@@ -40,6 +40,7 @@ class CallPeer:
     sideband_connected: asyncio.Event = field(default_factory=asyncio.Event)
     disconnected: asyncio.Event = field(default_factory=asyncio.Event)
     sideband_status: int = 101
+    expected_sideband_authorization: str | None = AUTHORIZATION
     hangup_allowed: bool = True
     socket: web.WebSocketResponse | None = None
 
@@ -70,7 +71,7 @@ class CallPeer:
         call_id = request.query["call_id"]
         assert call_id in self.sessions
         headers = {key.lower(): value for key, value in request.headers.items()}
-        assert headers["authorization"] == AUTHORIZATION
+        assert headers.get("authorization") == self.expected_sideband_authorization
         assert "x-sdk-sentinel-grant" not in headers
         self.sidebands.append((call_id, headers))
         self.sequence.append("sideband")

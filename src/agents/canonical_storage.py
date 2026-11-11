@@ -7,7 +7,9 @@ reenter the SDK. Payloads are trusted opaque native records, not portable state.
 from __future__ import annotations
 
 from _agents_codex.canonical_storage import (
+    AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore,
     CustomStorage as CustomStorage,
+    DaprSessionStore as DaprSessionStore,
     EncryptedSessionStore as EncryptedSessionStore,
     Iterator as Iterator,
     MongoDBSessionStore as MongoDBSessionStore,
@@ -29,6 +31,7 @@ from _agents_codex.canonical_storage import (
     dataclass as dataclass,
     json as json,
     os as os,
+    read_dapr_legacy_history as read_dapr_legacy_history,
     runtime_checkable as runtime_checkable,
     sqlite3 as sqlite3,
     stat as stat,

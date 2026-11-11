@@ -3187,6 +3187,8 @@ mod rebuild_consumer_tests {
             async move {
                 for (call_id, verified) in [("failure-call", Some(false)), ("legacy-call", None)] {
                     let specs = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                        strict: false,
+                        output_schema: None,
                         name: "reserve".into(),
                         description: "Record the known reservation outcome".into(),
                         input_schema: json!({
@@ -3231,6 +3233,8 @@ mod rebuild_consumer_tests {
                                 ..Default::default()
                             },
                         ),
+                        asynchronous: None,
+                        status: None,
                     };
                     let earlier_output = ResponseItem::FunctionCallOutput {
                         id: None,
@@ -3260,6 +3264,8 @@ mod rebuild_consumer_tests {
                                 ..Default::default()
                             },
                         ),
+                        asynchronous: None,
+                        status: None,
                     };
                     // Use Core's public history entry point, which records,
                     // checkpoints and flushes through the real local writer.

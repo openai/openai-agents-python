@@ -39,6 +39,11 @@ from pydantic import (
 )
 from typing_extensions import ParamSpec as ParamSpec, TypeVar as TypeVar
 
+from _agents_shared.strict_schema import (
+    _normalize_function_tool_output_json_schema,
+    ensure_strict_json_schema,
+)
+
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
 from .manual import (
@@ -236,6 +241,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     With defer_loading=True, Core can offer this selected schema through native
     search when the model supports it. Other models receive the schema directly.
     Deferral never admits a tool omitted from the operation.
+    strict opts into strict input schemas. output_schema declares the JSON object
+    encoded in string results for the Responses API. output_type validates the result.
     """
 
     name: str
@@ -262,6 +269,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         | None
     ) = field(default=None, repr=False)
     defer_loading: bool = False
+    strict: bool = False
+    output_schema: dict[str, Any] | None = None
     timeout_behavior: ToolTimeoutBehavior = "raise_exception"
     timeout_error_function: (
         Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None
@@ -302,6 +311,16 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             raise ValueError("Managed approvals require an unnamespaced registered callback")
         if not isinstance(self.finish_turn, bool):
             raise TypeError("FunctionTool finish_turn must be a bool")
+        if not isinstance(self.strict, bool):
+            raise TypeError("FunctionTool strict must be a bool")
+        if self.output_schema is not None:
+            object.__setattr__(
+                self,
+                "output_schema",
+                _normalize_function_tool_output_json_schema(
+                    self.output_schema, option_name="output_schema"
+                ),
+            )
         if not isinstance(self.defer_loading, bool):
             raise TypeError("FunctionTool defer_loading must be a bool")
         if not isinstance(self.input_type, type) or not issubclass(self.input_type, BaseModel):
@@ -353,13 +372,18 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         return ToolRef(self.name, self.namespace)
 
     def _spec_json(self) -> str:
-        function = {
+        input_schema = self.input_type.model_json_schema()
+        function: dict[str, Any] = {
             "type": "function",
             "name": self.name,
             "description": self.description,
-            "inputSchema": self.input_type.model_json_schema(),
+            "inputSchema": ensure_strict_json_schema(input_schema) if self.strict else input_schema,
             "deferLoading": self.defer_loading,
         }
+        if self.strict:
+            function["strict"] = True
+        if self.output_schema is not None:
+            function["outputSchema"] = self.output_schema
         if self.namespace is None:
             return json.dumps(function)
         return json.dumps(
@@ -584,6 +608,8 @@ def function_tool(
     before: _BeforePolicy[object] | None = None,
     after: _AfterPolicy[object] | None = None,
     defer_loading: bool = False,
+    strict: bool = False,
+    output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
     timeout_error_function: _TimeoutFormatter[Any] | None = None,
     namespace: str | None = None,
@@ -606,6 +632,8 @@ def function_tool(
     before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
     after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
     defer_loading: bool = False,
+    strict: bool = False,
+    output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
     timeout_error_function: _TimeoutFormatter[Any] | None = None,
     namespace: str | None = None,
@@ -630,6 +658,8 @@ def function_tool(
     before: _BeforePolicy[object] | None = None,
     after: _AfterPolicy[object] | None = None,
     defer_loading: bool = False,
+    strict: bool = False,
+    output_schema: dict[str, Any] | None = None,
     timeout_behavior: Literal["raise_exception"] = "raise_exception",
     timeout_error_function: _TimeoutFormatter[Any] | None = None,
     namespace: str | None = None,
@@ -652,6 +682,8 @@ def function_tool(
     before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
     after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
     defer_loading: bool = False,
+    strict: bool = False,
+    output_schema: dict[str, Any] | None = None,
     timeout_behavior: Literal["raise_exception"] = "raise_exception",
     timeout_error_function: _TimeoutFormatter[Any] | None = None,
     namespace: str | None = None,
@@ -676,6 +708,8 @@ def function_tool(
     before: _BeforePolicy[object] | None = None,
     after: _AfterPolicy[object] | None = None,
     defer_loading: bool = False,
+    strict: bool = False,
+    output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
     timeout_error_function: _TimeoutFormatter[object] | None = None,
     namespace: str | None = None,
@@ -698,6 +732,8 @@ def function_tool(
     before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
     after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
     defer_loading: bool = False,
+    strict: bool = False,
+    output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
     timeout_error_function: _TimeoutFormatter[object]
     | _TimeoutFormatter[PolicyContextT]
@@ -735,6 +771,8 @@ def function_tool(
     ]
     | None = None,
     defer_loading: bool = False,
+    strict: bool = False,
+    output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
     timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
     | None = None,
@@ -798,6 +836,10 @@ def function_tool(
 
     defer_loading=True requests native schema discovery for this declaration
     where the current model supports it; unsupported models get the direct schema.
+
+    strict opts into strict input schemas. output_schema declares the JSON object
+    encoded in string results for the Responses API. The return annotation validates
+    the callback result.
     """
 
     def decorate(callback: Callable[..., Any]) -> _PythonTool[Any, Any]:
@@ -877,6 +919,8 @@ def function_tool(
             before=before,
             after=after,
             defer_loading=defer_loading,
+            strict=strict,
+            output_schema=output_schema,
             finish_turn=finish_turn,
             needs_approval=needs_approval,
             run_before_approval=run_before_approval,

@@ -56,8 +56,8 @@ Change imports for each existing workflow together:
 | `from agents.models import ...` | `from agents.classic.models import ...` |
 | `from agents.tracing import ...` | `from agents.classic.tracing import ...` |
 | `from agents.mcp import ...` | `from agents.classic.mcp import ...` |
-| `from agents.realtime import ...` | `from agents.classic.realtime import ...` |
-| `from agents.voice import ...` | `from agents.classic.voice import ...` |
+| `from agents.realtime import ...` | Non-conflicting Classic names at the original path; `agents.classic.realtime` for a wholly Classic namespace |
+| `from agents.voice import ...` | Original Voice paths, including Classic single-agent workflows |
 | `from agents.extensions import ...` | `from agents.classic.extensions import ...` |
 | `from agents.testing import ...` | `from agents.classic.testing import ...` |
 
@@ -91,3 +91,43 @@ The [Classic example collection](examples/classic/README.md) includes the establ
 ## Classic lifecycle
 
 Classic is retained in v1 and is not deprecated by this change. The intended sequence is deprecation in a later v1 minor release, followed by removal in v2. No specific release or date is set here. Use the staging period to complete the native port; see [the migration plan](MIGRATION.md#use-classic-only-when-staging-is-necessary).
+
+## Compatible Voice and Realtime imports
+
+Original Voice module paths have been exposing the exact retained Classic objects.
+`agents.voice.SingleAgentVoiceWorkflow`, `SingleAgentWorkflowCallbacks` and
+`VoiceWorkflowHelper` have been retaining the Classic workflow implementation.
+`NativeSessionVoiceWorkflow` has been retaining explicit native Session execution.
+
+```python
+from agents.classic import Agent
+from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
+
+workflow = SingleAgentVoiceWorkflow(Agent(name="Assistant", instructions="Help."))
+pipeline = VoicePipeline(workflow=workflow)
+```
+
+Non-conflicting `agents.realtime` names, including `RealtimeAgent` and
+`RealtimeRunner`, have been loading their retained Classic objects only when
+requested. `RealtimeRunner.run()` has been returning a Classic session. Original
+module-specific imports such as `agents.realtime.model` and
+`agents.realtime.session` have been retaining Classic ownership.
+Wildcard imports from `agents.realtime` have been exposing the native API
+with the base installation.
+
+```python
+from agents.realtime import RealtimeAgent, RealtimeRunner
+from agents.realtime.session import RealtimeSession  # Retained Classic type.
+
+runner = RealtimeRunner(RealtimeAgent(name="Assistant", instructions="Help."))
+```
+
+The top-level `agents.realtime` names `RealtimeSession`, `realtime_handoff`,
+`RealtimeAudio`, `RealtimeResponse`, `RealtimeUserInput`,
+`RealtimeUserInputMessage` and `RealtimeUserInputText` have been retaining their
+existing native identities. A wholly Classic flow has been using
+`agents.classic.realtime` for these names as well.
+
+The package root has been retaining native ownership. These aliases have not been
+restoring Classic root `Agent` or `Runner`, rewriting dependent-library imports,
+or routing unsupported native operations through Classic.
