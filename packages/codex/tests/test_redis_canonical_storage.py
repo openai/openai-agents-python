@@ -1,13 +1,16 @@
 """Lease ownership and snapshot CAS against an independent real Redis process."""
 
+import asyncio
 import json
 import shutil
 import subprocess
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import pytest
 from redis import Redis
+from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import ConnectionError, ResponseError
 
 from agents import Agent, CustomStorage, NativeProvider, RedisSessionStore
@@ -198,27 +201,48 @@ def test_redis_owned_client_lifetime_and_prefix_ttl(redis_client) -> None:
     assert redis_client.ping()
 
 
-async def test_redis_native_session_restores_canonical_context(redis_client, responses) -> None:
+@pytest.mark.parametrize("restore_with_async_client", [False, True], ids=["sync", "async"])
+async def test_redis_native_session_restores_canonical_context(
+    redis_client, responses, restore_with_async_client
+) -> None:
     store = RedisSessionStore(redis_client)
     responses.respond(assistant_output("first answer"))
     responses.respond(assistant_output("second answer"))
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-native-store")
-    try:
+    async with AsyncExitStack() as stack:
+        stack.callback(store.close)
+        restore_store = store
+        if restore_with_async_client:
+            client = await stack.enter_async_context(
+                AsyncRedis(
+                    unix_socket_path=redis_client.connection_pool.connection_kwargs["path"],
+                    socket_timeout=2,
+                    socket_connect_timeout=2,
+                )
+            )
+            restore_store = RedisSessionStore(client)
+            stack.push_async_callback(restore_store.aclose)
         async with provider:
             agent = Agent(instructions="Answer.", provider=provider)
             async with agent.session(storage=CustomStorage(store)) as session:
                 identity = session.id
                 result = await (await session.submit("remember this input")).get_result()
                 assert result.final_output == "first answer"
-            async with agent.session(storage=CustomStorage(store), resume=identity) as restored:
+            async with agent.session(
+                storage=CustomStorage(restore_store), resume=identity
+            ) as restored:
                 assert restored.id == identity
+                if restore_with_async_client:
+                    with pytest.raises(RuntimeError, match="already has a writer"):
+                        await asyncio.to_thread(store.acquire, identity)
                 result = await (await restored.submit("Continue.")).get_result()
                 assert result.final_output == "second answer"
         assert len(responses.requests) == 2
         assert "remember this input" in json.dumps(responses.requests[1])
         assert "first answer" in json.dumps(responses.requests[1])
-    finally:
-        store.close()
+        if restore_with_async_client:
+            await restore_store.aclose()
+            assert await client.ping()
 
 
 def test_redis_commit_without_ttl_clears_previous_expiry(redis_client) -> None:
