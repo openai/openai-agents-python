@@ -266,6 +266,126 @@ class _ImmediateCompletion:
         self.discarded = True
 
 
+@pytest.fixture
+def windows_completion_sockets(monkeypatch):
+    allocated = []
+
+    def open_socket(*args, **kwargs):
+        if len(allocated) == 2:
+            # Dispose the failed pair before allocating either replacement.
+            assert all(sock.fileno() == -1 for sock in allocated)
+        sock = socket.socket(*args, **kwargs)
+        allocated.append(sock)
+        return sock
+
+    monkeypatch.setattr(_native_async, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(
+        _native_async,
+        "socket",
+        SimpleNamespace(
+            socket=open_socket, SOL_SOCKET=socket.SOL_SOCKET, SO_LINGER=socket.SO_LINGER
+        ),
+    )
+    return allocated
+
+
+@pytest.mark.parametrize("outcome", ["recovered", "persistent", "unrelated"])
+async def test_windows_completion_retries_only_first_duplicate_name_connect_failure(
+    monkeypatch, windows_completion_sockets, outcome
+):
+    loop = asyncio.get_running_loop()
+    connect = loop.sock_connect
+    attempts, starts, conversions = [], [], []
+    first_error = OSError("completion connection failed")
+    first_error.winerror = 5 if outcome == "unrelated" else 52
+    second_error = OSError("replacement connection failed")
+    second_error.winerror = 52
+
+    async def connect_with_failure(writer, address):
+        attempts.append(writer)
+        if len(attempts) == 1:
+            raise first_error
+        if outcome == "persistent":
+            raise second_error
+        await connect(writer, address)
+
+    class CountedCompletion(_ImmediateCompletion):
+        def start(self, writer):
+            starts.append(writer)
+            super().start(writer)
+
+        def take_result(self):
+            conversions.append("converted result")
+            return super().take_result()
+
+    monkeypatch.setattr(loop, "sock_connect", connect_with_failure)
+    call = CountedCompletion()
+    if outcome == "recovered":
+        result = await asyncio.wait_for(_native_async._await_native_completion(call), 5)
+        assert result == "completed"
+        assert starts == [attempts[1]]
+        assert conversions == ["converted result"]
+    else:
+        with pytest.raises(OSError) as caught:
+            await asyncio.wait_for(_native_async._await_native_completion(call), 5)
+        assert caught.value is (first_error if outcome == "unrelated" else second_error)
+        assert starts == conversions == []
+    assert len(attempts) == (1 if outcome == "unrelated" else 2)
+    assert len(windows_completion_sockets) == 2 * len(attempts)
+    assert all(sock.fileno() == -1 for sock in windows_completion_sockets)
+    assert call.discarded
+
+
+@pytest.mark.parametrize("stage", ["retry_checkpoint", "sock_connect", "sock_accept"])
+async def test_windows_completion_retry_cancellation_releases_unstarted_call(
+    monkeypatch, windows_completion_sockets, stage
+):
+    loop = asyncio.get_running_loop()
+    connect, accept = loop.sock_connect, loop.sock_accept
+    entered, release = asyncio.Event(), asyncio.Event()
+    attempts = []
+    error = OSError("completion connection failed")
+    error.winerror = 52
+
+    async def connect_with_failure(writer, address):
+        attempts.append(writer)
+        if len(attempts) == 1:
+            if stage == "retry_checkpoint":
+                loop.call_soon(asyncio.current_task().cancel)
+            raise error
+        if stage == "sock_connect":
+            entered.set()
+            await release.wait()
+        await connect(writer, address)
+
+    async def held_accept(listener):
+        entered.set()
+        await release.wait()
+        return await accept(listener)
+
+    monkeypatch.setattr(loop, "sock_connect", connect_with_failure)
+    if stage == "sock_accept":
+        monkeypatch.setattr(loop, "sock_accept", held_accept)
+    call = _ImmediateCompletion()
+    task = asyncio.create_task(_native_async._await_native_completion(call))
+    try:
+        if stage != "retry_checkpoint":
+            await asyncio.wait_for(entered.wait(), 5)
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert len(attempts) == (1 if stage == "retry_checkpoint" else 2)
+        assert len(windows_completion_sockets) == 2 * len(attempts)
+        assert all(sock.fileno() == -1 for sock in windows_completion_sockets)
+        assert not call.started
+        assert call.discarded
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 @pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX completion transport")
 @pytest.mark.parametrize("default_timeout", [None, 0.0, 0.25])

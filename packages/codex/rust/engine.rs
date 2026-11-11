@@ -704,6 +704,7 @@ impl EngineState {
         initial_messages: Option<crate::initial_messages::Batch>,
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
+        let private_http = options.private_http;
         if initial_messages.is_some() {
             ensure!(
                 history.is_none() && python_specs.is_some() && options.permits_initial_config(),
@@ -823,7 +824,9 @@ impl EngineState {
                     .collect(),
             );
         }
-        let native = self.start_prepared(startup, instructions).await?;
+        let native = self
+            .start_prepared_with_transport(startup, instructions, private_http)
+            .await?;
         if let Some(batch) = initial_messages {
             let state = native
                 .current()
@@ -841,12 +844,22 @@ impl EngineState {
     // The caller holds lifecycle through validation, native import and start.
     pub(crate) async fn start_prepared(
         self: &Arc<Self>,
-        mut startup: StartThreadOptions,
+        startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
     ) -> anyhow::Result<NativeThread> {
-        if let Some(pool) = &self.model_http_pool {
-            startup.thread_extension_init.insert(pool.clone());
-        }
+        self.start_prepared_with_transport(startup, instructions, false)
+            .await
+    }
+
+    async fn start_prepared_with_transport(
+        self: &Arc<Self>,
+        mut startup: StartThreadOptions,
+        instructions: Arc<options::ThreadInstructions>,
+        private_http: bool,
+    ) -> anyhow::Result<NativeThread> {
+        // build_startup has already validated the unchanged provider against the
+        // retained Engine. Only this owned thread config receives the restriction.
+        prepare_private_transport(&mut startup, self.model_http_pool.as_ref(), private_http)?;
         if self.runtime_parent.is_some() {
             ensure!(
                 matches!(&startup.initial_history, InitialHistory::New),
@@ -2866,6 +2879,39 @@ impl ThreadState {
         self.closed.store(true, Ordering::Release);
     }
 }
+
+fn prepare_private_transport(
+    startup: &mut StartThreadOptions,
+    pool: Option<&codex_http_client::SdkModelHttpPool>,
+    private_http: bool,
+) -> anyhow::Result<()> {
+    if private_http {
+        let config = &mut startup.config;
+        let provider = &mut config.model_provider;
+        ensure!(
+            pool.is_some()
+                && matches!(&startup.initial_history, InitialHistory::New)
+                && config.model_provider_id == "native_agent"
+                && provider.requires_openai_auth
+                && provider.supports_websockets
+                && provider.base_url.as_deref() == Some("https://api.openai.com/v1")
+                && !provider.has_request_routing_overrides(),
+            "private HTTP requires the implicit default SDK Responses provider on a fresh thread"
+        );
+        provider.supports_websockets = false;
+        if let Some(selected) = config.model_providers.get_mut(&config.model_provider_id) {
+            selected.supports_websockets = false;
+        }
+    }
+    if let Some(pool) = pool {
+        startup.thread_extension_init.insert(pool.clone());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "private_http_tests.rs"]
+mod private_http_tests;
 
 #[cfg(test)]
 #[path = "response_history_tests.rs"]
