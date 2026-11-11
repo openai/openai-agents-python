@@ -655,7 +655,11 @@
     {
       "path": "sdk-provider-item-references.patch",
       "sha256": "721e67310d0269e626bdefce41f4bd625a985cd0eb9925b8912a3c8a8c300f56"
+    },
+    {
+      "path": "sdk-function-provider-schemas.patch",
+      "sha256": "2dc9df2134da65d9f7ebf158260a6a3504d370c22d906f213b38abceeafec55f"
     }
   ],
-  "result_tree": "6dbfdc4c848c4d193a70d9c47de22c12339f86fd"
+  "result_tree": "68ab51110f6bd9ec1f23041b8b32f04f221d7337"
 }
