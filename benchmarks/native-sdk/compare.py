@@ -91,6 +91,7 @@ def validate_sample(
     reference_engine="v0",
     native_transport="http",
     default_host=False,
+    native_provider_mode="caller-owned",
 ):
     """Check scheduling, declared identities and existing worker count receipts."""
     if bool(row.get("default_host", False)) != default_host:
@@ -104,8 +105,18 @@ def validate_sample(
     ):
         raise ValueError("Diagnostic/profiled/instrumented rows cannot enter a comparison")
     engine = reference_engine if side == "v0" else "v1"
-    if reference_engine not in ("v0", "v1") or native_transport not in ("http", "websocket"):
+    if (
+        reference_engine not in ("v0", "v1")
+        or native_transport not in ("http", "websocket")
+        or native_provider_mode not in ("caller-owned", "omitted")
+    ):
         raise ValueError("Unknown scheduled reference engine or native transport")
+    expected_provider_mode = native_provider_mode if engine == "v1" else None
+    if (
+        row.get("native_provider_mode", "caller-owned" if engine == "v1" else None)
+        != expected_provider_mode
+    ):
+        raise ValueError("Native Provider mode mismatch with its schedule")
     if native_transport == "websocket" and (
         (case != "oneshot_text" and not default_host) or v1_response_mode != "streaming"
     ):
@@ -258,6 +269,7 @@ def summarize(
     native_transport="http",
     reference_transport=None,
     default_host=False,
+    native_provider_mode="caller-owned",
 ):
     summary, identities = {}, {}
     for case, sides in records.items():
@@ -291,6 +303,7 @@ def summarize(
                     if side == "v0" and reference_transport
                     else native_transport,
                     default_host=default_host,
+                    native_provider_mode=native_provider_mode,
                 )
         fields = ["import_ms"]
         if case != "startup_import":
@@ -333,7 +346,12 @@ def summarize(
         )
         summary[case] = {
             "reference_engine": reference_engine,
+            "reference_transport": "http"
+            if reference_engine == "v0"
+            else (reference_transport or native_transport),
             "native_transport": native_transport,
+            "native_provider_mode": native_provider_mode,
+            "full_owner_scope": None if case == "startup_import" else "adapter-lifetime",
             "primary_metric": primary,
             "primary": metrics[primary],
             "sample_indices": list(range(len(paired["v0"]))),
@@ -357,6 +375,15 @@ def main():
     )
     parser.add_argument("--reference-engine", choices=["v0", "v1"], default="v0")
     parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
+    parser.add_argument(
+        "--native-provider-mode",
+        choices=["caller-owned", "omitted"],
+        default="caller-owned",
+        help=(
+            "Provider mode for every v1 arm "
+            "(omitted: default-host, final-only, no-tool oneshot cases)"
+        ),
+    )
     parser.add_argument("--v0-python", type=Path, required=True)
     parser.add_argument("--v1-python", type=Path, required=True)
     parser.add_argument("--v0-version", required=True)
@@ -388,10 +415,14 @@ def main():
         or not args.v1_version.strip()
     ):
         parser.error("Use positive counts/timeout, distinct cases and explicit expected versions")
+    if args.native_provider_mode == "omitted" and not args.default_host_setup:
+        parser.error("Omitted Provider mode: default-host workloads only")
     if args.reference_transport and (not args.default_host_setup or args.reference_engine != "v1"):
         parser.error("Reference transport requires default-host mode with a v1 reference")
     if args.default_host_setup:
-        if args.native_transport == "websocket" or args.reference_transport == "websocket":
+        if args.native_provider_mode != "omitted" and (
+            args.native_transport == "websocket" or args.reference_transport == "websocket"
+        ):
             parser.error("Default-host HTTP/SSE mode: --native-transport http only")
         args.default_host_setup = args.default_host_setup.resolve()
         if args.v1_response_mode != "streaming" or any(
@@ -459,6 +490,7 @@ def main():
         "expected_sdk_versions": expected_versions,
         "reference_engine": args.reference_engine,
         "native_transport": args.native_transport,
+        "native_provider_mode": args.native_provider_mode,
         "reference_transport": args.reference_transport,
         "default_host_setup": str(args.default_host_setup) if args.default_host_setup else None,
         "v1_response_mode": args.v1_response_mode,
@@ -524,6 +556,8 @@ def main():
                     )
                     if engine == "v1" and scheduled_transport != "http":
                         command += ["--native-transport", scheduled_transport]
+                    if engine == "v1" and args.native_provider_mode != "caller-owned":
+                        command += ["--native-provider-mode", args.native_provider_mode]
                     if args.default_host_setup:
                         command += ["--default-host-setup", str(args.default_host_setup)]
                     if engine == "v1" and args.v1_response_mode == "buffered":
@@ -612,6 +646,7 @@ def main():
                         reference_engine=args.reference_engine,
                         native_transport=scheduled_transport,
                         default_host=bool(args.default_host_setup),
+                        native_provider_mode=args.native_provider_mode,
                     )
                     records[case][side].append(data)
                     value = data.get("latency_p50_ms", data["import_ms"])
@@ -629,6 +664,7 @@ def main():
                 native_transport=args.native_transport,
                 reference_transport=args.reference_transport,
                 default_host=bool(args.default_host_setup),
+                native_provider_mode=args.native_provider_mode,
             )
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             primary = summary[case]["primary"]

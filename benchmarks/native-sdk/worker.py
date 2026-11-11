@@ -116,6 +116,7 @@ async def exercise(
     native_transport="http",
     default_host=False,
     control_base_url=None,
+    native_provider_mode="caller-owned",
 ):
     control_base_url = control_base_url or base_url
     owner_cpu_before = time.process_time_ns()
@@ -125,6 +126,8 @@ async def exercise(
         adapter_options["transport"] = "websocket"
     if default_host:
         adapter_options["default_host"] = True
+    if native_provider_mode == "omitted":
+        adapter_options["provider_mode"] = "omitted"
     construction_start = time.perf_counter_ns()
     adapter = Adapter(
         base_url,
@@ -369,6 +372,12 @@ def main():
     parser.add_argument("--engine", choices=["v0", "v1"], required=True)
     parser.add_argument("--default-host-setup", type=Path)
     parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
+    parser.add_argument(
+        "--native-provider-mode",
+        choices=["caller-owned", "omitted"],
+        default="caller-owned",
+        help="Native Provider mode (omitted: default-host, final-only, no-tool oneshot cases)",
+    )
     parser.add_argument("--response-mode", choices=["streaming", "buffered"], default="streaming")
     parser.add_argument("--case", choices=WORKLOADS, default="oneshot_text")
     parser.add_argument("--iterations", type=int)
@@ -377,7 +386,15 @@ def main():
     parser.add_argument("--sample-index", type=int)
     parser.add_argument("--import-only", action="store_true")
     args = parser.parse_args()
-    if args.default_host_setup and args.native_transport == "websocket":
+    if args.native_provider_mode == "omitted" and (
+        args.engine != "v1" or not args.default_host_setup
+    ):
+        parser.error("Omitted Provider mode: native default-host workloads only")
+    if (
+        args.default_host_setup
+        and args.native_transport == "websocket"
+        and args.native_provider_mode != "omitted"
+    ):
         parser.error("Default-host HTTP/SSE mode: --native-transport http only")
     os.environ.pop("OPENAI_API_KEY", None)
     os.environ["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1"
@@ -463,6 +480,8 @@ def main():
         if args.engine == "v1" and not args.import_only
         else None,
         "native_transport": args.native_transport if args.engine == "v1" else None,
+        "native_provider_mode": args.native_provider_mode if args.engine == "v1" else None,
+        "full_owner_scope": None if args.import_only else "adapter-lifetime",
         "wire_transport": None
         if args.import_only
         else "websocket"
@@ -519,6 +538,8 @@ def main():
             control_base_url = addresses.get("control_base_url", base_url)
             if not workload.prefill:
                 initial_stats = stats_at(control_base_url, summary=True)
+        if args.native_provider_mode == "omitted":
+            os.environ["OPENAI_API_KEY"] = "synthetic-benchmark-key"
         start = time.perf_counter_ns()
         module = importlib.import_module(f"{args.engine}_adapter")
         result["import_ms"] = (time.perf_counter_ns() - start) / 1e6
@@ -538,6 +559,7 @@ def main():
                         native_transport=args.native_transport,
                         default_host=bool(setup),
                         control_base_url=control_base_url,
+                        native_provider_mode=args.native_provider_mode,
                     )
                 )
             )
