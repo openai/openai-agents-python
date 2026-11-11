@@ -459,6 +459,10 @@ jobs:
               for profile in ('strict-filtered', 'trusted-filtered'):
                   emit(profile=profile, operation='target-present-before', exit=run(['/bin/launchctl', 'print', info['domain'] + '/' + info['target']]))
                   prefix = [] if profile == 'trusted-unrestricted' else ['/usr/bin/sandbox-exec', '-f', str(root / (profile + '.sb'))]
+                  applied = subprocess.run(prefix + ['/usr/bin/true'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=5)
+                  results.append(dict(profile=profile, operation='apply-profile', exit=applied.returncode, detail=applied.stderr[:500]))
+                  if applied.returncode != 0:
+                      continue
                   commands = {
                       'uid': ['/usr/bin/id', '-F'],
                       'ssh': ['/usr/bin/ssh', '-G', '-F', '/dev/null', '-o', 'CanonicalizeHostname=no', '-o', 'ProxyCommand=none', 'example.invalid'],
