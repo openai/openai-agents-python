@@ -1,0 +1,161 @@
+name: Diagnose Python trusted Darwin offline trust
+
+on:
+  push:
+    branches: [diag/python-trusted-darwin-offline-trust-5787]
+    paths:
+      - .github/workflows/diagnose-trusted-darwin-offline-trust.yml
+      - .github/diagnostics/offline_sectrust.c
+      - .github/diagnostics/test_native_trusted_darwin_offline_trust.py
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  trusted-darwin-offline-trust:
+    if: github.repository == 'openai/openai-agents-python' && !github.event.deleted
+    runs-on: macos-15
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+        working-directory: pinned-source
+    steps:
+      - name: Check out the diagnostic inputs
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic
+          fetch-depth: 2
+          persist-credentials: false
+          sparse-checkout: |
+            .github/diagnostics/offline_sectrust.c
+            .github/diagnostics/test_native_trusted_darwin_offline_trust.py
+          sparse-checkout-cone-mode: false
+      - name: Check out the exact qualified source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: d9c8916aa01417e776201fb633bc1ebd8bbc831f
+          path: pinned-source
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.14'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: '0.11.14'
+          enable-cache: false
+      - name: Verify source and diagnostic identities
+        run: |
+          test "$RUNNER_OS/$RUNNER_ARCH" = macOS/ARM64
+          test "$(uname -m)" = arm64
+          sw_vers
+          test "$(git rev-parse HEAD)" = d9c8916aa01417e776201fb633bc1ebd8bbc831f
+          test "$(git rev-parse 'HEAD^{tree}')" = b8ed399e62f503bc9b4881b7f508c1e88a683de3
+          test "$(git -C ../diagnostic rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C ../diagnostic show -s --format=%P HEAD)" = "$(git rev-parse HEAD)"
+          test "$(git cat-file -p HEAD | sed -n '3p')" = 'parent c4b733d30ac4a8670c4d8720f2614c16c60cba88'
+          printf '%s  %s\n' \
+            bcd15c90c1f97e8b9c1e7d41d9c1034e16ed20388a9043076d25c6bd53b82b1e ../diagnostic/.github/diagnostics/offline_sectrust.c \
+            bb258ededb12b95011fb8b619796713a98a267f58e2c7238cd73b51fe37cd57f ../diagnostic/.github/diagnostics/test_native_trusted_darwin_offline_trust.py \
+            | shasum -a 256 -c -
+          python -I -S - <<'PY'
+          import runpy
+          from pathlib import Path
+
+          source = runpy.run_path("packages/codex/scripts/source_integrity.py")
+          identity = source["native_bundle_identity"](Path("."))
+          assert identity == "1bd6cd41944f25b3a058432b71f15205df3ed073af60a12a2affc718233df6fb"
+          print("Native bundle identity:", identity)
+          PY
+      - name: Verify and stage the official native artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_SOURCE_RUN: '43019869695'
+          SNAPSHOT_DIRECTORY: ${{ runner.temp }}/offline-trust-native
+          NATIVE_ARTIFACTS: >-
+            {"macOS-ARM64":{"id":13854444121,
+            "digest":"sha256:587d25f296ca51cf3ce2a13583b958678dc4b8a2ed7ca3953793b332ddb340ee",
+            "name":"native-snapshot-macOS-ARM64-1bd6cd41944f25b3a058432b71f15205df3ed073af60a12a2affc718233df6fb",
+            "provenance":{"head_ref":"5787/merge","pull_request":null,"repository_id":"946380199",
+            "run_attempt":"1","run_id":"43019869695","source_sha":"d9c8916aa01417e776201fb633bc1ebd8bbc831f"}}}
+        run: python -I -S .github/scripts/download-native-snapshot.py
+      - name: Install the exact wheel and compile only the public Security API probe
+        run: |
+          stage="$RUNNER_TEMP/offline-trust-probe"
+          native="$RUNNER_TEMP/offline-trust-native"
+          tests="$stage/packages/codex/tests"
+          mkdir -p "$tests"
+          cp packages/codex/tests/{__init__,_asyncio,conftest,native_fixtures}.py "$tests/"
+          cp ../diagnostic/.github/diagnostics/test_native_trusted_darwin_offline_trust.py "$tests/"
+          printf '%s  %s\n' \
+            961a919d2c26ceec57dc14a5c44be6cdf7905c024dcafb928564a02321a11b55 "$native/exec-server-fixture" \
+            | shasum -a 256 -c -
+          chmod +x "$native/exec-server-fixture"
+          /usr/bin/clang -std=c11 -Wall -Wextra -Werror \
+            -framework CoreFoundation -framework Security \
+            ../diagnostic/.github/diagnostics/offline_sectrust.c -o "$stage/offline_sectrust"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          uv venv --seed --python 3.14 "$stage/venv"
+          probe_python="$stage/venv/bin/python"
+          wheels=("$native"/openai_agents-*.whl)
+          test "${#wheels[@]}" -eq 1
+          pip_install=("$probe_python" -m pip install --only-binary=:all: --constraint "$stage/constraints.txt")
+          "${pip_install[@]}" aiohttp hatchling pytest pytest-asyncio
+          "$probe_python" -I -B - "${wheels[0]}" <<'PY'
+          import runpy
+          import sys
+          from pathlib import Path
+
+          wheel = Path(sys.argv[1])
+          hooks = runpy.run_path("packages/codex/scripts/hatch_build.py")
+          receipt = hooks["_wheel_qualification"](Path("packages/codex").resolve(), wheel)
+          assert receipt["patch_series"]["result_tree"] == "eec990570a5ce8f74740039ab5a79715f6d28a72"
+          assert len(receipt["native_inputs"]) == 255
+          digest = hooks["_wheel_digest"](wheel)
+          assert digest == "25ef57e4121aa6396196ed9ad1fd424a78cfa510e989fb9447f4c01d00931677"
+          print("Qualified Core tree:", receipt["patch_series"]["result_tree"])
+          print(f"Verified wheel {wheel.name} sha256:{digest}")
+          PY
+          "${pip_install[@]}" "${wheels[0]}"
+          cd "$stage"
+          "$probe_python" -I -B - <<'PY'
+          import sys
+          from pathlib import Path
+
+          import agents
+          import agents._native
+
+          prefix = Path(sys.prefix).resolve()
+          assert Path(agents.__file__).resolve().is_relative_to(prefix)
+          assert Path(agents._native.__file__).resolve().is_relative_to(prefix)
+          assert agents._native.CODEX_REVISION == "7c2ce90716335c889a5076ded9a630459f9c9899"
+          print("Installed native revision:", agents._native.CODEX_REVISION)
+          PY
+      - name: Require one installed offline host and child comparison
+        run: |
+          stage="$RUNNER_TEMP/offline-trust-probe"
+          probe_python="$stage/venv/bin/python"
+          report="$stage/result.xml"
+          cd "$stage"
+          env -u GH_TOKEN -u GITHUB_TOKEN -u OPENAI_API_KEY -u CODEX_API_KEY \
+            -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX \
+            SDK_OFFLINE_SECTRUST_HELPER="$stage/offline_sectrust" \
+            CODEX_EXEC_SERVER_TEST_BINARY="$RUNNER_TEMP/offline-trust-native/exec-server-fixture" \
+            "$probe_python" -I -B -m pytest -vv -s -o "pythonpath=$stage/packages/codex" \
+            -o asyncio_mode=auto -o 'markers=requires_native_macos_sandbox: requires macOS Seatbelt' \
+            --junitxml="$report" \
+            packages/codex/tests/test_native_trusted_darwin_offline_trust.py::test_trusted_darwin_offline_sectrust
+          "$probe_python" -I -B - "$report" <<'PY'
+          import sys
+          from xml.etree import ElementTree
+
+          case, = ElementTree.parse(sys.argv[1]).findall(".//testcase")
+          assert case.attrib["name"] == "test_trusted_darwin_offline_sectrust"
+          assert not any(node.tag in {"skipped", "failure", "error"} for node in case)
+          print("One installed offline Darwin comparison completed.")
+          PY
