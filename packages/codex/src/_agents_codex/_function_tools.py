@@ -231,7 +231,7 @@ _UNSET_ERROR_FUNCTION = cast(
 )
 
 
-@dataclass(frozen=True, kw_only=True, init=False)
+@dataclass(frozen=True, kw_only=True)
 class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     """A function that runs a registered callback or takes its result from the app.
 
@@ -283,9 +283,10 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]
     ) = True
 
-    _error_function_config: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = (
-        field(default=_UNSET_ERROR_FUNCTION, repr=False)
+    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
+        default=None, repr=False
     )
+    _allow_run_error_formatter: bool = field(default=True, repr=False)
 
     def __init__(
         self,
@@ -326,24 +327,17 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
         error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
         | None = _UNSET_ERROR_FUNCTION,
-        _error_function_config: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
-        | None = _UNSET_ERROR_FUNCTION,
+        _allow_run_error_formatter: bool | None = None,
     ) -> None:
-        # replace() carries private configuration; a public override takes precedence.
-        if error_function is not _UNSET_ERROR_FUNCTION:
-            _error_function_config = error_function
+        # replace() carries inheritance unchanged, including same-value None copies.
+        if _allow_run_error_formatter is None:
+            _allow_run_error_formatter = error_function is not None
+        if error_function is _UNSET_ERROR_FUNCTION:
+            error_function = None
         values = locals()
         for declaration in fields(self):
             object.__setattr__(self, declaration.name, values[declaration.name])
         self.__post_init__()
-
-    @property
-    def error_function(
-        self,
-    ) -> Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None:
-        if self._error_function_config is _UNSET_ERROR_FUNCTION:
-            return None
-        return self._error_function_config
 
     def __post_init__(self) -> None:
         if self.error_function is not None and not callable(self.error_function):
@@ -968,7 +962,7 @@ def function_tool(
                 timeout_error_function=declaration.timeout_error_function,
                 input_error_function=declaration.input_error_function,
                 error_function=declaration.error_function,
-                _allow_run_error_formatter=declaration._error_function_config is not None,
+                _allow_run_error_formatter=declaration._allow_run_error_formatter,
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,

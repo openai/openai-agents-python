@@ -25,7 +25,9 @@ class ToolErrorContext(Generic[ContextT]):
     non-terminal tool reply. None, another return type, or a formatter exception
     during active admission has been selecting default_message. Per-tool input
     and body handlers have been retaining precedence for their own phases;
-    explicit error_function=None has been suppressing run-wide recovery.
+    Declaring a tool with explicit error_function=None has been suppressing
+    run-wide recovery. dataclasses.replace() has been carrying that original
+    inheritance choice, including same-value error_function=None copies.
 
     Async formatters have been receiving asyncio cancellation directly. The
     owner has been joining cleanup and discarding late replies, with cleanup

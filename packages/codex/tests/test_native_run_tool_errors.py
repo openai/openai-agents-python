@@ -21,13 +21,15 @@ class _NonCopyingPayload(BaseModel):
 
 
 def test_default_handler_stays_publicly_none_across_declaration_replacement():
-    from dataclasses import replace
+    from dataclasses import asdict, fields, replace
 
     @function_tool
     async def lookup(key: str) -> str:
         return key
 
     assert lookup.error_function is None
+    assert "error_function" in {declaration.name for declaration in fields(lookup)}
+    assert asdict(lookup)["error_function"] is None
     assert replace(lookup, description="Updated").error_function is None
     assert replace(lookup, error_function=None).error_function is None
 
@@ -388,7 +390,9 @@ async def test_run_formatter_preserves_callback_timeout_owner(responses, behavio
 
 @pytest.mark.parametrize("phase", ["arguments", "execution"])
 @pytest.mark.parametrize("opt_out", [False, True])
-async def test_replaced_declaration_preserves_omission_and_explicit_none(responses, phase, opt_out):
+async def test_replaced_declaration_preserves_direct_opt_out_and_same_value_none(
+    responses, phase, opt_out
+):
     from dataclasses import replace
 
     formatted = []
@@ -397,13 +401,12 @@ async def test_replaced_declaration_preserves_omission_and_explicit_none(respons
         formatted.append(context.phase)
         return "Copied declaration recovery"
 
-    @function_tool
     async def lookup(key: str) -> str:
         raise ValueError("body failed")
 
-    copied = replace(lookup, description="Updated")
-    if opt_out:
-        copied = replace(copied, error_function=None)
+    declaration = function_tool(lookup, error_function=None) if opt_out else function_tool(lookup)
+    copied = replace(declaration, description="Updated")
+    copied = replace(copied, error_function=None)
     responses.respond(
         function_call("lookup", {"key": 7 if phase == "arguments" else "value"}, "copy")
     )
