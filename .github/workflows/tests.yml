@@ -976,7 +976,8 @@ jobs:
       - name: Run parallel tests
         id: parallel-tests
         if: steps.changes.outputs.run == 'true'
-        run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 8 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
+        # Native completions use loopback sockets on Windows.
+        run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 4 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
       - name: Run serial tests after all workers exit
         if: ${{ !cancelled() && (steps.parallel-tests.outcome == 'success' || steps.parallel-tests.outcome == 'failure') }}
         run: uv run python .github/scripts/run_serial_tests.py
