@@ -20,6 +20,7 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
+        bash "$GITHUB_ACTION_PATH/../../scripts/use-ubuntu-archive-if-needed.sh"
         sudo apt-get update
         sudo apt-get install --yes clang cmake pkg-config protobuf-compiler libssl-dev
     - name: macOS build tools
