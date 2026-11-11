@@ -226,6 +226,11 @@ class ToolContext(Generic[ContextT_co]):
         )
 
 
+_UNSET_ERROR_FUNCTION = cast(
+    Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None, object()
+)
+
+
 @dataclass(frozen=True, kw_only=True)
 class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     """A function that runs a registered callback or takes its result from the app.
@@ -279,10 +284,19 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     ) = True
 
     error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
-        default=None, repr=False
+        default=_UNSET_ERROR_FUNCTION, repr=False
     )
+    _allow_run_error_formatter: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        implicit_error_function = self.error_function is _UNSET_ERROR_FUNCTION
+        object.__setattr__(
+            self,
+            "_allow_run_error_formatter",
+            implicit_error_function or self.error_function is not None,
+        )
+        if implicit_error_function:
+            object.__setattr__(self, "error_function", None)
         if self.error_function is not None and not callable(self.error_function):
             raise TypeError("FunctionTool error_function must be callable or None")
         if not isinstance(self.is_enabled, bool) and not callable(self.is_enabled):
@@ -789,7 +803,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[Any] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
-    error_function: _BodyErrorFormatter[Any] | None = None,
+    error_function: _BodyErrorFormatter[Any] | None = _UNSET_ERROR_FUNCTION,
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -905,6 +919,7 @@ def function_tool(
                 timeout_error_function=declaration.timeout_error_function,
                 input_error_function=declaration.input_error_function,
                 error_function=declaration.error_function,
+                _allow_run_error_formatter=declaration._allow_run_error_formatter,
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,

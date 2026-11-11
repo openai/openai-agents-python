@@ -13,6 +13,10 @@ if TYPE_CHECKING:
         ToolTimeoutError as ToolTimeoutError,
         function_tool as function_tool,
     )
+    from ._tool_errors import (
+        ToolErrorContext as ToolErrorContext,
+        ToolErrorFormatter as ToolErrorFormatter,
+    )
     from ._trace_context import TraceContext as TraceContext
     from .agent import (
         Agent as Agent,
@@ -368,6 +372,8 @@ _MODULES = {
     "ToolOutputFile": ".tools",
     "ToolContext": "._function_tools",
     "ToolInputErrorContext": "._function_tools",
+    "ToolErrorContext": "._tool_errors",
+    "ToolErrorFormatter": "._tool_errors",
     "ToolTimeoutBehavior": "._function_tools",
     "ToolTimeoutError": "._function_tools",
     "ToolCallInfo": ".tools",

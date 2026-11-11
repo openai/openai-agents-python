@@ -504,6 +504,8 @@ class _CapturedFunction:
         default=None, repr=False
     )
 
+    _allow_run_error_formatter: bool = field(default=False, repr=False)
+
     @property
     def _requires_live_manual_session(self) -> bool:
         return False
