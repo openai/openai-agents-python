@@ -84,6 +84,7 @@ async def test_current_guidance_reaches_cold_grandchild_without_loading_parent_o
                 url=executor.url,
                 headers={"Authorization": "Bearer " + executor.token},
                 cwd=str(cwd or executor.root),
+                tools=("exec_command", "write_stdin", "apply_patch"),
             )
 
         @asynccontextmanager
@@ -102,7 +103,7 @@ async def test_current_guidance_reaches_cold_grandchild_without_loading_parent_o
 
         base = agent_for(peer, executor)
         native = next(tool for tool in base.tools if isinstance(tool, NativeAgents))
-        agent = replace(base, tools=[replace(native, max_depth=2)])
+        agent = replace(base, model="gpt-6.1-sol", tools=[replace(native, max_depth=2)])
         guidance = {"project_guidance": True, "discover_agents_md": True}
         async with agent.session(environment=source("SYNTHETIC_GUIDE_A"), **guidance) as first:
             await (await first.submit("Create alpha and grandchild.")).get_result()

@@ -43,7 +43,27 @@ async def test_stored_fork_preserves_complete_originals_and_source_reference(res
             assert fork_id != original_id and source.id == original_id
             assert await source.history_snapshot() == retained
         async with agent.session(storage=storage, resume=fork_id) as branch:
-            assert (await branch.history_snapshot()).items[: len(originals)] == originals
+            # A limited cold read must share the complete referenced catalog revision.
+            tail = await branch.history_snapshot(limit=1)
+            complete = await branch.history_snapshot()
+            assert complete.items[: len(originals)] == tuple(originals)
+            assert tail.revision == complete.revision
+            assert tail.total == complete.total
+            assert tail.items == complete.items[-1:]
+            assert await branch.history_snapshot(limit=0) == type(complete)(
+                revision=complete.revision, total=complete.total, items=()
+            )
+            audit = {"type": "application-branch-audit", "value": "branch-only"}
+            await branch.transact_history(
+                expected_revision=complete.revision, keep=complete.total, items=[audit]
+            )
+            updated = await branch.history_snapshot()
+            assert updated.items == (*complete.items, audit)
+            with pytest.raises(RuntimeError, match="(?i)revision"):
+                await branch.transact_history(
+                    expected_revision=complete.revision, keep=complete.total, items=[]
+                )
+            assert await branch.history_snapshot() == updated
         async with agent.session(storage=storage, resume=original_id) as source:
             with pytest.raises(RuntimeError):
                 await source.delete_stored()

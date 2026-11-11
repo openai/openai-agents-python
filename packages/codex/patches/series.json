@@ -547,7 +547,15 @@
     {
       "path": "sdk-user-instructions-appendix.patch",
       "sha256": "a3ea35cfd3f2eaeed66dc6ad6b06e7f651a7126ebfc66032636dc5bfe9ae31d9"
+    },
+    {
+      "path": "sdk-fork-originals-lineage.patch",
+      "sha256": "3f315e7d82ebdc5e30cb9d336282876d05a410458dce6bdf7a6d5576fcf65411"
+    },
+    {
+      "path": "sdk-cold-child-workspace-user-instructions.patch",
+      "sha256": "cd6a420cdec6aa3b3663aef30f9d7aec10ee58a34eea46b1bc47045279b2dd64"
     }
   ],
-  "result_tree": "b4a1fc455f8b3a2a5cdae5ed129a409e223f7865"
+  "result_tree": "f7c5f4cad7f743ebbdae48f78bf93238037ca750"
 }
