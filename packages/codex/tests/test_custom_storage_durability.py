@@ -23,6 +23,7 @@ from agents import (
     LocalRecoveryRequired,
     LocalStorage,
     NativeAgents,
+    NativeError,
     NativeGoals,
     NativeProvider,
     SessionStoreCleanup,
@@ -504,9 +505,18 @@ async def test_local_storage_reconciles_interrupted_application_shell(responses,
 
     entered = asyncio.Event()
     calls: list[str] = []
+    result = ShellOutput(
+        output=[
+            ShellCommandOutput(
+                stdout="ready and more", stderr="details", outcome=ShellExit(exit_code=0)
+            )
+        ]
+    )
 
     async def execute(_context: ToolContext[None], call: ShellCall) -> ShellOutput:
         calls.append(call.call_id)
+        if entered.is_set():
+            return result
         entered.set()
         await asyncio.Future()
         raise AssertionError("The interrupted executor must not return")
@@ -541,16 +551,7 @@ async def test_local_storage_reconciles_interrupted_application_shell(responses,
         with pytest.raises(RuntimeError, match="requires a verified ShellOutput"):
             async with agent.session(storage=storage, resume=identity, reconciled_calls=[untyped]):
                 pytest.fail("A text result settled the application Shell call")
-        verified = uncertain.reconcile(
-            outcome="applied",
-            result=ShellOutput(
-                output=[
-                    ShellCommandOutput(
-                        stdout="ready and more", stderr="details", outcome=ShellExit(exit_code=0)
-                    )
-                ]
-            ),
-        )
+        verified = uncertain.reconcile(outcome="applied", result=result)
         async with agent.session(
             storage=storage, resume=identity, reconciled_calls=[verified]
         ) as confirmed:
@@ -582,8 +583,15 @@ async def test_local_storage_reconciles_interrupted_application_shell(responses,
             assert history_receipt["turn_id"] == uncertain.turn_id
             assert (await (await resumed.submit("Continue.")).get_result()).final_output == "done"
 
+            responses.respond(shell_call())
+            responses.respond(assistant_output("Replayed the command."))
+            with pytest.raises(
+                NativeError, match="Cannot reuse an original call identity during recovery"
+            ):
+                await (await resumed.submit("Repeat the original call identity.")).get_result()
+
     assert calls == ["shell-local"]
-    assert len(responses.requests) == 2
+    assert len(responses.requests) == 3
     (receipt,) = [
         item for item in responses.requests[1]["input"] if item["type"] == "shell_call_output"
     ]
