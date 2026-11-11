@@ -50,6 +50,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "search_history",
         "revert_stored",
         "delete_stored",
+        "set_stored_name",
         "items",
         "history_snapshot",
         "transact_history",

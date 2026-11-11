@@ -970,6 +970,21 @@ impl NativeThread {
         })
     }
 
+    fn _set_stored_name<'py>(
+        &self,
+        py: Python<'py>,
+        name_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let name = serde_json::from_str(name_json).map_err(py_error)?;
+        async_bridge::future_into_py(py, async move {
+            let name = stored_history::set_name(&inner, name)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&name).map_err(py_error)
+        })
+    }
+
     fn _fork_stored<'py>(
         &self,
         py: Python<'py>,

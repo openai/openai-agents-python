@@ -51,7 +51,7 @@ from typing import (
 )
 from uuid import uuid4 as uuid4
 
-from pydantic import BaseModel as BaseModel, TypeAdapter as _TypeAdapter
+from pydantic import BaseModel as BaseModel, TypeAdapter as _TypeAdapter, ValidationError
 
 from ._agent_profiles import _AgentProfile, _capture_agent_graph, _check_handoff_tool_names
 from ._compat import cancel_once as cancel_once, cancellation_requested
@@ -67,6 +67,7 @@ from ._function_tools import (
     FunctionTool as FunctionTool,
     Tool as Tool,
     ToolContext as ToolContext,
+    ToolInputErrorContext as ToolInputErrorContext,
     ToolTimeoutError as ToolTimeoutError,
 )
 from ._history import project_history as project_history
@@ -6463,6 +6464,37 @@ class Session(Generic[ContextT, OutputT]):
             self._realtime._mark_tool_unavailable(message["callId"])
         return enabled
 
+    async def _recover_tool_input(
+        self,
+        state: _CallbackState,
+        entry: _CapturedFunction,
+        message: dict[str, Any],
+        error: Exception,
+        original: Any,
+        admit: Callable[[], bool],
+        call: ToolCallInfo,
+    ) -> str | None:
+        callback = entry.input_error_function
+        if callback is None:
+            raise error
+        if not admit():
+            return None
+        assert state.handle is not None
+        context = ToolInputErrorContext(
+            entry.context,
+            state.handle,
+            message["callId"],
+            call=call,
+            trace_context=_native_trace_context(message.get("_sdk_trace")),
+            realtime_usage=self.realtime_usage,
+        )
+        text = await _call_callback(callback, admit, context, error, deepcopy(original))
+        if not admit():
+            return None
+        if not isinstance(text, str):
+            raise TypeError("Function input_error_function must return str")
+        return text
+
     async def _prepare_managed_approval(
         self,
         state: _CallbackState,
@@ -6504,11 +6536,36 @@ class Session(Generic[ContextT, OutputT]):
             if not admit():
                 return
             if request._invocation not in state.manual_inputs:
-                with (
-                    _clear_current(),
-                    _owned_span("manual input validation", "validation", request._tracing_context),
-                ):
-                    arguments = entry.input_adapter.validate_python(deepcopy(message["arguments"]))
+                try:
+                    with (
+                        _clear_current(),
+                        _owned_span(
+                            "manual input validation", "validation", request._tracing_context
+                        ),
+                    ):
+                        arguments = entry.input_adapter.validate_python(
+                            deepcopy(message["arguments"])
+                        )
+                except ValidationError as error:
+                    if (
+                        entry.function.input_error_function is None
+                        or message.get("_sdk_restored_approval")
+                        or "_sdk_effective_arguments" in message
+                    ):
+                        raise
+                    text = await self._recover_tool_input(
+                        state,
+                        entry.function,
+                        message,
+                        error,
+                        message["arguments"],
+                        admit,
+                        request.call,
+                    )
+                    if text is not None and admit():
+                        scope.active = False
+                        await self._decide_approval(request, False, reason=text)
+                    return
                 if not admit():
                     return
                 state.manual_inputs[request._invocation] = arguments
@@ -12922,9 +12979,44 @@ class Session(Generic[ContextT, OutputT]):
                 if approved is None or not approved.approved:
                     raise NativeError("Managed approval arguments are no longer available")
             if approved is None:
-                parsed = entry._parse_arguments(
-                    message.get("_sdk_effective_arguments", message["arguments"])
-                )
+                try:
+                    parsed = entry._parse_arguments(
+                        message.get("_sdk_effective_arguments", message["arguments"])
+                    )
+                except (ValidationError, json.JSONDecodeError) as error:
+                    if entry.input_error_function is None or "_sdk_effective_arguments" in message:
+                        raise
+                    call = ToolCallInfo(
+                        tool=ref,
+                        session_id=self.id,
+                        turn_id=state.handle.turn_id,
+                        call_id=message["callId"] if code_origin is None else None,
+                        child_id=state.handle.child_id
+                        if isinstance(state, _ChildCallbacks)
+                        else None,
+                        child_incarnation=state.handle.instance_id
+                        if isinstance(state, _ChildCallbacks)
+                        else None,
+                        role=None,
+                        model=message.get("_sdk_model"),
+                        route="direct" if code_origin is None else "code",
+                        cell_id=code_origin["cell_id"] if code_origin is not None else None,
+                        nested_call_id=code_origin["nested_call_id"]
+                        if code_origin is not None
+                        else None,
+                    )
+                    text = await self._recover_tool_input(
+                        state,
+                        entry,
+                        message,
+                        error,
+                        message["arguments"],
+                        lambda: self._admit_tool(state, request),
+                        call,
+                    )
+                    if text is not None:
+                        await respond_tool_denial(text)
+                    return
             else:
                 parsed = deepcopy(approved.value)
             kwargs = entry._arguments(parsed)
@@ -13448,6 +13540,18 @@ class Session(Generic[ContextT, OutputT]):
             raise RuntimeError("Stored history operation requires an open Session before close")
         self._stored_close_action = self._native._stored_history_close_action(json.dumps(action))
         await self.aclose()
+
+    async def set_stored_name(self, name: str | None) -> str | None:
+        """Persist this LocalStorage Session's label; None clears it.
+
+        Surrounding whitespace trimmed; blank names rejected. Nonunique labels,
+        immutable Session identity; no alias or resume authority.
+        """
+        self._check_open()
+        self._check_callback_operation("set its own stored name")
+        if name is not None and not isinstance(name, str):
+            raise TypeError("name must be a string or None")
+        return cast(str | None, json.loads(await self._native._set_stored_name(json.dumps(name))))
 
     async def stored_sessions(
         self, *, limit: int = 50, cursor: str | None = None, archived: bool = False

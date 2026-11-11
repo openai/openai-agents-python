@@ -39,6 +39,7 @@ from _agents_codex._function_tools import (
     ToolCallInfo as ToolCallInfo,
     ToolContext as ToolContext,
     ToolContextT as ToolContextT,
+    ToolInputErrorContext as ToolInputErrorContext,
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
     ToolTimeoutBehavior as ToolTimeoutBehavior,

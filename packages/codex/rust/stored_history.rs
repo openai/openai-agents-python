@@ -310,6 +310,36 @@ pub async fn read(state: &ThreadState, query: Query) -> Result<Value> {
     }
 }
 
+/// Persist only this Session's label using the existing native metadata owner.
+pub async fn set_name(state: &ThreadState, name: Option<String>) -> Result<Option<String>> {
+    let name = name
+        .map(|name| {
+            codex_core::util::normalize_thread_name(&name).context("Thread name cannot be empty")
+        })
+        .transpose()?;
+    let _lifecycle = state.engine.lifecycle.lock().await;
+    let _operation = state.engine.operation(false)?;
+    let _mutation = state.mutations.lock().await;
+    ensure!(
+        state.engine.local_checklist_store.is_some(),
+        "stored session names require native LocalStorage"
+    );
+    ensure!(!state.is_closed(), "Codex thread is closed");
+    let stored = state
+        .engine
+        .manager
+        .update_thread_metadata(
+            state.id,
+            codex_thread_store::ThreadMetadataPatch {
+                name: Some(name),
+                ..Default::default()
+            },
+            false,
+        )
+        .await?;
+    Ok(stored.name)
+}
+
 /// One indexed page of application-session headers, without opening their writers.
 async fn sessions(
     store: &crate::storage::LocalChecklistStore,
@@ -362,6 +392,7 @@ async fn sessions(
         }
         sessions.push(json!({
             "id": header.meta.id.to_string(),
+            "name": candidate.name,
             "forked_from_id": header.meta.forked_from_id.map(|id| id.to_string()),
             "parent_thread_id": header.meta.parent_thread_id.map(|id| id.to_string()),
             "created_at_ms": candidate.created_at.timestamp_millis(),

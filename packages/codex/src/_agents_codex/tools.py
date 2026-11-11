@@ -24,7 +24,12 @@ from .manual import _CapturedManual as _CapturedManual
 from .realtime_result import BackgroundResult as BackgroundResult
 
 if TYPE_CHECKING:
-    from ._function_tools import ToolContext, ToolTimeoutBehavior, ToolTimeoutError
+    from ._function_tools import (
+        ToolContext,
+        ToolInputErrorContext,
+        ToolTimeoutBehavior,
+        ToolTimeoutError,
+    )
     from .native_interception import Allow, Deny, ReplaceArguments
 
 _TOOL_RESPONSE = TypeAdapter(FunctionCallResponse)
@@ -472,6 +477,9 @@ class _CapturedFunction:
         | None
     )
     context: Any = field(repr=False)
+    input_error_function: (
+        Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None
+    ) = field(default=None, repr=False)
     namespace: str | None = None
     finish_turn: bool = False
 

@@ -52,6 +52,7 @@ from agents import (
     StopTurn,
     Tool,
     ToolContext,
+    ToolInputErrorContext,
     ToolOutput,
     ToolRef,
     ToolTimeoutBehavior,
@@ -911,6 +912,31 @@ def formatter_only(key: str) -> str:
     return key
 
 
+def format_input_error(
+    context: ToolInputErrorContext[Application], error: Exception, original_arguments: Any
+) -> str:
+    return context.context.tenant
+
+
+def input_error_lookup(key: str) -> str:
+    return key
+
+
+direct_input_formatter = function_tool(input_error_lookup, input_error_function=format_input_error)
+decorated_input_formatter = function_tool(input_error_function=format_input_error)(
+    input_error_lookup
+)
+
+
+def contextual_input_lookup(context: ToolContext[Application], key: str) -> str:
+    return context.context.tenant + key
+
+
+contextual_input_formatter = function_tool(
+    contextual_input_lookup, input_error_function=format_input_error
+)
+
+
 @function_tool(before=contextual_before, after=neutral_after)
 def mixed_policies(key: str) -> str:
     return key
@@ -939,6 +965,11 @@ def raising_formatter(key: str) -> str:
 assert_type(Agent(instructions="Read.", tools=[policy_only]), Agent[Application, str])
 assert_type(Agent(instructions="Read.", tools=[after_only]), Agent[Application, str])
 assert_type(Agent(instructions="Read.", tools=[formatter_only]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[direct_input_formatter]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[decorated_input_formatter]), Agent[Application, str])
+assert_type(
+    Agent(instructions="Read.", tools=[contextual_input_formatter]), Agent[Application, str]
+)
 assert_type(Agent(instructions="Read.", tools=[mixed_policies]), Agent[Application, str])
 assert_type(
     Agent(instructions="Read.", tools=[plain, namespaced_policy_only]), Agent[Application, str]
