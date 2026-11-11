@@ -957,11 +957,11 @@ class Agent(Generic[ContextT, OutputT]):
     transform_context: _ContextTransform[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
-    tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     decisions: DecisionProvider | None
     realtime: RealtimeAgentConfig | None
     input_guardrails: tuple[InputGuardrail[ContextT], ...]
     output_guardrails: tuple[OutputGuardrail[ContextT], ...]
+    tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
