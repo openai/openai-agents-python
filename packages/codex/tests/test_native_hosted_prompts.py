@@ -67,6 +67,27 @@ async def test_native_prompt_defaults_and_explicit_empty_overrides(
             assert field not in request
 
 
+async def test_native_static_prompt_public_reads_preserve_later_sessions(
+    responses: ResponsesFixture,
+) -> None:
+    responses.respond(assistant_output("first"))
+    responses.respond(assistant_output("second"))
+    reference = {
+        "id": "pmpt_captured",
+        "variables": {"file": {"type": "input_file", "file_id": "file_captured"}},
+    }
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-prompt-key", supports_websockets=False
+    ) as provider:
+        agent = Agent(provider=provider, hosted_prompt=reference)
+        exposed: Any = agent.hosted_prompt
+        exposed["variables"]["file"]["file_id"] = "file_changed"
+        assert (await agent.run("first")).final_output == "first"
+        assert (await agent.run("second")).final_output == "second"
+    assert len(responses.requests) == 2
+    assert all(request["prompt"] == reference for request in responses.requests)
+
+
 async def test_native_prompt_cold_restore_uses_current_declaration(
     responses: ResponsesFixture,
 ) -> None:
