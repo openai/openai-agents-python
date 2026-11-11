@@ -140,7 +140,7 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
         };
         assert!(matches!(reply.item,
             codex_protocol::models::ResponseItem::FunctionCallOutput { call_id, .. }
-                if call_id == "call-B"
+                if call_id.as_deref() == Some("call-B")
         ));
         assert!(replies["call-B"].to_string().contains("known-B"), "{replies:?}");
         assert!(!replies["call-B"].to_string().contains("aborted"), "{replies:?}");
