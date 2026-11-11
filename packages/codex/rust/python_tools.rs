@@ -6449,12 +6449,14 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 }
             }
             if let ToolPayload::Computer { arguments } = &call.payload {
-                return Ok(
-                    Box::new(codex_tools::ComputerToolOutput::from_dynamic_response(
+                return Ok(Box::new(ReplyOutput {
+                    output: codex_tools::ComputerToolOutput::from_dynamic_response(
                         arguments,
                         response.response,
-                    )?) as Box<dyn ToolOutput>,
-                );
+                    )?,
+                    start_response: response.start_response,
+                    acceptance: response.acceptance,
+                }) as Box<dyn ToolOutput>);
             }
             if let ToolPayload::ClientToolSearch(search) = &call.payload {
                 let selection =
@@ -6477,13 +6479,13 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
     }
 }
 
-struct ReplyOutput {
-    output: PythonOutput,
+struct ReplyOutput<T> {
+    output: T,
     start_response: bool,
     acceptance: Option<oneshot::Sender<()>>,
 }
 
-impl ToolOutput for ReplyOutput {
+impl<T: ToolOutput> ToolOutput for ReplyOutput<T> {
     fn log_output(&self) -> String {
         self.output.log_output()
     }
@@ -6496,7 +6498,11 @@ impl ToolOutput for ReplyOutput {
     fn realtime_response_requested(&self) -> bool {
         self.start_response
     }
+    fn contains_external_context(&self) -> bool {
+        self.output.contains_external_context()
+    }
     fn mark_accepted(&mut self) {
+        self.output.mark_accepted();
         if let Some(acceptance) = self.acceptance.take() {
             let _ = acceptance.send(());
         }

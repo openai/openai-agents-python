@@ -118,7 +118,7 @@ fn handoff_defaults(
 struct OpeningFiles(Vec<InstructionFile>);
 
 impl OpeningProfiles {
-    /// A serialized pending source can only claim permissions the fresh graph
+    /// A serialized source can only claim permissions the fresh graph
     /// grants without running a callback.
     pub(crate) fn validate_pending_source(&self, source: &AgentProfileReceipt) -> Result<()> {
         let mut candidates = vec![self.root_id.as_str()];
@@ -140,7 +140,7 @@ impl OpeningProfiles {
                 );
             }
         }
-        anyhow::bail!("Restored pending Agent profile requires live callback acceptance")
+        anyhow::bail!("Restored Agent profile requires live callback acceptance")
     }
 
     pub(crate) fn validate_restored_handoff(
@@ -373,6 +373,19 @@ struct PersistedProfile {
     model: AgentProfileModelSettings,
 }
 
+fn rebind_attempt_controls(
+    mut saved: AgentProfileModelSettings,
+    current: &AgentProfileModelSettings,
+) -> AgentProfileModelSettings {
+    saved
+        .request_controls
+        .retry
+        .clone_from(&current.request_controls.retry);
+    saved.request_controls.attempt_timeout_ms = current.request_controls.attempt_timeout_ms;
+    saved.invocation_timeout_ms = current.invocation_timeout_ms;
+    saved
+}
+
 pub(crate) fn profile_receipt(value: &Value) -> Result<AgentProfileReceipt> {
     let source: PersistedProfile = serde_json::from_value(value.clone())
         .map_err(|_| anyhow::anyhow!("Invalid restored Agent receipt"))?;
@@ -499,6 +512,7 @@ pub(crate) fn operation_source(
         matching == 1,
         "Original operation has no unique canonical accepted Agent envelope"
     );
+    opening.validate_pending_source(&source)?;
     Ok(source)
 }
 
@@ -509,10 +523,12 @@ pub(crate) fn restore_source(
     validate_restored(opening, history)?;
     let (_, source) = restored_envelope(opening, history)?
         .context("Managed Agent checkpoint has no source receipt")?;
-    Ok(AgentProfileReceipt {
+    let source = AgentProfileReceipt {
         profile_id: source.profile_id,
         epoch: source.epoch,
-    })
+    };
+    opening.validate_pending_source(&source)?;
+    Ok(source)
 }
 
 pub(crate) fn validate_restored(
@@ -1063,7 +1079,11 @@ pub(crate) async fn configure(
     let mut profiles = BTreeMap::new();
     for descriptor in &opening.roster {
         let model = if descriptor.id == opening.root_id {
-            opening_model.clone()
+            if restored {
+                rebind_attempt_controls(opening_model.clone(), &descriptor.model)
+            } else {
+                opening_model.clone()
+            }
         } else {
             descriptor.model.clone()
         };

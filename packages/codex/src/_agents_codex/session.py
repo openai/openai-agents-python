@@ -67,6 +67,8 @@ from ._events import (
     MessageItem,
     ReasoningItem,
     SessionItem as SessionItem,
+    ShellCallItem,
+    ShellCallOutputItem,
     WebSearchCallItem,
 )
 from ._function_tools import (
@@ -1442,6 +1444,8 @@ def _project_progress(
                     "web_search_call",
                     "file_search_call",
                     "code_interpreter_call",
+                    "shell_call",
+                    "shell_call_output",
                     "image_generation_call",
                 }
                 or (
@@ -1460,6 +1464,8 @@ def _project_progress(
                             | WebSearchCallItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
+                            | ShellCallItem
+                            | ShellCallOutputItem
                             | ImageGenerationCallItem,
                             item,
                         ),
@@ -2294,7 +2300,7 @@ def _split_tools(
         else:
             raise TypeError(
                 "tools must use FunctionTool, function_tool, StdioMCP, HttpMCP, "
-                "Checklist, NativeGoals, WebSearch, FileSearch, CodeInterpreter, "
+                "Checklist, NativeGoals, WebSearch, FileSearch, CodeInterpreter, HostedShell, "
                 "ImageGeneration, ToolSearch or NativeAgents"
             )
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
@@ -3604,6 +3610,19 @@ def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
         error.args = ("Provide api_key or set OPENAI_API_KEY",)
 
 
+def _current_attempt_controls(
+    root: Mapping[str, Any], profile: Mapping[str, Any]
+) -> dict[str, Any]:
+    retry = root.get("retry")
+    if "retry" in profile:
+        profile_retry = profile["retry"]
+        retry = {**(retry or {}), **profile_retry} if profile_retry is not None else None
+    return {
+        "retry": retry,
+        "attempt_timeout_ms": profile.get("attempt_timeout_ms", root.get("attempt_timeout_ms")),
+    }
+
+
 def _prepare_opening_model_settings(
     agent: Agent[Any, Any],
     model: str | None,
@@ -3631,26 +3650,13 @@ def _prepare_opening_model_settings(
         raise ValueError("store=True requires API-key Responses authentication")
     if restored_model_settings is not None:
         current_controls = settings.get("request_controls", {})
-        attempt_controls = {
-            "retry": current_controls.get("retry"),
-            "attempt_timeout_ms": current_controls.get("attempt_timeout_ms"),
-        }
-        if restored_profile is not None:
-            profile_controls = next(
-                row["model"]["request_controls"]
-                for row in profile_roster
-                if row["id"] == restored_profile.profile.id
-            )
-            if "attempt_timeout_ms" in profile_controls:
-                attempt_controls["attempt_timeout_ms"] = profile_controls["attempt_timeout_ms"]
-            if "retry" in profile_controls:
-                profile_retry = profile_controls["retry"]
-                current_retry = attempt_controls["retry"]
-                attempt_controls["retry"] = (
-                    {**(current_retry or {}), **profile_retry}
-                    if profile_retry is not None
-                    else None
-                )
+        profile_model = (
+            next(row["model"] for row in profile_roster if row["id"] == restored_profile.profile.id)
+            if restored_profile is not None
+            else None
+        )
+        profile_controls = profile_model["request_controls"] if profile_model is not None else {}
+        attempt_controls = _current_attempt_controls(current_controls, profile_controls)
         model, settings = restored_model_settings
         settings.setdefault("request_controls", {}).update(attempt_controls)
     return model, settings
@@ -3708,6 +3714,8 @@ class Session(Generic[ContextT, OutputT]):
                 raise ValueError("Managed checkpoint requires a current managed sandbox source")
             captured_pair = managed_source.validate_resume(state)
             state = captured_pair.conversation
+        if state is not None:
+            state._check_prompt_references()
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -4705,6 +4713,7 @@ class Session(Generic[ContextT, OutputT]):
                     settings=settings,
                     fresh=checkpoint is None and not _atomic_first_turn,
                     restored=checkpoint is not None or resume is not None,
+                    manual_restore=manual_restore,
                     validate_provider_model=(
                         uses_siwc or (web_search is not None and web_search.route == "hosted")
                     ),
@@ -5255,6 +5264,7 @@ class Session(Generic[ContextT, OutputT]):
         settings: dict[str, Any],
         fresh: bool,
         restored: bool = False,
+        manual_restore: bool = False,
         validate_provider_model: bool,
         instructions: str,
         instruction_receipts: Sequence[Mapping[str, Any]],
@@ -5267,15 +5277,14 @@ class Session(Generic[ContextT, OutputT]):
         default_handoffs: list[str] | None = None,
     ) -> None:
         thread = self._native
-        if validate_provider_model and (not fresh or "model" not in settings):
-            await self._publish_startup(thread._validate_provider_model())
-        if restored:
-            controls = settings.get("request_controls", {})
+
+        async def publish_attempt_controls(controls: Mapping[str, Any]) -> None:
+            # The accepted native state already owns the invocation deadline.
             reset = {
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
                     "retry": None,
-                }
+                },
             }
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(reset)))
@@ -5292,6 +5301,11 @@ class Session(Generic[ContextT, OutputT]):
                     is not True
                 ):
                     raise NativeError("Native model update acknowledgement did not match")
+
+        if validate_provider_model and (not fresh or "model" not in settings):
+            await self._publish_startup(thread._validate_provider_model())
+        if restored and (not profile_roster or manual_restore):
+            await publish_attempt_controls(settings.get("request_controls", {}))
         if fresh and settings:
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(settings)))
@@ -5316,7 +5330,7 @@ class Session(Generic[ContextT, OutputT]):
             )
             _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, generation)
         if profile_roster:
-            receipt = await self._publish_startup(
+            encoded = await self._publish_startup(
                 thread._configure_agent_profiles(
                     json.dumps(profile_roster),
                     profile_roster[0]["id"],
@@ -5324,7 +5338,18 @@ class Session(Generic[ContextT, OutputT]):
                     default_handoffs,
                 )
             )
-            self._accept_profile_catalogs(json.loads(receipt))
+            receipt = json.loads(encoded)
+            self._accept_profile_catalogs(receipt)
+            if restored and not manual_restore:
+                # Pending continuations already have their current controls before
+                # the graph binds their sealed profile receipt.
+                active = receipt["active"]["profile_id"]
+                model = next(row["model"] for row in profile_roster if row["id"] == active)
+                controls = _current_attempt_controls(
+                    settings.get("request_controls", {}), model["request_controls"]
+                )
+                await publish_attempt_controls(controls)
+                await self._refresh_profile_bindings(preserve_current=True)
 
     async def _prepare_realtime_mcp(self) -> None:
         """Acquire idle defaults before voice captures a lazy native source."""
@@ -14918,7 +14943,7 @@ class Session(Generic[ContextT, OutputT]):
             del response
             if not self._admit_tool(state, request):
                 return
-            nested_application_output = None
+            acknowledged_application_output = None
             if started is not None:
                 application_data = _capture_application_data(output.application_data)
                 if application_data is not None:
@@ -14930,18 +14955,18 @@ class Session(Generic[ContextT, OutputT]):
                         namespace=started.namespace,
                         application_data=application_data,
                     )
-                    if code_origin is None:
+                    if code_origin is None and not isinstance(entry, _CapturedComputer):
                         application_call_id = started.call_id
                         state.pending_application_outputs[application_call_id] = application_output
                     else:
-                        nested_application_output = application_output
+                        acknowledged_application_output = application_output
             if entry.finish_turn and response_output["success"] and started is not None:
                 if started.call_id in state.terminal_observations:
                     raise NativeError("Repeated terminal tool observation identity")
                 state.terminal_observations[started.call_id] = started
                 deferred_observation = True
             accepted = await self._respond_tool(
-                state, reply, application_output=nested_application_output
+                state, reply, application_output=acknowledged_application_output
             )
             # A retired receiver grants no delivery authority; the native owner
             # still supplies the selected terminal cause. Writer errors still raise.

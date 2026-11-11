@@ -21,15 +21,20 @@ from pydantic import (
     BaseModel as BaseModel,
     ConfigDict as ConfigDict,
     Field as Field,
+    JsonValue as JsonValue,
     TypeAdapter as TypeAdapter,
 )
 
 from ._function_tools import FunctionTool as FunctionTool, ToolContext as ToolContext
 from ._public import preserve_module_identity as _preserve_module_identity
-from .tools import _CapturedFunction as _CapturedFunction
+from .tools import ToolOutput as ToolOutput, _CapturedFunction as _CapturedFunction
 
 Button = Literal["left", "right", "wheel", "back", "forward"]
 Environment = Literal["mac", "windows", "ubuntu", "browser"]
+_ComputerResultData = Callable[
+    [ToolContext[Any], dict[str, Any]],
+    dict[str, JsonValue] | None | Awaitable[dict[str, JsonValue] | None],
+]
 
 
 class Computer(Protocol):
@@ -89,6 +94,7 @@ class _Declaration:
     on_safety_check: (
         Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None
     )
+    extract_application_data: _ComputerResultData | None = field(repr=False)
 
 
 class _DeviceGate:
@@ -299,7 +305,7 @@ class _CapturedComputer(_CapturedFunction):
         admit: Callable[[], bool],
         context: ToolContext[Any],
         call: _ComputerCall,
-    ) -> str:
+    ) -> str | ToolOutput:
         async def invoke(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
             if not admit():
                 raise asyncio.CancelledError
@@ -391,16 +397,27 @@ class _CapturedComputer(_CapturedFunction):
             if not isinstance(screenshot, str) or not screenshot:
                 screenshot = result = None
                 raise TypeError("Computer screenshot must return base64 PNG data")
-            return json.dumps(
-                {
-                    "output": {
-                        "type": "computer_screenshot",
-                        "image_url": f"data:image/png;base64,{screenshot}",
-                    },
-                    "acknowledged_safety_checks": pending,
+            response = {
+                "output": {
+                    "type": "computer_screenshot",
+                    "image_url": f"data:image/png;base64,{screenshot}",
                 },
-                allow_nan=False,
+                "acknowledged_safety_checks": pending,
+            }
+            wire = json.dumps(response, allow_nan=False)
+            extract = self.computer.extract_application_data
+            if extract is None:
+                return wire
+            data = await invoke(
+                extract,
+                context,
+                {"type": "computer_call_output", "call_id": call.call_id, **response},
             )
+            if data is None:
+                return wire
+            tool_output = ToolOutput.text(wire)
+            tool_output.application_data = data
+            return tool_output
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -441,6 +458,7 @@ def computer_tool(
     on_safety_check: (
         Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None
     ) = None,
+    extract_application_data: _ComputerResultData | None = None,
 ) -> FunctionTool[Any, str, Any]:
     """Declare a native computer tool; Core owns its call/result continuation.
 
@@ -451,6 +469,9 @@ def computer_tool(
     without pending checks. Direct drivers are borrowed. Use ComputerProvider
     for per-Session acquisition
     and explicit disposal. Sessions serialize calls against each declaration.
+    ``extract_application_data`` receives the tool context and a detached
+    computer output. Core acceptance makes the optional JSON object available
+    through ``application_tool_outputs`` on the completed turn.
     """
     if tool_type == "computer_use_preview" and (dimensions is None or environment is None):
         raise ValueError("Preview computer requires dimensions and environment")
@@ -461,7 +482,7 @@ def computer_tool(
         spec.update(displayWidth=dimensions[0], displayHeight=dimensions[1])
     if environment is not None:
         spec["environment"] = environment
-    declaration = _Declaration(computer, approve, on_safety_check)
+    declaration = _Declaration(computer, approve, on_safety_check, extract_application_data)
 
     def bind(
         context: object, policy_context: object, tool: FunctionTool[Any, Any, Any]
@@ -471,7 +492,11 @@ def computer_tool(
             spec_json=tool._spec_json(),
             model=_ComputerCall,
             field_names=(),
-            output_adapter=TypeAdapter(str),
+            output_adapter=(
+                TypeAdapter(str | ToolOutput)
+                if extract_application_data is not None
+                else TypeAdapter(str)
+            ),
             callback=bind,
             context_parameter=inspect.Parameter("context", inspect.Parameter.POSITIONAL_ONLY),
             callback_timeout=None,

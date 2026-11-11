@@ -261,6 +261,8 @@ impl Stream for Generation {
                         | ResponseItem::WebSearchCall { .. }
                         | ResponseItem::FileSearchCall { .. }
                         | ResponseItem::CodeInterpreterCall { .. }
+                        | ResponseItem::ShellCall { .. }
+                        | ResponseItem::ShellCallOutput { .. }
                         | ResponseItem::ImageGenerationCall { .. } => {
                             this.pending_assistant = false;
                             this.completed_native_item = true;

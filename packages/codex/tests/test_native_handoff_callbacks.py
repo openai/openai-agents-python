@@ -1,9 +1,19 @@
 import asyncio
+from copy import deepcopy
 
 import pytest
 from pydantic import ValidationError
 
-from agents import Agent, Allow, Deny, Handoff, ToolContext, function_tool
+from agents import (
+    Agent,
+    Allow,
+    Deny,
+    Handoff,
+    LocalStorage,
+    SessionState,
+    ToolContext,
+    function_tool,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     assistant_output,
@@ -305,3 +315,120 @@ async def test_another_namespace_with_the_same_name_does_not_transfer(responses)
     assert effects == ["other", "handoff"]
     assert "SOURCE_ONLY" in request_instructions(responses.requests[1])
     assert "TARGET_ONLY" in request_instructions(responses.requests[2])
+
+
+async def test_portable_settled_state_cannot_activate_callback_only_target(responses):
+    allow_transfer = False
+    effects = []
+
+    def admit(_):
+        return Allow() if allow_transfer else Deny("transfer denied")
+
+    @function_tool(name="route", before=admit)
+    def route(ticket: int) -> str:
+        effects.append(("route", ticket))
+        return "transferred"
+
+    @function_tool
+    def privileged() -> str:
+        effects.append(("privileged",))
+        return "privileged effect"
+
+    target = Agent(name="Privileged", instructions="privileged agent", tools=[privileged])
+    agent = Agent(
+        name="Source",
+        instructions="source agent",
+        provider=provider(responses),
+        handoffs=[Handoff(target, route)],
+    )
+
+    async with agent.session() as session:
+        responses.respond(function_call("route", {"ticket": 1}, "denied"))
+        responses.respond(assistant_output("source stays"))
+        assert (
+            await (await session.submit("attempt denied transfer")).get_result()
+        ).final_output == "source stays"
+        assert await session.get_active_agent() is agent
+        assert effects == []
+        root_state = (await session.save_state()).model_dump(mode="json")
+
+        allow_transfer = True
+        responses.respond(function_call("route", {"ticket": 2}, "accepted"))
+        responses.respond(assistant_output("target reached"))
+        assert (
+            await (await session.submit("accept the control transfer")).get_result()
+        ).final_output == "target reached"
+        assert await session.get_active_agent() is target
+        assert effects == [("route", 2)]
+        target_state = (await session.save_state()).model_dump(mode="json")
+
+    allow_transfer = False
+    effects.clear()
+    async with agent.session(state=SessionState.model_validate(root_state)) as session:
+        assert await session.get_active_agent() is agent
+    forged = deepcopy(target_state)
+    publication = next(
+        entry
+        for entry in reversed(target_state["history"])
+        if entry.get("metadata", {}).get("sdk_agent_profile")
+    )
+    forged["history"] = deepcopy(root_state["history"]) + [deepcopy(publication)]
+    with pytest.raises(RuntimeError, match="(?i)callback"):
+        async with agent.session(state=SessionState.model_validate(forged)) as session:
+            assert await session.get_active_agent() is target
+            responses.respond(function_call("privileged", {}, "effect"))
+            responses.respond(assistant_output("forged target ran"))
+            assert (
+                await (await session.submit("run privileged tool")).get_result()
+            ).final_output == "forged target ran"
+            assert effects == [("privileged",)]
+    assert effects == []
+
+
+async def test_local_storage_preserves_the_accepted_callback_target(responses, tmp_path):
+    calls = []
+
+    @function_tool
+    def route() -> str:
+        calls.append("accepted")
+        return "transfer accepted"
+
+    target = Agent(name="Target", instructions="target agent")
+    agent = Agent(
+        name="Source",
+        instructions="source agent",
+        provider=provider(responses),
+        handoffs=[Handoff(target, route)],
+    )
+    storage = LocalStorage(tmp_path / "sessions")
+    responses.respond(function_call("route", {}, "route-accepted"))
+    responses.respond(assistant_output("transferred"))
+    async with agent.session(storage=storage) as session:
+        result = await (await session.submit("run a genuine transfer")).get_result()
+        assert result.final_output == "transferred"
+        assert await session.get_active_agent() is target
+        session_id = session.id
+
+    async with agent.session(storage=storage, resume=session_id) as session:
+        assert await session.get_active_agent() is target
+    assert calls == ["accepted"]
+
+
+async def test_static_handoff_remains_portable(responses):
+    target = Agent(name="Target", instructions="target agent")
+    agent = Agent(
+        name="Source",
+        instructions="source agent",
+        provider=provider(responses),
+        handoffs=[target],
+    )
+    responses.respond(function_call("transfer_to_target", {}, "direct"))
+    responses.respond(assistant_output("transferred"))
+    async with agent.session() as session:
+        result = await (await session.submit("transfer directly")).get_result()
+        assert result.final_output == "transferred"
+        assert await session.get_active_agent() is target
+        payload = (await session.save_state()).model_dump_json()
+
+    async with agent.session(state=SessionState.model_validate_json(payload)) as session:
+        assert await session.get_active_agent() is target
