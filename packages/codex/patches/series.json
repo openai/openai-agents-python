@@ -702,8 +702,8 @@
     },
     {
       "path": "sdk-trace-lifecycle-dispatch.patch",
-      "sha256": "cef3d590cd9936331fefca9d0863488a382432e5da75f587996f860cb2559527"
+      "sha256": "7ad94085ca25e835088fa60efc140869944e889aa02fdd3689b9560b2b300c8c"
     }
   ],
-  "result_tree": "86c198d8d6d8fd409d3f55c5fb9e8e04813fbdbe"
+  "result_tree": "c3424d5e3104cec5ea0d14021d1ae463e7ad50cc"
 }

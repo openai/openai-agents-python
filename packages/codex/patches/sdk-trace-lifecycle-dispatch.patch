@@ -1,8 +1,16 @@
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index c9abc221..ecd01d1e 100644
+index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..ee221eaacd2753c9501fbcf44d95f1131a4a76c0 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
-@@ -236,26 +236,103 @@ fn event(
+@@ -44,6 +44,7 @@ struct Routes {
+     delivered: u64,
+     queue: VecDeque<(u64, Value, usize, Option<Arc<TraceCredentials>>)>,
+     pending: BTreeSet<u64>,
++    dispatch_waiters: BTreeMap<u64, tokio::sync::oneshot::Sender<()>>,
+     bytes: usize,
+     dropped: u64,
+     failed: u64,
+@@ -236,26 +237,95 @@ fn event(
      if credential_required {
          value["credential_required"] = json!(true);
      }
@@ -73,7 +81,7 @@ index c9abc221..ecd01d1e 100644
 +    let descriptor = observation.root_descriptor.take();
 +    let mut value =
 +        serde_json::to_value(observation).map_err(|_| "Invalid trace event snapshot")?;
-+    let sequence = {
++    let acknowledged = {
 +        let mut s = lock();
 +        if s.credentials_closed {
 +            return Err("Telemetry has been shutting down".into());
@@ -89,23 +97,112 @@ index c9abc221..ecd01d1e 100644
 +        if !enqueue_event(&mut s, sequence, value, descriptor, None) {
 +            return Err("Trace event exceeds processor queue capacity".into());
 +        }
-+        sequence
++        let (sender, acknowledged) = tokio::sync::oneshot::channel();
++        s.dispatch_waiters.insert(sequence, sender);
++        acknowledged
 +    };
-+    loop {
-+        let (acknowledged, closing) = {
-+            let s = lock();
-+            (s.acknowledged >= sequence, s.credentials_closed)
-+        };
-+        if acknowledged {
-+            return Ok(());
-+        }
-+        if closing {
-+            return Err("Telemetry has been shutting down before trace delivery".into());
-+        }
-+        tokio::time::sleep(Duration::from_millis(2)).await;
-+    }
++    acknowledged
++        .await
++        .map_err(|_| "Telemetry has been shutting down before trace delivery".into())
  }
 +
  fn truncate(s: &str, max: usize) -> String {
      let mut end = s.len().min(max);
      while !s.is_char_boundary(end) {
+@@ -306,6 +376,7 @@ pub fn ack_trace_events(sequence: u64, failed: u64) -> Result<(), String> {
+     if sequence > s.delivered || sequence < s.acknowledged {
+         return Err("invalid trace event acknowledgment".into());
+     }
++    let mut dispatch_waiters = Vec::new();
+     if sequence > s.acknowledged {
+         s.failed = s.failed.saturating_add(failed);
+         if let Some((barrier, _, captured_failed)) = &mut s.flush_snapshot {
+@@ -315,6 +386,16 @@ pub fn ack_trace_events(sequence: u64, failed: u64) -> Result<(), String> {
+         }
+         s.acknowledged = sequence;
+         s.pending.retain(|pending| *pending > sequence);
++        while let Some(waiter) = s.dispatch_waiters.first_entry() {
++            if *waiter.key() > sequence {
++                break;
++            }
++            dispatch_waiters.push(waiter.remove());
++        }
++    }
++    drop(s);
++    for waiter in dispatch_waiters {
++        let _ = waiter.send(());
+     }
+     Ok(())
+ }
+@@ -406,7 +487,7 @@ pub(crate) fn configure_log_shutdown(owner: Option<&Arc<crate::provider::LogShut
+     lock().log_shutdown = owner.map(Arc::downgrade);
+ }
+ pub fn begin_shutdown(deadline: Instant) {
+-    let (batch, logs) = {
++    let (batch, logs, dispatch_waiters) = {
+         let mut routes = lock();
+         routes.default_available = false;
+         routes.accepting_credentials = false;
+@@ -417,8 +498,10 @@ pub fn begin_shutdown(deadline: Instant) {
+                 .log_shutdown
+                 .as_ref()
+                 .and_then(std::sync::Weak::upgrade),
++            std::mem::take(&mut routes.dispatch_waiters),
+         )
+     };
++    drop(dispatch_waiters);
+     if let Some(logs) = logs {
+         logs.begin(deadline);
+     }
+@@ -952,6 +1035,51 @@ mod tests {
+ 
+     static TEST_LOCK: Mutex<()> = Mutex::new(());
+ 
++    #[tokio::test]
++    async fn detached_dispatch_wakes_on_acknowledgement_or_shutdown() {
++        use std::future::Future;
++        use std::sync::atomic::{AtomicUsize, Ordering};
++        use std::task::{Poll, Wake, Waker};
++
++        #[derive(Default)]
++        struct WakeCounter(AtomicUsize);
++        impl Wake for WakeCounter {
++            fn wake(self: Arc<Self>) {
++                self.0.fetch_add(1, Ordering::Relaxed);
++            }
++        }
++
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
++        let encoded = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
++        let first_wakes = Arc::new(WakeCounter::default());
++        let second_wakes = Arc::new(WakeCounter::default());
++        let first_waker = Waker::from(first_wakes.clone());
++        let second_waker = Waker::from(second_wakes.clone());
++        let mut first_context = std::task::Context::from_waker(&first_waker);
++        let mut second_context = std::task::Context::from_waker(&second_waker);
++        let mut first = std::pin::pin!(dispatch_trace_event(encoded));
++        let mut second = std::pin::pin!(dispatch_trace_event(encoded));
++
++        assert!(first.as_mut().poll(&mut first_context).is_pending());
++        assert!(second.as_mut().poll(&mut second_context).is_pending());
++        drain_trace_events(2).unwrap();
++        ack_trace_events(1, 0).unwrap();
++        assert_eq!(first_wakes.0.load(Ordering::Relaxed), 1);
++        assert_eq!(second_wakes.0.load(Ordering::Relaxed), 0);
++        assert_eq!(first.poll(&mut first_context), Poll::Ready(Ok(())));
++
++        begin_shutdown(Instant::now());
++        assert_eq!(second_wakes.0.load(Ordering::Relaxed), 1);
++        assert_eq!(
++            second.poll(&mut second_context),
++            Poll::Ready(Err(
++                "Telemetry has been shutting down before trace delivery".into()
++            ))
++        );
++    }
++
+     #[derive(Debug, Default, Clone)]
+     struct Recorder(Arc<Mutex<Vec<String>>>);
+     impl SpanProcessor for Recorder {
