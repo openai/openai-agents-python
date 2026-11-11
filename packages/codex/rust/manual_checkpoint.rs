@@ -1179,8 +1179,18 @@ pub(crate) async fn continue_if_ready(
     if let Some(source) = operation_declaration_source {
         recovery_options["operation_declaration_source"] = serde_json::to_value(source)?;
     }
+    let reset_tool_choice = thread
+        .thread
+        .thread_settings_snapshot()
+        .await
+        .request_controls
+        .reset_tool_choice
+        .flatten()
+        == Some(true);
     let terminal = match frame.tool_outcomes.take() {
-        Some(outcomes) if frame.fresh.is_some() || !held_outputs.is_empty() => {
+        Some(outcomes)
+            if frame.fresh.is_some() || !held_outputs.is_empty() || reset_tool_choice =>
+        {
             Some(crate::python_tools::RecoveredToolCompletionSeed::new(
                 frame.turn.clone(),
                 outcomes,
