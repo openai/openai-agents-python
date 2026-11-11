@@ -5,13 +5,25 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from contextlib import AsyncExitStack, closing
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
-from agents import Agent, MongoDBSessionStore, NativeProvider, RedisSessionStore, SQLiteSessionStore
+from agents import (
+    Agent,
+    CustomStorage,
+    EncryptedSessionStore,
+    MongoDBSessionStore,
+    NativeProvider,
+    RedisSessionStore,
+    SessionStore,
+    SQLiteSessionStore,
+)
+from agents.canonical_storage import read_dapr_legacy_history
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
 
@@ -30,13 +42,17 @@ NATIVE_ITEMS = [
 ]
 
 
-async def verify_import(items: list[dict[str, Any]], peer: ResponsesFixture) -> None:
+async def verify_import(
+    items: list[dict[str, Any]], peer: ResponsesFixture, *, storage: SessionStore | None = None
+) -> None:
     assert items == NATIVE_ITEMS
     peer.respond(assistant_output("restored"))
     async with (
         timeout(20),
         NativeProvider(base_url=peer.url, api_key="synthetic-v0-import") as provider,
-        Agent(instructions="Answer.", provider=provider).session() as session,
+        Agent(instructions="Answer.", provider=provider).session(
+            storage=CustomStorage(storage) if storage is not None else None
+        ) as session,
     ):
         before = await session.history_snapshot()
         await session.transact_history(expected_revision=before.revision, keep=0, items=items)
@@ -46,6 +62,102 @@ async def verify_import(items: list[dict[str, Any]], peer: ResponsesFixture) -> 
     request = json.dumps(peer.requests[0], ensure_ascii=False)
     assert "v0 imported café" in request
     assert "v0 imported tool result" in request
+
+
+async def test_dapr_reader_uses_the_v0_key_and_rejects_a_non_list():
+    class DaprClient:
+        async def get_state(self, *, store_name, key, state_metadata):
+            assert (store_name, key, state_metadata) == (
+                "history",
+                "legacy:messages",
+                {"consistency": "strong"},
+            )
+            return SimpleNamespace(data=b'{"unexpected":true}')
+
+    with pytest.raises(ValueError, match="must be a JSON list"):
+        await read_dapr_legacy_history(
+            DaprClient(), "legacy", state_store_name="history", consistency="strong"
+        )
+
+
+async def test_imports_v0_dapr_items(responses):
+    address = os.environ.get("AGENTS_TEST_DAPR_ADDRESS")
+    if not address:
+        pytest.skip("requires AGENTS_TEST_DAPR_ADDRESS")
+    pytest.importorskip("dapr")
+    from dapr.aio.clients import DaprClient
+
+    session_id = f"legacy-{uuid4()}"
+    store_name = "parity-state"
+    key = f"{session_id}:messages"
+    wire_items = [json.dumps(V0_ITEMS[0], ensure_ascii=False), *V0_ITEMS[1:]]
+    async with DaprClient(address=address) as client:
+        await client.save_state(
+            store_name=store_name,
+            key=key,
+            value=json.dumps(wire_items, ensure_ascii=False),
+            state_metadata={"ttlInSeconds": "300"},
+        )
+        before = await client.get_state(store_name=store_name, key=key)
+        items = await read_dapr_legacy_history(client, session_id, state_store_name=store_name)
+        after = await client.get_state(store_name=store_name, key=key)
+        assert after.data == before.data
+        assert after.etag == before.etag
+        assert (
+            await read_dapr_legacy_history(
+                client, f"{session_id}-absent", state_store_name=store_name
+            )
+            == []
+        )
+    await verify_import(items, responses)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="encrypted SQLite fixture requires POSIX locking")
+async def test_imports_authenticated_unexpired_v0_items_into_native_encrypted_storage(
+    tmp_path, responses
+):
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from agents.classic.extensions.memory.encrypt_session import (
+        _derive_session_fernet_key,
+        _ensure_fernet_key_bytes,
+    )
+
+    source_key = Fernet.generate_key().decode("ascii")
+    key_bytes = _ensure_fernet_key_bytes(source_key)
+    session_id = "v0-encrypted"
+    cipher = _derive_session_fernet_key(key_bytes, session_id)
+    other_cipher = _derive_session_fernet_key(key_bytes, "other-session")
+
+    def envelope(item, item_cipher=cipher, *, age=0):
+        payload = json.dumps(item, ensure_ascii=False).encode("utf-8")
+        token = item_cipher.encrypt_at_time(payload, int(time.time()) - age).decode("ascii")
+        return {"__enc__": 1, "v": 1, "kid": "v0-fixture", "payload": token}
+
+    source = [
+        envelope({"role": "user", "content": "outside limit"}),
+        *(envelope(item) for item in V0_ITEMS),
+        envelope({"role": "user", "content": "expired"}, age=900),
+        envelope({"role": "user", "content": "wrong session"}, other_cipher),
+        {"role": "user", "content": "plain text"},
+    ]
+    items = EncryptedSessionStore.read_legacy_history(
+        source, session_id, encryption_key=source_key, ttl=600, limit=len(V0_ITEMS)
+    )
+    assert (
+        EncryptedSessionStore.read_legacy_history(
+            source, "unknown-session", encryption_key=source_key, ttl=600
+        )
+        == []
+    )
+    target_file = tmp_path / "native-encrypted.sqlite"
+    target = EncryptedSessionStore(
+        SQLiteSessionStore(target_file), encryption_key=Fernet.generate_key().decode("ascii")
+    )
+    await verify_import(items, responses, storage=target)
+    for database_file in tmp_path.glob("native-encrypted.sqlite*"):
+        assert "v0 imported café".encode() not in database_file.read_bytes()
 
 
 async def test_imports_v0_sqlite_items_without_changing_the_file(tmp_path, responses):

@@ -6,8 +6,8 @@ import json
 from typing import Any
 
 
-def decode_legacy_item(raw: str | bytes) -> dict[str, Any]:
-    item = json.loads(raw)
+def decode_legacy_item(raw: str | bytes | dict[str, Any]) -> dict[str, Any]:
+    item = raw.copy() if isinstance(raw, dict) else json.loads(raw)
     if not isinstance(item, dict):
         raise ValueError("A v0 session item must be a JSON object")
     role = item.get("role")

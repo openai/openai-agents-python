@@ -19,7 +19,7 @@ from collections.abc import Iterator as Iterator
 from contextlib import contextmanager as contextmanager
 from dataclasses import dataclass as dataclass
 from pathlib import Path as Path
-from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable
+from typing import Any as Any, Literal, Protocol as Protocol, runtime_checkable as runtime_checkable
 
 from ._legacy_history import decode_legacy_item as _decode_legacy_item
 from ._lifecycle import _join as _join
@@ -451,6 +451,32 @@ class SQLAlchemySessionStore(SQLiteSessionStore):
                 yield connection
         finally:
             pooled.close()
+
+
+async def read_dapr_legacy_history(
+    dapr_client: Any,
+    session_id: str,
+    *,
+    state_store_name: str,
+    consistency: Literal["eventual", "strong"] = "eventual",
+) -> list[dict[str, Any]]:
+    """Read v0 Dapr items in insertion order with an application-owned async client.
+
+    Finish writes to the v0 session before reading from its original Dapr
+    application and state store. Import the items with the current revision
+    of an empty native Session's `transact_history`.
+    """
+    result = await dapr_client.get_state(
+        store_name=state_store_name,
+        key=f"{session_id}:messages",
+        state_metadata={"consistency": consistency},
+    )
+    if not result.data:
+        return []
+    items = json.loads(result.data)
+    if not isinstance(items, list):
+        raise ValueError("Dapr v0 session messages must be a JSON list")
+    return [_decode_legacy_item(item) for item in items]
 
 
 # Re-export adapters only after their shared protocols and SQLite base exist.
