@@ -493,7 +493,8 @@ def set_tracing_id_generator(generator: TracingIdGenerator | None = None) -> Non
     try:
         if generator is not None and not isinstance(generator, TracingIdGenerator):
             raise TypeError("generator must be TracingIdGenerator or None")
-        generator = generator or TracingIdGenerator()
+        if generator is None:
+            generator = TracingIdGenerator()
         for callback in (generator.generate_trace_id, generator.generate_span_id):
             if callback is not None and (
                 not callable(callback) or _inspect.iscoroutinefunction(callback)

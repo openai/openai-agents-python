@@ -62,6 +62,10 @@ async def native_case(case):
                 callback_seen = False
                 supplied = set()
 
+                class FalsyTracingIdGenerator(telemetry.TracingIdGenerator):
+                    def __bool__(self):
+                        return False
+
                 def span_b():
                     nonlocal later_count
                     later_count += 1
@@ -84,7 +88,7 @@ async def native_case(case):
                     return "1" * 32
 
                 telemetry.set_tracing_id_generator(
-                    telemetry.TracingIdGenerator(
+                    FalsyTracingIdGenerator(
                         generate_trace_id=trace_a,
                         generate_span_id=span_a,
                     )
