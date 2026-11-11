@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148cb3ff3c7 100644
+index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c40e85240 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -1,4 +1,6 @@
@@ -47,7 +47,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
      )
      .await;
      let status = compaction_status_from_result(&result);
-@@ -253,60 +260,313 @@ async fn run_compact_task_inner(
+@@ -253,60 +260,319 @@ async fn run_compact_task_inner(
      result.map(|_| ())
  }
  
@@ -150,10 +150,10 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
 +    }
 +    if sess.input_queue.has_pending_input(&sess.active_turn).await {
 +        return Ok(true);
-+    }
+     }
 +    if cancellation_token.is_cancelled() {
 +        return Err(CodexErr::TurnAborted);
-     }
++    }
 +    sess.ensure_rollout_durable().await?;
      let history = sess.clone_history().await;
 -    let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
@@ -348,7 +348,13 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
 +                validate_compaction_window(history, input.items, &window.items)?;
 +                // A borrowed client's producer is outside the native catalog owner.
 +                let model_hash = None;
-+                let output = window.items.clone();
++                // Record copied controls through the replacement history.
++                let output = window
++                    .items
++                    .iter()
++                    .filter(|item| !is_compaction_control_item(item))
++                    .cloned()
++                    .collect();
 +                let captured = history
 +                    .model_items()
 +                    .iter()
@@ -396,7 +402,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
          }
      }
      Ok(None)
-@@ -325,12 +585,7 @@ async fn publish_compaction_summary(
+@@ -325,12 +591,7 @@ async fn publish_compaction_summary(
      let (compaction_response_id, completed_output) = match compaction_response {
          Some((response, cancellation_token)) => (
              Some(response.response_id),
@@ -410,7 +416,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
          ),
          None => (None, None),
      };
-@@ -348,12 +603,57 @@ async fn publish_compaction_summary(
+@@ -348,12 +609,57 @@ async fn publish_compaction_summary(
          // belongs to this compaction turn.
          summary_item.set_turn_id_if_missing(&turn_context.sub_id);
      }
@@ -469,7 +475,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
      let (initial_context, world_state_baseline) =
          build_compaction_initial_context(sess, replacement_step_context, world_state).await;
      new_history =
-@@ -366,7 +666,7 @@ async fn publish_compaction_summary(
+@@ -366,7 +672,7 @@ async fn publish_compaction_summary(
              input_goal_ids,
              message: summary_text,
              window,
@@ -478,7 +484,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
              compaction_model_hash,
              reviewer_compaction_hash: None,
          },
-@@ -377,6 +677,7 @@ async fn publish_compaction_summary(
+@@ -377,6 +683,7 @@ async fn publish_compaction_summary(
      Ok(())
  }
  
@@ -486,7 +492,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
  async fn run_compact_task_inner_impl(
      sess: Arc<Session>,
      source_step_context: Arc<StepContext>,
-@@ -385,17 +686,29 @@ async fn run_compact_task_inner_impl(
+@@ -385,17 +692,29 @@ async fn run_compact_task_inner_impl(
      world_state: Arc<WorldState>,
      compaction_metadata: CompactionTurnMetadata,
      cancellation_token: &CancellationToken,
@@ -517,7 +523,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
      )
      .await?
      {
-@@ -403,9 +716,14 @@ async fn run_compact_task_inner_impl(
+@@ -403,9 +722,14 @@ async fn run_compact_task_inner_impl(
              .await;
          return Ok(summary);
      }
@@ -533,7 +539,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..13493bd10863d19551a048d1345b5148
      let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
      history.record_items(
          &[initial_input_for_turn.into()],
-@@ -1040,3 +1358,73 @@ async fn drain_to_completed(
+@@ -1040,3 +1364,73 @@ async fn drain_to_completed(
  #[cfg(test)]
  #[path = "compact_tests.rs"]
  mod tests;

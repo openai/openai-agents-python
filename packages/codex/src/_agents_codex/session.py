@@ -131,7 +131,7 @@ from .canonical_storage import (
     CustomStorage as CustomStorage,
     SessionStoreCleanup as SessionStoreCleanup,
 )
-from .compaction import CompactionContext
+from .compaction import CompactionContext, _compaction_instruction_messages
 from .completion import (
     CompletionContext,
     ContinueTurn,
@@ -5497,7 +5497,6 @@ class Session(Generic[ContextT, OutputT]):
         if isinstance(profile_id, str):
             return self._source_profile_runtime(profile_id).profile.agent
         return self._agent if self._agent is not None else captured
-
 
     async def _realtime_tool_enabled(
         self,
@@ -11990,7 +11989,11 @@ class Session(Generic[ContextT, OutputT]):
                     if not active():
                         raise asyncio.CancelledError
                     transform = declaration.transform_context
+                    original_controls: tuple[dict[str, Any], ...] = ()
                     if prepared.mode == "input" and transform is not None:
+                        original_controls = deepcopy(
+                            _compaction_instruction_messages(prepared.items)
+                        )
                         replacement = await self._call_decision_callback(
                             state,
                             message,
@@ -12021,6 +12024,7 @@ class Session(Generic[ContextT, OutputT]):
                         prepared,
                         provider_response=message.get("provider_response"),
                         observe=observe,
+                        original_controls=original_controls,
                     )
                 except Exception:
                     if policy or message.get("optional", False):

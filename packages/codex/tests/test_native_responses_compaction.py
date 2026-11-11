@@ -346,3 +346,78 @@ async def test_context_transform_redacts_borrowed_compaction_input(responses, au
     assert [context for context in transforms if context[0] == "compaction"] == [
         ("compaction", "separate-compactor")
     ]
+
+
+@pytest.mark.parametrize("modify_echo", [False, True])
+async def test_compaction_transform_keeps_original_instruction_provenance(responses, modify_echo):
+    original = "SYNTHETIC_COMPACTION_INSTRUCTION"
+    redacted = "SYNTHETIC_REDACTED_INSTRUCTION"
+    captured = []
+
+    def transform(context):
+        if context.purpose == "compaction":
+            captured.extend(
+                item
+                for item in context.items
+                if item.get("role") == "developer" and original in json.dumps(item)
+            )
+            return [
+                json.loads(json.dumps(item).replace(original, redacted)) for item in context.items
+            ]
+        return None
+
+    async def compact(**body):
+        controls = [
+            item
+            for item in body["input"]
+            if item.get("role") == "developer" and redacted in json.dumps(item)
+        ]
+        assert len(controls) == 2
+        if modify_echo:
+            controls[0] = json.loads(
+                json.dumps(controls[0]).replace(redacted, "SYNTHETIC_INVENTED_INSTRUCTION")
+            )
+        result = window()
+        result["output"][:0] = controls
+        return result
+
+    responses.respond(assistant_output("seed"))
+    responses.respond(assistant_output("continued"))
+    agent = Agent(
+        instructions=original,
+        provider=provider(responses),
+        transform_context=transform,
+        compaction=ResponsesCompaction(
+            client=client_for(compact),
+            model="compactor",
+            mode="input",
+            should_compact=lambda _: False,
+        ),
+    )
+    async with timeout(30):
+        async with agent.session() as session:
+            await (await session.submit("seed")).get_result()
+            await session.update(instructions=f"{original} current")
+            if modify_echo:
+                with pytest.raises(NativeError, match="new or modified instruction"):
+                    await session.compact()
+                assert "OPAQUE_COMPLETE_WINDOW" not in (await session.save_state()).to_json()
+                return
+            await session.compact()
+            saved = await session.save_state()
+            compacted = next(row["payload"] for row in saved.history if row["type"] == "compacted")
+            accepted = compacted["replacement_history"]
+            assert len(captured) == 2 and all(item in accepted for item in captured)
+            assert redacted not in json.dumps(accepted)
+        current_agent = Agent(
+            instructions=f"{original} current",
+            provider=agent.provider,
+            transform_context=transform,
+            compaction=agent.compaction,
+        )
+        async with current_agent.session(state=SessionState.from_json(saved.to_json())) as restored:
+            result = await (await restored.submit("continue")).get_result()
+            assert result.final_output == "continued"
+            replay = responses.requests[-1]["input"]
+            assert f"{original} current" in json.dumps(replay)
+            assert redacted not in json.dumps(replay)

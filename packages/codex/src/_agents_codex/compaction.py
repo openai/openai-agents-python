@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable as Awaitable, Callable as Callable
+import json as json
+from collections.abc import (
+    Awaitable as Awaitable,
+    Callable as Callable,
+    Mapping as Mapping,
+    Sequence as Sequence,
+)
 from dataclasses import dataclass as dataclass, field as field
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
@@ -154,12 +160,12 @@ class ResponsesCompaction(Generic[ContextT]):
         *,
         provider_response: dict[str, Any] | None,
         observe: Callable[[TokenUsage | None], None],
+        original_controls: tuple[dict[str, Any], ...] = (),
     ) -> dict[str, Any]:
         """Capture one completed compact result, retaining its entire output."""
-        import json
-
         model = response = value = usage = window = None
         body: dict[str, Any] | None = None
+        control_echoes: tuple[tuple[str, dict[str, Any]], ...] = ()
         completed = reported = False
         try:
             model = request.model
@@ -170,6 +176,7 @@ class ResponsesCompaction(Generic[ContextT]):
                 body["previous_response_id"] = provider_response["response_id"]
             else:
                 body["input"] = list(request.items)
+                control_echoes = _compaction_control_echoes(original_controls, request.items)
             response = await self._compact(**body)
             completed = True
             value = (
@@ -186,12 +193,63 @@ class ResponsesCompaction(Generic[ContextT]):
             ):
                 raise ValueError("Compaction response ID must be a nonempty string")
             window = {"items": value["output"], "response_id": response_id, "model": model}
-            return cast(dict[str, Any], json.loads(json.dumps(window, allow_nan=False)))
+            window = cast(dict[str, Any], json.loads(json.dumps(window, allow_nan=False)))
+            if control_echoes:
+                _restore_compaction_control_echoes(window["items"], control_echoes)
+            return window
         finally:
             if completed and not reported:
                 observe(None)
             del self, request, provider_response, observe, response, body, value, window, usage
-            del model
+            del model, control_echoes, original_controls
+
+
+def _compaction_instruction_messages(
+    items: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        dict(item)
+        for item in items
+        if item.get("type") == "message" and item.get("role") in ("system", "developer")
+    )
+
+
+def _compaction_control_echoes(
+    original: tuple[dict[str, Any], ...], outbound: Sequence[Mapping[str, Any]]
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    if not original:
+        return ()
+    transformed = _compaction_instruction_messages(outbound)
+    if [(item["role"], item.get("id")) for item in original] != [
+        (item["role"], item.get("id")) for item in transformed
+    ]:
+        return ()
+    # Capture the outbound representation before entering the borrowed client.
+    return tuple(
+        (json.dumps(sent, sort_keys=True, allow_nan=False), canonical)
+        for canonical, sent in zip(original, transformed, strict=True)
+    )
+
+
+def _restore_compaction_control_echoes(
+    items: list[Any], echoes: tuple[tuple[str, dict[str, Any]], ...]
+) -> None:
+    # Unmatched controls still reach Core's canonical provenance check.
+    cursor = 0
+    for index, item in enumerate(items):
+        if (
+            not isinstance(item, dict)
+            or item.get("type") != "message"
+            or item.get("role") not in ("system", "developer")
+        ):
+            continue
+        fingerprint = json.dumps(item, sort_keys=True, allow_nan=False)
+        for position in range(cursor, len(echoes)):
+            sent, canonical = echoes[position]
+            if sent == fingerprint:
+                items[index] = canonical
+                cursor = position + 1
+                break
 
 
 def _compact_usage(raw: Any) -> TokenUsage | None:
