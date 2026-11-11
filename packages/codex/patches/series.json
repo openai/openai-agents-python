@@ -674,8 +674,8 @@
     },
     {
       "path": "sdk-provider-hosted-replay-fence.patch",
-      "sha256": "c9e982a6a38610e0eb7a0299052eb07df4c8511d4f8ef478200b63890bd79783"
+      "sha256": "94ba7f728d2769a754ae6241372104d057f9d43d7436db8c386a4c81c0a127bb"
     }
   ],
-  "result_tree": "b27efd422bc85d067bd721e645ca4bce33bdce58"
+  "result_tree": "ca330c585048f06a7e00486ce19ce2fbb17332eb"
 }

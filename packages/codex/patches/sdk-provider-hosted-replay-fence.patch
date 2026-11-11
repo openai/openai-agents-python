@@ -78,21 +78,20 @@ index 3af26098..1882c65c 100644
          self.local_effects.store(true, Ordering::Release);
      }
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 70668f84..5b9f1fac 100644
+index 70668f84..edf4b7a3 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -2309,6 +2309,10 @@ async fn run_sampling_request(
+@@ -2309,6 +2309,9 @@ async fn run_sampling_request(
                  conversation_id: state.conversation_id,
                  usage: attempt.usage(),
              };
-+            let accepted_provider_tools = context.response_started
-+                && attempt
-+                    .provider_tools
-+                    .load(std::sync::atomic::Ordering::Acquire);
++            let provider_tool_request = attempt
++                .provider_tools
++                .load(std::sync::atomic::Ordering::Acquire);
              let permanently_stopped = cancellation_token.is_cancelled()
                  || preempt.is_cancelled()
                  || parent_stop.requested();
-@@ -2321,6 +2325,9 @@ async fn run_sampling_request(
+@@ -2321,6 +2324,9 @@ async fn run_sampling_request(
                  || context.normalized.error_code.as_deref() == Some("conversation_locked");
              let hard_veto = permanently_stopped
                  || retirement_failed
@@ -102,33 +101,33 @@ index 70668f84..5b9f1fac 100644
                  || context.normalized.is_abort
                  || (enforce_replay_safety
                      && (context.retry_unsafe_output
-@@ -2339,6 +2346,7 @@ async fn run_sampling_request(
+@@ -2339,6 +2345,7 @@ async fn run_sampling_request(
                  && retry_settings.is_some_and(|settings| settings.has_policy == Some(true))
                  && policy_attempt <= u64::from(context.max_retries);
              let compatibility_retry = !hard_veto
-+                && !accepted_provider_tools
++                && !provider_tool_request
                  && context.normalized.error_code.as_deref() == Some("conversation_locked")
                  && retry_settings.and_then(|settings| settings.max_retries) != Some(0)
                  && locked_retries < 3;
-@@ -2371,6 +2379,17 @@ async fn run_sampling_request(
+@@ -2371,6 +2378,17 @@ async fn run_sampling_request(
                      }
                  }
              }
-+            // Acceptance may already have launched hosted actions without an output
-+            // frame. Only captured provider advice, never a policy override, proves
-+            // that replaying this accepted request is safe.
++            // Dispatch may launch hosted actions even when no response frame arrives.
++            // Only captured provider advice, never a policy override, proves that
++            // replaying this potentially dispatched request is safe.
 +            let advice = resolution
 +                .as_ref()
 +                .and_then(|reply| reply.provider_advice.as_ref())
 +                .unwrap_or(&context.provider_advice);
 +            let hard_veto = hard_veto
-+                || (accepted_provider_tools
++                || (provider_tool_request
 +                    && advice.replay_safety
 +                        != codex_protocol::model_retry::ModelReplaySafety::Safe);
              let use_configured_retry = retry_configured
                  || failure.is_some()
                  || compatibility_retry
-@@ -3737,6 +3756,30 @@ fn assign_missing_streamed_response_item_id(
+@@ -3737,6 +3755,30 @@ fn assign_missing_streamed_response_item_id(
      Session::assign_missing_response_item_id(item);
  }
  
@@ -159,7 +158,7 @@ index 70668f84..5b9f1fac 100644
  #[allow(clippy::too_many_arguments)]
  #[instrument(level = "trace",
      skip_all,
-@@ -3981,6 +4024,11 @@ async fn try_run_sampling_request(
+@@ -3981,6 +4023,11 @@ async fn try_run_sampling_request(
              {
                  break Err(CodexErr::TurnAborted);
              }
