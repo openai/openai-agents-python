@@ -45,7 +45,7 @@ async def test_sequential_native_realtime_functions_exceed_native_retention_capa
                     if (
                         isinstance(event, RealtimeToolCall)
                         and event.call_id == call_id
-                        and event.status != "started"
+                        and event.status in ("completed", "failed")
                     ):
                         assert event.status == "completed"
                         break
