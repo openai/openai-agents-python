@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, UnionType
-from typing import Any, Union, get_origin
+from typing import Annotated, Any, Union, get_origin
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -192,14 +192,17 @@ def _module_contract(
     bindings = {}
     for name in sorted(exports):
         value = getattr(module, name)
+        origin = get_origin(value)
         # Python 3.14 gives union objects a typing.Union runtime identity.
         # The source declaration, not that interpreter detail, defines the alias.
-        if get_origin(value) in (Union, UnionType):
+        if origin in (Union, UnionType):
             bindings[name] = name
         else:
+            # Annotated aliases can report an interpreter-specific module name.
+            binding = origin if origin is Annotated else value
             bindings[name] = (
-                f"{value.__module__}.{value.__qualname__}"
-                if hasattr(value, "__module__") and hasattr(value, "__qualname__")
+                f"{binding.__module__}.{binding.__qualname__}"
+                if hasattr(binding, "__module__") and hasattr(binding, "__qualname__")
                 else name
             )
     selected = set(exports) | (include or set())
