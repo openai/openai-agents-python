@@ -1,7 +1,7 @@
 fastapi>=0.162.0
 starlette>=1.7.0; python_version < "3.11"
 starlette>=1.10.0; python_version >= "3.11"
-openai>=3.39.0,<4
+openai>=3.42.1,<4
 httpx2>=2.13.1; python_version < "3.11"
 httpx2>=2.16.0; python_version >= "3.11"
 uvicorn[standard]>=0.54.0
