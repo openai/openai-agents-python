@@ -6973,6 +6973,7 @@ class Session(Generic[ContextT, OutputT]):
         output: str | None = None
         application_output: ApplicationToolOutput | None = None
         try:
+            application_data = None
             if _approval_rejection:
                 output = json.dumps(ToolOutput.error(result).to_native())
             elif prepared is None:
@@ -6986,17 +6987,18 @@ class Session(Generic[ContextT, OutputT]):
                     output = entry._encode_result(value, expected_json=expected_json)
                     if isinstance(value, ToolOutput):
                         application_data = _capture_application_data(value.application_data)
-                        if application_data is not None:
-                            application_output = ApplicationToolOutput(
-                                submission_id=handle.submission_id,
-                                turn_id=request.turn_id,
-                                call_id=request.call_id,
-                                name=entry.name,
-                                namespace=entry.namespace,
-                                application_data=application_data,
-                            )
             else:
                 output = prepared.output
+                application_data = prepared.application_data
+            if application_data is not None:
+                application_output = ApplicationToolOutput(
+                    submission_id=handle.submission_id,
+                    turn_id=request.turn_id,
+                    call_id=request.call_id,
+                    name=entry.name,
+                    namespace=entry.namespace,
+                    application_data=application_data,
+                )
         except Exception:
             output = None
         finally:
