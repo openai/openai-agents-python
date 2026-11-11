@@ -1,5 +1,5 @@
 diff --git a/codex-rs/arg0/src/lib.rs b/codex-rs/arg0/src/lib.rs
-index d653f62..042ecb9 100644
+index d653f6295f5198337bb3fca1e0f7acf478398dfa..042ecb985ded81b6263edac7f04094b84cfa82c0 100644
 --- a/codex-rs/arg0/src/lib.rs
 +++ b/codex-rs/arg0/src/lib.rs
 @@ -102,6 +102,20 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
@@ -24,7 +24,7 @@ index d653f62..042ecb9 100644
          codex_sandboxing::run_windows_mxc_main();
      }
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
-index 32f1a7a..ee17224 100644
+index 32f1a7a73d74a7f2067bcee9fd93955b0261e28d..ee172244eb77a126ecc1aceee8ad70e0e4648725 100644
 --- a/codex-rs/core/src/session/handlers.rs
 +++ b/codex-rs/core/src/session/handlers.rs
 @@ -305,10 +305,15 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
@@ -46,7 +46,7 @@ index 32f1a7a..ee17224 100644
          sess.services.local_agent_runtime.record_shutdown_failure();
          warn!("failed to shutdown code mode session: {err}");
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index bc39a14..6173a55 100644
+index bc39a14368abfb3ed32e2cc8a0a544e9101813ce..6173a55574a90cdb3e97b4cb9bb141bbb2487394 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
 @@ -907,10 +907,14 @@ impl Session {
@@ -67,7 +67,7 @@ index bc39a14..6173a55 100644
 
      pub(crate) async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
 diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
-index 9711ce8..901c81c 100644
+index 9711ce8777fbafa4873c76f8db248bb4ec83a904..901c81c4beed3d9a9b9123e1ace1bc4197d71b69 100644
 --- a/codex-rs/core/src/unified_exec/mod.rs
 +++ b/codex-rs/core/src/unified_exec/mod.rs
 @@ -156,15 +156,17 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
@@ -100,7 +100,7 @@ index 9711ce8..901c81c 100644
      turn: Arc<codex_extension_api::ExtensionData>,
      process: Arc<UnifiedExecProcess>,
 diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
-index 759feb8..502334d 100644
+index 759feb8f0a1131a4b241aaea919642a51730ff10..502334d2e16dca39e1207363e7ba8eeeed8114bc 100644
 --- a/codex-rs/core/src/unified_exec/process.rs
 +++ b/codex-rs/core/src/unified_exec/process.rs
 @@ -120,6 +120,8 @@ pub(crate) struct UnifiedExecProcess {
@@ -292,7 +292,7 @@ index 759feb8..502334d 100644
          let exited = tokio::time::timeout(
              EARLY_EXIT_GRACE_PERIOD,
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 660af27..6fbac2a 100644
+index 660af270d59d37eb3295a04c1b78c22a20390de4..6fbac2a3d6801a855b7960d7deb8cc4cd9b9f1ce 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
 @@ -52,7 +52,7 @@ use crate::unified_exec::MIN_YIELD_TIME_MS;
@@ -654,7 +654,7 @@ index 660af27..6fbac2a 100644
              return false;
 diff --git a/codex-rs/exec-server/src/darwin_coalition.rs b/codex-rs/exec-server/src/darwin_coalition.rs
 new file mode 100644
-index 0000000..ae2572f
+index 0000000000000000000000000000000000000000..ae2572f63ea436473710372fbe9b21aa86de5659
 --- /dev/null
 +++ b/codex-rs/exec-server/src/darwin_coalition.rs
 @@ -0,0 +1,426 @@
@@ -1086,10 +1086,10 @@ index 0000000..ae2572f
 +}
 diff --git a/codex-rs/exec-server/src/darwin_command.rs b/codex-rs/exec-server/src/darwin_command.rs
 new file mode 100644
-index 0000000..e1cd44b
+index 0000000000000000000000000000000000000000..0f825af261b216a22223508643602d9b239454da
 --- /dev/null
 +++ b/codex-rs/exec-server/src/darwin_command.rs
-@@ -0,0 +1,805 @@
+@@ -0,0 +1,799 @@
 +//! Own each managed local command in a dedicated launchd resource coalition.
 +
 +use std::collections::HashMap;
@@ -1523,7 +1523,7 @@ index 0000000..e1cd44b
 +    // SAFETY: This callback only makes descriptor, session, and task-port calls.
 +    unsafe {
 +        command.pre_exec(move || {
-+            clear_launchd_ports()?;
++            clear_registered_ports()?;
 +            if tty {
 +                codex_utils_pty::pty::configure_child_terminal()?;
 +            } else if libc::setsid() == -1 {
@@ -1568,10 +1568,12 @@ index 0000000..e1cd44b
 +    Ok(0)
 +}
 +
-+// The worker needs its launchd domain, but the payload must not inherit
-+// authority to start unrelated jobs. exec inherits these task port slots.
-+fn clear_launchd_ports() -> io::Result<()> {
-+    const TASK_BOOTSTRAP_PORT: libc::c_int = 4;
++// Dynamic commands arrive through Core's generated Seatbelt profile, which
++// denies job-creation before executing the payload. The fixed trusted
++// /usr/bin/true readiness probe has no payload policy. Keep bootstrap lookup
++// access for account resolution; clear registered ports so they cannot carry
++// additional inherited service authority.
++fn clear_registered_ports() -> io::Result<()> {
 +    const MACH_PORT_NULL: libc::mach_port_t = 0;
 +    unsafe extern "C" {
 +        fn mach_ports_register(
@@ -1579,24 +1581,16 @@ index 0000000..e1cd44b
 +            ports: *const libc::mach_port_t,
 +            count: libc::mach_msg_type_number_t,
 +        ) -> libc::kern_return_t;
-+        fn task_set_special_port(
-+            task: libc::mach_port_t,
-+            which: libc::c_int,
-+            port: libc::mach_port_t,
-+        ) -> libc::kern_return_t;
 +    }
 +
 +    let registered_ports = [MACH_PORT_NULL; 3];
 +    #[allow(deprecated)]
 +    // SAFETY: The forked child's libSystem has initialized its own task port.
 +    let task = unsafe { libc::mach_task_self_ };
-+    // SAFETY: These Mach calls clear the current task's port slots. The
-+    // registered port array is valid for the duration of the call.
-+    let cleared = unsafe {
-+        mach_ports_register(task, registered_ports.as_ptr(), 3) == libc::KERN_SUCCESS
-+            && task_set_special_port(task, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL)
-+                == libc::KERN_SUCCESS
-+    };
++    // SAFETY: This call clears only this task's registered port slots. The
++    // array remains valid for the duration of the call.
++    let cleared =
++        unsafe { mach_ports_register(task, registered_ports.as_ptr(), 3) == libc::KERN_SUCCESS };
 +    if cleared {
 +        Ok(())
 +    } else {
@@ -1896,7 +1890,7 @@ index 0000000..e1cd44b
 +    )
 +}
 diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
-index 1a7c5c2..e2af0c8 100644
+index 1a7c5c2aa62406c63cf358237c58f3ceb2296023..e2af0c81d2efbd148fc70032086e04d123cc797b 100644
 --- a/codex-rs/exec-server/src/lib.rs
 +++ b/codex-rs/exec-server/src/lib.rs
 @@ -7,6 +7,10 @@ mod client_error;
@@ -1911,7 +1905,7 @@ index 1a7c5c2..e2af0c8 100644
  mod discover_v2;
  mod environment;
 diff --git a/codex-rs/exec-server/src/sandboxed_file_open.rs b/codex-rs/exec-server/src/sandboxed_file_open.rs
-index bf21a06..cb47f0f 100644
+index bf21a065cc2b68e946583959a65979e0d3ed0d96..cb47f0f4403bc7461de06bfe88bc71dfb0d91313 100644
 --- a/codex-rs/exec-server/src/sandboxed_file_open.rs
 +++ b/codex-rs/exec-server/src/sandboxed_file_open.rs
 @@ -104,20 +104,29 @@ async fn open_platform(
@@ -1956,8 +1950,23 @@ index bf21a06..cb47f0f 100644
      socket: &std::os::unix::net::UnixStream,
  ) -> io::Result<std::os::fd::OwnedFd> {
      use rustix::net::RecvAncillaryBuffer;
+diff --git a/codex-rs/sandboxing/src/seatbelt_base_policy.sbpl b/codex-rs/sandboxing/src/seatbelt_base_policy.sbpl
+index 2fca6a886e4f3ad5a5d8d8e6e6e88894fc8f0ed9..ea23e7e6d7b6aa96880a2d89912f51723a43df47 100644
+--- a/codex-rs/sandboxing/src/seatbelt_base_policy.sbpl
++++ b/codex-rs/sandboxing/src/seatbelt_base_policy.sbpl
+@@ -7,6 +7,10 @@
+ ; start with closed-by-default
+ (deny default)
+
++; Bootstrap lookup remains available to the managed payload. Deny launchd job
++; creation explicitly, including brokers that check a path-filtered operation.
++(deny job-creation)
++
+ ; child processes inherit the policy of their parent
+ (allow process-exec)
+ (allow process-fork)
 diff --git a/codex-rs/utils/pty/src/process.rs b/codex-rs/utils/pty/src/process.rs
-index 5593450..3a6f64e 100644
+index 5593450b89d0578d59f3ab74cb5cfcf625c908f6..3a6f64e14a6a0c22905276dec09621c1c9354518 100644
 --- a/codex-rs/utils/pty/src/process.rs
 +++ b/codex-rs/utils/pty/src/process.rs
 @@ -132,6 +132,16 @@ impl fmt::Debug for ProcessHandle {
@@ -1978,7 +1987,7 @@ index 5593450..3a6f64e 100644
      pub(crate) fn new(
          writer_tx: mpsc::Sender<Vec<u8>>,
 diff --git a/codex-rs/utils/pty/src/pty.rs b/codex-rs/utils/pty/src/pty.rs
-index 035fad8..35d31f5 100644
+index 035fad8841761f95eee4cd2db0365ea75f39bd0d..35d31f5d67a0ece80931c8e21cbae4af289b0640 100644
 --- a/codex-rs/utils/pty/src/pty.rs
 +++ b/codex-rs/utils/pty/src/pty.rs
 @@ -48,12 +48,17 @@ pub enum ChildFds<'a> {
