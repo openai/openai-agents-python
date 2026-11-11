@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import pytest
@@ -12,8 +14,10 @@ from agents import (
     ActionReply,
     Agent,
     CapabilityError,
+    CustomStorage,
     FunctionTool,
     Interaction,
+    LocalStorage,
     NativeError,
     NativeProvider,
     PreparedRequest,
@@ -30,10 +34,66 @@ from tests.native_fixtures import (
     function_call,
     responses as responses,
 )
+from tests.native_storage_fixtures import MemorySessionStore
 from tests.test_native_agent import function_declarations
 from tests.test_native_agent_observation import provider
 from tests.test_native_manual_tools import next_request
 from tests.test_review_ii_steering_tail import ProjectContinuation
+
+
+@pytest.mark.parametrize("max_requests", [1, 2])
+async def test_budget_follows_live_managed_approval(responses, max_requests):
+    effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def record() -> str:
+        effects.append("accepted")
+        return "recorded"
+
+    responses.respond(function_call("record", {}, "approved-effect"))
+    if max_requests == 2:
+        responses.respond(assistant_output("Done"))
+    agent = Agent(instructions="Record and answer.", provider=provider(responses), tools=[record])
+    async with timeout(20), agent.session() as session:
+        turn = await session.submit("begin", budget=RunBudget(max_requests=max_requests))
+        request = await next_request(session.interactions(), record)
+        assert effects == []
+        with pytest.raises(CapabilityError, match="Cannot checkpoint an active run with a budget"):
+            await session.suspend()
+        await request.approve()
+        if max_requests == 1:
+            with pytest.raises(NativeError) as stopped:
+                await turn.get_result()
+            assert stopped.value.code == "run_budget_exceeded"
+        else:
+            assert (await turn.get_result()).final_output == "Done"
+        assert effects == ["accepted"]
+    assert len(responses.requests) == max_requests
+
+
+@pytest.mark.parametrize("backend", ["local", "custom"])
+async def test_settled_store_reopen_starts_a_fresh_budget(responses, tmp_path: Path, backend):
+    storage = (
+        LocalStorage(tmp_path / "profile")
+        if backend == "local"
+        else CustomStorage(MemorySessionStore())
+    )
+    responses.respond(assistant_output("First"))
+    responses.respond(assistant_output("Second"))
+    agent = Agent(instructions="Answer.", provider=provider(responses))
+    async with timeout(20):
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            first = await session.submit("first", budget=RunBudget(max_requests=1))
+            assert (await first.get_result()).final_output == "First"
+            with pytest.raises(CapabilityError, match="Persistent storage"):
+                await session.save_state()
+        async with agent.session(storage=storage, resume=identity) as reopened:
+            assert reopened.id == identity
+            second = await reopened.submit("second", budget=RunBudget(max_requests=1))
+            assert (await second.get_result()).final_output == "Second"
+    assert len(responses.requests) == 2
+    assert "First" in json.dumps(responses.requests[1]["input"])
 
 
 class LookupArgs(BaseModel):
