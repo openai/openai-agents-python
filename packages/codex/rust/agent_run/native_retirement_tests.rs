@@ -105,9 +105,11 @@ fn actual_thread_join_survives_engine_slot_poison_then_retry_releases_lease() {
             let runtime = json!({"strict_config":true,"base_instructions":"Reply plainly.",
                 "loader":{"ignore_user_config":true,"ignore_project_config":true}}).to_string();
             let scope = crate::conversation_opening(config, runtime,
-                "{\"_application_instructions\":\"\"}", "[]", "{}",
-                "test-key".into(), lease.clone(), false, false).unwrap().await.unwrap();
+                "{\"_application_instructions\":\"\",\"tool_policy\":{\"allowed_tools\":[]}}", "[]", "{}",
+                "test-key".into(), lease.clone(), false, false, true).unwrap().await.unwrap();
             assert!(scope.2.is_none(), "test must use the shared no-home profile");
+            assert!(scope.1.current().unwrap().thread.thread_extension_data()
+                .get::<codex_core::PrivateDisposableRun>().is_some());
             assert!(!scope.0.current().unwrap().owns_runtime_services());
             let engine_slot = scope.0.inner.clone();
             let thread_slot = scope.1.inner.clone();
