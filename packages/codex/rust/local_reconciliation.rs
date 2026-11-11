@@ -122,6 +122,35 @@ pub(crate) fn computer_receipt(
     Ok(item)
 }
 
+pub(crate) fn shell_receipt(
+    arguments: &str,
+    response: codex_protocol::dynamic_tools::DynamicToolResponse,
+    turn: &str,
+    call_id: &str,
+) -> Result<ResponseItem> {
+    use codex_tools::ToolOutput as _;
+    let output = codex_tools::ApplicationShellOutput::from_dynamic_response(arguments, response)
+        .map_err(|_| anyhow::anyhow!("Invalid native shell response"))?;
+    let mut item = ResponseItem::from(output.to_response_item(
+        call_id,
+        &codex_tools::ToolPayload::Shell {
+            arguments: arguments.to_owned(),
+        },
+    ));
+    let ResponseItem::ShellCallOutput {
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = &mut item
+    else {
+        unreachable!("validated Shell output has the native Shell shape");
+    };
+    *internal_chat_message_metadata_passthrough = Some(InternalChatMessageMetadataPassthrough {
+        turn_id: Some(turn.to_owned()),
+        ..Default::default()
+    });
+    Ok(item)
+}
+
 fn computer_reconciliation(
     invocation: &ResponseItem,
     result: &str,

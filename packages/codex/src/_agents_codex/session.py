@@ -4336,10 +4336,19 @@ class Session(Generic[ContextT, OutputT]):
                 if isinstance(storage, CustomStorage) and resume is not None:
                     # Inspect before Core starts, while the canonical backend's
                     # original writer still fences every other opener.
-                    history = json.loads(
+                    history, shell_calls = json.loads(
                         await opening.acquire(engine._inspect_custom_recovery(resume))
                     )
-                    uncertain: list[UncertainCall] = []
+                    uncertain = [
+                        UncertainCall(
+                            thread_id=resume,
+                            turn_id=turn_id,
+                            call_id=call_id,
+                            name="shell",
+                            arguments=arguments,
+                        )
+                        for turn_id, call_id, arguments in shell_calls
+                    ]
                     turns, items = project_history(history, resume, uncertain_calls=uncertain)
                     if uncertain:
                         raise LocalRecoveryRequired(tuple(uncertain), tuple(turns), tuple(items))

@@ -2157,18 +2157,16 @@ impl PythonTools {
                 codex_tools::ComputerToolOutput::from_dynamic_response(arguments, response)
                     .map_err(|_| anyhow::anyhow!("Invalid native computer response"))?,
             ),
-            ToolPayload::Shell { arguments } => Box::new(
-                codex_tools::ApplicationShellOutput::from_dynamic_response(arguments, response)
-                    .map_err(|_| anyhow::anyhow!("Invalid native shell response"))?,
-            ),
+            ToolPayload::Shell { arguments } => {
+                return crate::local_reconciliation::shell_receipt(
+                    arguments, response, &key.turn, &key.call,
+                )
+                .map(Some);
+            }
             _ => return Ok(Some(PythonOutput(response).receipt(key))),
         };
         let mut item: ResponseItem = output.to_response_item(&key.call, &payload).into();
         if let ResponseItem::ComputerCallOutput {
-            internal_chat_message_metadata_passthrough,
-            ..
-        }
-        | ResponseItem::ShellCallOutput {
             internal_chat_message_metadata_passthrough,
             ..
         } = &mut item
@@ -2238,7 +2236,8 @@ impl PythonTools {
                 spec,
                 exposure: if matches!(
                     declaration,
-                    DynamicToolSpec::Computer(_) | DynamicToolSpec::ToolSearch(_)
+                    DynamicToolSpec::Computer(_)
+                        | DynamicToolSpec::ToolSearch(_)
                         | DynamicToolSpec::Shell(_)
                 ) {
                     ToolExposure::DirectModelOnly
@@ -5904,28 +5903,49 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 _ => serde_json::from_str(call.function_arguments()?)
                     .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?,
             };
-            let (key, invocation, receiver) = self
-                .tools
-                .enqueue_profile(
-                    &self.thread,
-                    &self.generation,
-                    self.slot,
-                    &call.turn_id,
-                    &call.call_id,
-                    arguments,
-                    &call.source,
-                    Some(&call.model),
-                    false,
-                    self.profile.as_ref(),
-                    Some(NativeMediaContext {
-                        inline_data_url_low_detail_supported: call
-                            .inline_data_url_low_detail_supported,
-                        model_info: Arc::clone(&call.model_info),
-                        profile: call.provider_reference_profile,
-                    }),
-                    call.conversation_history.realtime_tool_call().cloned(),
-                )
-                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+            let shell_calls = self
+                .managed_calls
+                .as_ref()
+                .filter(|_| matches!(call.payload, ToolPayload::Shell { .. }));
+            if let Some(calls) = shell_calls {
+                // The selected application executor is the durable owner.
+                // Publish that identity before enqueue can start the callback.
+                calls
+                    .record_shell_call(&self.thread, &call.turn_id, &call.call_id)
+                    .await
+                    .map_err(|error| FunctionCallError::Fatal(error.to_string()))?;
+            }
+            let pending = self.tools.enqueue_profile(
+                &self.thread,
+                &self.generation,
+                self.slot,
+                &call.turn_id,
+                &call.call_id,
+                arguments,
+                &call.source,
+                Some(&call.model),
+                false,
+                self.profile.as_ref(),
+                Some(NativeMediaContext {
+                    inline_data_url_low_detail_supported: call.inline_data_url_low_detail_supported,
+                    model_info: Arc::clone(&call.model_info),
+                    profile: call.provider_reference_profile,
+                }),
+                call.conversation_history.realtime_tool_call().cloned(),
+            );
+            let (key, invocation, receiver) = match pending {
+                Ok(pending) => pending,
+                Err(error) => {
+                    if let Some(calls) = shell_calls {
+                        // A failed enqueue has not exposed the callback.
+                        calls
+                            .discard_shell_call(&self.thread, &call.turn_id, &call.call_id)
+                            .await
+                            .map_err(|error| FunctionCallError::Fatal(error.to_string()))?;
+                    }
+                    return Err(FunctionCallError::RespondToModel(error.to_string()));
+                }
+            };
             // A rejected enqueue never reaches application code. Keep Core's
             // error output for it instead of recording an unknown effect.
             if let Some(calls) = &self.managed_calls {
