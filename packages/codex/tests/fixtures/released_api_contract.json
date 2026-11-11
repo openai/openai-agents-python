@@ -252,10 +252,11 @@
         "declarations": [
           "Button = Literal['left', 'right', 'wheel', 'back', 'forward']",
           "Environment = Literal['mac', 'windows', 'ubuntu', 'browser']",
+          "_ComputerResultData = Callable[[ToolContext[Any], dict[str, Any]], dict[str, JsonValue] | None | Awaitable[dict[str, JsonValue] | None]]",
           "class Computer(Protocol):\n\n    def screenshot(self) -> str | Awaitable[str]:\n        pass\n\n    def click(self, x: float, y: float, button: Button) -> None | Awaitable[None]:\n        pass\n\n    def double_click(self, x: float, y: float) -> None | Awaitable[None]:\n        pass\n\n    def scroll(self, x: float, y: float, scroll_x: float, scroll_y: float) -> None | Awaitable[None]:\n        pass\n\n    def type(self, text: str) -> None | Awaitable[None]:\n        pass\n\n    def wait(self) -> None | Awaitable[None]:\n        pass\n\n    def move(self, x: float, y: float) -> None | Awaitable[None]:\n        pass\n\n    def keypress(self, keys: list[str]) -> None | Awaitable[None]:\n        pass\n\n    def drag(self, path: list[tuple[float, float]]) -> None | Awaitable[None]:\n        pass",
           "@dataclass(frozen=True)\nclass ComputerProvider:\n    create: Callable[[ToolContext[Any]], Computer | Awaitable[Computer]] = field(repr=False)\n    dispose: Callable[[Computer], None | Awaitable[None]] | None = field(default=None, repr=False)",
           "class ComputerSafetyError(RuntimeError):\n    pass",
-          "def computer_tool(computer: Computer | ComputerProvider, *, tool_type: Literal['computer', 'computer_use_preview']='computer', dimensions: tuple[int, int] | None=None, environment: Environment | None=None, approve: Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None=None, on_safety_check: Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None=None) -> FunctionTool[Any, str, Any]:\n    pass"
+          "def computer_tool(computer: Computer | ComputerProvider, *, tool_type: Literal['computer', 'computer_use_preview']='computer', dimensions: tuple[int, int] | None=None, environment: Environment | None=None, approve: Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None=None, on_safety_check: Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None=None, extract_application_data: _ComputerResultData | None=None) -> FunctionTool[Any, str, Any]:\n    pass"
         ],
         "exports": {
           "Button": "typing.Literal",
@@ -269,6 +270,7 @@
           "from collections.abc import Awaitable as Awaitable, Callable as Callable",
           "from dataclasses import dataclass as dataclass, field as field",
           "from typing import Any as Any, Literal as Literal, Protocol as Protocol",
+          "from pydantic import JsonValue as JsonValue",
           "from ._function_tools import FunctionTool as FunctionTool, ToolContext as ToolContext"
         ],
         "references": {
