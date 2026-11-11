@@ -144,7 +144,7 @@ impl ExternalAuth for ApiKey {
         !self.app_managed_oauth
     }
 
-    fn terminal_auto_compaction_limit_errors(&self) -> bool {
+    fn uses_app_managed_model_oauth(&self) -> bool {
         self.app_managed_oauth
     }
 
