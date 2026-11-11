@@ -1,4 +1,4 @@
-name: Stock macOS XPC interface routine inspection
+name: Stock macOS XPC pre-send audit gate
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  inspect-stock-libxpc:
+  observe-stock-libxpc:
     runs-on: macos-15
     timeout-minutes: 4
     steps:
@@ -19,194 +19,272 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 1
-      - name: Inspect the loaded system libxpc from a synthetic process
+          fetch-depth: 2
+      - name: Observe the pre-send bit in the owned stock named client
         shell: bash
         run: |
           set -euo pipefail
+          exec 2>/dev/null
+          stage=checkout
+          trap 'printf "error_stage=%s\n" "$stage"' ERR
+          parent=3fead8a298dd90373399322f192805c373ff1356
+          source=.github/diagnostics/stock-xpc-decode-control.c
+          workflow=.github/workflows/stock-xpc-named-auth-path.yml
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          /usr/bin/sw_vers
-          /usr/bin/uname -m
+          test "$(git rev-list --parents -n 1 HEAD)" = "$GITHUB_SHA $parent"
+          test "$(git rev-parse "$parent^{tree}")" = 8d6b50af27e5107c6927f29b575f25a2f35ac8e2
+          test "$(git diff-tree --no-commit-id --name-only -r "$parent" HEAD)" = "$workflow"
+
+          stage=platform
+          test "$(/usr/bin/uname -s)" = Darwin
           test "$(/usr/bin/sw_vers -productVersion)" = 15.8.2
           test "$(/usr/bin/sw_vers -buildVersion)" = 24H232
           test "$(/usr/bin/uname -m)" = arm64
           test "$(/usr/bin/id -u)" -ne 0
-          temp_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-xpc-inspection.XXXXXXXX")"
-          trap '/bin/rm -rf -- "$temp_dir"' EXIT
-          cat > "$temp_dir/probe.c" <<'C'
-          #include <xpc/xpc.h>
+          test "$(/usr/bin/id -u)" = "$(/usr/bin/id -ru)"
 
-          int main(void) {
-              xpc_object_t value = xpc_bool_create(true);
-              xpc_release(value);
-              return 0;
+          stage=source
+          blob=9ecf131b0bb157d25e7814f827fb0c1c8a95018d
+          test "$(git rev-parse "HEAD:$source")" = "$blob"
+          test "$(git hash-object "$source")" = "$blob"
+          digest="$(/usr/bin/shasum -a 256 "$source")"
+          test "${digest%% *}" = be1af7b3622e9e70bc261a1d3773c7facb96666e1a8217e3393bd657a2f73dd9
+
+          stage=scratch
+          umask 077
+          scratch="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-xpc-presend.XXXXXXXX")"
+          trap '/bin/rm -rf -- "$scratch"' EXIT
+
+          stage=fixture-source
+          cat > "$scratch/hardware.c.fragment" <<'HARDWARE'
+          #include <dlfcn.h>
+          #include <mach/arm/thread_status.h>
+          #include <mach-o/loader.h>
+          #include <stdatomic.h>
+          #include <sys/ucontext.h>
+
+          enum {
+              // Same-image deltas and instructions from signed stock jobs 130609480118,
+              // 130607648558 and 130603961890.
+              anchor_to_interface = 0x2420,
+              load_gate = 0xb8,
+              pre_send_stop = 0xbc,
+              named_return = 0x5b7c,
+              // DBGBCR: enabled, EL0, all four instruction bytes.
+              hardware_control = 0x1e5,
+              hardware_breakpoint_ec = 0x30,
+          };
+
+          _Static_assert(ATOMIC_POINTER_LOCK_FREE == 2 && ATOMIC_INT_LOCK_FREE == 2,
+                         "the signal handler requires lock-free publication");
+          static _Atomic uintptr_t hardware_pc;
+          static _Atomic int hardware_fd;
+
+          static bool pinned_image(const Dl_info *image) {
+              static const uint8_t uuid[] = {
+                  0xd3, 0x68, 0x26, 0x03, 0xac, 0x67, 0x32, 0x42,
+                  0x82, 0xeb, 0x12, 0x26, 0xb4, 0x35, 0xbf, 0xf4,
+              };
+              if (image->dli_fbase == NULL || image->dli_fname == NULL ||
+                  strcmp(image->dli_fname, "/usr/lib/system/libxpc.dylib") != 0) {
+                  return false;
+              }
+              const struct mach_header_64 *header = image->dli_fbase;
+              if (header->magic != MH_MAGIC_64 || header->cputype != CPU_TYPE_ARM64) {
+                  return false;
+              }
+              const uint8_t *cursor = (const uint8_t *)(header + 1);
+              size_t left = header->sizeofcmds;
+              for (uint32_t i = 0; i < header->ncmds && left >= sizeof(struct load_command); ++i) {
+                  const struct load_command *command = (const struct load_command *)cursor;
+                  if (command->cmdsize < sizeof(*command) || command->cmdsize > left) {
+                      return false;
+                  }
+                  if (command->cmd == LC_UUID) {
+                      const struct uuid_command *identity = (const struct uuid_command *)command;
+                      return command->cmdsize == sizeof(*identity) &&
+                             memcmp(identity->uuid, uuid, sizeof(uuid)) == 0;
+                  }
+                  cursor += command->cmdsize;
+                  left -= command->cmdsize;
+              }
+              return false;
           }
-          C
-          /usr/bin/xcrun --sdk macosx clang -std=c11 -arch arm64 -g -O0 -Wall -Wextra -Werror \
-            "$temp_dir/probe.c" -o "$temp_dir/probe"
-          cat > "$temp_dir/stock_xpc_observer.py" <<'PY'
-          import re
 
-          import lldb
+          static void observe_hardware_trap(int signal_number, siginfo_t *info, void *context) {
+              (void)info;
+              const ucontext_t *frame = context;
+              const uintptr_t pc = atomic_load_explicit(&hardware_pc, memory_order_acquire);
+              if (signal_number != SIGTRAP || frame == NULL || frame->uc_mcontext == NULL || pc == 0 ||
+                  ((frame->uc_mcontext->__es.__esr >> 26) & 0x3f) != hardware_breakpoint_ec) {
+                  _exit(2);
+              }
+              const arm_thread_state64_t state = frame->uc_mcontext->__ss;
+              if (arm_thread_state64_get_pc(state) != pc || state.__x[25] != 3 || state.__x[20] != 1) {
+                  _exit(2);
+              }
+              // The pinned interface prologue has saved its caller LR at SP + 0x78.
+              // Strip pointer authentication from the local value, leaving the stack untouched.
+              uintptr_t caller = *(const uintptr_t *)(arm_thread_state64_get_sp(state) + 0x78);
+              __asm__ volatile("xpaci %0" : "+r"(caller));
+              if (caller != pc - pre_send_stop + named_return) {
+                  _exit(2);
+              }
+              char bit = (state.__x[8] & 1) == 0 ? '1' : '0';
+              int fd = atomic_load_explicit(&hardware_fd, memory_order_relaxed);
+              _exit(write(fd, &bit, 1) == 1 ? 0 : 2);
+          }
 
+          static bool only_hardware_site(const arm_debug_state64_t *state, uintptr_t pc) {
+              if (pc != 0 && (state->__bvr[0] != pc || state->__bcr[0] != hardware_control)) {
+                  return false;
+              }
+              for (size_t i = 0; i < sizeof(state->__bcr) / sizeof(state->__bcr[0]); ++i) {
+                  if (((state->__bcr[i] & 1) != 0) != (i == 0 && pc != 0) ||
+                      (state->__wcr[i] & 1) != 0) {
+                      return false;
+                  }
+              }
+              return (state->__mdscr_el1 & 1) == 0;
+          }
 
-          STOCK_UUID = "D3682603-AC67-3242-82EB-1226B435BFF4"
-          ROOTS = ("_xpc_interface_routine",)
-          DIRECT_CHECK_NAMES = (
-              "audit", "auth", "credential", "entitlement", "identity",
-              "peer", "privilege", "receive", "reply", "routine", "validate", "voucher",
-          )
-          BRANCH_ADDRESS = re.compile(r"#?(0x[0-9a-f]+)", re.IGNORECASE)
-          INDIRECT_BRANCH = re.compile(r"bl?r(?:aa|ab|aaz|abz)?")
-          MAX_SYMBOLS = 6
-          MAX_INSTRUCTIONS = 1400
+          static bool arm_owned_child(int fd) {
+              Dl_info image;
+              void *anchor = dlsym(RTLD_DEFAULT, "xpc_dictionary_set_bool");
+              if (anchor == NULL || dladdr(anchor, &image) == 0 || !pinned_image(&image)) {
+                  return failure("presend-image", 0);
+              }
+              uintptr_t base = (uintptr_t)anchor - anchor_to_interface;
+              if (base < (uintptr_t)image.dli_fbase || (base & 3) != 0) {
+                  return failure("presend-anchor", 0);
+              }
+              const uint32_t *code = (const uint32_t *)base;
+              if (code[0x00 / 4] != 0xd503237f || code[0x04 / 4] != 0xd10203ff ||
+                  code[0x18 / 4] != 0xa9077bfd || code[load_gate / 4] != 0x394162e8 ||
+                  code[pre_send_stop / 4] != 0x7100011f || code[0xe0 / 4] != 0x9400aaf3 ||
+                  code[0x148 / 4] != 0x39416008 || code[0x14c / 4] != 0x360000a8) {
+                  return failure("presend-instructions", 0);
+              }
+              struct sigaction action = {.sa_sigaction = observe_hardware_trap, .sa_flags = SA_SIGINFO};
+              if (sigemptyset(&action.sa_mask) != 0 || sigaction(SIGTRAP, &action, NULL) != 0) {
+                  return failure("presend-handler", 0);
+              }
 
+              uintptr_t pc = base + pre_send_stop;
+              atomic_store_explicit(&hardware_fd, fd, memory_order_relaxed);
+              atomic_store_explicit(&hardware_pc, pc, memory_order_release);
+              task_t task = mach_task_self();
+              arm_debug_state64_t readback;
+              mach_msg_type_number_t count = ARM_DEBUG_STATE64_COUNT;
+              if (task_get_state(task, ARM_DEBUG_STATE64, (thread_state_t)&readback, &count) != KERN_SUCCESS ||
+                  count != ARM_DEBUG_STATE64_COUNT || !only_hardware_site(&readback, 0)) {
+                  return failure("presend-task-initial", 0);
+              }
+              arm_debug_state64_t site = {0};
+              site.__bvr[0] = pc;
+              site.__bcr[0] = hardware_control;
+              if (task_set_state(task, ARM_DEBUG_STATE64, (thread_state_t)&site,
+                                 ARM_DEBUG_STATE64_COUNT) != KERN_SUCCESS ||
+                  task_get_state(task, ARM_DEBUG_STATE64, (thread_state_t)&readback, &count) != KERN_SUCCESS ||
+                  count != ARM_DEBUG_STATE64_COUNT || !only_hardware_site(&readback, pc)) {
+                  return failure("presend-task-hardware", 0);
+              }
 
-          def observe(debugger, command, result, internal_dict):
-              target = debugger.GetSelectedTarget()
-              process = target.GetProcess()
-              frame = process.GetSelectedThread().GetFrameAtIndex(0)
-              if (
-                  process.GetState() != lldb.eStateStopped
-                  or frame.GetFunctionName() != "main"
-                  or frame.GetModule().GetFileSpec() != target.GetExecutable()
-              ):
-                  result.SetError("expected the owned executable stopped at main")
-                  return
+              // Install the default first so subsequent dispatch threads inherit the site.
+              thread_act_array_t threads;
+              mach_msg_type_number_t length;
+              if (task_threads(task, &threads, &length) != KERN_SUCCESS) {
+                  return failure("presend-threads", 0);
+              }
+              bool ok = length != 0;
+              for (mach_msg_type_number_t i = 0; i < length; ++i) {
+                  count = ARM_DEBUG_STATE64_COUNT;
+                  if (ok) {
+                      ok = thread_get_state(threads[i], ARM_DEBUG_STATE64, (thread_state_t)&readback, &count) == KERN_SUCCESS &&
+                           count == ARM_DEBUG_STATE64_COUNT &&
+                           (only_hardware_site(&readback, 0) || only_hardware_site(&readback, pc)) &&
+                           thread_set_state(threads[i], ARM_DEBUG_STATE64, (thread_state_t)&site, ARM_DEBUG_STATE64_COUNT) == KERN_SUCCESS &&
+                           thread_get_state(threads[i], ARM_DEBUG_STATE64, (thread_state_t)&readback, &count) == KERN_SUCCESS &&
+                           count == ARM_DEBUG_STATE64_COUNT && only_hardware_site(&readback, pc);
+                  }
+                  ok = mach_port_deallocate(task, threads[i]) == KERN_SUCCESS && ok;
+              }
+              ok = vm_deallocate(task, (vm_address_t)threads, length * sizeof(*threads)) == KERN_SUCCESS && ok;
+              return ok || failure("presend-thread-hardware", 0);
+          }
 
-              path = "/usr/lib/system/libxpc.dylib"
-              module = target.FindModule(lldb.SBFileSpec(path))
-              if (
-                  not module.IsValid()
-                  or module.GetUUIDString() != STOCK_UUID
-                  or not module.GetTriple().startswith("arm64")
-              ):
-                  result.SetError("unexpected loaded libxpc identity")
-                  return
-              result.AppendMessage(f"loaded_image={path} uuid={STOCK_UUID} triple={module.GetTriple()}")
+          static bool read_hardware_bit(int fd, char *bit) {
+              struct pollfd poll_fd = {.fd = fd, .events = POLLIN};
+              return (poll(&poll_fd, 1, deadline_ms) == 1 && (poll_fd.revents & POLLIN) &&
+                      read(fd, bit, 1) == 1 && (*bit == '0' || *bit == '1')) ||
+                     failure("presend-hardware-stop", 0);
+          }
 
-              pending = [(module.FindSymbol(name, lldb.eSymbolTypeCode), name, 0) for name in ROOTS]
-              seen = set()
-              complete_roots = set()
-              remaining = MAX_INSTRUCTIONS
-              while pending and len(seen) < MAX_SYMBOLS:
-                  symbol, name, depth = pending.pop(0)
-                  if not symbol.IsValid():
-                      result.SetError(f"required symbol unavailable: {name}")
-                      return
-                  start = symbol.GetStartAddress()
-                  end = symbol.GetEndAddress()
-                  address = start.GetFileAddress()
-                  if address in seen:
-                      continue
-                  size = end.GetFileAddress() - address
-                  if (
-                      not start.IsValid()
-                      or not end.IsValid()
-                      or start.GetSection() != end.GetSection()
-                      or size < 4
-                      or size % 4
-                  ):
-                      if depth == 0:
-                          result.SetError(f"required symbol has unknown extent: {name}")
-                          return
-                      result.AppendMessage(f"symbol={name} status=unknown_extent")
-                      continue
-                  seen.add(address)
-                  expected = size // 4
-                  instructions = target.ReadInstructions(start, min(expected, remaining))
-                  count = instructions.GetSize()
-                  complete = count == expected
-                  if depth == 0 and not complete:
-                      result.SetError(f"incomplete required symbol: {name} ({count}/{expected})")
-                      return
-                  if depth == 0:
-                      complete_roots.add(name)
-                  remaining -= count
-                  result.AppendMessage(
-                      f"symbol={name} depth={depth} inspected={count}/{expected} complete={complete}"
-                  )
-                  for instruction in instructions:
-                      offset = instruction.GetAddress().GetFileAddress() - address
-                      mnemonic = instruction.GetMnemonic(target) or ""
-                      operands = instruction.GetOperands(target) or ""
-                      comment = instruction.GetComment(target) or ""
-                      result.AppendMessage(f"  +0x{offset:x} {mnemonic} {operands} {comment}".rstrip())
-                      if INDIRECT_BRANCH.fullmatch(mnemonic):
-                          result.AppendMessage(f"  edge={name}+0x{offset:x} unresolved=indirect")
-                      if mnemonic not in {"b", "bl"}:
-                          continue
-                      match = BRANCH_ADDRESS.fullmatch(operands.strip())
-                      if not match:
-                          result.AppendMessage(f"  edge={name}+0x{offset:x} unresolved=operand")
-                          continue
-                      destination = target.ResolveLoadAddress(int(match[1], 16))
-                      if not destination.IsValid():
-                          result.AppendMessage(f"  edge={name}+0x{offset:x} unresolved=address")
-                          continue
-                      callee = destination.GetSymbol()
-                      callee_name = callee.GetName() if callee.IsValid() else None
-                      if not callee_name:
-                          result.AppendMessage(f"  edge={name}+0x{offset:x} unresolved=symbol")
-                          continue
-                      if destination.GetModule() == module and callee_name == name:
-                          continue
-                      result.AppendMessage(f"  edge={name}+0x{offset:x} destination={callee_name}")
-                  # List every direct edge above. Expand only immediate
-                  # same-image transaction or validation candidates.
-                      if (
-                      depth == 0
-                          and destination.GetModule() == module
-                          and callee.GetType() == lldb.eSymbolTypeCode
-                      and any(part in callee_name for part in DIRECT_CHECK_NAMES)
-                      ):
-                          pending.append((callee, callee_name, depth + 1))
-                  if not remaining:
-                      break
-              if complete_roots != set(ROOTS):
-                  result.SetError("inspection did not complete the interface routine")
-                  return
-              result.AppendMessage(f"static_symbols={len(seen)} pending={len(pending)} dynamic_calls=false")
-              result.AppendMessage("stock_interface_static_inspection=complete")
-
-          def __lldb_init_module(debugger, internal_dict):
-              debugger.HandleCommand("command script add -f stock_xpc_observer.observe observe-stock-xpc")
-          PY
-          python3 - "$temp_dir" <<'PY'
-          import os
-          import signal
-          import subprocess
+          HARDWARE
+          python3 - "$source" "$scratch/hardware.c.fragment" "$scratch/fixture.c" <<'PY'
+          import hashlib
+          from pathlib import Path
           import sys
 
-          workdir = sys.argv[1]
-          command = [
-              "/usr/bin/xcrun", "lldb", "--batch", "--no-lldbinit", "--no-use-colors",
-              "-o", "settings set target.disable-aslr false",
-              "-o", "breakpoint set --name main --shlib probe",
-              "-o", "run",
-              "-o", "command script import ./stock_xpc_observer.py",
-              "-o", "observe-stock-xpc",
-              "-o", "process kill",
-              "--", f"{workdir}/probe",
-          ]
-          log = os.path.join(workdir, "lldb.log")
-          with open(log, "w") as output, subprocess.Popen(
-              command, cwd=workdir, start_new_session=True, stdout=output, stderr=subprocess.STDOUT
-          ) as proc:
-              try:
-                  status = proc.wait(timeout=25)
-              except subprocess.TimeoutExpired:
-                  try:
-                      os.killpg(proc.pid, signal.SIGKILL)
-                  except ProcessLookupError:
-                      pass
-                  proc.wait()
-                  print("lldb exceeded its 25-second watchdog", flush=True)
-                  status = 124
-          with open(log) as output:
-              receipt = output.read()
-          print(receipt, end="")
-          if status == 0 and "stock_interface_static_inspection=complete" not in receipt.splitlines():
-              sys.exit("missing static inspection completion marker")
-          sys.exit(status if status >= 0 else 128 - status)
+          source = Path(sys.argv[1]).read_bytes()
+          if hashlib.sha256(source).hexdigest() != "be1af7b3622e9e70bc261a1d3773c7facb96666e1a8217e3393bd657a2f73dd9":
+              sys.exit(1)
+
+
+          def replace(before, after):
+              global source
+              if source.count(before) != 1:
+                  sys.exit(1)
+              source = source.replace(before, after, 1)
+
+
+          child = b"static bool run_child(bool named, int fd) {"
+          replace(child, Path(sys.argv[2]).read_bytes() + child)
+          ready = b"""              send_gate(fd, 'R', "child-ready-send") &&"""
+          replace(ready, b"""              (!named || arm_owned_child(fd)) &&
+          """ + ready)
+          gate = b"""        !empty(bootstrap, "pre-go-queue") ||
+                  !send_gate(gate[0], 'G', "parent-go-send") ||
+                  !wait_for_request(bootstrap)) {"""
+          replace(gate, b"""        !empty(bootstrap, "pre-go-queue")) {
+                  goto cleanup;
+              }
+
+              if (named && raw) {
+                  char bit;
+                  ok = send_gate(gate[0], 'G', "parent-go-send") &&
+                       read_hardware_bit(gate[0], &bit) &&
+                       finish_child(&child, true) &&
+                       empty(bootstrap, "post-join-queue");
+                  if (ok) {
+                      puts(bit == '1' ? "pre_send_audit_gate_clear=true" :
+                                        "pre_send_audit_gate_clear=false");
+                  }
+                  goto cleanup;
+              }
+
+              if (!send_gate(gate[0], 'G', "parent-go-send") ||
+                  !wait_for_request(bootstrap)) {""")
+          Path(sys.argv[3]).write_bytes(source)
           PY
+
+          stage=fixture-build
+          /usr/bin/xcrun --sdk macosx clang -arch arm64 -march=armv8.3-a -std=c11 \
+            -O0 -fblocks -D_DARWIN_C_SOURCE -Wall -Wextra -Werror -Wno-deprecated-declarations \
+            "$scratch/fixture.c" -lbsm -o "$scratch/fixture" >/dev/null
+
+          stage=fixture
+          if ! result="$("$scratch/fixture" named-raw 2>"$scratch/fixture.err")"; then
+            detail="$(/usr/bin/sed -n -E 's/^(presend-(image|anchor|instructions|handler|task-initial|task-hardware|threads|thread-hardware|hardware-stop)|parent-ready-receive|pre-go-queue|post-join-queue) status=-?[0-9]+$/\1/p' "$scratch/fixture.err" | /usr/bin/head -n 1)"
+            printf 'error_stage=%s\n' "${detail:-fixture}"
+            exit 1
+          fi
+          case "$result" in
+            pre_send_audit_gate_clear=true|pre_send_audit_gate_clear=false)
+              printf '%s\n' "$result"
+              ;;
+            *)
+              stage=receipt
+              false
+              ;;
+          esac
