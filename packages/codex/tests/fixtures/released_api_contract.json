@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "4e36194c717c2caf1b3c3ab0f03efc9177694a19",
+  "baseline_commit": "7acfdbddfbc2cbf672dd961e7dea55a52b4e647b",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -2052,7 +2052,7 @@
       },
       "_agents_codex.canonical_storage_sqlalchemy_async": {
         "declarations": [
-          "class AsyncSQLAlchemySessionStore:\n\n    def __init__(self, engine: AsyncEngine, *, table_name: str='agents_canonical_threads', schema: str | None=None, create_tables: bool=False, lease_seconds: float=30) -> None:\n        pass\n\n    @classmethod\n    async def from_url(cls, url: str | URL, *, table_name: str='agents_canonical_threads', schema: str | None=None, create_tables: bool=False, lease_seconds: float=30, **engine_options: Any) -> AsyncSQLAlchemySessionStore:\n        pass\n\n    async def read_legacy_history(self, session_id: str, *, messages_table: str='agent_messages', schema: str | None=None, order_by: Literal['created_at', 'id']='created_at') -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
+          "class AsyncSQLAlchemySessionStore:\n\n    def __init__(self, engine: AsyncEngine, *, table_name: str='agents_canonical_threads', schema: str | None=None, create_tables: bool=False, lease_seconds: float=30) -> None:\n        pass\n\n    @classmethod\n    async def from_url(cls, url: str | URL, *, table_name: str='agents_canonical_threads', schema: str | None=None, create_tables: bool=False, lease_seconds: float=30, **engine_options: Any) -> AsyncSQLAlchemySessionStore:\n        pass\n\n    async def read_legacy_history(self, session_id: str, *, messages_table: str='agent_messages', schema: str | None=None, order_by: Literal['created_at', 'id']='created_at', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
