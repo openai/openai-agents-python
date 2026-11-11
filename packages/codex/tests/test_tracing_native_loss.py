@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -10,7 +11,7 @@ from threading import Event
 
 import pytest
 
-from agents import telemetry
+from agents import _native, telemetry
 from tests.test_native_trace_exporter import collector, native_trace_child_env
 
 
@@ -159,6 +160,103 @@ async def native_loss_case(long_names: bool, forwarded=False, retained_after_rec
         finally:
             release.set()
             await telemetry.shutdown(timeout_ms=15000)
+
+
+async def native_loss_overlap_case():
+    cutoffs = []
+    observed = []
+    second_loss = asyncio.Event()
+    staged = False
+    stale_name = "intervening-stale-child"
+    healthy_name = "healthy-after-recovery"
+
+    class Observer:
+        def on_trace_event(self, event):
+            if event["name"] in (stale_name, healthy_name):
+                observed.append(event)
+
+    def fill(count):
+        for _ in range(count):
+            with telemetry.trace("bounded-overflow", options={"detached": True}):
+                pass
+
+    native_routes = _native.set_trace_routes
+    native_ack = _native.ack_trace_events
+
+    def set_routes(raw):
+        cutoff = native_routes(raw)
+        if json.loads(raw) == {"processor_ids": [], "replace": False}:
+            cutoffs.append(cutoff)
+            if len(cutoffs) == 2:
+                second_loss.set()
+        return cutoff
+
+    def acknowledge(through, failed):
+        nonlocal staged
+        native_ack(through, failed)
+        if len(cutoffs) == 1 and not staged:
+            staged = True
+            # At most two batches of 64 can have freed slots: a drain that read
+            # during the initial fill and the first drain that reported loss.
+            # The stale span and 64 traces emit 130 records, forcing another loss.
+            with telemetry.span(stale_name, options={"parent": parent}):
+                pass
+            fill(64)
+
+    with collector() as (endpoint, requests), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(_native, "set_trace_routes", set_routes)
+        patch.setattr(_native, "ack_trace_events", acknowledge)
+        exporter = telemetry.OpenAITraceExporter(api_key="synthetic", endpoint=endpoint)
+        await telemetry.configure(processors=[exporter, Observer()])
+        try:
+            with telemetry.trace("completed-stale-parent", options={"detached": True}) as root:
+                parent = root.context
+            assert (await telemetry.force_flush()).status == "success"
+
+            fill(1600)
+            await asyncio.wait_for(second_loss.wait(), 10)
+            loss = await telemetry.force_flush(timeout_ms=15000)
+            with telemetry.trace(healthy_name, options={"detached": True}):
+                pass
+            later = await telemetry.force_flush(timeout_ms=15000)
+
+            first, second = cutoffs
+            stale = [event for event in observed if event["name"] == stale_name]
+            healthy = [event for event in observed if event["name"] == healthy_name]
+            assert len(stale) == len(healthy) == 2
+            assert all(
+                event["root_descriptor"]["start_sequence"] < first < event["sequence"] <= second
+                for event in stale
+            )
+            assert all(second < event["sequence"] for event in healthy)
+            assert loss.status == later.status == "partial"
+            assert loss.dropped_records == later.dropped_records > 0
+
+            records = [row for request in requests for row in request["payload"]["data"]]
+            names = [row["span_data"]["name"] for row in records if row["object"] == "trace.span"]
+            assert stale_name not in names
+            assert names.count(healthy_name) == 1
+            assert 0 < loss.failed_deliveries == later.failed_deliveries
+            assert {event["recovery_sequence"] for event in stale} == {first}
+            assert {event["recovery_sequence"] for event in healthy} == {second}
+        finally:
+            await telemetry.shutdown(timeout_ms=15000)
+
+
+@pytest.mark.serial
+def test_native_loss_preserves_overlapping_recovery_cutoffs():
+    script = (
+        f"import asyncio,runpy; m=runpy.run_path({str(Path(__file__).resolve())!r}); "
+        "asyncio.run(m['native_loss_overlap_case']())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        env=native_trace_child_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.serial
