@@ -1686,8 +1686,11 @@ async def test_macos_session_close_stops_child_after_command_exit(
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt and launchd")
 @pytest.mark.requires_native_macos_sandbox
+@pytest.mark.parametrize("write_policy", ["strict", "trusted_workspace_write"])
 async def test_macos_local_command_cannot_delegate_execution_to_launchd(
-    responses: ResponsesFixture, tmp_path: Path
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    write_policy: Literal["strict", "trusted_workspace_write"],
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1705,6 +1708,9 @@ async def test_macos_local_command_cannot_delegate_execution_to_launchd(
 
     label = f"org.openai.agents.sdk-test.{uuid4().hex}"
     service = f"{domain}/{label}"
+    submit_label = f"org.openai.agents.sdk-submit-test.{uuid4().hex}"
+    submit_marker = tmp_path / "launchd-submit-marker"
+    submit_args = ("submit", "-l", submit_label, "--", "/usr/bin/touch", str(submit_marker))
     plist = workspace / f"{label}.plist"
     job = {
         "Label": label,
@@ -1728,6 +1734,7 @@ async def test_macos_local_command_cannot_delegate_execution_to_launchd(
     for operation, args in (
         ("bootstrap", (domain, str(plist))),
         ("kickstart", (service,)),
+        ("submit", submit_args[1:]),
     ):
         cmd = (
             "rc=0; "
@@ -1743,11 +1750,26 @@ async def test_macos_local_command_cannot_delegate_execution_to_launchd(
 
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
     agent = Agent(instructions="Use the selected tools.", provider=provider)
-    environment = Environment.local(cwd=workspace, tools=["exec_command"])
+    environment = Environment.local(
+        cwd=workspace, tools=["exec_command"], write_policy=write_policy
+    )
     try:
+        # A real host control prevents an unsupported submit route from passing
+        # as a sandbox denial. Remove only this unique, fixture-owned job.
+        submitted = launchctl(*submit_args)
+        assert submitted.returncode == 0, submitted.stderr
+        async with timeout(5):
+            while not submit_marker.exists():
+                await asyncio.sleep(0.05)
+        removed = launchctl("remove", submit_label)
+        assert removed.returncode == 0, removed.stderr
+        async with timeout(5):
+            while launchctl("list", submit_label).returncode == 0:
+                await asyncio.sleep(0.05)
+        submit_marker.unlink()
         assert launchctl("print", service).returncode != 0
         assert not marker.exists()
-        async with timeout(35), provider, agent.session(environment=environment) as session:
+        async with timeout(45), provider, agent.session(environment=environment) as session:
             turn = await session.submit("Try to register the test job.")
             assert (await turn.get_result()).final_output == "checked"
             output = tool_output(responses.requests[1], "bootstrap")
@@ -1767,6 +1789,13 @@ async def test_macos_local_command_cannot_delegate_execution_to_launchd(
                 "sandboxed kickstart ran the registered launchd job"
             )
 
+            turn = await session.submit("Try to submit the fixture job.")
+            assert (await turn.get_result()).final_output == "checked"
+            output = tool_output(responses.requests[5], "submit")
+            assert re.search(r"^submit exit [1-9]\d*$", output, re.MULTILINE), output
+            assert launchctl("list", submit_label).returncode != 0
+            assert not submit_marker.exists(), "sandboxed submit ran the fixture job"
+
         kicked = launchctl("kickstart", service)
         assert kicked.returncode == 0, kicked.stderr
         async with timeout(5):
@@ -1774,9 +1803,14 @@ async def test_macos_local_command_cannot_delegate_execution_to_launchd(
                 await asyncio.sleep(0.05)
         assert runs() == 1
     finally:
-        stopped = launchctl("bootout", service)
-        if stopped.returncode:
-            assert launchctl("print", service).returncode != 0, stopped.stderr
+        try:
+            removed = launchctl("remove", submit_label)
+            if removed.returncode:
+                assert launchctl("list", submit_label).returncode != 0, removed.stderr
+        finally:
+            stopped = launchctl("bootout", service)
+            if stopped.returncode:
+                assert launchctl("print", service).returncode != 0, stopped.stderr
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
