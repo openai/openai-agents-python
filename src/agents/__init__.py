@@ -196,6 +196,7 @@ if TYPE_CHECKING:
         get_cleanup as get_cleanup,
     )
     from .state import (
+        ApplicationToolOutput as ApplicationToolOutput,
         ChecklistState as ChecklistState,
         ChecklistStep as ChecklistStep,
         CheckpointStatus as CheckpointStatus,
@@ -292,6 +293,7 @@ _MODULES = {
     "CodeInterpreter": ".tools",
     "ImageGeneration": ".tools",
     "SessionState": ".state",
+    "ApplicationToolOutput": ".state",
     "ChecklistState": ".state",
     "ChecklistStep": ".state",
     "ActionReply": ".manual",
