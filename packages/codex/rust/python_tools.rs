@@ -5960,7 +5960,11 @@ impl<T: ToolOutput> ToolOutput for ReplyOutput<T> {
     fn realtime_response_requested(&self) -> bool {
         self.start_response
     }
+    fn contains_external_context(&self) -> bool {
+        self.output.contains_external_context()
+    }
     fn mark_accepted(&mut self) {
+        self.output.mark_accepted();
         if let Some(acceptance) = self.acceptance.take() {
             let _ = acceptance.send(());
         }
