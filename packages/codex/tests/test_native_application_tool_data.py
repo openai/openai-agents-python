@@ -17,6 +17,7 @@ from agents import (
     ToolOutput,
     function_tool,
 )
+from agents.observation import ToolFinished
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -66,6 +67,19 @@ async def test_native_application_data_is_detached_and_survives_checkpoint(
         assert record.application_data == application_data
         record.application_data["receipt"] = "changed"
         assert turn.application_tool_outputs[0].application_data == application_data
+        (detailed,) = [
+            event
+            async for event in turn.events(include_execution_details=True)
+            if isinstance(event, ToolFinished)
+        ]
+        assert detailed.output is not None
+        observed_data = detailed.output.application_data
+        assert observed_data is not None
+        assert observed_data == application_data
+        observed_data["receipt"] = "changed in observation"
+        assert completed.application_tool_outputs[0].application_data == application_data
+        (default,) = [event async for event in turn.events() if isinstance(event, ToolFinished)]
+        assert default.output is None
         saved = SessionState.from_json((await session.save_state()).to_json())
         assert saved.application_tool_outputs[0].application_data == application_data
         assert "private-application-receipt" not in json.dumps(saved.history)

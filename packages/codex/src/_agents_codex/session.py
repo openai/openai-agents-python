@@ -10288,7 +10288,12 @@ class Session(Generic[ContextT, OutputT]):
         output = None
         if parts is not None:
             try:
-                output = ToolOutput(parts)
+                output = ToolOutput(
+                    parts,
+                    application_data=deepcopy(application_output.application_data)
+                    if application_output is not None
+                    else None,
+                )
                 output._validate()
             except (TypeError, ValueError):
                 output = None
@@ -13076,6 +13081,7 @@ class Session(Generic[ContextT, OutputT]):
         observed_output: ToolOutput | None = None
         deferred_observation = False
         application_call_id: str | None = None
+        application_data = None
         accepted = False
         try:
             request = json.dumps(message)
@@ -13597,7 +13603,9 @@ class Session(Generic[ContextT, OutputT]):
                 status = "completed" if response_output["success"] else "failed"
                 if not deferred_observation:
                     observed_output = ToolOutput(
-                        deepcopy(response_output["contentItems"]), response_output["success"]
+                        deepcopy(response_output["contentItems"]),
+                        response_output["success"],
+                        application_data=deepcopy(application_data),
                     )
         except BaseException as error:  # report every callback exit to its owner
             status = "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
