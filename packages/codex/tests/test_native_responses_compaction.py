@@ -41,8 +41,10 @@ def client_for(callback):
     return cast(AsyncOpenAI, SimpleNamespace(responses=SimpleNamespace(compact=callback)))
 
 
+@pytest.mark.parametrize("profiled", [False, True])
 async def test_complete_window_cold_restore_keeps_current_instructions_and_original_audit(
     responses,
+    profiled,
 ):
     calls = []
     decisions = []
@@ -60,8 +62,15 @@ async def test_complete_window_cold_restore_keeps_current_instructions_and_origi
     config = ResponsesCompaction(
         client=client_for(compact), model="separate-compactor", should_compact=skip
     )
+    current_provider = provider(responses)
+    target = Agent(
+        name="Unused", instructions="Unused.", provider=current_provider, compaction=config
+    )
     agent = Agent(
-        instructions="ORIGINAL_APPLICATION", provider=provider(responses), compaction=config
+        instructions="ORIGINAL_APPLICATION",
+        provider=current_provider,
+        compaction=config,
+        handoffs=[target] if profiled else (),
     )
     async with timeout(30):
         async with agent.session() as session:
@@ -72,7 +81,14 @@ async def test_complete_window_cold_restore_keeps_current_instructions_and_origi
             assert len(decisions) == count
             saved = await session.save_state()
             assert "OLD_USER_SENTINEL" in saved.to_json()
-        async with agent.session(state=SessionState.from_json(saved.to_json())) as restored:
+        current_agent = (
+            agent
+            if profiled
+            else Agent(
+                instructions="CURRENT_APPLICATION", provider=current_provider, compaction=config
+            )
+        )
+        async with current_agent.session(state=SessionState.from_json(saved.to_json())) as restored:
             await (await restored.submit("followup")).get_result()
     assert len(calls) == 1 and calls[0]["model"] == "separate-compactor"
     assert "OLD_USER_SENTINEL" in json.dumps(calls[0]["input"])
@@ -258,3 +274,49 @@ async def test_cancel_joins_compact_callback_and_rejects_late_window(responses):
             assert "OPAQUE_COMPLETE_WINDOW" not in (await session.save_state()).to_json()
         finally:
             release.set()
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_context_transform_redacts_borrowed_compaction_input(responses, automatic):
+    secret = "COMPACTION_TOOL_SECRET_SENTINEL"
+    calls = []
+    transforms = []
+
+    @function_tool
+    def secret_tool() -> str:
+        """Return a synthetic private value."""
+        return secret
+
+    async def compact(**body):
+        calls.append(body)
+        return window()
+
+    def transform(context):
+        transforms.append((context.purpose, context.model))
+        return [json.loads(json.dumps(item).replace(secret, "redacted")) for item in context.items]
+
+    responses.respond(function_call("secret_tool", {}, "secret-call"))
+    responses.respond(assistant_output("answer"))
+    agent = Agent(
+        instructions="Answer.",
+        provider=provider(responses),
+        tools=[secret_tool],
+        transform_context=transform,
+        compaction=ResponsesCompaction(
+            client=client_for(compact),
+            model="separate-compactor",
+            mode="input",
+            should_compact=lambda context: automatic,
+        ),
+    )
+    async with timeout(30), agent.session() as session:
+        assert (await (await session.submit("go")).get_result()).final_output == "answer"
+        if not automatic:
+            await session.compact()
+        assert len(calls) == 1
+        assert secret not in json.dumps(calls[0]["input"])
+        assert "redacted" in json.dumps(calls[0]["input"])
+        assert secret in (await session.save_state()).to_json()
+    assert [context for context in transforms if context[0] == "compaction"] == [
+        ("compaction", "separate-compactor")
+    ]

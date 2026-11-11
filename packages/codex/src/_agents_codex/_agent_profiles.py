@@ -88,6 +88,7 @@ def _capture_agent_graph(
             programmatic_tool_calling=source.programmatic_tool_calling,
             transform_context=source.transform_context,
             before_compact=source.before_compact,
+            compaction=source.compaction,
             before_complete=source.before_complete,
             input_guardrails=source.input_guardrails,
             output_guardrails=source.output_guardrails,

@@ -167,3 +167,108 @@ async def test_completed_malformed_result_reports_missing_usage_once_without_a_w
     with pytest.raises(ValueError, match="malformed"):
         await factory._window(prepared, provider_response=None, observe=reports.append)
     assert reports == [None]
+
+
+def test_handoff_capture_preserves_each_compaction_declaration():
+    from types import SimpleNamespace
+
+    from _agents_codex._agent_profiles import _capture_agent_graph
+    from agents import Agent
+
+    async def compact(**body):
+        return result()
+
+    client = SimpleNamespace(responses=SimpleNamespace(compact=compact))
+    root_config = ResponsesCompaction(client=client, model="root-compactor")
+    target_config = ResponsesCompaction(client=client, model="target-compactor")
+    target = Agent(name="Target", instructions="Target.", compaction=target_config)
+    root = Agent(instructions="Root.", handoffs=[target], compaction=root_config)
+    profiles = _capture_agent_graph(root)
+    assert profiles[0].declaration.compaction is root_config
+    assert profiles[1].declaration.compaction is target_config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_session_compaction_transforms_input_before_client_effects(cancel):
+    import asyncio
+    from types import SimpleNamespace
+
+    import _agents_codex.session as implementation
+    from agents import Agent
+
+    active = True
+    calls = []
+    transforms = []
+
+    async def transform(request):
+        nonlocal active
+        transforms.append((request.purpose, request.model, request.request_id))
+        if cancel:
+            active = False
+        return [
+            json.loads(json.dumps(item).replace("PRIVATE_SENTINEL", "redacted"))
+            for item in request.items
+        ]
+
+    async def compact(**body):
+        calls.append(body)
+        return result()
+
+    client = SimpleNamespace(responses=SimpleNamespace(compact=compact))
+    agent = Agent(
+        instructions="Answer.",
+        transform_context=transform,
+        compaction=ResponsesCompaction(client=client, model="compactor", mode="input"),
+    )
+    replies = []
+
+    async def own(state, message, prepare, reply, reject):
+        callback, request = prepare(lambda: active)
+        reply(await callback(request))
+
+    async def decide(state, message, callback, admitted, request):
+        return await implementation._call_callback(callback, admitted, request)
+
+    owner = SimpleNamespace(
+        id="session",
+        _context=None,
+        _native=SimpleNamespace(
+            _reply_compaction=lambda *args, **kwargs: replies.append((args, kwargs))
+        ),
+        _agent_for_message=lambda message: agent,
+        _run_owned_context_callback=own,
+        _call_decision_callback=decide,
+    )
+    state = SimpleNamespace(run_usage=SimpleNamespace(report=lambda usage: None))
+    message = {
+        "step_id": 7,
+        "thread": "session",
+        "instance": None,
+        "turn_id": "turn",
+        "model": "generation",
+        "trigger": "manual",
+        "candidate_indexes": [0],
+        "model_omitted": False,
+        "items": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "PRIVATE_SENTINEL"}],
+            }
+        ],
+    }
+    work = implementation.Session._before_compact_body(
+        owner, state, message, policy=False, tracing=None
+    )
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await work
+        assert calls == [] and replies == []
+    else:
+        await work
+        assert len(calls) == 1
+        assert "PRIVATE_SENTINEL" not in json.dumps(calls[0]["input"])
+        assert "redacted" in json.dumps(calls[0]["input"])
+        assert len(replies) == 1
+    assert transforms == [("compaction", "compactor", "7")]

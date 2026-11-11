@@ -11610,6 +11610,34 @@ class Session(Generic[ContextT, OutputT]):
                         return decision
                     if not active():
                         raise asyncio.CancelledError
+                    transform = declaration.transform_context
+                    if prepared.mode == "input" and transform is not None:
+                        replacement = await self._call_decision_callback(
+                            state,
+                            message,
+                            transform,
+                            active,
+                            ModelRequestContext(
+                                context=prepared.context,
+                                items=prepared.items,
+                                session_id=prepared.session_id,
+                                turn_id=prepared.turn_id,
+                                subagent_id=prepared.subagent_id,
+                                request_id=str(message["step_id"]),
+                                model=prepared.model,
+                                purpose="compaction",
+                            ),
+                        )
+                        if not active():
+                            raise asyncio.CancelledError
+                        if replacement is not None:
+                            if (
+                                not isinstance(replacement, Sequence)
+                                or isinstance(replacement, (str, bytes, bytearray))
+                                or any(not isinstance(item, Mapping) for item in replacement)
+                            ):
+                                raise TypeError("transform_context must return input items or None")
+                            prepared = replace(prepared, items=tuple(replacement))
                     return await factory._window(
                         prepared,
                         provider_response=message.get("provider_response"),
