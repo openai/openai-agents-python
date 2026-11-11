@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from _agents_codex._agent_profiles import _capture_agent_graph
+from _agents_codex.observation import _ObservationBuffer
 from _agents_codex.schema import _prepare_spec
 from _agents_codex.session import (
     Session,
@@ -342,7 +343,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
     session._repair_turns = []
     session._repair_items = []
     session._repair_receipts_incomplete = False
-    session._observations = SimpleNamespace()
+    session._observations = _ObservationBuffer("session")
     state = _Submission(_prepare_spec(root.output_type))
     state.handle = SimpleNamespace(turn_id="original-turn", submission_id="submission")
     settings = {
