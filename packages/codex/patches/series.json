@@ -691,7 +691,11 @@
     {
       "path": "sdk-raw-provider-usage.patch",
       "sha256": "c0b0800e001dd18e9860d3ebc0f8219a75496189aeef2034e664ec248015d70a"
+    },
+    {
+      "path": "sdk-trace-lifecycle-dispatch.patch",
+      "sha256": "cef3d590cd9936331fefca9d0863488a382432e5da75f587996f860cb2559527"
     }
   ],
-  "result_tree": "406f9faa2c7d445875260e989fbd1caa8deb7bfb"
+  "result_tree": "67c11fcd1ce86a5a2d94b8a3c1f04514ecc234f6"
 }

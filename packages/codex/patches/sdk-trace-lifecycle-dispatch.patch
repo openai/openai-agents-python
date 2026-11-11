@@ -1,0 +1,111 @@
+diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+index c9abc221..ecd01d1e 100644
+--- a/codex-rs/otel/src/sdk_trace_routes.rs
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -236,26 +236,103 @@ fn event(
+     if credential_required {
+         value["credential_required"] = json!(true);
+     }
++    enqueue_event(s, sequence, value, root_descriptor, credential);
++}
++
++fn enqueue_event(
++    s: &mut Routes,
++    sequence: u64,
++    mut value: Value,
++    root_descriptor: Option<Value>,
++    credential: Option<Arc<TraceCredentials>>,
++) -> bool {
+     if serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 {
+         dropped(s, sequence);
+-        return;
++        return false;
+     }
+     if let Some(descriptor) = root_descriptor {
+         if serde_json::to_vec(&descriptor).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 {
+             dropped(s, sequence);
+-            return;
++            return false;
+         }
+         value["__root_descriptor"] = descriptor;
+     }
+     let bytes = serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len());
+     if s.pending.len() >= MAX_EVENTS || s.bytes + bytes > MAX_BYTES {
+         dropped(s, sequence);
+-        return;
++        return false;
+     }
+     s.bytes += bytes;
+     s.pending.insert(sequence);
+     s.queue.push_back((sequence, value, bytes, credential));
++    true
++}
++/// Detached processor observation; no live span or credential authority.
++#[derive(Deserialize, Serialize)]
++struct DispatchedTraceEvent {
++    lifecycle: String,
++    trace_id: String,
++    span_id: String,
++    parent_span_id: Option<String>,
++    name: String,
++    kind: String,
++    start_time_unix_nanos: String,
++    end_time_unix_nanos: Option<String>,
++    attributes: serde_json::Map<String, Value>,
++    outcome: String,
++    dropped_attributes_count: u32,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    credential_required: Option<bool>,
++    #[serde(skip_serializing)]
++    root_descriptor: Option<Value>,
++}
++
++/// Delivery through the existing bounded processor queue and acknowledgement.
++pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
++    if encoded.len() > MAX_BYTES {
++        return Err("Trace event exceeds its record limit".into());
++    }
++    let mut observation: DispatchedTraceEvent =
++        serde_json::from_str(encoded).map_err(|_| "Invalid trace event snapshot")?;
++    if !matches!(observation.lifecycle.as_str(), "start" | "end") {
++        return Err("Invalid trace event lifecycle".into());
++    }
++    let descriptor = observation.root_descriptor.take();
++    let mut value =
++        serde_json::to_value(observation).map_err(|_| "Invalid trace event snapshot")?;
++    let sequence = {
++        let mut s = lock();
++        if s.credentials_closed {
++            return Err("Telemetry has been shutting down".into());
++        }
++        s.sequence += 1;
++        let sequence = s.sequence;
++        if s.processors.is_empty() {
++            return Ok(());
++        }
++        value["sequence"] = json!(sequence);
++        value["processor_ids"] = json!(s.processors);
++        // Observation IDs never resolve a native scope or credential lease.
++        if !enqueue_event(&mut s, sequence, value, descriptor, None) {
++            return Err("Trace event exceeds processor queue capacity".into());
++        }
++        sequence
++    };
++    loop {
++        let (acknowledged, closing) = {
++            let s = lock();
++            (s.acknowledged >= sequence, s.credentials_closed)
++        };
++        if acknowledged {
++            return Ok(());
++        }
++        if closing {
++            return Err("Telemetry has been shutting down before trace delivery".into());
++        }
++        tokio::time::sleep(Duration::from_millis(2)).await;
++    }
+ }
++
+ fn truncate(s: &str, max: usize) -> String {
+     let mut end = s.len().min(max);
+     while !s.is_char_boundary(end) {
