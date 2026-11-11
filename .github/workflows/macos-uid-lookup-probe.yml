@@ -422,7 +422,7 @@ jobs:
             if(mach_port_insert_right(mach_task_self(),receive,receive,MACH_MSG_TYPE_MAKE_SEND)!=KERN_SUCCESS)return 151;
             char service[128];snprintf(service,sizeof(service),"com.openai.codex.uidprobe.registration.%d",getpid());
             kern_return_t registered=bootstrap_register(bootstrap_port,service,receive);
-            if(registered==KERN_SUCCESS)bootstrap_register(bootstrap_port,service,MACH_PORT_NULL);
+            if(registered==KERN_SUCCESS) { kern_return_t removed=bootstrap_register(bootstrap_port,service,MACH_PORT_NULL); if(removed!=KERN_SUCCESS)return 153; }
             mach_port_mod_refs(mach_task_self(),receive,MACH_PORT_RIGHT_RECEIVE,-1);
             mach_port_deallocate(mach_task_self(),receive);
             return lookup_denied && registered!=KERN_SUCCESS?0:152;
