@@ -1,0 +1,41 @@
+name: Stock XPC observation
+
+on:
+  push:
+    branches:
+      - diagnostics/nov9-stock-xpc-observe-a12
+    paths:
+      - .github/workflows/stock-xpc-observe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    runs-on: macos-15
+    timeout-minutes: 4
+    steps:
+      - name: Check out exact diagnostic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Observe stock XPC lookup selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          /usr/bin/sw_vers
+          /usr/bin/uname -m
+          test "$(/usr/bin/sw_vers -productVersion)" = 15.8.2
+          test "$(/usr/bin/sw_vers -buildVersion)" = 24H232
+          test "$(/usr/bin/uname -m)" = arm64
+          test "$(/usr/bin/id -u)" -ne 0
+          source=.github/diagnostics/stock-xpc-observe.c
+          /usr/bin/shasum -a 256 "$source"
+          temp_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-xpc.XXXXXXXX")"
+          trap '/bin/rm -rf -- "$temp_dir"' EXIT
+          /usr/bin/xcrun --sdk macosx clang -std=c11 -D_DARWIN_C_SOURCE -fblocks \
+            -Wall -Wextra -Werror -Wno-deprecated-declarations \
+            "$source" -lbsm -o "$temp_dir/observe"
+          /usr/bin/env -i PATH=/usr/bin:/bin "$temp_dir/observe"
