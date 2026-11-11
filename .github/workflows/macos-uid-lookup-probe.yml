@@ -278,3 +278,11 @@ jobs:
               if count >= 50:
                   break
           print(f'public_os_filter_lines={count}')
+      - name: Read installed filter declaration syntax
+        shell: python
+        run: |
+          from pathlib import Path
+          lines = Path('/System/Library/Sandbox/Profiles/airlock.sb').read_text().splitlines()
+          for first, last in [(510, 565), (625, 645)]:
+              for index in range(first-1, min(last, len(lines))):
+                  print(f'airlock.sb:{index+1}: {lines[index]}')
