@@ -623,7 +623,11 @@
     {
       "path": "0159-sdk-residual-text-guards.patch",
       "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
+    },
+    {
+      "path": "0160-sdk-realtime-event-context.patch",
+      "sha256": "1c8909ef7718231b9b1fc54154617565751b6b7f67d2e3bd0211a8f1c7ced112"
     }
   ],
-  "result_tree": "3fc07408314c0fc6d85c225c96dc1d39846c1828"
+  "result_tree": "2fa9e305cc37e7a4363db2f00c33ecd2659d7124"
 }
