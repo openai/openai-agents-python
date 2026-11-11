@@ -1782,7 +1782,10 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
 async def _call_callback(
     callback: Callable[..., Any], admit: Callable[[], bool], /, *args: Any, **kwargs: Any
 ) -> Any:
-    return await _call_callback_entered(callback, admit, args, kwargs)
+    try:
+        return await _call_callback_entered(callback, admit, args, kwargs)
+    finally:
+        del callback, admit, args, kwargs
 
 
 async def _call_callback_entered(
@@ -1866,6 +1869,7 @@ async def _call_callback_body(
         args = ()
         kwargs = {}
         enter = None
+        callback = admit = cast(Any, None)
         del worker, value
 
 
@@ -11408,6 +11412,11 @@ class Session(Generic[ContextT, OutputT]):
             callback = declaration.transform_context
             source = declaration.hosted_prompt
             enabled = message.get("hosted_prompt") is True
+            if source is not None and not enabled and message.get("purpose") == "compaction":
+                # Native local compaction deliberately omits server-prompt controls.
+                # Keep its admitted transform path without resolving a prompt factory.
+                source = None
+                callback = callback if callback is not None else (lambda _request: None)
             if (source is not None) != enabled:
                 raise NativeError("Hosted prompt ownership differs from the restored request")
             if source is None and callback is None:
