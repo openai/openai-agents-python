@@ -940,15 +940,16 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (limit=None))]
+    #[pyo3(signature = (limit=None, for_replay=false))]
     fn _canonical_history<'py>(
         &self,
         py: Python<'py>,
         limit: Option<usize>,
+        for_replay: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::snapshot(&inner, limit)
+            let value = canonical_history::snapshot(&inner, limit, for_replay)
                 .await
                 .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
