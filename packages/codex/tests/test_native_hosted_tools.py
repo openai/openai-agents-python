@@ -293,6 +293,52 @@ async def test_server_tool_search_advertises_the_deferred_catalog_and_calls_the_
     assert tool_output(responses.requests[1], "call_account_lookup") == "active"
 
 
+@pytest.mark.asyncio
+async def test_step_selection_excludes_explicit_server_search(
+    responses: ResponsesFixture,
+) -> None:
+    effects: list[str] = []
+
+    @function_tool
+    def selected_lookup() -> str:
+        effects.append("selected")
+        return "selected"
+
+    @function_tool(defer_loading=True)
+    def deferred_lookup() -> str:
+        effects.append("deferred")
+        return "deferred"
+
+    responses.respond(assistant_output("Selected scope."))
+    async with (
+        timeout(30),
+        provider(responses) as native_provider,
+        Agent(
+            instructions="Use only the selected tools.",
+            model="fixture-tool-search-selection",
+            provider=native_provider,
+            tools=[ToolSearch(execution="server"), selected_lookup, deferred_lookup],
+        ).session() as session,
+    ):
+        result = await (
+            await session.submit(
+                "Select the lookup.",
+                before_step=lambda turn, **indices: [selected_lookup],
+            )
+        ).get_result()
+    assert result.final_output == "Selected scope."
+    assert effects == []
+    assert len(responses.requests) == 1
+    tools = responses.requests[0]["tools"]
+    assert not any(tool["type"] == "tool_search" for tool in tools)
+    leaves = [
+        leaf
+        for tool in tools
+        for leaf in (tool["tools"] if tool["type"] == "namespace" else [tool])
+    ]
+    assert [tool["name"] for tool in leaves] == ["selected_lookup"]
+
+
 # Deliberately include unknown provider fields to detect lossy normalization.
 CASES = [
     pytest.param(

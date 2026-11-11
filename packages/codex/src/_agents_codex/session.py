@@ -12206,10 +12206,7 @@ class Session(Generic[ContextT, OutputT]):
             if (
                 refs
                 and search in candidates
-                and not any(
-                    isinstance(tool, ToolSearch) and tool._manual is not None
-                    for tool in source_bindings
-                )
+                and not any(isinstance(tool, ToolSearch) for tool in source_bindings)
             ):
                 refs.add(search)
             selected = refs & candidates
