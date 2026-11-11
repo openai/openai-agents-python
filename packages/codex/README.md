@@ -57,9 +57,7 @@ async def main() -> None:
             },
             provider=provider,
         )
-        contextual_result = await contextual.run(
-            "Give one example.", context={"topic": "history"}
-        )
+        contextual_result = await contextual.run("Give one example.", context={"topic": "history"})
         print(contextual_result.final_output)
 
 

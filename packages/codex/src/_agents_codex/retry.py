@@ -216,7 +216,7 @@ class _RetryPolicies:
                 if decision._veto == "hard":
                     return decision
                 if decision._veto == "provider_unsafe":
-                    veto = veto or decision
+                    veto = decision if veto is None else veto
                     continue
                 if not decision.retry:
                     if require_all:
@@ -242,7 +242,7 @@ class _RetryPolicies:
                 return veto
             if veto is not None and positive is not None:
                 return replace(positive, reason=positive.reason or veto.reason)
-            return positive or negative
+            return negative if positive is None else positive
 
         return policy
 
