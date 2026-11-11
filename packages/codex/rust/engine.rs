@@ -3193,6 +3193,8 @@ mod rebuild_consumer_tests {
             async move {
                 for (call_id, verified) in [("failure-call", Some(false)), ("legacy-call", None)] {
                     let specs = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                        strict: false,
+                        output_schema: None,
                         name: "reserve".into(),
                         description: "Record the known reservation outcome".into(),
                         input_schema: json!({

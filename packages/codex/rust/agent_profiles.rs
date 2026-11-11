@@ -248,6 +248,8 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
                 continue;
             }
             all_declarations.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                strict: false,
+                output_schema: None,
                 name: name.clone(),
                 description: "Native handoff".into(),
                 input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -1617,6 +1619,8 @@ pub(crate) fn wrap_handoff_callback(
 
 fn handoff_declaration(name: &str, target: &str) -> DynamicToolFunctionSpec {
     DynamicToolFunctionSpec {
+        strict: false,
+        output_schema: None,
         name: name.to_owned(),
         description: format!("Transfer this conversation to captured Agent {target}."),
         input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
