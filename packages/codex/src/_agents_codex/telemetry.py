@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio as asyncio
 import importlib as importlib
 import json as json
+from collections import deque as _deque
 from collections.abc import (
     Callable as _Callable,
     Coroutine as Coroutine,
@@ -926,7 +927,7 @@ _active_processor_ids: set[str] = set()
 _retired_routes: dict[str, int] = {}
 _processor_acknowledged = 0
 _processor_dropped_records = 0
-_processor_loss_watermark = 0
+_processor_loss_cutoffs: _deque[int] = _deque()
 _processor_recovery_epoch = 0
 _worker_count = 0
 _worker_lock = Lock()
@@ -1342,7 +1343,7 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
         # Eager task factories must not drain before route publication commits.
         await ready
     global _processor_acknowledged, _processor_dropped_records
-    global _processor_loss_watermark, _processor_recovery_epoch
+    global _processor_recovery_epoch
     native = _native_tracing()
     while True:
         drain = _ProcessorDrain(native.drain_trace_events(64))
@@ -1355,21 +1356,28 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
             if batch["dropped_records"] > _processor_dropped_records:
                 # No-op merge preserves routes and captures the native sequence
                 # under its lock, including dropped records beyond the queue tail.
-                _processor_loss_watermark = native.set_trace_routes(
-                    '{"processor_ids":[],"replace":false}'
+                cutoff = native.set_trace_routes('{"processor_ids":[],"replace":false}')
+                previous_cutoff = (
+                    _processor_loss_cutoffs[-1]
+                    if _processor_loss_cutoffs
+                    else _processor_recovery_epoch
                 )
+                if cutoff > previous_cutoff:
+                    # Each later drain crosses the oldest cutoff or consumes
+                    # part of the bounded native backlog at or before it.
+                    _processor_loss_cutoffs.append(cutoff)
                 _processor_dropped_records = batch["dropped_records"]
-            watermark = _processor_loss_watermark
-            groups = [batch["events"]]
-            if watermark and batch["through_sequence"] >= watermark:
-                groups = [
-                    [event for event in batch["events"] if event["sequence"] <= watermark],
-                    [event for event in batch["events"] if event["sequence"] > watermark],
-                ]
-            for index, group in enumerate(groups):
-                if index == 1:
-                    _processor_recovery_epoch = watermark
-                    _processor_loss_watermark = 0
+            groups: dict[int, list[dict[str, Any]]] = {}
+            for event in batch["events"]:
+                while _processor_loss_cutoffs and _processor_loss_cutoffs[0] < event["sequence"]:
+                    _processor_recovery_epoch = _processor_loss_cutoffs.popleft()
+                groups.setdefault(_processor_recovery_epoch, []).append(event)
+            # The drain can advance across a cutoff without returning a record.
+            while (
+                _processor_loss_cutoffs and _processor_loss_cutoffs[0] <= batch["through_sequence"]
+            ):
+                _processor_recovery_epoch = _processor_loss_cutoffs.popleft()
+            for epoch, group in groups.items():
                 routes: dict[str, list[TraceLifecycleEvent]] = {}
                 for event in group:
                     descriptors = batch.get("root_descriptors", {})
@@ -1377,7 +1385,7 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                     snapshot = _freeze(
                         {
                             **event,
-                            "recovery_sequence": _processor_recovery_epoch,
+                            "recovery_sequence": epoch,
                             **({"root_descriptor": descriptor} if descriptor is not None else {}),
                         }
                     )
@@ -1392,7 +1400,7 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                             continue
                         try:
                             delivery = processor.submit(
-                                events, _processor_recovery_epoch, batch.get("credential_routes")
+                                events, epoch, batch.get("credential_routes")
                             )
                         except Exception:
                             continue

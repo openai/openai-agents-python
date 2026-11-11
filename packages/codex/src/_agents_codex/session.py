@@ -3243,6 +3243,7 @@ class Session(Generic[ContextT, OutputT]):
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
+        _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
         managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
@@ -3729,6 +3730,57 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
+
+                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
+                    private_text = (
+                        _atomic_first_turn
+                        and observation_retention == "bounded"
+                        and context is None
+                        and not owned_provider
+                        and provider is not None
+                        and provider.model_backend is None
+                        and provider.auth is None
+                        and not available
+                        and not agent.handoffs
+                        and _tracing_context is None
+                        and (agent.output_type is None or agent.output_type is str)
+                        and not output.max_retries
+                    )
+                    use_completed_owner = private_text and _completed_input is not None
+                    websockets_enabled = provider._websockets_enabled
+                    private_http = False
+                    # Conservative subset of SdkModelHttpPool::client eligibility;
+                    # explicit CA/proxy profiles keep their existing transport selection.
+                    if (
+                        private_text
+                        and (_private_text_run or use_completed_owner)
+                        and provider_config["model_provider"] == "native_agent"
+                        and provider.supports_websockets is None
+                        and websockets_enabled
+                        and not provider._routing_config()
+                        and sys.platform == "linux"
+                        and not any(
+                            name in os.environ
+                            for name in (
+                                "HTTP_PROXY",
+                                "http_proxy",
+                                "HTTPS_PROXY",
+                                "https_proxy",
+                                "ALL_PROXY",
+                                "all_proxy",
+                                "REQUEST_METHOD",
+                                "CODEX_SANDBOX",
+                                "CODEX_CA_CERTIFICATE",
+                                "SSL_CERT_DIR",
+                                "SSL_CERT_FILE",
+                            )
+                        )
+                    ):
+                        private_http = True
+                        websockets_enabled = False
+                    return use_completed_owner, websockets_enabled, private_http
+
+                use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
@@ -3979,19 +4031,7 @@ class Session(Generic[ContextT, OutputT]):
                 async def initialize_atomic() -> (
                     tuple[Any, Any, Any] | Completed[Any] | _RunHandoff
                 ):
-                    if (
-                        _completed_input is not None
-                        and observation_retention == "bounded"
-                        and context is None
-                        and not owned_provider
-                        and provider is not None
-                        and provider.model_backend is None
-                        and not available
-                        and not agent.handoffs
-                        and _tracing_context is None
-                        and (agent.output_type is None or agent.output_type is str)
-                        and not output.max_retries
-                    ):
+                    if use_completed_owner:
                         submission_id = uuid4().hex
                         owner = native._prepare_run_conversation(
                             json.dumps(config),
@@ -4002,13 +4042,14 @@ class Session(Generic[ContextT, OutputT]):
                             json.dumps(
                                 {
                                     "mode": "start_if_idle",
-                                    "input": _native_input(_completed_input),
+                                    "input": _native_input(cast(str, _completed_input)),
                                     "observation_submission_id": submission_id,
                                 }
                             ),
                             api_key=opening.api_key or "",
                             provider_lease=provider_lease,
                             _share_model_http=True,
+                            _private_http=private_http,
                         )
                         return await opening.run(owner, agent, output, submission_id)
                     return cast(
@@ -4023,6 +4064,7 @@ class Session(Generic[ContextT, OutputT]):
                                 api_key=opening.api_key or "",
                                 provider_lease=provider_lease,
                                 _share_model_http=True,
+                                _private_http=private_http,
                             )
                         ),
                     )
@@ -4206,7 +4248,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
-                session._websockets_enabled = provider._websockets_enabled
+                session._websockets_enabled = websockets_enabled
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
                     session._manual_source_digest = hashlib.sha256(
