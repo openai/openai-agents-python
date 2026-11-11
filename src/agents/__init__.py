@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from .canonical_storage import (
         AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore,
         CustomStorage as CustomStorage,
+        DaprSessionStore as DaprSessionStore,
         EncryptedSessionStore as EncryptedSessionStore,
         MongoDBSessionStore as MongoDBSessionStore,
         RedisSessionStore as RedisSessionStore,
@@ -129,6 +130,7 @@ if TYPE_CHECKING:
         ModelRequestOptionsFactory as ModelRequestOptionsFactory,
         ModelResponse as ModelResponse,
         NativeModel as NativeModel,
+        NativeStreamingModel as NativeStreamingModel,
         ResponsesModel as ResponsesModel,
     )
     from .native_agents import (
@@ -236,6 +238,7 @@ _MODULES = {
     "ModelRequestOptionsFactory": ".models",
     "ModelResponse": ".models",
     "NativeModel": ".models",
+    "NativeStreamingModel": ".models",
     "DecisionError": ".decisions",
     "DecisionInput": ".decisions",
     "DecisionProvider": ".decisions",
@@ -308,6 +311,7 @@ _MODULES = {
     "LocalStorage": ".state",
     "AsyncSQLAlchemySessionStore": ".canonical_storage",
     "CustomStorage": ".canonical_storage",
+    "DaprSessionStore": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
     "MongoDBSessionStore": ".canonical_storage",
     "RedisSessionStore": ".canonical_storage",

@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "27eaa0ae47d3e752657addedf4388320fe26d57d",
+  "baseline_commit": "7685c18338971110941e638a4e1d9fd4dba25376",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -140,6 +140,7 @@
           "from dataclasses import dataclass as dataclass",
           "from pathlib import Path as Path",
           "from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable",
+          "from .canonical_storage_dapr import DaprSessionStore as DaprSessionStore",
           "from .canonical_storage_encrypt import EncryptedSessionStore as EncryptedSessionStore",
           "from .canonical_storage_mongodb import MongoDBSessionStore as MongoDBSessionStore",
           "from .canonical_storage_redis import RedisSessionStore as RedisSessionStore",
@@ -148,6 +149,7 @@
         ],
         "references": {
           "AsyncSQLAlchemySessionStore": "_agents_codex.canonical_storage_sqlalchemy_async.AsyncSQLAlchemySessionStore",
+          "DaprSessionStore": "_agents_codex.canonical_storage_dapr.DaprSessionStore",
           "EncryptedSessionStore": "_agents_codex.canonical_storage_encrypt.EncryptedSessionStore",
           "MongoDBSessionStore": "_agents_codex.canonical_storage_mongodb.MongoDBSessionStore",
           "RedisSessionStore": "_agents_codex.canonical_storage_redis.RedisSessionStore",
@@ -659,6 +661,7 @@
           "ModelRequestOptionsFactory: TypeAlias = Callable[[ModelRequest], ModelRequestOptions | None | Awaitable[ModelRequestOptions | None]]",
           "@dataclass(frozen=True)\nclass ModelResponse:\n    output: list[dict[str, Any]] = field(repr=False)\n    usage: dict[str, int] | None = None\n    response_id: str = field(default_factory=lambda: 'resp_' + uuid4().hex)",
           "class NativeModel(Protocol):\n\n    def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]:\n        pass",
+          "class NativeStreamingModel(NativeModel, Protocol):\n\n    def stream(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]] | Awaitable[AsyncIterator[Mapping[str, Any]]]:\n        pass",
           "class ModelProvider(Protocol):\n\n    def get_model(self, model_name: str) -> NativeModel:\n        pass",
           "@dataclass(frozen=True)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
           "@dataclass(frozen=True)\nclass LitellmModel(ChatCompletionsModel):\n    pass",
@@ -675,10 +678,11 @@
           "ModelRequestOptionsFactory": "collections.abc.Callable",
           "ModelResponse": "agents.models.ModelResponse",
           "NativeModel": "agents.models.NativeModel",
+          "NativeStreamingModel": "agents.models.NativeStreamingModel",
           "ResponsesModel": "agents.models.ResponsesModel"
         },
         "imports": [
-          "from collections.abc import Awaitable, Callable, Mapping",
+          "from collections.abc import AsyncIterator, Awaitable, Callable, Mapping",
           "from dataclasses import dataclass, field",
           "from typing import Any, Protocol, TypeAlias",
           "from uuid import uuid4",
@@ -1808,6 +1812,7 @@
       "ComputerSafetyError": "agents.computer.ComputerSafetyError",
       "ContinueTurn": "agents.completion.ContinueTurn",
       "CustomStorage": "agents.canonical_storage.CustomStorage",
+      "DaprSessionStore": "agents.canonical_storage.DaprSessionStore",
       "DecisionError": "agents.decisions.DecisionError",
       "DecisionInput": "agents.decisions.DecisionInput",
       "DecisionProvider": "agents.decisions.DecisionProvider",
@@ -1885,6 +1890,7 @@
       "NativeOutput": "agents.schema.NativeOutput",
       "NativeProvider": "agents.agent.NativeProvider",
       "NativeRole": "agents.native_agents.NativeRole",
+      "NativeStreamingModel": "agents.models.NativeStreamingModel",
       "NativeToolCall": "agents.native_interception.NativeToolCall",
       "NetworkPolicy": "agents.executor.NetworkPolicy",
       "OpenAIDecisions": "agents.decisions.OpenAIDecisions",
@@ -2011,6 +2017,16 @@
         "imports": [
           "from collections.abc import Mapping, Sequence",
           "from typing import Any, TextIO"
+        ],
+        "references": {}
+      },
+      "_agents_codex.canonical_storage_dapr": {
+        "declarations": [
+          "class DaprSessionStore:\n\n    def __init__(self, client: DaprClient, *, state_store_name: str, key_prefix: str='agents:canonical:v1', lease_seconds: float=30) -> None:\n        pass\n\n    @classmethod\n    async def from_address(cls, dapr_address: str='localhost:50001', *, state_store_name: str, key_prefix: str='agents:canonical:v1', lease_seconds: float=30) -> DaprSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from dapr.aio.clients import DaprClient"
         ],
         "references": {}
       },
@@ -4580,6 +4596,7 @@
       "ComputerSafetyError",
       "ContinueTurn",
       "CustomStorage",
+      "DaprSessionStore",
       "DecisionError",
       "DecisionInput",
       "DecisionProvider",
@@ -4657,6 +4674,7 @@
       "NativeOutput",
       "NativeProvider",
       "NativeRole",
+      "NativeStreamingModel",
       "NativeToolCall",
       "NetworkPolicy",
       "OpenAIDecisions",
@@ -4721,7 +4739,7 @@
       "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, ToolInputErrorContext as ToolInputErrorContext, ToolTimeoutBehavior as ToolTimeoutBehavior, ToolTimeoutError as ToolTimeoutError, function_tool as function_tool",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
-      "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
+      "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn",
       "from .computer import Computer as Computer, ComputerProvider as ComputerProvider, ComputerSafetyError as ComputerSafetyError, computer_tool as computer_tool",
@@ -4732,7 +4750,7 @@
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalDecision as ApprovalDecision, ApprovalRequest as ApprovalRequest, ApprovalRequested as ApprovalRequested, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",
       "from .model_context import ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",
-      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, NativeModel as NativeModel, ResponsesModel as ResponsesModel",
+      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, NativeModel as NativeModel, NativeStreamingModel as NativeStreamingModel, ResponsesModel as ResponsesModel",
       "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
       "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",

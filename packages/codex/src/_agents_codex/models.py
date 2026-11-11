@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import json
 import math
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeAlias, cast
@@ -212,6 +212,19 @@ class NativeModel(Protocol):
     """
 
     def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]: ...
+
+
+class NativeStreamingModel(NativeModel, Protocol):
+    """Produce Responses events incrementally through the native turn.
+
+    Yield finalized output items and one terminal response event. Core applies
+    the output and executes admitted tools after the stream completes. The
+    session joins the iterator when its model request is cancelled.
+    """
+
+    def stream(
+        self, request: ModelRequest
+    ) -> AsyncIterator[Mapping[str, Any]] | Awaitable[AsyncIterator[Mapping[str, Any]]]: ...
 
 
 class ModelProvider(Protocol):
