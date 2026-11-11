@@ -254,7 +254,7 @@
     },
     {
       "path": "0057-reuse-model-http-clients.patch",
-      "sha256": "29351a7eed6a09706141a8be50cdee0f9a5d94830eeb7011b89015d1a2c0e4e6"
+      "sha256": "8c602ad3af14a1e8f622a77a0106b11c001a1a975a115cbccc366a159c6878b8"
     },
     {
       "path": "0058-reuse-bundled-model-catalog.patch",
@@ -417,6 +417,10 @@
       "sha256": "fa13e4a0e5475eb5581f1cf96763fba7b72cccdc47e6afe98a019dba065a9327"
     },
     {
+      "path": "0152-siwc-http-errors.patch",
+      "sha256": "a7a63448ffefe079fe9e95ec879cf9dda6dedfe90b3c931153df913380d6bdc1"
+    },
+    {
       "path": "0153-sdk-saved-login-durable-refresh.patch",
       "sha256": "3256e6ede7e0d7357bd6cf3c9a3f2fec8fec97aae4cffde957f5c575cf017231"
     },
@@ -425,9 +429,201 @@
       "sha256": "a23e22f1c99c7e11c270f5bed8a5f1aae78876d319b41f2d9a83e2da39ad7501"
     },
     {
+      "path": "sdk-bwrap-search-path.patch",
+      "sha256": "1b1f87bda8fca4a75ca687ae5662bf28ad6eb7538af8b882576daea23c8b01fa"
+    },
+    {
+      "path": "sdk-root-metadata-readback.patch",
+      "sha256": "f3148384548bb8c5090f106fe44c18d763d1b9daf5551b2fb10f51937a25791a"
+    },
+    {
+      "path": "0171-original-history-catalog.patch",
+      "sha256": "a0fd58cc346c11bc2320b1e120b7f8d3afc79ad7a2d12ad112636bca373345b3"
+    },
+    {
+      "path": "sdk-rpc-json-fidelity.patch",
+      "sha256": "627e429ded864fb3388b6562c22460e604ca9ba6ad25ec72e38480c1ba61e6ed"
+    },
+    {
+      "path": "0172-linear-original-history-checkpoints.patch",
+      "sha256": "c2009453efb8889a8844186ead76b51ba912fee2512bc6b0524b12ece696989c"
+    },
+    {
+      "path": "sdk-linux-bootstrap-environment.patch",
+      "sha256": "4f453674465f30d922f2bfc0016d3bf47cd6f9016fe3e679abe0bfa9c780fd5e"
+    },
+    {
+      "path": "sdk-environment-name-validation.patch",
+      "sha256": "117f2da7c540d33ba72cfe8eac6601c6d534fa89e5c920a2be7b19d7431c7590"
+    },
+    {
+      "path": "0173-bounded-live-original-history.patch",
+      "sha256": "f3653b99ba819032f5be8dd217135c784e5bf9ba4fae0416a8d81a9364306f43"
+    },
+    {
+      "path": "0174-sdk-command-environment-overrides.patch",
+      "sha256": "19e180d0db741accea2e1beb68457deba7d7a3f09081be25572bc80fa15434ea"
+    },
+    {
+      "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
+      "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
+    },
+    {
       "path": "sdk-linux-protected-metadata-mount-race.patch",
       "sha256": "22137e6318edf060270e1fd558005d6fadb4c04297bdad1ba46dad141ddc2b7b"
+    },
+    {
+      "path": "sdk-linux-protected-metadata-bootstrap.patch",
+      "sha256": "76ced00372b6b83f300b3ddc798517b632c92eee5d4e78445d76bb7206bf1130"
+    },
+    {
+      "path": "sdk-linux-private-credential-file-mask.patch",
+      "sha256": "280414d1ef9f7fea874d460629f4ca24732d4f3b09daf47488947cc24c9e7a3e"
+    },
+    {
+      "path": "sdk-local-project-read-cwd.patch",
+      "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
+    },
+    {
+      "path": "0154-sdk-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
+    },
+    {
+      "path": "0155-sdk-registered-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "08b93a2908caa91c4e7071347053fa0e5ba22ca85315184e03c5e0d7cf41935c"
+    },
+    {
+      "path": "0156-sdk-commit-completed-compaction-summary.patch",
+      "sha256": "b97ccbc58e4a1519389fc9634040c60edc30a31d720ea95da58e0456df246a6d"
+    },
+    {
+      "path": "0157-sdk-registered-http-429-diagnostics.patch",
+      "sha256": "a0cb667f8dd1f5358bcee2eeb706592c679c95d8ccc05cfe2e140380e8d4e795"
+    },
+    {
+      "path": "sdk-realtime-provider-events-and-scopes.patch",
+      "sha256": "765ea5dd42cd743855514d8694e6a497c1352c0ea0a95f1940bbff4c5c4db542"
+    },
+    {
+      "path": "sdk-realtime-application-update-rejections.patch",
+      "sha256": "7371166d4fd71f8ea0aeb1d15746da37618e8cb5583bceb209ce2c4a1061368b"
+    },
+    {
+      "path": "sdk-realtime-unpublished-agent-source.patch",
+      "sha256": "e0311387868c576d81dce16ee47a1ce4d345c35c182b799eade073475efc044c"
+    },
+    {
+      "path": "sdk-realtime-historical-delete-terminal.patch",
+      "sha256": "8442a703759550a806a5f640b8d2a50047ba4e9f9c6d9455396c5d97ff2e3ab7"
+    },
+    {
+      "path": "sdk-realtime-historical-delete-terminal-tests.patch",
+      "sha256": "48d2df857342b269a96fe97822c51937fbbd2f5fa528a340072dd60ac681cd02"
+    },
+    {
+      "path": "sdk-realtime-finish-batch-test-fixture.patch",
+      "sha256": "61a544805338b79ec8bb0cec3e177389b47c9fa3fee4e4790cd7a83d3ede2d76"
+    },
+    {
+      "path": "0158-sdk-private-disposable-run.patch",
+      "sha256": "7798a788f8c67eca899ec42f5d72bc8432a9817ed1a3549a468a29fd075311bc"
+    },
+    {
+      "path": "sdk-realtime-voice-policies.patch",
+      "sha256": "9b738c67f5ec9766e66393703518d40a82f20fef0226fbc0bacfaf30825b8453"
+    },
+    {
+      "path": "sdk-agent-profile-observations.patch",
+      "sha256": "6e7ccb5f3b38d26fa69dbfc33338d829011692ab29a544baa074fb71bbcea607"
+    },
+    {
+      "path": "sdk-realtime-filter-forwarded-batches.patch",
+      "sha256": "fcc45c2e79c74aedb6c621f422b298f58a3b1c759ed691378b5f7fb893bc9838"
+    },
+    {
+      "path": "native-model-input-modalities.patch",
+      "sha256": "5bece16f3599d550006f178f1e903f6b9bfaab18395daad81235ea0fd5587946"
+    },
+    {
+      "path": "native-box-model-deadline-futures.patch",
+      "sha256": "68f27e496efe84385243d8067e9b45aae4948222d810af32cb2399716f15a717"
+    },
+    {
+      "path": "0212-native-mcp-routing.patch",
+      "sha256": "832935a9e112b8fc1a4e4768e97b0011254709219c6dfa5264a277adef4ed547"
+    },
+    {
+      "path": "sdk-bounded-original-history-reads.patch",
+      "sha256": "9c2091df8d9532c8d9f201172cee0440cdde554e811b0f2c15525128e92dabbb"
+    },
+    {
+      "path": "sdk-terminal-candidate-admission.patch",
+      "sha256": "c8eb0fc9c4fb238e493d52bc39b79cf29071e7e4ad391583ebeab7e1daf0c1db"
+    },
+    {
+      "path": "sdk-realtime-captured-tool-policy.patch",
+      "sha256": "7049918cd439db51f58be02adb304a54c6b313160b9be163a31c8778799f7c06"
+    },
+    {
+      "path": "sdk-suspended-terminal-guard-only.patch",
+      "sha256": "7ab156a284a8f1bde203cd46fbe2e63f2ffc73bb78ee655278d98bd6c7dc6073"
+    },
+    {
+      "path": "sdk-host-trace-credentials.patch",
+      "sha256": "88a7876ebaee3fd063e0edfa5ae0997e6c36dae38b7df6b8ff4eb2c0128c88e7"
+    },
+    {
+      "path": "sdk-user-instructions-appendix.patch",
+      "sha256": "a3ea35cfd3f2eaeed66dc6ad6b06e7f651a7126ebfc66032636dc5bfe9ae31d9"
+    },
+    {
+      "path": "sdk-fork-originals-lineage.patch",
+      "sha256": "3f315e7d82ebdc5e30cb9d336282876d05a410458dce6bdf7a6d5576fcf65411"
+    },
+    {
+      "path": "sdk-cold-child-workspace-user-instructions.patch",
+      "sha256": "cd6a420cdec6aa3b3663aef30f9d7aec10ee58a34eea46b1bc47045279b2dd64"
+    },
+    {
+      "path": "sdk-realtime-captured-mcp-policy.patch",
+      "sha256": "6483f796a3a9329ebde3348ee431b60f4e09278fcfcd79bace8a6ab5627f8a2b"
+    },
+    {
+      "path": "sdk-mcp-forced-choice-captured-binding.patch",
+      "sha256": "4bd3b5089c6843c58c3c8af71f50e488142a1a26ce29d6d5dcc4041cf7ff1985"
+    },
+    {
+      "path": "sdk-provider-compaction-prompt-boundary.patch",
+      "sha256": "77e0de10c45e19b433a07437917870b43d9ca68fb3d2147b5279d5ed22845d49"
+    },
+    {
+      "path": "sdk-stored-session-discovery-and-compaction-restore.patch",
+      "sha256": "1e8b7a34760ffb9bedc4750741903573e483db2bf5e07768cfa6ce51a00bc229"
+    },
+    {
+      "path": "sdk-native-compaction-provider-window.patch",
+      "sha256": "51748b7cd628e84a055b0af35c84bd157dbf097f170fe1025e59e7ab4b2d6d72"
+    },
+    {
+      "path": "sdk-native-web-search-images.patch",
+      "sha256": "87c4c6eda5d7d3086c434c0227fab9301c847c94c97eae32eabba7598f4e67bf"
+    },
+    {
+      "path": "sdk-private-macos-deny-paths.patch",
+      "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
+    },
+    {
+      "path": "sdk-registered-auto-compaction-overflow.patch",
+      "sha256": "033b6e451bb217f8aec5968a4a521bd0e1ed4d64fa4033f1b4fdded4cd5a4a99"
+    },
+    {
+      "path": "sdk-registered-manual-compaction-overflow.patch",
+      "sha256": "796b1e927babcc03b15f4fc6dd14097ce9d1afe39aa034905139cc139c020c81"
+    },
+    {
+      "path": "0159-sdk-residual-text-guards.patch",
+      "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     }
   ],
-  "result_tree": "92e699d7d550e61ec6f20e95645a031fea4e8875"
+  "result_tree": "3fc07408314c0fc6d85c225c96dc1d39846c1828"
 }
