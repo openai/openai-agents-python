@@ -27,7 +27,7 @@ else:
         # Fall back to direct import (when run as a script)
         from my_workflow import MyWorkflow
 
-CHUNK_LENGTH_S = 0.05  # 100ms
+CHUNK_LENGTH_S = 0.05  # Each chunk contains 50 ms of audio.
 SAMPLE_RATE = 24000
 FORMAT = np.int16
 CHANNELS = 1
