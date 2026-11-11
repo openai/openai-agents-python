@@ -20,7 +20,7 @@ from a2a.types import a2a_pb2 as p
 from google.protobuf.json_format import MessageToDict
 from pydantic import AfterValidator
 
-from agents import FunctionTool
+from agents import FunctionTool, SessionState, ToolOutput
 from agents.a2a import A2ALimits, NativeA2ABinding, NativeA2AExecutor, NativeA2ATask
 from tests.a2a_helpers import HostStore, call_context, invoke, request_context
 from tests.native_fixtures import (
@@ -72,6 +72,41 @@ async def test_manual_answer_transform_runs_once_before_durable_claim(
     assert executor.store.read(binding()).acknowledges(settled.task)
     assert len(responses.requests) == 2
     assert tool_output(responses.requests[1], "call-a") == "yes!"
+
+
+async def test_prepared_manual_answer_retains_application_data(tmp_path, responses):
+    tool = FunctionTool(
+        name="approve",
+        description="Host approval",
+        input_type=Approval,
+        output_type=ToolOutput,
+    )
+    executor = make_executor(tmp_path, responses, [tool])
+    responses.respond(function_call("approve", {"reason": "first"}, "call-a"))
+    first, _ = await invoke(executor, request_context())
+    assert first.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+    proposal = MessageToDict(first.task.status.message.parts[0].data)
+    application_data = {"receipt": "private-manual-approval"}
+    reply = {
+        "challenge": proposal["challenge"],
+        "generation": proposal["generation"],
+        "result": {
+            "content_items": [{"type": "inputText", "text": "approved"}],
+            "application_data": application_data,
+        },
+    }
+    responses.respond(function_call("approve", {"reason": "second"}, "call-b"))
+    second, _ = await invoke(executor, request_context(reply=reply, current=first.task))
+
+    assert second.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+    record = executor.store.read(binding())
+    assert record.checkpoint is not None
+    saved = SessionState.from_json(record.checkpoint)
+    (accepted,) = saved.application_tool_outputs
+    assert (accepted.call_id, accepted.name) == ("call-a", "approve")
+    assert accepted.application_data == application_data
+    assert tool_output(responses.requests[1], "call-a") == "approved"
+    assert "private-manual-approval" not in json.dumps(responses.requests)
 
 
 async def worker(directory, mode):
