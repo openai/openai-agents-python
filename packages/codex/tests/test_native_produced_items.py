@@ -252,6 +252,7 @@ async def test_failed_native_run_details_outlive_its_session(responses, capture)
     ]
     assert [item["type"] for item in accepted] == ["function_call", "function_call_output"]
     assert "accepted data" in str(accepted[1]["output"])
+    assert "accepted data" not in repr(details)
     assert "resp_1" in {response["id"] for response in details.raw_responses}
     assert len(details.guardrail_results) == 1
     assert not details.incomplete

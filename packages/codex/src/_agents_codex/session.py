@@ -936,7 +936,7 @@ class RunErrorDetails:
 
     input: UserInput | None = field(repr=False)
     last_agent: Agent[Any, Any] | None
-    items: tuple[ProducedItem, ...]
+    items: tuple[ProducedItem, ...] = field(repr=False)
     raw_responses: tuple[dict[str, Any], ...] = field(repr=False)
     guardrail_results: tuple[GuardrailRecord, ...] = field(repr=False)
     incomplete: bool = False

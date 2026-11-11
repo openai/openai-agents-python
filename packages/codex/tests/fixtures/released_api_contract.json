@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "2a80fb6246b7c9e90a9e07095855034688795c34",
+  "baseline_commit": "815dd4de01ebeb419edcf347d0c117cf4e31f813",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1383,7 +1383,7 @@
           "class NativeError(RuntimeError):\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n    _interrupted: bool = False\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None, param: str | None=None) -> None:\n        pass\n\n    @property\n    def response_integrity_reason(self) -> ResponseIntegrityReason | None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
           "class InteractionRequired(NativeError):\n    state: SessionState | None = None",
           "@dataclass(frozen=True, slots=True)\nclass ProducedItem:\n    item: SessionItem\n    agent: Agent[Any, Any]\n    handoff_target: Agent[Any, Any] | None = None",
-          "@dataclass(frozen=True, slots=True)\nclass RunErrorDetails:\n    input: UserInput | None = field(repr=False)\n    last_agent: Agent[Any, Any] | None\n    items: tuple[ProducedItem, ...]\n    raw_responses: tuple[dict[str, Any], ...] = field(repr=False)\n    guardrail_results: tuple[GuardrailRecord, ...] = field(repr=False)\n    incomplete: bool = False",
+          "@dataclass(frozen=True, slots=True)\nclass RunErrorDetails:\n    input: UserInput | None = field(repr=False)\n    last_agent: Agent[Any, Any] | None\n    items: tuple[ProducedItem, ...] = field(repr=False)\n    raw_responses: tuple[dict[str, Any], ...] = field(repr=False)\n    guardrail_results: tuple[GuardrailRecord, ...] = field(repr=False)\n    incomplete: bool = False",
           "class RunDiagnosticError(Exception):\n    __slots__ = ('_details',)\n\n    def __init__(self, details: RunErrorDetails) -> None:\n        pass\n\n    @property\n    def details(self) -> RunErrorDetails:\n        pass",
           "@dataclass(frozen=True)\nclass Completed(Generic[OutputT, TurnT]):\n    turn: TurnT\n    final_output: OutputT\n    thread_usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()\n    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)\n    tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)\n    guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)\n    history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)\n    items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)\n    raw_usage: tuple[RawProviderUsage, ...] | None = field(default=None, repr=False, kw_only=True)\n    run_usage: RunUsage = field(init=False)\n\n    @property\n    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:\n        pass",
           "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",
