@@ -14663,10 +14663,10 @@ class Session(Generic[ContextT, OutputT]):
                 native_sealed = True
                 sealed = json.loads(encoded)
                 if sealed is None:
-                    payload = None
-                else:
-                    payload = sealed["checkpoint"]
-                    model_attempt = sealed["model_attempt"]
+                    pre_seal_refused = True
+                    raise RuntimeError("The active submission is not a settled manual boundary")
+                payload = sealed["checkpoint"]
+                model_attempt = sealed["model_attempt"]
             if active is not None:
                 if payload is None:
                     pre_seal_refused = True
