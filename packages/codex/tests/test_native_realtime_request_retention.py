@@ -25,14 +25,18 @@ def request(realtime: RealtimeSession, call_id: str) -> None:
         {
             "FunctionCallRequested": {
                 "call_id": call_id,
+                "item_id": f"item-{call_id}",
                 "name": "echo",
-                "response_id": call_id,
                 "arguments": "{}",
-                "item_id": call_id,
-            }
+                "response_id": call_id,
+            },
         },
         None,
     )
+
+
+def reserved_function_bytes(call_id: str) -> int:
+    return 4 * (3 * len(call_id) + len(f"item-{call_id}") + len("echo") + len("{}"))
 
 
 def drain(realtime: RealtimeSession) -> None:
@@ -74,8 +78,8 @@ async def test_completed_function_rollover_preserves_active_requests(monkeypatch
         assert "active" in realtime._seen
         assert len(realtime._seen) <= 4
         if index == 11:
-            assert realtime._identity_bytes == 4 * sum(
-                4 * len(key) + len("echo") + len("{}") for key in realtime._seen
+            assert realtime._identity_bytes == sum(
+                reserved_function_bytes(key) for key in realtime._seen
             )
         drain(realtime)
     assert "call-0" not in realtime._function_names
@@ -163,8 +167,7 @@ async def test_retirement_rollover_preserves_running_guardrail():
 
 async def test_terminal_request_byte_pressure_releases_only_terminal_reservations(monkeypatch):
     realtime = owner()
-    max_bytes = 520
-    monkeypatch.setattr(realtime, "_BUFFER_BYTES_LIMIT", max_bytes)
+    monkeypatch.setattr(realtime, "_BUFFER_BYTES_LIMIT", 600)
     request(realtime, "active")
     for index in range(12):
         call_id = f"terminal-{index}" + "x" * 12
@@ -172,7 +175,7 @@ async def test_terminal_request_byte_pressure_releases_only_terminal_reservation
         realtime._retire_pending_functions(call_id)
         assert "active" in realtime._pending_functions
         assert "active" in realtime._seen
-        assert realtime._identity_bytes == 4 * sum(
-            4 * len(key) + len("echo") + len("{}") for key in realtime._seen
+        assert realtime._identity_bytes == sum(
+            reserved_function_bytes(key) for key in realtime._seen
         )
-        assert realtime._identity_bytes <= max_bytes
+        assert realtime._identity_bytes <= 600
