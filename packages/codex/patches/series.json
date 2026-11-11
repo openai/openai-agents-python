@@ -647,7 +647,15 @@
     {
       "path": "sdk-preserved-speech-tool-continuation.patch",
       "sha256": "3cdb9146f7f0f4bc3985dedfc9eb435a350863b38cf75659b6bfb29fe2a3f8bd"
+    },
+    {
+      "path": "sdk-model-invocation-terminal-clock.patch",
+      "sha256": "8095460fd1722245c0f4001a83b60e1e5878ab3e30c1cc4ddfc6b2285c78133e"
+    },
+    {
+      "path": "sdk-model-attempt-settlement.patch",
+      "sha256": "95a58b27e498cc24388058dc4d32ece76652f45e6efc2e318ae283700537fd87"
     }
   ],
-  "result_tree": "fe87571c47cac96653fcb3ff4092ffe2e0dd3085"
+  "result_tree": "248567351cce182bf5b79fd0e450619c77d8bee8"
 }

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+import sys
 from dataclasses import dataclass, field
 from typing import Any
-
-from openai import APIConnectionError, APITimeoutError
 
 from .models import ModelRequest
 from .retry import NormalizedError
@@ -50,6 +49,15 @@ def _normalized_error(error: BaseException) -> NormalizedError:
     def text(value: str, limit: int) -> str:
         return value[:limit].encode("utf-8", "replace").decode("utf-8")
 
+    # A borrowed OpenAI client has already imported its error types. Native
+    # declarations and custom producers can work without that optional client.
+    openai = sys.modules.get("openai")
+    timeout_types = (TimeoutError, getattr(openai, "APITimeoutError", TimeoutError))
+    network_types = (
+        ConnectionError,
+        *timeout_types,
+        getattr(openai, "APIConnectionError", ConnectionError),
+    )
     status = code = request_id = retry_after = None
     abort = network = timeout = False
     seen: set[int] = set()
@@ -82,8 +90,8 @@ def _normalized_error(error: BaseException) -> NormalizedError:
                     retry_after = delay
                     break
         abort |= _is_model_abort(current)
-        timeout |= isinstance(current, (APITimeoutError, TimeoutError))
-        network |= isinstance(current, (APIConnectionError, ConnectionError, TimeoutError))
+        timeout |= isinstance(current, timeout_types)
+        network |= isinstance(current, network_types)
         following = read(current, "__cause__") or read(current, "__context__")
         current = following if isinstance(following, BaseException) else None
     try:

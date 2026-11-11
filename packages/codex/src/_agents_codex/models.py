@@ -43,9 +43,13 @@ class ModelRequest:
         counts. Cleanup can report until the admitted callback physically exits.
         False means this request has no live native measurement owner.
         """
-        captured = _capture_model_usage(usage)
-        assert captured is not None
-        return self._report_usage(captured) if self._report_usage is not None else False
+        captured = None
+        try:
+            captured = _capture_model_usage(usage)
+            assert captured is not None
+            return self._report_usage(captured) if self._report_usage is not None else False
+        finally:
+            del self, usage, captured
 
 
 def _capture_model_usage(usage: Mapping[str, int] | None) -> dict[str, int] | None:
@@ -59,18 +63,23 @@ def _capture_model_usage(usage: Mapping[str, int] | None) -> dict[str, int] | No
         "reasoning_output_tokens",
         "total_tokens",
     )
-    if (
-        not isinstance(usage, Mapping)
-        or usage.keys() - set(fields)
-        or any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in usage.values())
-    ):
-        raise ValueError("ModelResponse usage requires nonnegative native token counters")
-    captured = {key: usage.get(key, 0) for key in fields}
-    if "total_tokens" not in usage:
-        captured["total_tokens"] = captured["input_tokens"] + captured["output_tokens"]
-        if captured["total_tokens"] > 2**63 - 1:
-            raise ValueError("ModelResponse total token count exceeds native capacity")
-    return captured
+    try:
+        if (
+            not isinstance(usage, Mapping)
+            or usage.keys() - set(fields)
+            or any(
+                type(value) is not int or not 0 <= value <= 2**63 - 1 for value in usage.values()
+            )
+        ):
+            raise ValueError("ModelResponse usage requires nonnegative native token counters")
+        captured = {key: usage.get(key, 0) for key in fields}
+        if "total_tokens" not in usage:
+            captured["total_tokens"] = captured["input_tokens"] + captured["output_tokens"]
+            if captured["total_tokens"] > 2**63 - 1:
+                raise ValueError("ModelResponse total token count exceeds native capacity")
+        return captured
+    finally:
+        del usage
 
 
 @dataclass(frozen=True, slots=True)

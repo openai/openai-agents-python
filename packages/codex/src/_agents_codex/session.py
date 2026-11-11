@@ -1029,7 +1029,6 @@ class _Submission:
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
     model_failure: _ModelFailure | None = field(default=None, repr=False)
-    model_generation_error: BaseException | None = field(default=None, repr=False)
     handle: Turn[Any] | None = None
     issued: Turn[Any] | None = None
     task: asyncio.Task[None] | None = None
@@ -1140,7 +1139,6 @@ class _ChildCallbacks:
     observed: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
     model_failure: _ModelFailure | None = field(default=None, repr=False)
-    model_generation_error: BaseException | None = field(default=None, repr=False)
     completion: asyncio.Future[Any] = field(default_factory=_future)
     task: asyncio.Task[None] | None = None
     continuation: asyncio.Future[None] | None = None
@@ -10745,17 +10743,17 @@ class Session(Generic[ContextT, OutputT]):
                     parent = self._usage_roots.get(origin)
                     if parent is not None and parent is not state.run_usage:
                         parent.attach(state.run_usage)
-        if kind == "raw_response_completed" and event["id"] == state.handle.turn_id:
-            state.run_usage.observe(message.get("token_usage"), message.get("model_attempt_id"))
-        state.native_instance = event["subagent_instance_id"]
-        if not state.observed.done():
-            state.observed.set_result(None)
         if kind == "_sdk_model_attempt":
             if message["data"]["phase"] == "started":
                 state.model_failure = None
             state.run_usage.attach(state.model_run_usage)
             state.model_run_usage.replace_model_attempt(message["data"])
             return
+        if kind == "raw_response_completed" and event["id"] == state.handle.turn_id:
+            state.run_usage.observe(message.get("token_usage"), message.get("model_attempt_id"))
+        state.native_instance = event["subagent_instance_id"]
+        if not state.observed.done():
+            state.observed.set_result(None)
         if kind == "raw_response_item":
             self._release_terminal_observation(state, message["item"])
         self._observe_mcp(event, state)
@@ -10829,15 +10827,13 @@ class Session(Generic[ContextT, OutputT]):
             state.model_run_usage.replace_model_attempt(snapshot, final=True)
         failure = state.model_failure
         selected = state.model_run_usage.model_terminal_attempt_id
-        error = state.model_generation_error
         if selected is not None and not state.failure.done():
             if failure is None:
                 raise NativeError("Native terminal has no retained provider error")
             error = failure.selected_error(selected)
-        if error is not None and not state.stopping and not state.failure.done():
-            state.failure.set_result(error)
+            if not state.stopping:
+                state.failure.set_result(error)
         state.model_failure = None
-        state.model_generation_error = None
 
     async def _decide_model_retry(self, state: _CallbackState, message: dict[str, Any]) -> None:
         invocation = _invocation.get()
@@ -12432,11 +12428,7 @@ class Session(Generic[ContextT, OutputT]):
                             child.policy_stop = (
                                 "expired" if message.get("policy_stop") is True else None
                             )
-                            error = _model_failure_error(message)
-                            if child.model_run_usage.model_usage is not None:
-                                child.model_generation_error = error
-                            else:
-                                child.failure.set_result(error)
+                            child.failure.set_result(_model_failure_error(message))
                     continue
                 if message.get("type") == "_sdk_model_retry" and message["thread"] != self.id:
                     child = self._child_callback_state(
@@ -12688,11 +12680,7 @@ class Session(Generic[ContextT, OutputT]):
                         state.policy_stop = (
                             "expired" if message.get("policy_stop") is True else None
                         )
-                        error = _model_failure_error(message)
-                        if state.model_run_usage.model_usage is not None:
-                            state.model_generation_error = error
-                        else:
-                            state.failure.set_result(error)
+                        state.failure.set_result(_model_failure_error(message))
                 elif kind == "_sdk_model_retry":
                     self._start_native_callback(
                         state,
@@ -14674,8 +14662,11 @@ class Session(Generic[ContextT, OutputT]):
                     encoded = await self._native._seal_manual(include_model_attempt=True)
                 native_sealed = True
                 sealed = json.loads(encoded)
-                payload = sealed["checkpoint"]
-                model_attempt = sealed["model_attempt"]
+                if sealed is None:
+                    payload = None
+                else:
+                    payload = sealed["checkpoint"]
+                    model_attempt = sealed["model_attempt"]
             if active is not None:
                 if payload is None:
                     pre_seal_refused = True
