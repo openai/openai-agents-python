@@ -33,7 +33,7 @@ async def next_request(session, tool):
 
 
 @pytest.mark.parametrize("profile", [False, True])
-@pytest.mark.parametrize("mode", ["retry", "timeout"])
+@pytest.mark.parametrize("mode", ["retry", "timeout", "invocation"])
 async def test_manual_restore_uses_current_attempt_authority(profile, mode):
     lookup = FunctionTool(name="lookup", description="Read", input_type=Lookup, output_type=str)
     calls = []
@@ -47,17 +47,19 @@ async def test_manual_restore_uses_current_attempt_authority(profile, mode):
                 return ModelResponse([function_call("lookup", {"key": "A"}, "manual")["item"]])
             if mode == "retry" and len(calls) == initial_requests + 1:
                 raise ConnectionError("synthetic manual continuation failure")
-            if mode == "timeout":
+            if mode in {"timeout", "invocation"}:
                 try:
                     await asyncio.sleep(2.0)
                 finally:
                     retired.append(True)
             return ModelResponse([assistant_output("unexpected replay")["item"]])
 
+    deadline = "invocation_timeout_ms" if mode == "invocation" else "attempt_timeout_ms"
+
     def declaration(provider, *, current):
         settings = {
             "retry": ModelRetrySettings(max_retries=0 if current else 3, policy=lambda _: True),
-            "attempt_timeout_ms": (None if mode == "retry" else 1000) if current else 5000,
+            deadline: (None if mode == "retry" else 1000) if current else 5000,
         }
         worker = Agent(
             name="Worker",
@@ -78,7 +80,7 @@ async def test_manual_restore_uses_current_attempt_authority(profile, mode):
             provider=provider,
             model_settings={
                 "retry": ModelRetrySettings(max_retries=7, policy=lambda _: True),
-                "attempt_timeout_ms": 5000,
+                deadline: 5000,
             },
         )
 
@@ -97,10 +99,14 @@ async def test_manual_restore_uses_current_attempt_authority(profile, mode):
             for row in document["history"]:
                 payload = row.get("payload", {})
                 if payload.get("type") == "thread_settings_applied":
-                    controls = payload["thread_settings"].setdefault("request_controls", {})
+                    settings = payload["thread_settings"]
+                    controls = settings.setdefault("request_controls", {})
                     retry = controls.setdefault("retry", {})
                     retry["max_retries"] = 3
-                    controls["attempt_timeout_ms"] = 5000
+                    if mode == "invocation":
+                        settings[deadline] = 5000
+                    else:
+                        controls[deadline] = 5000
                     changed += 1
             assert changed
             saved = SessionState.from_json(json.dumps(document))
@@ -116,5 +122,5 @@ async def test_manual_restore_uses_current_attempt_authority(profile, mode):
                 await request.respond("answer")
                 await restored.restored_turn.get_result()
         assert len(calls) == initial_requests + 1
-        if mode == "timeout":
+        if mode in {"timeout", "invocation"}:
             assert retired == [True]

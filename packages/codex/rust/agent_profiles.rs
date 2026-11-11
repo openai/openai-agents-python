@@ -370,6 +370,19 @@ struct PersistedProfile {
     model: AgentProfileModelSettings,
 }
 
+fn rebind_attempt_controls(
+    mut saved: AgentProfileModelSettings,
+    current: &AgentProfileModelSettings,
+) -> AgentProfileModelSettings {
+    saved
+        .request_controls
+        .retry
+        .clone_from(&current.request_controls.retry);
+    saved.request_controls.attempt_timeout_ms = current.request_controls.attempt_timeout_ms;
+    saved.invocation_timeout_ms = current.invocation_timeout_ms;
+    saved
+}
+
 pub(crate) fn profile_receipt(value: &Value) -> Result<AgentProfileReceipt> {
     let source: PersistedProfile = serde_json::from_value(value.clone())
         .map_err(|_| anyhow::anyhow!("Invalid restored Agent receipt"))?;
@@ -1059,7 +1072,11 @@ pub(crate) async fn configure(
     let mut profiles = BTreeMap::new();
     for descriptor in &opening.roster {
         let model = if descriptor.id == opening.root_id {
-            opening_model.clone()
+            if restored {
+                rebind_attempt_controls(opening_model.clone(), &descriptor.model)
+            } else {
+                opening_model.clone()
+            }
         } else {
             descriptor.model.clone()
         };
