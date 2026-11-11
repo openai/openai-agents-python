@@ -587,7 +587,11 @@
     {
       "path": "sdk-realtime-captured-mcp-policy.patch",
       "sha256": "6483f796a3a9329ebde3348ee431b60f4e09278fcfcd79bace8a6ab5627f8a2b"
+    },
+    {
+      "path": "sdk-mcp-forced-choice-captured-binding.patch",
+      "sha256": "4bd3b5089c6843c58c3c8af71f50e488142a1a26ce29d6d5dcc4041cf7ff1985"
     }
   ],
-  "result_tree": "dc527f1740550f07228ff0f728d3b019a4b946fc"
+  "result_tree": "117c8a6363c61081270c91b326336bab0152c74e"
 }
