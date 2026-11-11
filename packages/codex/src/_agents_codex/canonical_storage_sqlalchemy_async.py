@@ -14,6 +14,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
+from ._legacy_history import decode_legacy_item
 from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._storage_driver import _StorageDriver
@@ -154,24 +155,7 @@ class AsyncSQLAlchemySessionStore:
         async def fetch() -> list[dict[str, Any]]:
             async with self._database_lock, self.engine.connect() as connection:
                 rows = (await connection.scalars(query)).all()
-            items = []
-            for row in rows:
-                item = json.loads(row)
-                if not isinstance(item, dict):
-                    raise ValueError("A v0 SQLAlchemy session item must be a JSON object")
-                role = item.get("role")
-                if item.get("type", "message") == "message" and role in (
-                    "user",
-                    "assistant",
-                    "developer",
-                    "system",
-                ):
-                    item["type"] = "message"
-                    if isinstance(content := item.get("content"), str):
-                        kind = "output_text" if role == "assistant" else "input_text"
-                        item["content"] = [{"type": kind, "text": content}]
-                items.append(item)
-            return items
+            return [decode_legacy_item(row) for row in rows]
 
         def read() -> list[dict[str, Any]]:
             self._check_process()

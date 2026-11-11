@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from ._legacy_history import decode_legacy_item
 from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._storage_driver import _StorageDriver
@@ -156,6 +157,25 @@ class RedisSessionStore:
     async def aclose(self) -> None:
         """Close the store after its Sessions have released it."""
         await _join(asyncio.create_task(asyncio.to_thread(self.close)))
+
+    async def read_legacy_history(
+        self, session_id: str, *, key_prefix: str = "agents:session"
+    ) -> list[dict[str, Any]]:
+        """Read v0 Redis list items in insertion order for native history import.
+
+        Finish writes to the v0 session before reading. Import the items with
+        the current revision of an empty native Session's `transact_history`.
+        """
+        key = f"{key_prefix}:{session_id}:messages"
+
+        def read() -> list[dict[str, Any]]:
+            self._check_process()
+            with self._mutex:
+                self._check_process()
+                rows = self._driver.call(self.client.lrange, key, 0, -1)
+                return [decode_legacy_item(row) for row in rows]
+
+        return await _join(asyncio.create_task(asyncio.to_thread(read)))
 
     def _keys(self, session_id: str) -> tuple[str, str]:
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()

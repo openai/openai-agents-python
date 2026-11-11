@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from ._legacy_history import decode_legacy_item
 from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._storage_driver import _StorageDriver
@@ -308,6 +309,51 @@ class MongoDBSessionStore:
     async def aclose(self) -> None:
         """Close the store after its Sessions have released it."""
         await _join(asyncio.create_task(asyncio.to_thread(self.close)))
+
+    async def read_legacy_history(
+        self,
+        session_id: str,
+        *,
+        sessions_collection: str = "agent_sessions",
+        messages_collection: str = "agent_messages",
+    ) -> list[dict[str, Any]]:
+        """Read the active v0 generation and its items in insertion order.
+
+        Finish writes to the v0 session before reading. Import the items with
+        the current revision of an empty native Session's `transact_history`.
+        """
+        from pymongo import ReadPreference
+
+        database = self.collection.database
+        sessions = database[sessions_collection].with_options(
+            read_preference=ReadPreference.PRIMARY
+        )
+        messages = database[messages_collection].with_options(
+            read_preference=ReadPreference.PRIMARY
+        )
+
+        def read() -> list[dict[str, Any]]:
+            self._check_process()
+            with self._mutex:
+                self._check_process()
+                selector: dict[str, Any] = {"session_id": session_id}
+                head = self._driver.call(sessions.find_one, selector, {"_generation": 1})
+                generation = head.get("_generation") if head is not None else None
+                selector["generation"] = (
+                    generation if isinstance(generation, int) and generation else {"$in": [0, None]}
+                )
+
+                def rows() -> Any:
+                    return messages.find(selector, {"message_data": 1}).sort("seq", 1).to_list()
+
+                items = []
+                for row in self._driver.call(rows):
+                    batch = row["message_data"]
+                    records = batch if isinstance(batch, list) else [batch]
+                    items.extend(decode_legacy_item(item) for item in records)
+                return items
+
+        return await _join(asyncio.create_task(asyncio.to_thread(read)))
 
 
 _preserve_module_identity(globals(), "agents.canonical_storage")

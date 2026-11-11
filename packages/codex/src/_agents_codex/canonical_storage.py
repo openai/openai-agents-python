@@ -21,6 +21,7 @@ from dataclasses import dataclass as dataclass
 from pathlib import Path as Path
 from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable
 
+from ._legacy_history import decode_legacy_item as _decode_legacy_item
 from ._lifecycle import _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolOutput as ToolOutput
@@ -210,6 +211,34 @@ class SQLiteSessionStore:
             connection.execute("PRAGMA user_version=1")
         with _stores_mutex:
             _stores.add(self)
+
+    @staticmethod
+    async def read_legacy_history(
+        path: Path,
+        session_id: str,
+        *,
+        messages_table: str = "agent_messages",
+    ) -> list[dict[str, Any]]:
+        """Read a v0 SQLite file in insertion order for native history import.
+
+        Finish writes to the v0 session before reading. Import the items with
+        the current revision of an empty native Session's `transact_history`.
+        """
+        table = '"' + messages_table.replace('"', '""') + '"'
+
+        def read() -> list[dict[str, Any]]:
+            uri = f"{path.resolve().as_uri()}?mode=ro"
+            connection = sqlite3.connect(uri, uri=True)
+            try:
+                rows = connection.execute(
+                    f"SELECT message_data FROM {table} WHERE session_id = ? ORDER BY id",
+                    (session_id,),
+                )
+                return [_decode_legacy_item(row[0]) for row in rows]
+            finally:
+                connection.close()
+
+        return await _join(asyncio.create_task(asyncio.to_thread(read)))
 
     def _check_database(self, *, create: bool = False) -> None:
         if sys.platform == "win32":
