@@ -579,7 +579,11 @@
     {
       "path": "sdk-cold-child-workspace-user-instructions.patch",
       "sha256": "cd6a420cdec6aa3b3663aef30f9d7aec10ee58a34eea46b1bc47045279b2dd64"
+    },
+    {
+      "path": "sdk-realtime-captured-mcp-policy.patch",
+      "sha256": "6483f796a3a9329ebde3348ee431b60f4e09278fcfcd79bace8a6ab5627f8a2b"
     }
   ],
-  "result_tree": "dc21b4df20228e898919f0c90fc681e69ae936d5"
+  "result_tree": "e054e1d46aabe17ceea3eede9298b94975b042a6"
 }

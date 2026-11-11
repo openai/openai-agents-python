@@ -351,14 +351,22 @@ async def test_unpublished_voice_mcp_uses_its_captured_raw_selector(
             ) as owner,
         ):
             initial = await voice.frame(lambda frame: frame["type"] == "session.update")
-            name = initial["session"]["tools"][0]["name"]
+            name = next(
+                tool["name"]
+                for tool in initial["session"]["tools"]
+                if tool["name"].startswith("mcp__records__")
+            )
             assert name == "mcp__records__a_b"
             start = len(voice.frames)
             await owner.update_agent(target)
             updated = await voice.frame(
                 lambda frame: frame["type"] == "session.update", after=start
             )
-            assert [tool["name"] for tool in updated["session"]["tools"]] == [name]
+            assert [
+                tool["name"]
+                for tool in updated["session"]["tools"]
+                if tool["name"].startswith("mcp__records__")
+            ] == [name]
             await voice.function(name, {"key": "target"}, "target-raw-selector")
             result = await voice.frame(
                 lambda frame: frame.get("item", {}).get("call_id") == "target-raw-selector"

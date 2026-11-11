@@ -968,7 +968,8 @@ async def test_global_voice_policy_keeps_target_source_and_handoff_kind(realtime
         updated = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
         assert updated["session"]["instructions"] == "Global B"
         assert updated["session"]["prompt"] == {"id": "target-prompt"}
-        assert {tool["name"] for tool in updated["session"]["tools"]} == {"transfer_to_c"}
+        names = {tool["name"] for tool in updated["session"]["tools"]}
+        assert "transfer_to_c" in names and "ordinary" not in names
         assert ("B", "handoff", "transfer_to_c") in tools_seen
         assert ("B", "function", "ordinary") in tools_seen
         start = len(peer.frames)
@@ -995,20 +996,18 @@ async def test_global_voice_policy_keeps_target_source_and_handoff_kind(realtime
         assert peer.responses.requests == []
 
 
-async def test_updated_voice_agent_retains_session_output_guard(realtime_peer):
+@pytest.mark.parametrize("updated", [False, True], ids=["opening", "updated"])
+async def test_session_output_guard_covers_backend_after_voice_update(realtime_peer, updated):
     from agents import GuardrailResult, OutputGuardrail
 
     peer = realtime_peer
     checked = []
 
-    @function_tool(finish_turn=True)
-    def finish_voice() -> str:
-        return "guarded-result"
-
     def check(completion, agent):
-        checked.append((completion.output, agent.name))
+        checked.append((completion.final_output, agent.name))
         return GuardrailResult(False)
 
+    peer.responses.respond(*text_response("guarded-backend", "guarded-result"))
     async with (
         timeout(15),
         NativeProvider(
@@ -1016,19 +1015,24 @@ async def test_updated_voice_agent_retains_session_output_guard(realtime_peer):
             api_key="synthetic-global-voice-output-guard",
             supports_websockets=False,
         ) as provider,
-        Agent(name="A", instructions="Root", provider=provider).session(
-            output_guardrails=(OutputGuardrail("global-voice", check),)
-        ) as session,
+        Agent(
+            name="A" if updated else "B",
+            instructions="Root",
+            provider=provider,
+        ).session(output_guardrails=(OutputGuardrail("global-voice", check),)) as session,
         session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
     ):
         await peer.frame(lambda frame: frame["type"] == "session.update")
-        target = Agent(name="B", instructions="Target", tools=[finish_voice])
-        await voice.update_agent(target)
-        await peer.function("finish_voice", {}, "voice-global-guard")
+        target = Agent(name="B", instructions="Target")
+        if updated:
+            await voice.update_agent(target)
+        backend = await session.get_active_agent()
+        await peer.handoff("Complete the guarded backend task", call_id="voice-global-guard")
         result = await peer.frame(
             lambda frame: frame.get("item", {}).get("call_id") == "voice-global-guard"
         )
         assert result["item"]["output"] == "guarded-result"
-        assert checked == [("guarded-result", "B")]
-        assert await voice.get_active_agent() is target
-        assert peer.responses.requests == []
+        assert checked == [("guarded-result", backend.name)]
+        if updated:
+            assert await voice.get_active_agent() is target
+        assert len(peer.responses.requests) == 1
