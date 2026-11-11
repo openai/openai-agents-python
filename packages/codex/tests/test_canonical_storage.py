@@ -413,8 +413,13 @@ async def test_reconcile_rejects_invalid_output_before_native_acquisition(
 
     calls = []
 
-    async def reconcile(*args):
+    class Operation:
+        async def run(self):
+            pass
+
+    def reconcile(*args):
         calls.append(args)
+        return Operation()
 
     monkeypatch.setattr(_native, "reconcile_canonical_store", reconcile)
     store = SQLiteSessionStore(tmp_path / "history.sqlite")
@@ -427,6 +432,16 @@ async def test_reconcile_rejects_invalid_output_before_native_acquisition(
             turn_id="turn",
             call_id="call",
             output=ToolOutput([{"type": "unknown"}]),
+        )
+    with pytest.raises(ValueError, match="application data"):
+        await storage.reconcile(
+            session_id="session",
+            turn_id="turn",
+            call_id="call",
+            output=ToolOutput(
+                [{"type": "inputText", "text": "verified"}],
+                application_data={"receipt": "application-only"},
+            ),
         )
     assert calls == []
     assert not store._owners

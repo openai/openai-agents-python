@@ -159,6 +159,7 @@ class CustomStorage:
         Close the Session first. Check authoritative external records, then pass
         the actual string or ToolOutput result, preserving its original identity.
         Structured content and explicit failure retain their original meaning.
+        Model-visible content only. Application data requires a live Session.
         This operation acquires exclusive ownership and never runs the tool.
         A known receipt cannot be replaced. Reopen with current tools afterward.
         If cleanup fails, get_cleanup(error) returns an owner whose aclose()
@@ -170,6 +171,10 @@ class CustomStorage:
             raise TypeError("output must be str or ToolOutput")
         response = ToolOutput.text(output) if isinstance(output, str) else output
         response._validate()
+        if response.application_data is not None:
+            raise ValueError(
+                "Canonical store reconciliation requires a result without application data"
+            )
         operation = _native.reconcile_canonical_store(
             self.backend, session_id, turn_id, call_id, json.dumps(response.to_native())
         )
