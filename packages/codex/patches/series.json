@@ -625,6 +625,14 @@
       "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     },
     {
+      "path": "0160-sdk-realtime-event-context.patch",
+      "sha256": "1c8909ef7718231b9b1fc54154617565751b6b7f67d2e3bd0211a8f1c7ced112"
+    },
+    {
+      "path": "0161-sdk-realtime-call-metadata.patch",
+      "sha256": "fa87c499a02627ab02b834e07014a1e0c594adcf72833a3a0722f798d6dde80c"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
       "sha256": "68668e758695b7f95164852c62a310cf0fd9bc78d310145ebe81b17fa8aa1eb9"
     },
@@ -665,6 +673,10 @@
       "sha256": "4a2fcdee2635a88dcfb17c3d060ccee894a5a2adae5f12bc6cccdf82401e5c8c"
     },
     {
+      "path": "sdk-provider-hosted-replay-fence.patch",
+      "sha256": "94ba7f728d2769a754ae6241372104d057f9d43d7436db8c386a4c81c0a127bb"
+    },
+    {
       "path": "sdk-stored-owner-retirement.patch",
       "sha256": "6e2609766301ec2703199766402600eed66ada05e9ae5d497d7f46542dae76a5"
     },
@@ -681,5 +693,5 @@
       "sha256": "69a74476497a8189f717036a231c5f48a3e391dc06191693dc7507851c81e7dc"
     }
   ],
-  "result_tree": "9d4daff0102a7e9530ca88e9fadd97131efa76d6"
+  "result_tree": "64e5991397e86ff2423f14907bba838506c2199d"
 }
