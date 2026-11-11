@@ -3755,7 +3755,7 @@ class Session(Generic[ContextT, OutputT]):
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
                 def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
-                    private_text = (
+                    private_run = (
                         _atomic_first_turn
                         and observation_retention == "bounded"
                         and context is None
@@ -3763,19 +3763,20 @@ class Session(Generic[ContextT, OutputT]):
                         and provider is not None
                         and provider.model_backend is None
                         and provider.auth is None
-                        and not available
                         and not agent.handoffs
                         and _tracing_context is None
                         and (agent.output_type is None or agent.output_type is str)
                         and not output.max_retries
                     )
-                    use_completed_owner = private_text and _completed_input is not None
+                    use_completed_owner = (
+                        private_run and not available and _completed_input is not None
+                    )
                     websockets_enabled = provider._websockets_enabled
                     private_http = False
                     # Conservative subset of SdkModelHttpPool::client eligibility;
                     # explicit CA/proxy profiles keep their existing transport selection.
                     if (
-                        private_text
+                        private_run
                         and (_private_text_run or use_completed_owner)
                         and provider_config["model_provider"] == "native_agent"
                         and provider.supports_websockets is None
