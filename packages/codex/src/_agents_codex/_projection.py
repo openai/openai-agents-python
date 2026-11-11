@@ -560,7 +560,11 @@ class EventProjector:
                 return []
             self._done_items.add(key)
             content = _response_content(
-                [part for part in native["content"] if part["type"] in {"text", "image", "file"}]
+                [
+                    part
+                    for part in native["content"]
+                    if part["type"] in {"text", "image", "file", "audio"}
+                ]
             )
             return [
                 self._event(

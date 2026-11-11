@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from .rate_limits import ApiRateLimits
 from .turn import Turn, _root_turn
+from .usage import RunUsage, _UsageCollector
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -32,6 +33,7 @@ class _CompletedTurnOwner:
         output: str,
         usage: TokenUsageInfo | None,
         observations: Callable[[], _ObservationBuffer],
+        run_usage: RunUsage | None = None,
     ) -> None:
         from .session import Completed, _future
 
@@ -43,6 +45,7 @@ class _CompletedTurnOwner:
         self._buffer: _ObservationBuffer | None = None
         completion = _future()
         turn = cast(Turn[str], _root_turn(self, turn_id, submission_id, completion))
+        object.__setattr__(turn, "_run_usage", _UsageCollector(run_usage))
         self._completed = Completed(turn, output, usage)
         completion.set_result(self._completed)
 

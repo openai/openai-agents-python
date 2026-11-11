@@ -478,7 +478,7 @@ def test_mcp_projection_excludes_unowned_events(boundary: str) -> None:
         _observations=SimpleNamespace(append=events.append),
     )
     handle = SimpleNamespace(turn_id="turn", submission_id="submission")
-    state = SimpleNamespace(handle=handle)
+    state = SimpleNamespace(handle=handle, step_mcp=None, mcp_names={}, mcp_call_names={})
     event = {
         "id": "turn",
         "msg": {
@@ -541,7 +541,13 @@ def test_mcp_end_classification_uses_native_result(result: dict[str, Any], expec
         cast(Any, owner),
         event,
         cast(
-            Any, SimpleNamespace(handle=SimpleNamespace(turn_id="turn", submission_id="submission"))
+            Any,
+            SimpleNamespace(
+                handle=SimpleNamespace(turn_id="turn", submission_id="submission"),
+                step_mcp=None,
+                mcp_names={},
+                mcp_call_names={},
+            ),
         ),
     )
     assert len(events) == 1

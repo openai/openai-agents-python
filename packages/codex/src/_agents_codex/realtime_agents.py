@@ -403,7 +403,12 @@ def _capture_voice_graph(
                 check(session._context)
     catalog = _capture_tools(0, functions, session._context)
     runtimes, roster = _capture_profile_runtimes(
-        profiles, catalog, declaration.instructions, session._context
+        profiles,
+        catalog,
+        declaration.instructions,
+        session._context,
+        session._output_guardrails,
+        session._input_guardrails,
     )
     _complete_profile_mcp(profiles, roster, session._executor)
     return runtimes, roster

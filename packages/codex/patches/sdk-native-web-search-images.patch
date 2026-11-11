@@ -1,0 +1,424 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/config_rpc.rs b/codex-rs/app-server/tests/suite/v2/config_rpc.rs
+index 6387237c..2d9fef83 100644
+--- a/codex-rs/app-server/tests/suite/v2/config_rpc.rs
++++ b/codex-rs/app-server/tests/suite/v2/config_rpc.rs
+@@ -591,6 +591,8 @@ allowed_domains = ["example.com"]
+         tools,
+         ToolsV2 {
+             web_search: Some(WebSearchToolConfig {
++                search_content_types: None,
++                image_settings: None,
+                 context_size: Some(WebSearchContextSize::Low),
+                 blocked_domains: None,
+                 allowed_domains: Some(vec!["example.com".to_string()]),
+@@ -966,6 +968,8 @@ location = { country = "US", city = "New York", timezone = "America/New_York" }
+     assert_eq!(
+         config.tools.expect("tools present").web_search,
+         Some(WebSearchToolConfig {
++            search_content_types: None,
++            image_settings: None,
+             context_size: Some(WebSearchContextSize::High),
+             blocked_domains: None,
+             allowed_domains: Some(vec!["example.com".to_string()]),
+diff --git a/codex-rs/codex-api/src/search.rs b/codex-rs/codex-api/src/search.rs
+index 237e7a7e..619a69c6 100644
+--- a/codex-rs/codex-api/src/search.rs
++++ b/codex-rs/codex-api/src/search.rs
+@@ -1,4 +1,5 @@
+ use crate::common::Reasoning;
++pub use codex_protocol::config_types::WebSearchImageSettings as SearchImageSettings;
+ use codex_protocol::models::ResponseItem;
+ use schemars::JsonSchema;
+ use serde::Deserialize;
+@@ -278,14 +279,6 @@ pub struct SearchFilters {
+     pub blocked_domains: Option<Vec<String>>,
+ }
+ 
+-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+-pub struct SearchImageSettings {
+-    #[serde(skip_serializing_if = "Option::is_none")]
+-    pub max_results: Option<u64>,
+-    #[serde(skip_serializing_if = "Option::is_none")]
+-    pub caption: Option<bool>,
+-}
+-
+ #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+ #[serde(rename_all = "snake_case")]
+ pub enum AllowedCaller {
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index ea0447a7..70409360 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1190,6 +1190,12 @@ impl ModelClient {
+                 codex_tools::ToolSpec::CodeInterpreter(config) if config.include_outputs => {
+                     include.push("code_interpreter_call.outputs".to_string());
+                 }
++                codex_tools::ToolSpec::WebSearch {
++                    search_content_types: Some(content_types),
++                    ..
++                } if content_types.iter().any(|kind| kind == "image") => {
++                    include.push("web_search_call.results".to_string());
++                }
+                 _ => {}
+             }
+         }
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 25ea5d72..2cac85dd 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -761,6 +761,7 @@ fn responses_request_uses_outer_tool_choice_and_requests_hosted_search_sources()
+ 
+     prompt.tool_choice = ToolChoice::Required;
+     prompt.tools = Arc::from([ToolSpec::WebSearch {
++        image_settings: None,
+         external_web_access: Some(false),
+         indexed_web_access: None,
+         filters: None,
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index f9d789e1..9f642ff5 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -236,7 +236,12 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+                 raw_content,
+             }))
+         }
+-        ResponseItem::WebSearchCall { id, action, .. } => {
++        ResponseItem::WebSearchCall {
++            id,
++            action,
++            results,
++            ..
++        } => {
+             let (action, query) = match action {
+                 Some(action) => (action.clone(), web_search_action_detail(action)),
+                 None => (WebSearchAction::Other, String::new()),
+@@ -245,7 +250,7 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+                 id: id.as_deref().unwrap_or_default().to_string(),
+                 query,
+                 action,
+-                results: None,
++                results: results.clone(),
+             }))
+         }
+         ResponseItem::FileSearchCall { id, .. } | ResponseItem::CodeInterpreterCall { id, .. } => {
+diff --git a/codex-rs/core/src/event_mapping_tests.rs b/codex-rs/core/src/event_mapping_tests.rs
+index 3a7eec8c..b754afd8 100644
+--- a/codex-rs/core/src/event_mapping_tests.rs
++++ b/codex-rs/core/src/event_mapping_tests.rs
+@@ -585,6 +585,7 @@ fn parses_reasoning_including_raw_content() {
+ #[test]
+ fn parses_web_search_call() {
+     let item = ResponseItem::WebSearchCall {
++        results: None,
+         id: Some(ResponseItemId::with_suffix("ws", "1")),
+         status: Some("completed".to_string()),
+         action: Some(WebSearchAction::Search {
+@@ -618,6 +619,7 @@ fn parses_web_search_call() {
+ #[test]
+ fn parses_web_search_open_page_call() {
+     let item = ResponseItem::WebSearchCall {
++        results: None,
+         id: Some(ResponseItemId::with_suffix("ws", "open")),
+         status: Some("completed".to_string()),
+         action: Some(WebSearchAction::OpenPage {
+@@ -647,6 +649,7 @@ fn parses_web_search_open_page_call() {
+ #[test]
+ fn parses_web_search_find_in_page_call() {
+     let item = ResponseItem::WebSearchCall {
++        results: None,
+         id: Some(ResponseItemId::with_suffix("ws", "find")),
+         status: Some("completed".to_string()),
+         action: Some(WebSearchAction::FindInPage {
+@@ -678,6 +681,7 @@ fn parses_web_search_find_in_page_call() {
+ #[test]
+ fn parses_partial_web_search_call_without_action_as_other() {
+     let item = ResponseItem::WebSearchCall {
++        results: None,
+         id: Some(ResponseItemId::with_suffix("ws", "partial")),
+         status: Some("in_progress".to_string()),
+         action: None,
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index 60df9f0f..e9a78738 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -56,6 +56,7 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) ->
+ fn external_context_pollution_items_include_web_search_and_tool_search() {
+     let polluting_items = [
+         ResponseItem::WebSearchCall {
++            results: None,
+             id: None,
+             status: Some("completed".to_string()),
+             action: None,
+diff --git a/codex-rs/core/src/tools/hosted_spec.rs b/codex-rs/core/src/tools/hosted_spec.rs
+index af7cdf80..bce551f3 100644
+--- a/codex-rs/core/src/tools/hosted_spec.rs
++++ b/codex-rs/core/src/tools/hosted_spec.rs
+@@ -19,15 +19,18 @@ pub fn create_web_search_tool(options: WebSearchToolOptions<'_>) -> Option<ToolS
+         Some(WebSearchMode::Disabled) | None => return None,
+     };
+ 
+-    let search_content_types = match options.web_search_tool_type {
+-        WebSearchToolType::Text => None,
+-        WebSearchToolType::TextAndImage => Some(
+-            WEB_SEARCH_TEXT_AND_IMAGE_CONTENT_TYPES
+-                .into_iter()
+-                .map(str::to_string)
+-                .collect(),
+-        ),
+-    };
++    let search_content_types = options
++        .web_search_config
++        .and_then(|config| config.search_content_types.clone())
++        .or_else(|| match options.web_search_tool_type {
++            WebSearchToolType::Text => None,
++            WebSearchToolType::TextAndImage => Some(
++                WEB_SEARCH_TEXT_AND_IMAGE_CONTENT_TYPES
++                    .into_iter()
++                    .map(str::to_string)
++                    .collect(),
++            ),
++        });
+ 
+     Some(ToolSpec::WebSearch {
+         external_web_access: Some(external_web_access),
+@@ -42,6 +45,9 @@ pub fn create_web_search_tool(options: WebSearchToolOptions<'_>) -> Option<ToolS
+             .web_search_config
+             .and_then(|config| config.search_context_size),
+         search_content_types,
++        image_settings: options
++            .web_search_config
++            .and_then(|config| config.image_settings.clone()),
+     })
+ }
+ 
+diff --git a/codex-rs/core/src/tools/hosted_spec_tests.rs b/codex-rs/core/src/tools/hosted_spec_tests.rs
+index fb401fe8..db2fd840 100644
+--- a/codex-rs/core/src/tools/hosted_spec_tests.rs
++++ b/codex-rs/core/src/tools/hosted_spec_tests.rs
+@@ -1,6 +1,7 @@
+ use super::*;
+ use codex_protocol::config_types::WebSearchContextSize;
+ use codex_protocol::config_types::WebSearchFilters;
++use codex_protocol::config_types::WebSearchImageSettings;
+ use codex_protocol::config_types::WebSearchUserLocation;
+ use codex_protocol::config_types::WebSearchUserLocationType;
+ use codex_tools::ResponsesApiWebSearchFilters;
+@@ -25,6 +26,11 @@ fn web_search_tool_preserves_configured_options() {
+                     timezone: Some("America/Los_Angeles".to_string()),
+                 }),
+                 search_context_size: Some(WebSearchContextSize::Low),
++                search_content_types: Some(vec!["image".to_string()]),
++                image_settings: Some(WebSearchImageSettings {
++                    max_results: Some(3),
++                    caption: Some(false),
++                }),
+             }),
+             web_search_tool_type: WebSearchToolType::TextAndImage,
+         }),
+@@ -43,7 +49,11 @@ fn web_search_tool_preserves_configured_options() {
+                 timezone: Some("America/Los_Angeles".to_string()),
+             }),
+             search_context_size: Some(WebSearchContextSize::Low),
+-            search_content_types: Some(vec!["text".to_string(), "image".to_string()]),
++            search_content_types: Some(vec!["image".to_string()]),
++            image_settings: Some(WebSearchImageSettings {
++                max_results: Some(3),
++                caption: Some(false),
++            }),
+         })
+     );
+ }
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index 8962d623..92137532 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -3074,6 +3074,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
+     assert_eq!(
+         live_web_search.visible_spec("web_search"),
+         &ToolSpec::WebSearch {
++            image_settings: None,
+             external_web_access: Some(true),
+             indexed_web_access: None,
+             filters: None,
+@@ -3174,6 +3175,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
+     assert_eq!(
+         bedrock_cached_web_search.visible_spec("web_search"),
+         &ToolSpec::WebSearch {
++            image_settings: None,
+             external_web_access: Some(false),
+             indexed_web_access: None,
+             filters: None,
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index fb2bc546..2d687472 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -3223,6 +3223,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+         internal_chat_message_metadata_passthrough: None,
+     });
+     prompt.input.push(ResponseItem::WebSearchCall {
++        results: None,
+         id: Some(ResponseItemId::with_suffix("ws", "web-search-id")),
+         status: Some("completed".into()),
+         action: Some(WebSearchAction::Search {
+diff --git a/codex-rs/protocol/src/config_types.rs b/codex-rs/protocol/src/config_types.rs
+index 3ee75c70..c1c5232e 100644
+--- a/codex-rs/protocol/src/config_types.rs
++++ b/codex-rs/protocol/src/config_types.rs
+@@ -472,6 +472,17 @@ impl WebSearchLocation {
+     }
+ }
+ 
++#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
++#[schemars(deny_unknown_fields)]
++pub struct WebSearchImageSettings {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub max_results: Option<u64>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub caption: Option<bool>,
++}
++
+ #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+ #[schemars(deny_unknown_fields)]
+ pub struct WebSearchToolConfig {
+@@ -481,6 +492,12 @@ pub struct WebSearchToolConfig {
+     #[ts(optional)]
+     pub blocked_domains: Option<Vec<String>>,
+     pub location: Option<WebSearchLocation>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub search_content_types: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub image_settings: Option<WebSearchImageSettings>,
+ }
+ 
+ impl WebSearchToolConfig {
+@@ -501,6 +518,14 @@ impl WebSearchToolConfig {
+                 (None, Some(other_location)) => Some(other_location.clone()),
+                 (None, None) => None,
+             },
++            search_content_types: other
++                .search_content_types
++                .clone()
++                .or_else(|| self.search_content_types.clone()),
++            image_settings: other
++                .image_settings
++                .clone()
++                .or_else(|| self.image_settings.clone()),
+         }
+     }
+ }
+@@ -541,6 +566,12 @@ pub struct WebSearchConfig {
+     pub filters: Option<WebSearchFilters>,
+     pub user_location: Option<WebSearchUserLocation>,
+     pub search_context_size: Option<WebSearchContextSize>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub search_content_types: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub image_settings: Option<WebSearchImageSettings>,
+ }
+ 
+ impl From<WebSearchLocation> for WebSearchUserLocation {
+@@ -565,6 +596,8 @@ impl From<WebSearchToolConfig> for WebSearchConfig {
+                 }),
+             user_location: config.location.map(Into::into),
+             search_context_size: config.context_size,
++            search_content_types: config.search_content_types,
++            image_settings: config.image_settings,
+         }
+     }
+ }
+@@ -991,6 +1024,8 @@ mod tests {
+     #[test]
+     fn web_search_tool_config_merge_prefers_overlay_values() {
+         let base = WebSearchToolConfig {
++            search_content_types: None,
++            image_settings: None,
+             context_size: Some(WebSearchContextSize::Low),
+             blocked_domains: None,
+             allowed_domains: Some(vec!["openai.com".to_string()]),
+@@ -1002,6 +1037,8 @@ mod tests {
+             }),
+         };
+         let overlay = WebSearchToolConfig {
++            search_content_types: None,
++            image_settings: None,
+             context_size: Some(WebSearchContextSize::High),
+             blocked_domains: None,
+             allowed_domains: None,
+@@ -1014,6 +1051,8 @@ mod tests {
+         };
+ 
+         let expected = WebSearchToolConfig {
++            search_content_types: None,
++            image_settings: None,
+             context_size: Some(WebSearchContextSize::High),
+             blocked_domains: None,
+             allowed_domains: Some(vec!["openai.com".to_string()]),
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 39250d28..44ff89b0 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1234,6 +1234,9 @@ pub enum ResponseItem {
+         action: Option<WebSearchAction>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
++        results: Option<Vec<serde_json::Value>>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
+     // Emitted by the Responses API when the agent triggers image generation.
+@@ -4042,6 +4045,7 @@ mod tests {
+         for (json_literal, expected_id, expected_action, expected_status) in cases {
+             let parsed: ResponseItem = serde_json::from_str(json_literal)?;
+             let expected = ResponseItem::WebSearchCall {
++                results: None,
+                 id: expected_id.clone(),
+                 status: expected_status.clone(),
+                 action: expected_action.clone(),
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index b827089b..3eb02d9b 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -8,6 +8,7 @@ use crate::default_namespace_description;
+ use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
+ use codex_protocol::config_types::WebSearchContextSize;
+ use codex_protocol::config_types::WebSearchFilters as ConfigWebSearchFilters;
++use codex_protocol::config_types::WebSearchImageSettings;
+ use codex_protocol::config_types::WebSearchUserLocation as ConfigWebSearchUserLocation;
+ use codex_protocol::config_types::WebSearchUserLocationType;
+ use serde::Serialize;
+@@ -57,6 +58,8 @@ pub enum ToolSpec {
+         #[serde(skip_serializing_if = "Option::is_none")]
+         search_context_size: Option<WebSearchContextSize>,
+         #[serde(skip_serializing_if = "Option::is_none")]
++        image_settings: Option<WebSearchImageSettings>,
++        #[serde(skip_serializing_if = "Option::is_none")]
+         search_content_types: Option<Vec<String>>,
+     },
+     #[serde(rename = "file_search")]
+diff --git a/codex-rs/tools/src/tool_spec_tests.rs b/codex-rs/tools/src/tool_spec_tests.rs
+index 478d2c86..917859e5 100644
+--- a/codex-rs/tools/src/tool_spec_tests.rs
++++ b/codex-rs/tools/src/tool_spec_tests.rs
+@@ -61,6 +61,7 @@ fn tool_spec_name_covers_all_variants() {
+     );
+     assert_eq!(
+         ToolSpec::WebSearch {
++            image_settings: None,
+             external_web_access: Some(true),
+             indexed_web_access: None,
+             filters: None,
+@@ -343,6 +344,7 @@ fn namespace_tool_spec_serializes_expected_wire_shape() {
+ fn web_search_tool_spec_serializes_expected_wire_shape() {
+     assert_eq!(
+         serde_json::to_value(ToolSpec::WebSearch {
++            image_settings: None,
+             external_web_access: Some(true),
+             indexed_web_access: Some(true),
+             filters: Some(ResponsesApiWebSearchFilters {

@@ -1,0 +1,22 @@
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -335,7 +335,7 @@
+         None => (None, None),
+     };
+     let history_snapshot = sess.clone_history().await;
+-    let history_items = history_snapshot.annotated_items();
++    let history_items = history_snapshot.model_items();
+     let compaction_model_hash = compaction_response_id
+         .as_ref()
+         .and_then(|_| turn_context.model_info().comp_hash.clone());
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -627,7 +627,7 @@
+     }
+ 
+     /// Unnormalized model window, excluding the audit prefix before a provider compaction.
+-    fn model_items(&self) -> &[ResponseItemEnvelope] {
++    pub(crate) fn model_items(&self) -> &[ResponseItemEnvelope] {
+         let start = self
+             .items
+             .iter()
