@@ -9554,6 +9554,7 @@ class Session(Generic[ContextT, OutputT]):
                     step_index=state.step_index,
                     budget=state.budget,
                     run_usage=state.run_usage,
+                    guardrail_results=state.guardrail_results,
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
                     operation_refs=state.operation_refs,

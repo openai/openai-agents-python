@@ -35,6 +35,9 @@ _Arguments = RootModel[dict[str, Any]]
 _Binder = Callable[[ContextT, ContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]
 _Approval = Callable[[ToolContext[ContextT]], Allow | Deny | Awaitable[Allow | Deny]]
 _MCP_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_MAX_DISCOVERED_TOOLS = 16_384
+_MAX_DISCOVERED_NAME_BYTES = 4_096
+_MAX_DISCOVERED_NAME_BUDGET = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,8 @@ async def select_mcp_tools(
     Native projected names for model-facing tools; each returned tool's ``ref``
     for native selection. Original peer names for ``tool_names`` and borrowed
     dispatch. Namespace characters: ASCII letters, digits, underscores, or hyphens.
+    The discovered catalog is limited to 16,384 tools, 4,096 UTF-8 bytes per tool
+    name, and 1 MiB of tool-name bytes in total, before native name projection.
 
     Selection and native Session cleanup leave connection ownership with the
     caller. Keep the client's authentication scope stable while its bindings are
@@ -205,8 +210,27 @@ async def select_mcp_tools(
         if filter_context is None
         else await server.list_tools(*filter_context)
     )
+    if len(discovered) > _MAX_DISCOVERED_TOOLS:
+        raise ValueError("MCP discovery exceeds the 16384-tool limit")
     by_name: dict[str, MCPTool] = {}
+    name_budget = 0
     for tool in discovered:
+        if not isinstance(tool.name, str) or not tool.name:
+            raise ValueError("MCP discovery requires nonempty tool names")
+        if len(tool.name) > _MAX_DISCOVERED_NAME_BYTES:
+            raise ValueError("MCP discovery exceeds the 4096-byte tool name limit")
+        name_bytes: int | None
+        try:
+            name_bytes = len(tool.name.encode("utf-8"))
+        except UnicodeError:
+            name_bytes = None
+        if name_bytes is None:
+            raise ValueError("MCP discovery tool names must contain valid Unicode")
+        if name_bytes > _MAX_DISCOVERED_NAME_BYTES:
+            raise ValueError("MCP discovery exceeds the 4096-byte tool name limit")
+        name_budget += name_bytes
+        if name_budget > _MAX_DISCOVERED_NAME_BUDGET:
+            raise ValueError("MCP discovery exceeds the 1048576-byte name budget")
         if tool.name in by_name:
             raise ValueError("MCP discovery returned duplicate tool names")
         by_name[tool.name] = tool

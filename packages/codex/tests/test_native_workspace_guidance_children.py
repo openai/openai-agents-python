@@ -84,7 +84,6 @@ async def test_current_guidance_reaches_cold_grandchild_without_loading_parent_o
                 url=executor.url,
                 headers={"Authorization": "Bearer " + executor.token},
                 cwd=str(cwd or executor.root),
-                tools=(),
             )
 
         @asynccontextmanager
