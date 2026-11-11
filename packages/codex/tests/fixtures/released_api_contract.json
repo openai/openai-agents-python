@@ -1510,7 +1510,7 @@
           "class ShellCommandOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    stdout: str\n    stderr: str\n    outcome: ShellExit | ShellTimeout = Field(discriminator='type')",
           "class ShellOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    output: list[ShellCommandOutput]\n    max_output_length: int | None = Field(default=None, ge=0)",
           "_ShellBinder: TypeAlias = Callable[[_ContextT, object, FunctionTool[Any, Any, Any]], _CapturedFunction]",
-          "def shell_tool(executor: Callable[[ToolContext[_ContextT], ShellCall], ShellOutput | Awaitable[ShellOutput]], *, skills: Sequence[ShellSkill]=(), needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False, before: _BeforePolicy[_ContextT] | None=None, after: _AfterPolicy[_ContextT] | None=None, callback_timeout: float | None=None, error_function: _BodyErrorFormatter[_ContextT] | None=None) -> FunctionTool[ShellCall, ShellOutput, _ShellBinder[_ContextT]]:\n    pass"
+          "def shell_tool(executor: Callable[[ToolContext[_ContextT], ShellCall], ShellOutput | Awaitable[ShellOutput]], *, skills: Sequence[ShellSkill]=(), needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False, before: Callable[[ToolContext[_ContextT]], Allow | Deny | Awaitable[Allow | Deny]] | None=None, callback_timeout: float | None=None, error_function: _BodyErrorFormatter[_ContextT] | None=None) -> FunctionTool[ShellCall, ShellOutput, _ShellBinder[_ContextT]]:\n    pass"
         ],
         "exports": {
           "ShellAction": "agents.shell.ShellAction",
@@ -1527,14 +1527,15 @@
           "from typing import Any, Literal, TypeAlias, TypeVar",
           "from pydantic import BaseModel, ConfigDict, Field",
           "from typing_extensions import TypedDict",
-          "from ._function_tools import FunctionTool, ToolContext, _AfterPolicy, _BeforePolicy, _BodyErrorFormatter",
+          "from ._function_tools import FunctionTool, ToolContext, _BodyErrorFormatter",
+          "from .native_interception import Allow, Deny",
           "from .tools import _CapturedFunction"
         ],
         "references": {
+          "Allow": "agents.native_interception.Allow",
+          "Deny": "agents.native_interception.Deny",
           "FunctionTool": "agents._function_tools.FunctionTool",
           "ToolContext": "agents._function_tools.ToolContext",
-          "_AfterPolicy": "agents._function_tools._AfterPolicy",
-          "_BeforePolicy": "agents._function_tools._BeforePolicy",
           "_BodyErrorFormatter": "agents._function_tools._BodyErrorFormatter",
           "_CapturedFunction": "agents.tools._CapturedFunction"
         }

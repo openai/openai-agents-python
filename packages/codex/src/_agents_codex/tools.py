@@ -576,6 +576,9 @@ class _CapturedFunction:
             arguments = deepcopy(arguments)
         return self.model.model_validate(arguments)
 
+    def _parse_replacement(self, arguments: Any, /) -> BaseModel:
+        return self._parse_arguments(arguments)
+
     def _arguments(self, parsed: BaseModel) -> dict[str, Any]:
         return {name: getattr(parsed, name) for name in self.field_names}
 

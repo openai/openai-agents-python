@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
 from agents import (
     Agent,
+    Allow,
+    NativeError,
+    ReplaceArguments,
     SessionState,
     ShellCall,
     ShellCommandOutput,
@@ -15,6 +19,7 @@ from agents import (
     ShellOutput,
     ShellSkill,
     ToolContext,
+    ToolOutput,
     shell_tool,
 )
 from tests._asyncio import timeout
@@ -57,7 +62,7 @@ async def test_application_shell_gates_execution_and_replays_typed_output(
         "description": "Synthetic test skill",
         "path": "/workspace/SKILL.md",
     }
-    tool = shell_tool(execute, skills=[skill], needs_approval=True)
+    tool = shell_tool(execute, skills=[skill], needs_approval=True, before=lambda _: Allow())
     frame = shell_call()
     responses.respond(frame)
     responses.respond(assistant_output("done"))
@@ -117,18 +122,104 @@ async def test_application_shell_gates_execution_and_replays_typed_output(
     assert next(item for item in replayed if item["type"] == "shell_call_output") == output
 
 
-async def test_application_shell_ignores_an_explicit_provider_container_call(
-    responses: ResponsesFixture,
+@pytest.mark.parametrize(
+    "receipt_case",
+    [
+        "paired",
+        "typed-auto",
+        "typed-reference",
+        "unrelated",
+        "duplicate-output",
+        "duplicate-call",
+        "empty-environment",
+        "unknown-environment",
+        "numeric-container",
+        "empty-container",
+        "blank-container",
+    ],
+)
+async def test_application_shell_accepts_only_paired_provider_container_receipts(
+    responses: ResponsesFixture, receipt_case: str
 ) -> None:
     def execute(_context: ToolContext[None], _call: ShellCall) -> ShellOutput:
         pytest.fail("The provider's container call reached the application callback")
 
-    responses.respond(shell_call(container_id="cntr-hosted"), assistant_output("provider done"))
+    item = {
+        "id": "sh_hosted_output",
+        "type": "shell_call_output",
+        "call_id": "shell-other" if receipt_case == "unrelated" else "shell-local",
+        "status": "completed",
+        "output": [{"stdout": "hosted", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}],
+    }
+    hosted_markers = {
+        "typed-auto": {"environment": {"type": "container_auto"}},
+        "typed-reference": {"environment": {"type": "container_reference"}},
+        "empty-environment": {"environment": {}},
+        "unknown-environment": {"environment": {"type": "unknown"}},
+        "numeric-container": {"container_id": 0},
+        "empty-container": {"container_id": ""},
+        "blank-container": {"container_id": " "},
+    }
+    frames = [
+        shell_call(
+            **hosted_markers.get(receipt_case, {"container_id": "cntr-hosted"}),
+            internal_chat_message_metadata_passthrough={"turn_id": "provider-turn"},
+        ),
+        {"type": "response.output_item.done", "item": item},
+    ]
+    if receipt_case == "duplicate-call":
+        frames.insert(1, shell_call(container_id="cntr-hosted", id="sh_duplicate_call"))
+    if receipt_case == "duplicate-output":
+        frames.append(
+            {"type": "response.output_item.done", "item": {**item, "id": "sh_duplicate_output"}}
+        )
+    responses.respond(*frames, assistant_output("provider done"))
     agent = Agent(
         instructions="Use the configured Shell tool.",
         provider=provider(responses),
         tools=[shell_tool(execute)],
     )
     async with timeout(30):
-        assert (await agent.run("run in the provider container")).final_output == "provider done"
+        if receipt_case in {"paired", "typed-auto", "typed-reference"}:
+            assert (
+                await agent.run("run in the provider container")
+            ).final_output == "provider done"
+        else:
+            with pytest.raises(
+                NativeError, match="Model returned a receipt for an application shell call"
+            ):
+                await agent.run("run in the provider container")
     assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("raw_shape", [False, True])
+async def test_application_shell_rejects_argument_replacement_before_execution(
+    responses: ResponsesFixture,
+    raw_shape: bool,
+) -> None:
+    def execute(_context: ToolContext[None], _call: ShellCall) -> ShellOutput:
+        pytest.fail("A rejected replacement reached the Shell executor")
+
+    def before(context: ToolContext[None]) -> ReplaceArguments:
+        if raw_shape:
+            return ReplaceArguments(context.effective_arguments["call"].model_dump())
+        return ReplaceArguments(dict(context.effective_arguments))
+
+    responses.respond(shell_call())
+    responses.respond(assistant_output("done"))
+    agent = Agent(
+        instructions="Use the configured Shell tool.",
+        provider=provider(responses),
+        tools=[shell_tool(execute, before=cast(Any, before))],
+    )
+    async with timeout(15):
+        with pytest.raises(TypeError, match="Shell before policies must return Allow or Deny"):
+            await agent.run("Run the test command.")
+
+
+def test_application_shell_rejects_generic_after_replacement() -> None:
+    def execute(_context: ToolContext[None], _call: ShellCall) -> ShellOutput:
+        return ShellOutput(output=[])
+
+    with pytest.raises(TypeError, match="Shell tools require typed ShellOutput from the executor"):
+        replace(shell_tool(execute), after=lambda *_: ToolOutput.text("unstructured"))

@@ -686,8 +686,8 @@
     },
     {
       "path": "sdk-application-shell.patch",
-      "sha256": "ea19e9546b1038555419c639fbe9cc5df0c8e15512076167a274ab1d1e985045"
+      "sha256": "6703c301515da3661c1ebd0812a4fed2f768e8a545b1dd87b8e5da611e4511d4"
     }
   ],
-  "result_tree": "79c7908ce37b5bc5929e46cf52e3e9f70cfdde7d"
+  "result_tree": "71b73aade4ac62ad8c63f008d69dadca0a560ad1"
 }

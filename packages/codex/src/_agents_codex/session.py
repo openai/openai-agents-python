@@ -6887,7 +6887,7 @@ class Session(Generic[ContextT, OutputT]):
                     return
                 if isinstance(decision, ReplaceArguments):
                     prepared_input = deepcopy(decision.arguments)
-                    parsed = function._parse_arguments(prepared_input)
+                    parsed = function._parse_replacement(prepared_input)
                     context = replace(
                         context,
                         effective_arguments=_snapshot_function_arguments(
@@ -13649,7 +13649,7 @@ class Session(Generic[ContextT, OutputT]):
                     return
                 if isinstance(decision, ReplaceArguments):
                     arguments_replaced = True
-                    parsed = entry._parse_arguments(decision.arguments)
+                    parsed = entry._parse_replacement(decision.arguments)
                     kwargs = entry._arguments(parsed)
                     context = replace(
                         context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
