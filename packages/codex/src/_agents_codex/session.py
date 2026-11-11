@@ -903,6 +903,15 @@ class _ManualBoundaryLost(RuntimeError):
     """No settled manual boundary remains at the pre-seal check."""
 
 
+@dataclass(frozen=True, slots=True)
+class ProducedItem:
+    """One accepted assistant or tool item and its producing Agent."""
+
+    item: SessionItem
+    agent: Agent[Any, Any]
+    handoff_target: Agent[Any, Any] | None = None
+
+
 @dataclass(frozen=True)
 class Completed(Generic[OutputT, TurnT]):
     """One completed root or captured child turn.
@@ -935,6 +944,7 @@ class Completed(Generic[OutputT, TurnT]):
     tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
     history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
+    items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
 
     def __post_init__(self) -> None:
@@ -1210,6 +1220,10 @@ class _RestoreDeclaration:
 _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
     "native_restore_declaration", default=None
 )
+
+_produced_items_restore: ContextVar[
+    tuple[Agent[Any, Any], SessionState, asyncio.Task[Any] | None] | None
+] = ContextVar("native_produced_items_restore", default=None)
 
 
 @contextmanager
@@ -4371,6 +4385,14 @@ class Session(Generic[ContextT, OutputT]):
                 session._websockets_enabled = websockets_enabled
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
+                    capture = _produced_items_restore.get()
+                    if (
+                        capture is not None
+                        and capture[0] is policy_agent
+                        and (capture[1] is state or capture[1] == state)
+                        and capture[2] is asyncio.current_task()
+                    ):
+                        session._start_produced_items()
                     session._manual_source_digest = hashlib.sha256(
                         saved.to_json().encode()
                     ).hexdigest()
@@ -4649,6 +4671,7 @@ class Session(Generic[ContextT, OutputT]):
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
+        self._produced_items_started = False
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._profiles: dict[str, _ProfileRuntime] = {}
@@ -7252,6 +7275,51 @@ class Session(Generic[ContextT, OutputT]):
 
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
 
+    def _start_produced_items(self) -> None:
+        if not self._produced_items_started:
+            self._native._start_produced_items()
+            self._produced_items_started = True
+
+    def _take_produced_items(self, turn: Turn[Any]) -> tuple[ProducedItem, ...]:
+        turn_id = turn.turn_id
+        if turn_id is None:
+            raise NativeError("Completed turn has no native identity")
+        try:
+            encoded = self._native._take_produced_items(turn_id)
+        except RuntimeError as error:
+            raise NativeError(str(error)) from error
+        captured = json.loads(encoded)
+        records = [
+            {"type": "turn_context", "payload": {"turn_id": turn_id}},
+            *(entry["record"] for entry in captured),
+        ]
+        item_record_indexes: dict[int, int] = {}
+        tool_success_by_record = {
+            index + 1: entry["tool_success"]
+            for index, entry in enumerate(captured)
+            if isinstance(entry.get("tool_success"), bool)
+        }
+        _, items = project_history(
+            records,
+            self.id,
+            item_record_indexes=item_record_indexes,
+            tool_success_by_record=tool_success_by_record,
+        )
+        produced = []
+        for item in items:
+            entry = captured[item_record_indexes[id(item)] - 1]
+            metadata = entry["record"].get("metadata") or {}
+            handoff = metadata.get("sdk_agent_handoff")
+            target = self._profiles.get(handoff["target_profile_id"]) if handoff else None
+            produced.append(
+                ProducedItem(
+                    item,
+                    self._original_agent_for_profile(entry["agent"]),
+                    target.profile.agent if target is not None else None,
+                )
+            )
+        return tuple(produced)
+
     async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
         """Original JSON object records from an idle Session.
 
@@ -7779,6 +7847,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         return_state: bool = False,
         return_history: bool = False,
+        return_items: bool = False,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
         """Own live replies and Session shutdown for a one-shot run."""
@@ -7900,6 +7969,8 @@ class Session(Generic[ContextT, OutputT]):
                 result = replace(result, state=await self.save_state())
             if return_history:
                 result = replace(result, history=await self._run_history())
+            if return_items:
+                result = replace(result, items=self._take_produced_items(result.turn))
         except BaseException as error:
             await _close_after_error(error, close)
             raise
