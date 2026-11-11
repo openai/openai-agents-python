@@ -1,26 +1,11 @@
-# MCP Filesystem Example
+# Read sample files with an MCP server
 
-This example uses the [filesystem MCP server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem), running locally via `npx`.
+Activate the SDK environment with the [Classic extra](../../../../CLASSIC.md#install-the-classic-extra). Install Node.js with npm so `npx` is available on `PATH`, and set your [OpenAI API key](../../../../docs/published.md#set-an-openai-api-key).
 
-Run it via:
+From the repository root, run the example.
 
-```
-uv run python examples/classic/mcp/filesystem_example/main.py
-```
-
-## Details
-
-The example uses the `MCPServerStdio` class from `agents.classic.mcp`, with the command:
-
-```bash
-npx -y "@modelcontextprotocol/server-filesystem" <samples_directory>
+```sh
+python -m examples.classic.mcp.filesystem_example.main
 ```
 
-It's only given access to the `sample_files` directory adjacent to the example, which contains some sample data.
-
-Under the hood:
-
-1. The server is spun up in a subprocess, and exposes a bunch of tools like `list_directory()`, `read_file()`, etc.
-2. We add the server instance to the Agent via `mcp_servers`.
-3. Each time the agent runs, we call out to the MCP server to fetch the list of tools via `server.list_tools()`.
-4. If the LLM chooses to use an MCP tool, we call the MCP server to run the tool via `server.call_tool()`.
+The script uses `npx` to start the [filesystem MCP server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) with the bundled `sample_files` directory. The first run may need to download the server from npm. The agent lists the files, reads the favorite-books list, and suggests a song from the preferences in the sample data.

@@ -44,7 +44,7 @@ Compile bytecode for every environment before measurement, as shown above. Worke
 
 ## Verify and run a small correctness check
 
-Before execution, verify the eight source hashes and inventory against `benchmark-source-manifest.json`. Keep exactly eight `.py` files in this directory, including `compare.py`; the controller records every Python file. Run ordinary Python without optimization or instrumentation. The controller and worker reject known inherited Python path/home, allocator, preload, profiling and scheduler overrides, including empty environment values. They also reject active Python trace/profile hooks and profiling `-X` options. Clear the listed controls rather than relying on a shell that happens to omit them. `PYTHONSAFEPATH` and the controller's fixed `PYTHONHASHSEED=0` remain supported. These checks cover known controls, not every possible external profiler or modified interpreter.
+Before execution, verify the eight source hashes and inventory against `benchmark-source-manifest.json`. Run ordinary Python without optimization or instrumentation. The controller and worker reject known environment overrides, even when the variables are empty. If a command reports `Unset inherited benchmark overrides`, unset every variable it lists and run the command again. `PYTHONSAFEPATH` and the controller's fixed `PYTHONHASHSEED=0` remain supported.
 
 ```sh
 "$PEER_PY" - "$BENCH" <<'VERIFY'
@@ -63,6 +63,7 @@ VERIFY
   unset PYTHONTRACEMALLOC PYTHONPROFILEIMPORTTIME CPUPROFILE
   unset CPUPROFILE_PER_THREAD_TIMERS CPUPROFILE_TIMER_SIGNAL CPUPROFILESIGNAL
   unset RUST_MIN_STACK TOKIO_WORKER_THREADS SDK_BENCH_EVENT_MODE
+  unset SDK_NATIVE_FIXTURE_BOUNDARY_TRACE OPENAI_AGENTS_NATIVE_WHEEL
   "$PEER_PY" "$BENCH/validate_peer.py" &&
   "$PEER_PY" "$BENCH/compare.py" \
     --v0-python "$STABLE_PY" --v1-python "$NATIVE_PY" \
