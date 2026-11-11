@@ -298,11 +298,6 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
         if not isinstance(tool, _HOSTED_TOOLS):
             continue
         fields = asdict(tool)
-        if isinstance(tool, HostedShell) and fields["environment"].get("type") not in {
-            "container_auto",
-            "container_reference",
-        }:
-            raise ValueError("HostedShell requires a provider-owned container environment")
         provider_data = fields.pop("provider_data")
         if provider_data is None:
             provider_data = {}

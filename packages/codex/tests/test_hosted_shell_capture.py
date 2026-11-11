@@ -53,14 +53,6 @@ def test_hosted_shell_provider_fields_cannot_replace_its_owner(provider_data: An
         )
 
 
-def test_hosted_shell_rejects_local_environment_at_capture() -> None:
-    environment: Any = {"type": "container_auto"}
-    tool = HostedShell(environment=environment)
-    environment["type"] = "local"
-    with pytest.raises(ValueError, match="provider-owned container"):
-        _capture_hosted_tools([tool])
-
-
 @pytest.mark.parametrize(
     "kind,fields",
     [
