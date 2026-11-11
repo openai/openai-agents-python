@@ -658,8 +658,8 @@
     },
     {
       "path": "sdk-model-cohort-core-test-fixtures.patch",
-      "sha256": "7cbb510d137129da06bddbbd0e15fd0a93f137039ca8ccf1f16f8add3c253007"
+      "sha256": "30c218b88cfd15417c664024c6a2039e18c6d4ab8cd65bd9cd8440de9d38b4c5"
     }
   ],
-  "result_tree": "ad4dd2388da483319b6d51e7e6c9f60c3d0e7559"
+  "result_tree": "5d7150119eae82f1434bef2fb3a09e144c8f1022"
 }

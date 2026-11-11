@@ -419,6 +419,12 @@ def project_history(
                 owners = model_owners.setdefault(turn_id, {})
                 owner = owners.setdefault(fact.get("owner_attempt_id"), _UsageCollector())
                 owner.replace_model_attempt(fact)
+            elif event_kind in {"task_complete", "turn_complete", "turn_aborted"}:
+                snapshot = payload.get("model_attempt")
+                if snapshot is not None:
+                    owners = model_owners.setdefault(turn_id, {})
+                    owner = owners.setdefault(snapshot.get("owner_attempt_id"), _UsageCollector())
+                    owner.replace_model_attempt(snapshot, final=True)
             elif event_kind == "raw_response_completed" and payload.get("model_attempt_id") is None:
                 legacy_usage.setdefault(turn_id, _UsageCollector()).observe(
                     payload.get("token_usage")
