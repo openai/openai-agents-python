@@ -76,8 +76,12 @@ async def dispatch_case(mode):
         telemetry.set_tracing_disabled(False)
         assert (await telemetry.force_flush()).status == "success"
     finally:
+        telemetry.set_tracing_disabled(True)
         await telemetry.shutdown()
     rejected = {**original[0], "attributes": {"private": "DISPATCH_PRIVATE_SENTINEL"}}
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await telemetry.dispatch_trace_event(rejected)
+    telemetry.set_tracing_disabled(False)
     with pytest.raises(Exception, match="shutting down") as caught:
         await telemetry.dispatch_trace_event(rejected)
     frame = caught.value.__traceback__

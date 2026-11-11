@@ -1470,6 +1470,9 @@ async def dispatch_trace_event(event: TraceLifecycleEvent) -> None:
             raise RuntimeError("Trace event dispatch cannot run inside a trace processor callback")
         current = _current.get()
         if _tracing_disabled or (current is not None and current.disabled):
+            with _processor_lock:
+                if _processor_closing:
+                    raise RuntimeError("Telemetry has been shutting down")
             return
         encoded = json.dumps(
             event, default=dict, allow_nan=False, ensure_ascii=False, separators=(",", ":")
