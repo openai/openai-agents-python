@@ -47,6 +47,7 @@ enum NativeThreadRegistration {
 pub struct EngineState {
     pub manager: Arc<ThreadManager>,
     runtime_parent: Option<Arc<EngineState>>,
+    telemetry_lease: Option<telemetry::EngineLease>,
     managed_execution: Option<codex_core::config::ManagedExecution>,
     pub context_gate: Arc<AsyncRwLock<()>>,
     pub context_retired: AtomicBool,
@@ -279,7 +280,7 @@ impl EngineState {
             Option<codex_core::config::ManagedExecution>,
         )>,
     ) -> anyhow::Result<Self> {
-        telemetry::engine_starting().await?;
+        let telemetry_lease = telemetry::engine_starting().await?;
         let runtime_json = config::prepare_runtime(&runtime_json)?;
         let (mut config, cloud_config, managed_execution) = match prepared {
             Some(prepared) => prepared,
@@ -643,6 +644,7 @@ impl EngineState {
         let result = Self {
             manager,
             runtime_parent: None,
+            telemetry_lease: Some(telemetry_lease),
             managed_execution,
             context_gate: Arc::new(AsyncRwLock::new(())),
             context_retired: AtomicBool::new(false),
@@ -1598,7 +1600,11 @@ impl EngineState {
 
     pub async fn close(&self) -> anyhow::Result<()> {
         let _guard = self.lifecycle.lock().await;
-        self.close_locked().await
+        self.close_locked().await?;
+        if let Some(lease) = &self.telemetry_lease {
+            lease.retire();
+        }
+        Ok(())
     }
 
     // Only the package worker's lost control channel calls this, after joining
@@ -1664,6 +1670,9 @@ impl EngineState {
         // Never let a suspend or writer error skip the remaining native roots,
         // state DB or Engine teardown (including on a later Engine::drop).
         self.close_locked().await?;
+        if let Some(lease) = &self.telemetry_lease {
+            lease.retire();
+        }
         if let Some(error) = failure {
             return Err(error);
         }

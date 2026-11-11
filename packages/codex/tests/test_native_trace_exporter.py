@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import io
 import json
 import os
@@ -147,6 +148,7 @@ def native_trace_child_env() -> dict[str, str]:
         "native_case",
         "native_deadline_case",
         "native_deadline_reset_case",
+        "native_restart_case",
         "native_outcome_privacy_case",
         "native_auth_case",
         pytest.param("native_batch_case", marks=pytest.mark.serial),
@@ -170,6 +172,46 @@ def test_real_native_capture_policy_and_openai_export(case_name):
         timeout=45,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def native_restart_case():
+    class Recorder:
+        def __init__(self):
+            self.names = []
+
+        def on_trace_event(self, event):
+            self.names.append(event["name"])
+
+    first = Recorder()
+    second = Recorder()
+    await telemetry.configure(processors=[first])
+    with pytest.raises(RuntimeError):
+        await telemetry.configure(processors=[second], restart_after_shutdown=True)
+    native = importlib.import_module("agents._native")
+    with telemetry.trace("before native restart") as before:
+        retired_parent = native.retain_trace_context(before.context._handle)
+    assert (await telemetry.force_flush()).status == "success"
+    live = await native.create_engine("{}", "{}", None)
+    await telemetry.shutdown()
+    with pytest.raises(RuntimeError, match="all Codex clients to close"):
+        await telemetry.configure(processors=[second], restart_after_shutdown=True)
+    await live.close()
+
+    await telemetry.configure(processors=[second], restart_after_shutdown=True)
+    with pytest.raises(RuntimeError, match="retired telemetry provider"):
+        native.start_trace_span(
+            json.dumps({"name": "retired child", "kind": "custom", "parent": retired_parent})
+        )
+    native.release_trace_context(retired_parent)
+    with telemetry.trace("after native restart"):
+        pass
+    assert (await telemetry.force_flush()).status == "success"
+    await telemetry.shutdown()
+
+    assert "before native restart" in first.names
+    assert "after native restart" not in first.names
+    assert "after native restart" in second.names
+    assert "before native restart" not in second.names
 
 
 async def native_case():

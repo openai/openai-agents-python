@@ -1,0 +1,286 @@
+diff --git a/codex-rs/otel/src/provider.rs b/codex-rs/otel/src/provider.rs
+index 8d06696..2986037 100644
+--- a/codex-rs/otel/src/provider.rs
++++ b/codex-rs/otel/src/provider.rs
+@@ -785,12 +785,12 @@ fn build_tracer_provider(
+     ) {
+         crate::sdk_trace_routes::configure_default(false);
+         return Ok(tracer_provider_builder(resource, span_attributes)
+-            .with_span_processor(crate::sdk_trace_routes::RoutedSpanProcessor {
+-                inner: SpanAttributesProcessor {
++            .with_span_processor(crate::sdk_trace_routes::RoutedSpanProcessor::new(
++                SpanAttributesProcessor {
+                     attributes: BTreeMap::new(),
+                 },
+-                default_enabled: false,
+-            })
++                false,
++            ))
+             .build());
+     }
+     let resource_for_builder = resource.clone();
+@@ -821,10 +821,9 @@ fn build_tracer_provider(
+     crate::sdk_trace_routes::configure_default(true);
+     Ok(
+         tracer_provider_builder(&resource_for_builder, span_attributes)
+-            .with_span_processor(crate::sdk_trace_routes::RoutedSpanProcessor {
+-                inner: processor,
+-                default_enabled: true,
+-            })
++            .with_span_processor(crate::sdk_trace_routes::RoutedSpanProcessor::new(
++                processor, true,
++            ))
+             .build(),
+     )
+ }
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 71d0eeb..b0b888e 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex, OnceLock, Weak};
+ use std::time::SystemTime;
+ 
++use crate::sdk_trace_routes::TraceGeneration;
++
+ pub use opentelemetry::trace::FutureExt;
+ use opentelemetry::trace::{SamplingDecision, SamplingResult};
+ use opentelemetry::trace::{
+@@ -246,6 +248,23 @@ pub fn build_span(
+     }
+ }
+ 
++// Serialize manual span creation with a restart so no recording can enter
++// the retiring provider between the live-span check and the route reset.
++static SPAN_ADMISSION: Mutex<()> = Mutex::new(());
++
++pub fn restart_trace_delivery() -> Result<(), String> {
++    let _admission = SPAN_ADMISSION.lock().unwrap_or_else(|e| e.into_inner());
++    let live = handles()
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .values()
++        .any(|handle| handle.context.span().is_recording());
++    if live {
++        return Err("Telemetry restart requires all recording spans to end".into());
++    }
++    crate::sdk_trace_routes::restart_host_trace_delivery()
++}
++
+ struct Handle {
+     context: Context,
+     _registration: Option<Arc<PolicyRegistration>>,
+@@ -268,6 +287,17 @@ fn resolve(handle: &str) -> Result<Arc<Handle>, String> {
+         .cloned()
+         .ok_or_else(|| "Unknown or released native tracing context".into())
+ }
++fn resolve_live(key: &str) -> Result<Arc<Handle>, String> {
++    let handle = resolve(key)?;
++    if handle
++        .context
++        .get::<TraceGeneration>()
++        .is_some_and(|generation| !generation.is_current())
++    {
++        return Err("Native tracing context belongs to a retired telemetry provider".into());
++    }
++    Ok(handle)
++}
+ #[derive(Default, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ struct Options {
+@@ -427,11 +457,12 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+     {
+         return Err("Unsupported native tracing span kind".into());
+     }
+-    let parent = options.parent.as_deref().map(resolve).transpose()?;
++    let _admission = SPAN_ADMISSION.lock().unwrap_or_else(|e| e.into_inner());
++    let parent = options.parent.as_deref().map(resolve_live).transpose()?;
+     let restriction = options
+         .restrictions_parent
+         .as_deref()
+-        .map(resolve)
++        .map(resolve_live)
+         .transpose()?;
+     let inherited = parent.as_ref().and_then(|h| policy_for_context(&h.context));
+     let ambient = restriction
+@@ -441,7 +472,7 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+         .restrictions_parents
+         .iter()
+         .map(|key| {
+-            resolve(key).and_then(|handle| {
++            resolve_live(key).and_then(|handle| {
+                 policy_for_context(&handle.context)
+                     .ok_or_else(|| "Native tracing policy unavailable".into())
+             })
+@@ -518,7 +549,9 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+     if parent_span.is_valid() && trace_id.is_some_and(|id| id != parent_span.trace_id()) {
+         return Err("trace_id does not match the selected parent".into());
+     }
+-    let context = parent_context.with_value(policy);
++    let context = parent_context
++        .with_value(policy)
++        .with_value(TraceGeneration::default());
+     let mut builder =
+         opentelemetry::trace::SpanBuilder::from_name(options.name).with_attributes(attributes);
+     builder.trace_id = trace_id;
+@@ -544,7 +577,7 @@ pub fn trace_span_context(key: &str) -> Result<String, String> {
+     readback(key, resolve(key)?.as_ref())
+ }
+ pub fn retain_trace_context(key: &str) -> Result<String, String> {
+-    let handle = resolve(key)?;
++    let handle = resolve_live(key)?;
+     let key = token("c");
+     handles()
+         .lock()
+@@ -618,7 +651,7 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
+     Ok(())
+ }
+ pub fn context(key: &str) -> Result<Context, String> {
+-    Ok(resolve(key)?.context.clone())
++    Ok(resolve_live(key)?.context.clone())
+ }
+ struct ExplicitSubmissionContext;
+ 
+@@ -655,6 +688,14 @@ pub fn current_context_token() -> Option<String> {
+     // Native lifecycle hooks can inherit private values on the instrumented
+     // span. A W3C round trip would discard those values before policy lookup.
+     let context = crate::trace_context::current_span_context();
++    let generation = context
++        .get::<TraceGeneration>()
++        .copied()
++        .unwrap_or_default();
++    if !generation.is_current() {
++        return None;
++    }
++    let context = context.with_value(generation);
+     let policy = policy_for_context(&context)?;
+     let registration = {
+         let span = context.span();
+diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+index c9abc22..68d4eb7 100644
+--- a/codex-rs/otel/src/sdk_trace_routes.rs
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -7,6 +7,7 @@ use serde::Deserialize;
+ use serde::Serialize;
+ use serde_json::{Value, json};
+ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex, OnceLock};
+ use std::time::{Duration, Instant, UNIX_EPOCH};
+ 
+@@ -61,6 +62,40 @@ fn lock() -> std::sync::MutexGuard<'static, Routes> {
+     state().lock().unwrap_or_else(|e| e.into_inner())
+ }
+ 
++static GENERATION: AtomicU64 = AtomicU64::new(0);
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) struct TraceGeneration(u64);
++
++impl Default for TraceGeneration {
++    fn default() -> Self {
++        Self(GENERATION.load(Ordering::Acquire))
++    }
++}
++
++impl TraceGeneration {
++    pub(crate) fn is_current(self) -> bool {
++        self == Self::default()
++    }
++}
++
++/// Open a new delivery generation after the host has retired the previous provider.
++pub(crate) fn restart_host_trace_delivery() -> Result<(), String> {
++    let mut routes = lock();
++    if !routes.credentials_closed || !routes.pending.is_empty() || !routes.queue.is_empty() {
++        return Err("Telemetry restart requires retired trace delivery".into());
++    }
++    *routes = Routes {
++        sequence: routes.sequence,
++        acknowledged: routes.sequence,
++        delivered: routes.sequence,
++        next_credential: routes.next_credential,
++        ..Routes::default()
++    };
++    GENERATION.fetch_add(1, Ordering::AcqRel);
++    Ok(())
++}
++
+ pub fn register_trace_credentials(input: &str) -> Result<String, String> {
+     if input.len() > 65536 {
+         return Err("trace credential headers exceed limit".into());
+@@ -882,9 +917,21 @@ impl SpanProcessor for TraceBatchProcessor {
+ 
+ #[derive(Debug)]
+ pub(crate) struct RoutedSpanProcessor<P> {
+-    pub(crate) inner: P,
+-    pub(crate) default_enabled: bool,
++    inner: P,
++    default_enabled: bool,
++    generation: TraceGeneration,
++}
++
++impl<P> RoutedSpanProcessor<P> {
++    pub(crate) fn new(inner: P, default_enabled: bool) -> Self {
++        Self {
++            inner,
++            default_enabled,
++            generation: TraceGeneration::default(),
++        }
++    }
+ }
++
+ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+     fn on_start(&self, span: &mut Span, cx: &Context) {
+         let policy = crate::sdk_trace::policy_for_context(cx);
+@@ -893,6 +940,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+         }
+         self.inner.on_start(span, cx);
+         let mut s = lock();
++        if !self.generation.is_current() {
++            return;
++        }
+         if let Some(data) = span.exported_data() {
+             let descriptor =
+                 retained_root_descriptor(&data, "start", policy.as_deref(), s.sequence + 1);
+@@ -913,6 +963,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+             return;
+         }
+         let mut s = lock();
++        if !self.generation.is_current() {
++            return;
++        }
+         let descriptor = retained_root_descriptor(&span, "end", policy.as_deref(), s.sequence + 1);
+         event(
+             &mut s,
+@@ -980,10 +1033,7 @@ mod tests {
+         set_trace_routes(r#"{"processor_ids":["first"],"replace":false}"#).unwrap();
+         let recorder = Recorder::default();
+         let provider = SdkTracerProvider::builder()
+-            .with_span_processor(RoutedSpanProcessor {
+-                inner: recorder.clone(),
+-                default_enabled: true,
+-            })
++            .with_span_processor(RoutedSpanProcessor::new(recorder.clone(), true))
+             .build();
+         let tracer = provider.tracer("route-test");
+         let mut old = tracer.start("old");
+@@ -1429,14 +1479,14 @@ mod tests {
+         let release = Arc::new((Mutex::new(false), Condvar::new()));
+         let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+         let provider = SdkTracerProvider::builder()
+-            .with_span_processor(RoutedSpanProcessor {
+-                inner: Sink {
++            .with_span_processor(RoutedSpanProcessor::new(
++                Sink {
+                     started: started_tx,
+                     release: release.clone(),
+                     admitted: admitted.clone(),
+                 },
+-                default_enabled: true,
+-            })
++                true,
++            ))
+             .build();
+         let tracer = provider.tracer("race");
+         let ending = std::thread::spawn(move || {
