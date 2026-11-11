@@ -331,6 +331,8 @@ class MongoDBSessionStore:
         """
         from pymongo import ReadPreference
 
+        if not isinstance(session_id, str):
+            raise TypeError("session_id must be text")
         validate_legacy_history_limits(max_items, max_bytes)
         database = self.collection.database
         sessions = database[sessions_collection].with_options(

@@ -335,6 +335,13 @@ async def test_imports_v0_mongo_items_and_batches_from_active_generation(generat
                 },
             ]
         )
+        invalid_session_id: Any = {"$ne": None}
+        with pytest.raises(TypeError, match="session_id must be text"):
+            await store.read_legacy_history(
+                invalid_session_id,
+                sessions_collection="heads",
+                messages_collection="messages",
+            )
         items = await store.read_legacy_history(
             "old-session",
             sessions_collection="heads",

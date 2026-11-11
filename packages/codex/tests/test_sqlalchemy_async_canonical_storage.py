@@ -214,3 +214,98 @@ async def test_async_sqlalchemy_serializes_stores_sharing_an_in_memory_engine():
                 await asyncio.to_thread(store.release, session_id, token)
 
         await asyncio.gather(save(stores[0], "first"), save(stores[1], "second"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order_by", ["created_at", "id"])
+async def test_async_sqlalchemy_bounds_legacy_history_before_loading_text(database_url, order_by):
+    from sqlalchemy import TIMESTAMP, Column, Integer, MetaData, String, Table, Text
+
+    metadata = MetaData()
+    messages = Table(
+        f"legacy_limits_{uuid4().hex}",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("session_id", String, nullable=False),
+        Column("message_data", Text, nullable=False),
+        Column("created_at", TIMESTAMP(timezone=False), nullable=False),
+    )
+    payloads = [
+        json.dumps(
+            {"type": "function_call_output", "call_id": str(index), "output": "é" * 20},
+            ensure_ascii=False,
+        )
+        for index in range(3)
+    ]
+    total_bytes = sum(len(payload.encode("utf-8")) for payload in payloads)
+    async with AsyncExitStack() as stack:
+        store = await AsyncSQLAlchemySessionStore.from_url(database_url)
+        stack.push_async_callback(store.aclose)
+        async with store.engine.begin() as connection:
+            await connection.run_sync(metadata.create_all)
+            await connection.execute(
+                messages.insert(),
+                [
+                    {
+                        "id": index + 1,
+                        "session_id": "source",
+                        "message_data": payload,
+                        "created_at": datetime(2026, 1, 3 - index),
+                    }
+                    for index, payload in enumerate(payloads)
+                ],
+            )
+            await connection.execute(
+                messages.insert(),
+                {
+                    "id": 4,
+                    "session_id": "other",
+                    "message_data": "x" * (total_bytes + 1),
+                    "created_at": datetime(2026, 1, 1),
+                },
+            )
+        try:
+            with pytest.raises(ValueError, match="item limit"):
+                await store.read_legacy_history(
+                    "source", messages_table=messages.name, order_by=order_by, max_items=2
+                )
+            with pytest.raises(ValueError, match="byte limit"):
+                await store.read_legacy_history(
+                    "source",
+                    messages_table=messages.name,
+                    order_by=order_by,
+                    max_bytes=total_bytes - 1,
+                )
+            expected = [json.loads(payload) for payload in payloads]
+            if order_by == "created_at":
+                expected.reverse()
+            assert (
+                await store.read_legacy_history(
+                    "source",
+                    messages_table=messages.name,
+                    order_by=order_by,
+                    max_items=3,
+                    max_bytes=total_bytes,
+                )
+                == expected
+            )
+            assert (
+                await store.read_legacy_history(
+                    "absent", messages_table=messages.name, max_items=1, max_bytes=1
+                )
+                == []
+            )
+        finally:
+            async with store.engine.begin() as connection:
+                await connection.run_sync(metadata.drop_all)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["max_items", "max_bytes"])
+@pytest.mark.parametrize("value", [0, -1, True])
+async def test_async_sqlalchemy_validates_legacy_limits(database_url, name, value):
+    async with AsyncExitStack() as stack:
+        store = await AsyncSQLAlchemySessionStore.from_url(database_url)
+        stack.push_async_callback(store.aclose)
+        with pytest.raises(ValueError, match="positive integer"):
+            await store.read_legacy_history("source", **{name: value})
