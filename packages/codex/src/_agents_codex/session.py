@@ -1705,7 +1705,10 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
 async def _call_callback(
     callback: Callable[..., Any], admit: Callable[[], bool], /, *args: Any, **kwargs: Any
 ) -> Any:
-    return await _call_callback_entered(callback, admit, args, kwargs)
+    try:
+        return await _call_callback_entered(callback, admit, args, kwargs)
+    finally:
+        del callback, admit, args, kwargs
 
 
 async def _call_callback_entered(
