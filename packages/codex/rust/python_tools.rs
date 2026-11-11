@@ -1152,9 +1152,35 @@ impl PythonTools {
         flags: [bool; 4],
         _reuse_initial: bool,
     ) -> Result<ProfileCatalog> {
+        self.allocate_profile_catalog(specs, manual_slots, terminal_slots, defaults, flags, true)
+    }
+
+    pub(crate) fn voice_profile_catalog(
+        &self,
+        specs: Vec<DynamicToolSpec>,
+        manual_slots: &[usize],
+        terminal_slots: &[usize],
+        defaults: Option<&[usize]>,
+        flags: [bool; 4],
+    ) -> Result<ProfileCatalog> {
+        self.allocate_profile_catalog(specs, manual_slots, terminal_slots, defaults, flags, false)
+    }
+
+    fn allocate_profile_catalog(
+        &self,
+        specs: Vec<DynamicToolSpec>,
+        manual_slots: &[usize],
+        terminal_slots: &[usize],
+        defaults: Option<&[usize]>,
+        flags: [bool; 4],
+        managed: bool,
+    ) -> Result<ProfileCatalog> {
         // Graph profiles always allocate a fresh identity, including the root.
         let id = self.allocate_generation()?;
-        let mut generation = self.prepare(id, specs)?;
+        // An explicitly admitted voice Agent supplies its own callback catalog.
+        // The opening policy still governs all durable profiles and turns.
+        let policy = managed.then_some(self.policy.as_ref());
+        let mut generation = self.prepare_catalog(id, specs, policy)?;
         generation.set_manual(manual_slots)?;
         generation.set_finish(terminal_slots)?;
         let defaults = generation.default_names(defaults)?;
@@ -1169,7 +1195,9 @@ impl PythonTools {
             "Duplicate native profile catalog generation"
         );
         catalogs.insert(id, Arc::downgrade(&generation));
-        self.managed_profiles.store(true, Ordering::Release);
+        if managed {
+            self.managed_profiles.store(true, Ordering::Release);
+        }
         Ok(ProfileCatalog {
             generation,
             defaults,
@@ -1209,7 +1237,7 @@ impl PythonTools {
         )
     }
 
-    /// Snapshot the exact native declaration owner without tool selection or MCP startup.
+    /// Snapshot the exact native owner, including its captured MCP declarations.
     pub(crate) async fn realtime_selection_snapshot(&self, thread: &CodexThread) -> Result<Value> {
         let profile = thread.captured_agent_profile().await?;
         let generation = match &profile {
@@ -1233,10 +1261,22 @@ impl PythonTools {
             "Expired native selection catalog"
         );
         let receipt = profile.as_ref().map(|profile| &profile.receipt);
+        let (selection_id, function_tools) =
+            thread.realtime_agent_source_selection(None, None).await?;
+        ensure!(
+            selection_id
+                == codex_extension_api::realtime_tool_selection_id(
+                    thread.thread_extension_data().level_id(),
+                    generation.id,
+                    receipt,
+                ),
+            "Realtime source changed during selection snapshot"
+        );
         Ok(json!({
-            "selection_id": codex_extension_api::realtime_tool_selection_id(thread.thread_extension_data().level_id(), generation.id, receipt),
+            "selection_id": selection_id,
             "profile_receipt": receipt,
             "catalog_generation": generation.id,
+            "function_tools": function_tools,
         }))
     }
 
@@ -2107,6 +2147,15 @@ impl PythonTools {
     }
 
     fn prepare(&self, id: u64, specs: Vec<DynamicToolSpec>) -> Result<Generation> {
+        self.prepare_catalog(id, specs, Some(self.policy.as_ref()))
+    }
+
+    fn prepare_catalog(
+        &self,
+        id: u64,
+        specs: Vec<DynamicToolSpec>,
+        policy: Option<&ToolPolicy>,
+    ) -> Result<Generation> {
         validate_declarations(&specs)?;
         let mut entries = Vec::new();
         for (declaration, (namespace, tool)) in specs.iter().zip(functions(&specs)) {
@@ -2117,7 +2166,7 @@ impl PythonTools {
                 "Python tool collides with fixed tool: {key}"
             );
             ensure!(
-                self.policy.allows(&key),
+                policy.is_none_or(|policy| policy.allows(&key)),
                 "Python tool is excluded by ToolPolicy: {key}"
             );
             let mut function = dynamic_tool_to_responses_api_tool(&tool)?;
@@ -2666,7 +2715,7 @@ impl PythonTools {
             return Ok(id);
         }
         ensure!(
-            Some(id) == self.snapshot().id.checked_add(1),
+            Some(id) == self.generation_high_water().checked_add(1),
             "Python tool generation is out of sequence"
         );
         let mut candidate = self.prepare(id, specs)?;
@@ -4951,7 +5000,7 @@ impl PythonContributor {
             .iter()
             .copied()
             .map(|slot| {
-                Arc::new(PythonExecutor {
+                let executor = Arc::new(PythonExecutor {
                     managed_calls: self.managed_calls.clone(),
                     accepted: accepted.clone(),
                     thread: thread.level_id().to_string(),
@@ -4961,7 +5010,14 @@ impl PythonContributor {
                     slot,
                     use_deferred_specs,
                     code_mode_enabled: self.code_mode_enabled,
-                }) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
+                })
+                    as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>;
+                crate::agent_profiles::wrap_handoff_callback(
+                    thread,
+                    profile.as_ref(),
+                    slot,
+                    executor,
+                )
             })
             .collect()
     }
@@ -5035,14 +5091,31 @@ impl ToolContributor for PythonContributor {
             }
             admitted.insert(generation.id, Arc::downgrade(generation));
         }
+        let voice = input.profile.is_some_and(|profile| {
+            profile
+                .profile
+                .data
+                .get::<codex_extension_api::RealtimeVoiceProfileScope>()
+                .is_some()
+        });
+        let allows = |name: &ToolName| voice || tools.policy.allows(name);
         let mut declarations = Vec::new();
         for ((_, raw), entry) in functions(&generation.specs)
             .into_iter()
             .zip(&generation.entries)
         {
-            if !tools.policy.allows(&entry.name)
+            let defaults = if crate::agent_profiles::is_handoff_callback(
+                input.thread_store,
+                input.profile.map(|profile| &profile.receipt),
+                &entry.name,
+            ) {
+                &catalog.handoff_defaults
+            } else {
+                &catalog.defaults
+            };
+            if !allows(&entry.name)
                 || entry.exposure == ToolExposure::Deferred
-                || catalog.defaults.as_ref().is_some_and(|defaults| {
+                || defaults.as_ref().is_some_and(|defaults| {
                     !defaults.iter().any(|name| {
                         name.clone().with_default_namespace()
                             == entry.name.clone().with_default_namespace()
@@ -5079,23 +5152,26 @@ impl ToolContributor for PythonContributor {
                 .get::<codex_extension_api::AgentProfileHandoffTools>()
         }) {
             declarations.extend(
-                crate::agent_profiles::realtime_handoff_declarations(&handoffs)
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .filter(|declaration| {
-                        tools.policy.allows(&declaration.native_name)
-                            && catalog.handoff_defaults.as_ref().is_none_or(|defaults| {
-                                defaults.contains(
-                                    &declaration.native_name.clone().with_default_namespace(),
-                                )
-                            })
-                    }),
+                crate::agent_profiles::realtime_handoff_declarations(
+                    &handoffs,
+                    input.thread_store,
+                    input.profile.map(|profile| &profile.receipt),
+                )
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|declaration| {
+                    allows(&declaration.native_name)
+                        && catalog.handoff_defaults.as_ref().is_none_or(|defaults| {
+                            defaults
+                                .contains(&declaration.native_name.clone().with_default_namespace())
+                        })
+                }),
             );
         }
         if let Some(binding) = input.mcp {
             for info in binding.tools() {
                 let native_name = info.canonical_tool_name();
-                if !tools.policy.allows(&native_name) {
+                if !allows(&native_name) {
                     continue;
                 }
                 let server = binding
@@ -5151,9 +5227,10 @@ impl ToolContributor for PythonContributor {
             }
         }
         let mut execution_data = input.retained_execution_data.cloned().unwrap_or_default();
+        let generation_id = generation.id;
         let selection_id = codex_extension_api::realtime_tool_selection_id(
             input.thread_store.level_id(),
-            catalog.generation.id,
+            generation_id,
             input.profile.map(|profile| &profile.receipt),
         );
         if input.retained_execution_data.is_none() {
@@ -5247,6 +5324,16 @@ impl ToolContributor for PythonContributor {
             });
             if let Some(accepted) = accepted {
                 execution_data.insert(accepted);
+            }
+            if let (Some(control), Some(source)) = (
+                input
+                    .thread_store
+                    .get::<crate::native_interception::Control>(),
+                execution_data.get::<crate::native_interception::ProfileMcpSource>(),
+            ) {
+                execution_data.insert(
+                    control.capture_realtime_mcp_source(source.as_ref().clone(), generation_id),
+                );
             }
         }
         if input.mcp.is_some_and(|binding| !binding.tools().is_empty())

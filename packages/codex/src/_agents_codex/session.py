@@ -2310,8 +2310,19 @@ def _capture_profile_runtimes(
     for index, profile in enumerate(profiles):
         declaration = profile.declaration
         tools, mcp, roles = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
-        catalog = root_catalog if index == 0 else _capture_tools(0, tools, context)
-        _check_handoff_tool_names((tool._ref for tool in catalog.tools), profile.handoffs)
+        catalog = (
+            root_catalog
+            if index == 0 and not profile.handoff_callbacks
+            else _capture_tools(root_catalog.generation if index == 0 else 0, tools, context)
+        )
+        _check_handoff_tool_names(
+            (
+                tool._ref
+                for slot, tool in enumerate(catalog.tools)
+                if slot not in profile.handoff_callbacks.values()
+            ),
+            profile.handoffs,
+        )
         _check_namespaced_tool_collisions(
             tools,
             _tool_names(mcp),
@@ -2341,6 +2352,11 @@ def _capture_profile_runtimes(
                 "terminal_slots": catalog.finish_slots(),
                 "step_defaults": list(range(len(catalog.tools))),
                 "handoffs": dict(profile.handoffs),
+                **(
+                    {"handoff_callbacks": dict(profile.handoff_callbacks)}
+                    if profile.handoff_callbacks
+                    else {}
+                ),
                 "transform_context": declaration.transform_context is not None,
                 "before_compact": declaration.before_compact is not None,
                 "before_complete": _needs_before_complete(
@@ -3144,6 +3160,7 @@ def _capture_opening_agent(
     """Detach declaration defaults before native opening can suspend."""
     return Agent[ContextT, OutputT](
         instructions=agent.instructions,
+        realtime=agent.realtime,
         name=agent.name,
         tools=agent.tools if tool_selection is None else tool_selection,
         handoffs=agent.handoffs,
@@ -4471,8 +4488,10 @@ class Session(Generic[ContextT, OutputT]):
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._profiles: dict[str, _ProfileRuntime] = {}
+        self._voice_profiles: dict[str, _ProfileRuntime] = {}
         self._agent_profile_fingerprint: str | None = None
         self._profile_generation_high_water = catalog.generation
+        self._catalog_publication_lock = asyncio.Lock()
         self._profile_current: tuple[str, int] | None = None
         self._profile_catalogs: dict[tuple[str | None, int], _ToolCatalog] = {
             (None, catalog.generation): catalog
@@ -4601,26 +4620,29 @@ class Session(Generic[ContextT, OutputT]):
         if _start_readers:
             self._start_readers()
 
-    def _start_readers(self) -> None:
-        self._start_interception()
+    def _start_readers(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
+        self._start_interception(pending)
+        if self._mcp_reader is not None:
+            return
+        configured = tuple(profile.profile.declaration for profile in self._profiles.values())
         if any(
             server.transform_result is not None or server.request_metadata is not None
             for server in self._mcp_tools
         ) or any(
             isinstance(tool, _MCP)
             and (tool.transform_result is not None or tool.request_metadata is not None)
-            for profile in self._profiles.values()
-            for tool in profile.profile.declaration.tools
+            for agent in (*configured, *pending)
+            for tool in agent.tools
         ):
             self._mcp_reader = _create_task(self._read_mcp_results())
 
-    def _start_interception(self) -> None:
+    def _start_interception(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         if self._interception is not None:
-            self._interception.refresh()
-        elif _has_interceptors(self):
+            self._interception.refresh(pending)
+        elif _has_interceptors(self, pending):
             self._interception = _NativeInterception(self)
             with _clear_current():
-                self._interception.start()
+                self._interception.start(pending)
 
     @property
     def id(self) -> str:
@@ -4785,6 +4807,7 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _realtime_tool_selection(
         self,
+        snapshot: Mapping[str, Any] | None = None,
     ) -> tuple[
         dict[str, Any],
         Agent[Any, Any],
@@ -4793,7 +4816,11 @@ class Session(Generic[ContextT, OutputT]):
         Sequence[Tool[Any]],
         str,
     ]:
-        snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
+        if snapshot is None:
+            snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
+        if not isinstance(snapshot, Mapping):
+            raise NativeError("Invalid Realtime tool selection snapshot")
+        snapshot = dict(snapshot)
         receipt = snapshot["profile_receipt"]
         source_agent = self._agent_for_profile(receipt)
         generation = snapshot["catalog_generation"]
@@ -4814,21 +4841,30 @@ class Session(Generic[ContextT, OutputT]):
             raise NativeError("Missing Realtime source selection identity")
         return snapshot, source_agent, receipt, catalog, bindings, selection_id
 
-    async def _realtime_policy_source(self) -> _RealtimePolicySource:
+    async def _realtime_policy_source(
+        self, snapshot: Mapping[str, Any] | None = None
+    ) -> _RealtimePolicySource:
         from .realtime import RealtimePolicyContext, RealtimeTool, _RealtimePolicySource
 
         self._check_open()
         self._check_callback_operation("configure Realtime policies in its own Session")
-        _, agent, receipt, catalog, _, selection_id = await self._realtime_tool_selection()
+        _, agent, receipt, catalog, _, selection_id = await self._realtime_tool_selection(snapshot)
+        profile = (
+            self._source_profile_runtime(receipt["profile_id"]).profile
+            if receipt is not None
+            else None
+        )
+        handoffs = dict.fromkeys((*profile.handoffs, *profile.handoff_callbacks)) if profile else {}
         tools = [
-            RealtimeTool("function", spec["name"])
+            RealtimeTool("handoff" if spec["name"] in handoffs else "function", spec["name"])
             for spec in json.loads(catalog.native_specs())
             if spec.get("type") == "function" and isinstance(spec.get("name"), str)
         ]
         if receipt is not None:
             tools.extend(
                 RealtimeTool("handoff", name)
-                for name in self._profiles[receipt["profile_id"]].profile.handoffs
+                for name in handoffs
+                if not any(tool.name == name for tool in tools)
             )
         return _RealtimePolicySource(
             RealtimePolicyContext(agent, self._context), tuple(tools), selection_id
@@ -4840,18 +4876,23 @@ class Session(Generic[ContextT, OutputT]):
         agent = self._agent_for_profile(receipt)
         if receipt is None:
             return None
-        return agent if name in self._profiles[receipt["profile_id"]].profile.handoffs else None
+        profile = self._source_profile_runtime(receipt["profile_id"]).profile
+        return agent if name in profile.handoffs or name in profile.handoff_callbacks else None
 
     async def _realtime_function_tools(
-        self, tools: Sequence[FunctionTool[Any, Any, Any]] | None, *, allow_missing: bool = False
+        self,
+        tools: Sequence[FunctionTool[Any, Any, Any]] | None,
+        *,
+        allow_missing: bool = False,
+        snapshot: Mapping[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]] | None, str | None]:
         """Fence explicit declarations to the exact native source capture."""
         self._check_open()
         self._check_callback_operation("configure Realtime tools in its own Session")
         if tools is None:
-            return None, None
+            return None, snapshot["selection_id"] if snapshot is not None else None
         if not tools:
-            return [], None
+            return [], snapshot["selection_id"] if snapshot is not None else None
         (
             snapshot,
             source_agent,
@@ -4859,7 +4900,7 @@ class Session(Generic[ContextT, OutputT]):
             catalog,
             bindings,
             selection_id,
-        ) = await self._realtime_tool_selection()
+        ) = await self._realtime_tool_selection(snapshot)
         captured = {tool._ref: tool for tool in catalog.tools}
         selected: list[dict[str, Any]] = []
         seen: set[ToolRef] = set()
@@ -4891,6 +4932,14 @@ class Session(Generic[ContextT, OutputT]):
 
     def _agent_for_profile(self, receipt: Mapping[str, Any] | None) -> Agent[Any, Any]:
         """Resolve a native source receipt without consulting the current Agent."""
+        if (
+            isinstance(receipt, Mapping)
+            and isinstance(receipt.get("profile_id"), str)
+            and receipt.get("profile_id") in getattr(self, "_voice_profiles", {})
+        ):
+            if type(receipt.get("epoch")) is not int or receipt["epoch"] < 0:
+                raise NativeError("Native voice source has an invalid Agent profile receipt")
+            return self._voice_profiles[receipt["profile_id"]].profile.declaration
         if not self._profiles:
             if receipt is not None or self._opening_agent is None:
                 raise NativeError("Native source does not belong to this Session's Agent graph")
@@ -4917,6 +4966,35 @@ class Session(Generic[ContextT, OutputT]):
         )
         return self._agent_for_profile(receipt)
 
+    async def _realtime_tool_enabled(
+        self,
+        message: Mapping[str, Any],
+        context: Any,
+        tool: ToolRef,
+        admitted: Callable[[], bool],
+    ) -> bool:
+        from .realtime_agents import RealtimeAgentContext
+
+        defaults = self._agent_for_message(message).realtime
+        if defaults is None or defaults.tool_enabled is None:
+            return True
+        profile = message.get("profile_id")
+        original = self._source_profile_runtime(profile).profile.agent if profile else self._agent
+        if original is None:
+            raise NativeError("Realtime tool has no source Agent")
+        enabled = await _call_callback(
+            defaults.tool_enabled, admitted, RealtimeAgentContext(context, original), tool
+        )
+        if type(enabled) is not bool:
+            raise TypeError("Realtime tool_enabled must return a bool")
+        return enabled
+
+    def _source_profile_runtime(self, profile_id: str) -> _ProfileRuntime:
+        runtime = self._profiles.get(profile_id) or self._voice_profiles.get(profile_id)
+        if runtime is None:
+            raise NativeError("Native request has an unknown captured Agent profile")
+        return runtime
+
     def _bindings_for_message(self, message: Mapping[str, Any]) -> Sequence[Tool[Any]]:
         declaration = self._agent_for_message(message)
         generation = message.get("generation")
@@ -4933,7 +5011,7 @@ class Session(Generic[ContextT, OutputT]):
         return declaration.tools
 
     def _catalog_for_message(self, message: Mapping[str, Any], generation: Any) -> _ToolCatalog:
-        if self._profiles:
+        if self._profiles or message.get("profile_id") in getattr(self, "_voice_profiles", {}):
             self._agent_for_message(message)
             catalog = self._profile_catalogs.get((message["profile_id"], generation))
             if catalog is None:
@@ -6320,8 +6398,16 @@ class Session(Generic[ContextT, OutputT]):
             or self._realtime._config.is_tool_enabled is None
         ):
             return True
+        receipt = (
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
+        handoff_agent = self._realtime_handoff_source(receipt, message["tool"])
         enabled = await self._realtime._tool_enabled(
-            self._agent_for_message(message), message["tool"]
+            handoff_agent if handoff_agent is not None else self._agent_for_message(message),
+            message["tool"],
+            "handoff" if handoff_agent is not None else "function",
         )
         if not enabled:
             self._realtime._mark_tool_unavailable(message["callId"])
@@ -8175,123 +8261,124 @@ class Session(Generic[ContextT, OutputT]):
         default_slots: list[int] | None = None,
         default_handoffs: list[str] | None = None,
     ) -> None:
-        if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
-            raise ValueError("CustomStorage preview does not support manual tools")
-        assert self._opening_agent is not None
-        if self._native_agents is not None:
-            children = json.loads(await self._native.call("list_subagents"))
-            if self._child_admissions or any(
-                child.busy for child in self._child_callbacks.values()
-            ):
-                raise RuntimeError("Cannot replace tools while native children remain open")
-            for child in children:
-                if child["status"] == "active" and (
-                    candidate.tools != self._catalog.tools or child["runtime_loaded"]
+        async with self._catalog_publication_lock:
+            # A voice admission may have allocated catalogs while this replacement waited.
+            generation = max(self._catalog.generation, self._profile_generation_high_water) + 1
+            if candidate.generation != generation:
+                candidate = replace(candidate, generation=generation)
+            if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
+                raise ValueError("CustomStorage preview does not support manual tools")
+            assert self._opening_agent is not None
+            if self._native_agents is not None:
+                children = json.loads(await self._native.call("list_subagents"))
+                if self._child_admissions or any(
+                    child.busy for child in self._child_callbacks.values()
                 ):
-                    # Native startup copies the catalog before the event reader
-                    # registers an incarnation. Only actually cold records have
-                    # no native catalog, even if Python bindings still match.
                     raise RuntimeError("Cannot replace tools while native children remain open")
-        mcp_published = False
-        if allowed_mcp:
+                for child in children:
+                    if child["status"] == "active" and (
+                        candidate.tools != self._catalog.tools or child["runtime_loaded"]
+                    ):
+                        # Native startup copies the catalog before the event reader
+                        # registers an incarnation. Only actually cold records have
+                        # no native catalog, even if Python bindings still match.
+                        raise RuntimeError("Cannot replace tools while native children remain open")
+            mcp_published = False
+            if allowed_mcp:
+                try:
+                    receipt = await self._publish_startup(
+                        self._native._replace_mcp_servers(
+                            _mcp_config(
+                                mcp_tools,
+                                self._executor,
+                                allowed_mcp,
+                                programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
+                            ),
+                            _result_policies(mcp_tools, candidate.generation),
+                        )
+                    )
+                except BaseException as error:
+                    # MCP ValueErrors reject before publication. Other failures can
+                    # hide an accepted roster, unlike Python's RuntimeError contract.
+                    if not isinstance(error, ValueError):
+                        self._broken = True
+                    raise
+                try:
+                    _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, candidate.generation)
+                except NativeError:
+                    self._broken = True
+                    raise
+                mcp_published = True
             try:
-                receipt = await self._publish_startup(
-                    self._native._replace_mcp_servers(
-                        _mcp_config(
-                            mcp_tools,
-                            self._executor,
-                            allowed_mcp,
-                            programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
+                manual_slots = candidate.manual_slots()
+                if default_handoffs is None:
+                    default_handoffs = _handoff_default_names(
+                        self._default_tools, self._effective_handoffs()
+                    )
+                acknowledgement = await (
+                    self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        default_slots,
+                        json.dumps(
+                            {
+                                "mcp_tools": _mcp_profile_declarations(mcp_tools),
+                                "default_handoffs": default_handoffs,
+                            }
                         ),
-                        _result_policies(mcp_tools, candidate.generation),
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if self._profiles
+                    else self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        default_slots,
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if default_slots is not None
+                    else self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if manual_slots
+                    else self._native._replace_tools(
+                        candidate.generation, specs, terminal_slots=candidate.finish_slots()
                     )
                 )
             except BaseException as error:
-                # MCP ValueErrors reject before publication. Other failures can
-                # hide an accepted roster, unlike Python's RuntimeError contract.
-                if not isinstance(error, ValueError):
+                # Binding RuntimeErrors reject before publication. Transport failures
+                # and cancellation can hide an accepted generation, so fence those.
+                if (
+                    mcp_published
+                    or not isinstance(error, RuntimeError)
+                    or isinstance(error, _NativeCompletionError)
+                ):
                     self._broken = True
                 raise
-            try:
-                _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, candidate.generation)
-            except NativeError:
+            if type(acknowledgement) is not int or acknowledgement != candidate.generation:
                 self._broken = True
-                raise
-            mcp_published = True
-        try:
-            manual_slots = candidate.manual_slots()
-            if default_handoffs is None:
-                default_handoffs = _handoff_default_names(
-                    self._default_tools, self._effective_handoffs()
-                )
-            acknowledgement = await (
-                self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    default_slots,
-                    json.dumps(
-                        {
-                            "mcp_tools": _mcp_profile_declarations(mcp_tools),
-                            "default_handoffs": default_handoffs,
-                        }
-                    ),
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if self._profiles
-                else self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    default_slots,
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if default_slots is not None
-                else self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if manual_slots
-                else self._native._replace_tools(
-                    candidate.generation, specs, terminal_slots=candidate.finish_slots()
-                )
+                raise NativeError("Native tool replacement acknowledgement did not match")
+            # The binding publishes only after validation and its native idle check.
+            # Keep Python definitions unchanged until that exact generation is accepted.
+            self._catalog = candidate
+            self._profile_generation_high_water = max(
+                self._profile_generation_high_water, candidate.generation
             )
-        except BaseException as error:
-            # Binding RuntimeErrors reject before publication. Transport failures
-            # and cancellation can hide an accepted generation, so fence those.
-            if (
-                mcp_published
-                or not isinstance(error, RuntimeError)
-                or isinstance(error, _NativeCompletionError)
-            ):
-                self._broken = True
-            raise
-        if type(acknowledgement) is not int or acknowledgement != candidate.generation:
-            self._broken = True
-            raise NativeError("Native tool replacement acknowledgement did not match")
-        # The binding publishes only after validation and its native idle check.
-        # Keep Python definitions unchanged until that exact generation is accepted.
-        self._catalog = candidate
-        self._profile_generation_high_water = max(
-            self._profile_generation_high_water, candidate.generation
-        )
-        profile_id = self._profile_current[0] if self._profile_current is not None else None
-        self._profile_catalogs[(profile_id, candidate.generation)] = candidate
-        # An admitted opening leaf can be absent from a narrowed current descriptor.
-        # Capture the effective MCP roster published for this generation.
-        self._catalog_bindings[(profile_id, candidate.generation)] = (
-            *(binding for binding in self._bindings if not isinstance(binding, _MCP)),
-            *cast(tuple[HttpMCP[Any] | StdioMCP[Any], ...], mcp_tools),
-            *(binding for binding in self._bindings if isinstance(binding, _MCP)),
-        )
-        self._mcp_tools = mcp_tools
-        self._start_interception()
-        if self._mcp_reader is None and any(
-            s.transform_result is not None or s.request_metadata is not None for s in mcp_tools
-        ):
-            self._mcp_reader = _create_task(self._read_mcp_results())
+            profile_id = self._profile_current[0] if self._profile_current is not None else None
+            self._profile_catalogs[(profile_id, candidate.generation)] = candidate
+            # An admitted opening leaf can be absent from a narrowed current descriptor.
+            # Capture the effective MCP roster published for this generation.
+            self._catalog_bindings[(profile_id, candidate.generation)] = (
+                *(binding for binding in self._bindings if not isinstance(binding, _MCP)),
+                *cast(tuple[HttpMCP[Any] | StdioMCP[Any], ...], mcp_tools),
+                *(binding for binding in self._bindings if isinstance(binding, _MCP)),
+            )
+            self._mcp_tools = mcp_tools
+            self._start_readers()
 
     def _owned_submission(self, turn: Turn[Any]) -> _Submission | None:
         """Find only the active native owner or admission reserved by this Turn."""
@@ -9696,7 +9783,7 @@ class Session(Generic[ContextT, OutputT]):
             else self._effective_agent()
         )
         output = (
-            self._profiles[source_message["profile_id"]].output
+            self._source_profile_runtime(source_message["profile_id"]).output
             if source_message is not None and self._profiles and not state.output_override
             else state.output
         )
@@ -10575,7 +10662,9 @@ class Session(Generic[ContextT, OutputT]):
     ) -> Any:
         if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
             provider = getattr(self, "_decisions_provider", None)
-            if getattr(self, "_profiles", None):
+            if getattr(self, "_profiles", None) or message.get("profile_id") in getattr(
+                self, "_voice_profiles", {}
+            ):
                 profile_provider = self._agent_for_message(message).decisions
                 if profile_provider is not None:
                     provider = profile_provider
@@ -10912,7 +11001,7 @@ class Session(Generic[ContextT, OutputT]):
             and state.realtime_tool is None
         ):
             self._agent_for_message(message)
-            state.output = self._profiles[message["profile_id"]].output
+            state.output = self._source_profile_runtime(message["profile_id"]).output
         has_guards = bool(
             self._output_guardrails or self._agent_for_message(message).output_guardrails
         )
@@ -11018,7 +11107,7 @@ class Session(Generic[ContextT, OutputT]):
                 and not state.output_override
                 and state.realtime_tool is None
             ):
-                state.output = self._profiles[message["profile_id"]].output
+                state.output = self._source_profile_runtime(message["profile_id"]).output
             output = _prepare_spec(None) if isinstance(state, _ChildCallbacks) else state.output
             value, wire = output.terminal_value(text)
             # JSON persistence must never silently accept NaN or Infinity.
@@ -11272,7 +11361,7 @@ class Session(Generic[ContextT, OutputT]):
                 and not state.output_override
                 and state.realtime_tool is None
             ):
-                state.output = self._profiles[message["profile_id"]].output
+                state.output = self._source_profile_runtime(message["profile_id"]).output
             source_bindings = self._bindings_for_message(message)
             mcp_names: dict[tuple[str, str], ToolRef] = {}
             for item in message.get("mcp_names", ()):
@@ -11298,7 +11387,9 @@ class Session(Generic[ContextT, OutputT]):
                 return actual
 
             source_handoffs = (
-                self._profiles[message["profile_id"]].profile.handoffs if self._profiles else None
+                self._source_profile_runtime(message["profile_id"]).profile.handoffs
+                if message.get("profile_id") is not None
+                else None
             )
             index = state.step_index
             state.step_index += 1
@@ -12553,11 +12644,12 @@ class Session(Generic[ContextT, OutputT]):
             if not admitted():
                 return
             if metadata:
+                ref = ToolRef(notice["callable_name"], notice["callable_namespace"])
                 context: Any = MCPMetadataContext(
                     self._context,
                     state.handle,
                     ToolCallInfo(
-                        tool=ToolRef(notice["callable_name"], notice["callable_namespace"]),
+                        tool=ref,
                         session_id=self.id,
                         turn_id=notice["turn_id"],
                         call_id=notice["call_id"] if notice.get("route") == "direct" else None,
@@ -12578,6 +12670,18 @@ class Session(Generic[ContextT, OutputT]):
                     MappingProxyType(deepcopy(notice["arguments"])),
                 )
                 value = await _call_callback(callback, admitted, context)
+                if not admitted():
+                    return
+                if (
+                    isinstance(state, _Submission)
+                    and state.realtime_tool is not None
+                    and not await self._realtime_tool_enabled(notice, self._context, ref, admitted)
+                ):
+                    # A non-object reply settles the metadata receipt as rejected.
+                    self._native._resolve_native_mcp_result(
+                        nonce, notice["turn_id"], notice["call_id"], "false"
+                    )
+                    return
                 if value is not None and not isinstance(value, Mapping):
                     raise TypeError("MCP request_metadata must return an object or None")
                 value = None if value is None else dict(value)
@@ -12734,6 +12838,30 @@ class Session(Generic[ContextT, OutputT]):
                 namespace=ref.namespace,
             )
             self._observations.append(started)
+            realtime_tool = isinstance(state, _Submission) and state.realtime_tool is not None
+
+            async def respond_tool_denial(reason: str) -> None:
+                nonlocal status
+                denial = ToolOutput.error(reason)
+                denial._validate()
+                reply = json.dumps({"request": message, "response": denial.to_native()})
+                if self._admit_tool(state, request) and await self._respond_tool(state, reply):
+                    # A late send does not undo an already committed receipt.
+                    status = "failed"
+
+            async def admit_source_tool() -> bool:
+                enabled = await self._realtime_tool_enabled(
+                    message, entry.context, ref, lambda: self._admit_tool(state, request)
+                )
+                if not self._admit_tool(state, request):
+                    return False
+                if enabled:
+                    return True
+                await respond_tool_denial("Tool disabled by its source Agent")
+                return False
+
+            if realtime_tool and not await admit_source_tool():
+                return
             approved = None
             if managed_approval:
                 approved = self._approval_ready.pop(
@@ -12809,14 +12937,7 @@ class Session(Generic[ContextT, OutputT]):
                     return
                 if isinstance(decision, Deny):
                     # A local denial never invokes the body or the after hook.
-                    denial = ToolOutput.error(decision.reason)
-                    denial._validate()
-                    reply = json.dumps({"request": message, "response": denial.to_native()})
-                    if self._admit_tool(state, request):
-                        accepted = await self._respond_tool(state, reply)
-                        # A late send does not undo an already committed receipt.
-                        if accepted:
-                            status = "failed"
+                    await respond_tool_denial(decision.reason)
                     return
                 if isinstance(decision, ReplaceArguments):
                     arguments_replaced = True
@@ -12859,6 +12980,32 @@ class Session(Generic[ContextT, OutputT]):
             if parameter is not None:
                 assert context is not None
                 args = (context,)
+            # The before hook may have yielded while the source grant changed.
+            if realtime_tool and entry.before is not None:
+                if not await admit_source_tool():
+                    return
+                from .realtime_agents import _CapturedHandoff, _HandoffAllowedAfterAwait
+
+                if isinstance(entry, _CapturedHandoff):
+                    source = self._agent_for_message(message).realtime
+                    if source is not None and source.tool_enabled is not None:
+                        # The source grant can suspend after the initial handoff check.
+                        assert context is not None
+                        handoff_decision = await self._call_decision_callback(
+                            state,
+                            message,
+                            entry.before,
+                            lambda: self._admit_tool(state, request),
+                            context,
+                        )
+                        if isinstance(handoff_decision, Deny):
+                            await respond_tool_denial(handoff_decision.reason)
+                            return
+                        # An awaited handoff decision applies to this attempt.
+                        # Refresh the source grant after that application wait.
+                        if isinstance(handoff_decision, _HandoffAllowedAfterAwait):
+                            if not await admit_source_tool():
+                                return
             if not self._admit_tool(state, request):
                 return
             timeout_output: ToolOutput | None = None

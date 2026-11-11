@@ -1,0 +1,12 @@
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -4262,7 +4262,7 @@
+                     .await
+                     .unwrap()
+                     .unwrap();
+-            let finished = matches!(&command, super::SdkRealtimeCommand::FinishBatch(_));
++            let finished = matches!(&command, super::SdkRealtimeCommand::FinishBatch { .. });
+             super::handle_sdk_realtime_command(
+                 Ok(command),
+                 &connection.writer(),

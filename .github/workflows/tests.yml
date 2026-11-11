@@ -549,11 +549,14 @@ jobs:
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   native-linux:
+    # PRs qualify platform-specific artifacts independently of Windows failures.
+    # Push runs retain the producer ordering for reusable snapshots.
     needs: [changes, produce-linux, produce-windows, produce-macos]
     if: >-
       !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
-      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
+      (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
@@ -581,7 +584,8 @@ jobs:
     if: >-
       !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
-      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
+      (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
@@ -599,7 +603,8 @@ jobs:
       needs.produce-windows.result == 'skipped' && needs.produce-macos.result == 'skipped') ||
       (needs.changes.outputs.code == 'true' && needs.produce-linux.result == 'success' &&
       needs.produce-macos.result == 'success' &&
-      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
+      (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
     env:
       UV_NO_SYNC: "1"
@@ -950,7 +955,8 @@ jobs:
       needs.produce-windows.result == 'skipped' && needs.produce-macos.result == 'skipped') ||
       (needs.changes.outputs.code == 'true' && needs.produce-linux.result == 'success' &&
       needs.produce-macos.result == 'success' &&
-      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
+      (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100

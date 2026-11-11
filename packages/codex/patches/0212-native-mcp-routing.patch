@@ -316,16 +316,16 @@ index 2b273076d6e63b8bcb252d590cf79d378d2f1321..3f5c836d0460da523e3296e2360263b8
          let server = mcp_server_catalog.server(&tool.server_name);
          let agent_plugin = server.is_some_and(|server| server.source().is_agent_plugin());
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index e772ce973e5760177421dd6984f5c389573a81c3..b3d53f514ee8748aa791be1b8a2738f4e9bcb3c5 100644
+index 8b6b9cc930cad599c9352230c9a154dec2643969..28fb6452e6698afd0879e42a83365bf3bfa1a276 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
-@@ -137,8 +137,47 @@ pub(crate) async fn build_tool_router(
-         .services
-         .thread_extension_data
-         .get::<crate::WaitForEnvironmentToolConfig>();
+@@ -143,8 +143,47 @@ pub(crate) async fn build_tool_router(
+         .as_ref()
+         .and_then(|source| source.tool_policy.as_ref())
+         .unwrap_or(&session.tool_policy);
 +    // This exact binding owns both admission and the SDK's per-step projection.
 +    step_store.insert(Arc::clone(mcp));
-+    let mut resolved_policy = session.tool_policy.as_ref().clone();
++    let mut resolved_policy = tool_policy.as_ref().clone();
 +    if let Some(selectors) = &resolved_policy.allowed_mcp_tools {
 +        let named_ceiling = resolved_policy.allowed_tools.clone();
 +        if let Some(allowed) = &mut resolved_policy.allowed_tools {
@@ -363,16 +363,16 @@ index e772ce973e5760177421dd6984f5c389573a81c3..b3d53f514ee8748aa791be1b8a2738f4
 +    let resolved_policy = Arc::new(resolved_policy);
 +    step_store.insert(resolved_policy.as_ref().clone());
      let context = CoreToolPlanContext {
--        tool_policy: &session.tool_policy,
+-        tool_policy,
 +        tool_policy: &resolved_policy,
          turn_context,
          model_info,
          environments,
-@@ -148,7 +187,7 @@ pub(crate) async fn build_tool_router(
+@@ -154,7 +193,7 @@ pub(crate) async fn build_tool_router(
          default_agent_type_description: &default_agent_type_description,
          wait_agent_timeouts: wait_agent_timeout_options(turn_context),
      };
--    let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
+-    let mut registry = ToolRegistry::with_tool_policy(Arc::clone(tool_policy));
 +    let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&resolved_policy));
      add_core_tool_sources(&context, &mut registry);
  
