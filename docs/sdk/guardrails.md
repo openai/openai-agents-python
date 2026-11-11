@@ -4,7 +4,7 @@ These APIs have been requiring a native wheel built from the same source revisio
 
 `InputGuardrail` has been checking the turn's original input. Checks with `run_in_parallel=False` have been running together before the first model request. By default, input checks have been running alongside model work. The SDK has been waiting for those checks before accepting a completion.
 
-`OutputGuardrail` has been checking `final_output` after conversion. The `before_complete` hook has been receiving the raw candidate before conversion, when it can request a repair. The SDK has been converting each proposed completion once.
+`OutputGuardrail` has been checking `final_output` after conversion. The `before_complete` hook has been receiving raw `text` for model completions and converted `final_output` for completions from a tool or tool batch. The hook has been allowing the application to request a repair. The SDK has been converting each proposed completion once.
 
 ## Try both input outcomes
 
