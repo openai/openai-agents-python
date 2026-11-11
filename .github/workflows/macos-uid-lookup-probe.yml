@@ -456,8 +456,8 @@ jobs:
               root = Path(root)
               info = json.loads((root / 'input.json').read_text())
               results = []
-              for profile in ('strict', 'trusted'):
-                  prefix = ['/usr/bin/sandbox-exec', '-f', str(root / (profile + '.sb'))]
+              for profile in ('strict', 'trusted', 'trusted-unrestricted', 'trusted-minimal-mach'):
+                  prefix = [] if profile == 'trusted-unrestricted' else ['/usr/bin/sandbox-exec', '-f', str(root / (profile + '.sb'))]
                   commands = {
                       'uid': ['/usr/bin/id', '-F'],
                       'ssh': ['/usr/bin/ssh', '-G', '-F', '/dev/null', '-o', 'CanonicalizeHostname=no', '-o', 'ProxyCommand=none', 'example.invalid'],
@@ -478,7 +478,8 @@ jobs:
               root = Path(tempfile.mkdtemp(prefix='codex-uid-policy-', dir=os.environ['RUNNER_TEMP']))
               (root / 'workspace').mkdir()
               suffix = uuid.uuid4().hex
-              domain = 'user/' + str(os.getuid())
+              gui = 'gui/' + str(os.getuid())
+              domain = gui if run(['/bin/launchctl', 'print', gui]) == 0 else 'user/' + str(os.getuid())
               labels = {name: 'com.openai.codex.uidprobe.' + suffix + '.' + name for name in ('target', 'candidate', 'new', 'submit')}
               script = str(Path(__file__).resolve())
               info = dict(domain=domain, target=labels['target'], submit=labels['submit'], helper=str(Path(os.environ['RUNNER_TEMP']) / 'denied-helper'))
@@ -486,6 +487,7 @@ jobs:
               base = Path(os.environ['RUNNER_TEMP'], 'seatbelt-base.sb').read_text()
               (root / 'strict.sb').write_text(base + '\n(allow file-read*)\n(allow file-write* (subpath ' + json.dumps(str(root / 'workspace')) + '))\n')
               (root / 'trusted.sb').write_text(base + '\n(allow file-read* file-write*)\n')
+              (root / 'trusted-minimal-mach.sb').write_text('(version 1)(allow default)(deny mach-lookup)(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))(deny mach-register)(deny job-creation)')
               jobs = {
                   'target': {'Label': labels['target'], 'ProgramArguments': ['/usr/bin/touch', str(root / 'escaped-target')], 'RunAtLoad': False},
                   'new': {'Label': labels['new'], 'ProgramArguments': ['/usr/bin/touch', str(root / 'escaped-bootstrap')], 'RunAtLoad': True},
@@ -499,6 +501,9 @@ jobs:
                   emit(profile='host', operation='register-target', exit=host_registration)
                   candidate_registration = run(['/bin/launchctl', 'bootstrap', domain, str(root / 'candidate.plist')])
                   emit(profile='host', operation='register-policy-candidate', exit=candidate_registration)
+                  if host_registration != 0 or candidate_registration != 0:
+                      emit(host_setup_failed=True)
+                      return
                   deadline = time.monotonic() + 30
                   while not (root / 'worker-result.json').exists() and time.monotonic() < deadline:
                       time.sleep(.1)
