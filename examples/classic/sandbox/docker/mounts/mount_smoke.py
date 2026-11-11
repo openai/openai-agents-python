@@ -139,13 +139,6 @@ async def run_mount_smoke_test(
         if 'plugin "rclone" not found' in str(exc):
             raise SystemExit("rclone Docker volume plugin not found") from exc
         raise
-    except RuntimeError:
-        print(
-            "Docker could not create the mount sandbox. Run 'docker plugin ls' on the Docker "
-            "host and check that the rclone volume plugin is enabled.",
-            file=sys.stderr,
-        )
-        raise
 
     try:
         try:

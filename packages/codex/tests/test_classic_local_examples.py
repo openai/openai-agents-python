@@ -30,12 +30,19 @@ async def test_mongodb_example_closes_client_when_initial_ping_fails(monkeypatch
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_credentials", [False, True])
-async def test_docker_mount_example_reports_missing_driver(monkeypatch, capsys, with_credentials):
+@pytest.mark.parametrize("missing_driver", [False, True])
+async def test_docker_mount_example_only_identifies_known_missing_driver(
+    monkeypatch, capsys, with_credentials, missing_driver
+):
     docker = pytest.importorskip("docker")
     from agents.classic.sandbox.entries import DockerVolumeMountStrategy, S3Mount
     from examples.classic.sandbox.docker.mounts import mount_smoke as example
 
-    error = docker.errors.NotFound('plugin "rclone" not found')
+    error = (
+        docker.errors.NotFound('plugin "rclone" not found')
+        if missing_driver
+        else RuntimeError("container creation failed")
+    )
 
     def create_container(**_kwargs):
         raise error
@@ -56,7 +63,7 @@ async def test_docker_mount_example_reports_missing_driver(monkeypatch, capsys, 
         mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
     )
     mount_cases = [example.MountSmokeCase(name="rclone", mount_dir="s3", mount=mount)]
-    expected_error = RuntimeError if with_credentials else SystemExit
+    expected_error = SystemExit if missing_driver and not with_credentials else RuntimeError
 
     with pytest.raises(expected_error) as caught:
         await example.run_mount_smoke_test(
@@ -65,11 +72,13 @@ async def test_docker_mount_example_reports_missing_driver(monkeypatch, capsys, 
 
     if with_credentials:
         assert "protected mount configuration" in str(caught.value)
-        assert "docker plugin ls" in capsys.readouterr().err
         assert caught.value.__cause__ is None
-    else:
+    elif missing_driver:
         assert str(caught.value) == "rclone Docker volume plugin not found"
         assert caught.value.__cause__ is error
+    else:
+        assert caught.value is error
+    assert "docker plugin ls" not in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
