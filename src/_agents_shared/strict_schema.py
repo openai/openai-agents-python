@@ -4,8 +4,6 @@ import copy
 from typing import Any, TypeGuard, cast
 from urllib.parse import unquote
 
-from openai import NOT_GIVEN
-
 from .exceptions import UserError
 
 _EMPTY_SCHEMA = {
@@ -371,7 +369,7 @@ def _ensure_strict_json_schema(
     # strip `None` defaults as there's no meaningful distinction here
     # the schema will still be `nullable` and the model will default
     # to using `None` anyway
-    if json_schema.get("default", NOT_GIVEN) is None:
+    if "default" in json_schema and json_schema["default"] is None:
         json_schema.pop("default")
 
     # we can't use `$ref`s if there are also other properties defined, e.g.
