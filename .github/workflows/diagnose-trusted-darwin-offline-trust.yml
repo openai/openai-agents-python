@@ -1,4 +1,4 @@
-name: Inspect stock Darwin launchd authorization surface
+name: Calibrate stock Darwin read-only bootstrap filtering
 
 on:
   push:
@@ -9,10 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  stock-darwin-launchd-inspection:
+  stock-bootstrap-filter:
     if: github.repository == 'openai/openai-agents-python' && !github.event.deleted
     runs-on: macos-15
-    timeout-minutes: 6
+    timeout-minutes: 5
     steps:
       - name: Check out the signed diagnostic workflow
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -22,135 +22,210 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/workflows/diagnose-trusted-darwin-offline-trust.yml
           sparse-checkout-cone-mode: false
-      - name: Inspect exact stock build without executing launchd commands
+      - name: Compare one read-only lookup across three profiles
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git show -s --format=%P HEAD)" = 73e2cf800b418d7e64a1b334520123dc177c38cd
+          test "$(git show -s --format=%P HEAD)" = 11e305c077fcb4bd1eb3694352651d34ae957712
           test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = .github/workflows/diagnose-trusted-darwin-offline-trust.yml
           sw_vers
           test "$RUNNER_OS/$RUNNER_ARCH" = macOS/ARM64
           test "$(sw_vers -buildVersion)" = 24H232
+          work=$(mktemp -d "$RUNNER_TEMP/bootstrap-filter.XXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          cd "$work"
+
+          cat > observe.c <<'C'
+          #include <mach/mach.h>
+          #include <stdint.h>
+          #include <stdio.h>
+
+          // Private symbol and packing from the published Sequoia XNU mach/message.h.
+          extern mach_msg_return_t mach_msg2_internal(
+              void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+          static _Thread_local mach_port_t destination;
+          static _Thread_local unsigned sends;
+          static _Thread_local unsigned message_id;
+          static _Thread_local unsigned transport_status;
+          static _Thread_local int observing_send;
+
+          void observe_bootstrap(mach_port_t port) {
+              destination = port;
+          }
+
+          void report_bootstrap(void) {
+              printf("BOOTSTRAP_OBSERVATION %u %08x %08x\n",
+                     sends, message_id, transport_status);
+          }
+
+          static int begin_send(uint64_t options, mach_port_t port, unsigned id) {
+              if (observing_send || destination == MACH_PORT_NULL ||
+                  !(options & MACH_SEND_MSG) || port != destination) {
+                  return 0;
+              }
+              observing_send = 1;
+              if (sends++ == 0) {
+                  message_id = id;
+              }
+              return 1;
+          }
+
+          static void end_send(int matched, mach_msg_return_t result) {
+              if (matched) {
+                  if (sends == 1) {
+                      transport_status = (unsigned)result;
+                  }
+                  observing_send = 0;
+              }
+          }
+
+          // MACH_SEND_FILTER_NONFATAL changes denial reporting, not the filter decision.
+          // Apply it to the observed send in every leg.
+          static const unsigned filter_nonfatal = 0x10000;
+          static mach_msg_return_t observe_mach_msg2(
+              void *data, uint64_t options, uint64_t bits_size, uint64_t ports,
+              uint64_t voucher_id, uint64_t descriptors_receive, uint64_t size_priority,
+              uint64_t timeout) {
+              const int matched = begin_send(options, (mach_port_t)ports, (unsigned)(voucher_id >> 32));
+              const mach_msg_return_t result = mach_msg2_internal(
+                  data, options | (matched ? filter_nonfatal : 0), bits_size, ports,
+                  voucher_id, descriptors_receive, size_priority, timeout);
+              end_send(matched, result);
+              return result;
+          }
+
+          static mach_msg_return_t observe_mach_msg(
+              mach_msg_header_t *msg, mach_msg_option_t options, mach_msg_size_t send_size,
+              mach_msg_size_t receive_size, mach_port_name_t receive_name,
+              mach_msg_timeout_t timeout, mach_port_name_t notify) {
+              const int matched = (options & MACH_SEND_MSG) &&
+                  begin_send(options, msg->msgh_remote_port, (unsigned)msg->msgh_id);
+              const mach_msg_return_t result = mach_msg(
+                  msg, options | (matched ? filter_nonfatal : 0), send_size, receive_size,
+                  receive_name, timeout, notify);
+              end_send(matched, result);
+              return result;
+          }
+
+          __attribute__((used, section("__DATA,__interpose")))
+          static const struct { const void *replacement; const void *original; } interpose[] = {
+              {(const void *)observe_mach_msg2, (const void *)mach_msg2_internal},
+              {(const void *)observe_mach_msg, (const void *)mach_msg},
+          };
+          C
+
+          cat > probe.c <<'C'
+          #include <mach/mach.h>
+          #include <sandbox.h>
+          #include <servers/bootstrap.h>
+          #include <stdio.h>
+          #include <string.h>
+
+          extern void observe_bootstrap(mach_port_t);
+          extern void report_bootstrap(void);
+
+          int main(int argc, char **argv) {
+              if (argc != 3 || strncmp(argv[1], "com.example.nov9.calibration.", 29) != 0) {
+                  return 2;
+              }
+              name_t service;
+              if (strlcpy(service, argv[1], sizeof(service)) >= sizeof(service)) {
+                  return 2;
+              }
+              mach_port_t inherited = MACH_PORT_NULL;
+              mach_port_type_t type = 0;
+              if (task_get_bootstrap_port(mach_task_self(), &inherited) != KERN_SUCCESS ||
+                  !MACH_PORT_VALID(inherited) ||
+                  mach_port_type(mach_task_self(), inherited, &type) != KERN_SUCCESS ||
+                  !(type & MACH_PORT_TYPE_SEND) || (type & MACH_PORT_TYPE_RECEIVE) ||
+                  inherited != bootstrap_port) {
+                  fputs("NO_INHERITED_BOOTSTRAP_SEND_RIGHT\n", stderr);
+                  return 3;
+              }
+              if (*argv[2]) {
+                  char *error = NULL;
+                  if (sandbox_init(argv[2], 0, &error) != 0) {
+                      fprintf(stderr, "PROFILE_ERROR %.240s\n", error ? error : "unknown");
+                      if (error) {
+                          sandbox_free_error(error);
+                      }
+                      return 4;
+                  }
+                  puts("PROFILE_APPLIED");
+              }
+              observe_bootstrap(inherited);
+              mach_port_t service_port = MACH_PORT_NULL;
+              const kern_return_t result = bootstrap_look_up(inherited, service, &service_port);
+              observe_bootstrap(MACH_PORT_NULL);
+              report_bootstrap();
+              const int got_port = MACH_PORT_VALID(service_port);
+              if (got_port) {
+                  mach_port_deallocate(mach_task_self(), service_port);
+              }
+              printf("LOOKUP_RESULT %d %d\n", result, got_port);
+              return 0;
+          }
+          C
+
+          xcrun clang -std=c11 -Wall -Wextra -Werror -dynamiclib \
+            -install_name @rpath/libobserve.dylib observe.c -o libobserve.dylib
+          xcrun clang -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations \
+            probe.c -L. -lobserve -Wl,-rpath,@executable_path -o probe
+
           python3 -I -S - <<'PY'
-          import hashlib
-          import mmap
           from pathlib import Path
           import re
           import subprocess
+          import uuid
 
-          operation = rb"(?:job|launchd|service|xpc)-[a-z][a-z0-9-]{1,62}"
-          atom = re.compile(rb"(?<=\x00)" + operation + rb"(?=\x00)")
-          action = re.compile(r"kickstart|job[-_ ](?:start|creation|control|management)|service[-_ ](?:start|control|management)|(?:start|manage|control)[-_ ](?:a |the )?(?:job|service)|caller.*(?:not allowed|denied|privilege|entitlement)|sandbox(?:[-_ ](?:check|denied|violation)|ed)", re.I)
-          symbol = re.compile(r"sandbox_check|sandbox_reference|audit_token|entitlement|xpc_pipe|bootstrap_")
-          profile_term = re.compile(rb"(?<![\w-])(?:job-[\w-]+|(?:launchd|service|xpc)-(?:start|kickstart|control|management)[\w-]*)(?![\w-])")
-          candidates = set()
+          service = "com.example.nov9.calibration." + uuid.uuid4().hex
+          dylib = Path("libobserve.dylib").resolve()
+          env = {"PATH": "/usr/bin:/bin", "DYLD_INSERT_LIBRARIES": str(dylib), "LC_ALL": "C"}
+          profile_base = "(version 1)(allow default)"
 
-          def tool(*argv):
+          def run(leg, profile):
               try:
-                  result = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=45)
-              except (OSError, subprocess.TimeoutExpired) as error:
-                  print("TOOL_ERROR", argv[0], type(error).__name__, flush=True)
-                  return []
-              print("TOOL", " ".join(argv), "exit", result.returncode, flush=True)
-              if result.returncode:
-                  print("TOOL_DETAIL", result.stderr.splitlines()[:2], flush=True)
-                  return []
-              return result.stdout.splitlines()
+                  proc = subprocess.run(
+                      ["./probe", service, profile], env=env, timeout=10,
+                      capture_output=True, text=True, errors="replace",
+                  )
+              except subprocess.TimeoutExpired:
+                  raise SystemExit(f"INCONCLUSIVE {leg}: probe timed out")
+              print(f"LEG {leg} exit={proc.returncode}", flush=True)
+              for output in (proc.stdout, proc.stderr):
+                  if output:
+                      print(output[:1800], end="", flush=True)
+              if proc.returncode:
+                  raise SystemExit(f"INCONCLUSIVE {leg}: probe did not complete")
+              observations = re.findall(
+                  r"(?m)^BOOTSTRAP_OBSERVATION (\d+) ([0-9a-f]{8}) ([0-9a-f]{8})$", proc.stdout
+              )
+              lookup = re.findall(r"(?m)^LOOKUP_RESULT (-?\d+) ([01])$", proc.stdout)
+              if len(observations) != 1 or observations[0][0] != "1" or len(lookup) != 1:
+                  raise SystemExit(f"INCONCLUSIVE {leg}: no unique observed lookup to inherited port")
+              if lookup[0][1] != "0":
+                  raise SystemExit(f"INCONCLUSIVE {leg}: unexpectedly returned a service right")
+              if profile and "PROFILE_APPLIED\n" not in proc.stdout:
+                  raise SystemExit(f"INCONCLUSIVE {leg}: profile status missing")
+              _, message, transport = observations[0]
+              return int(message, 16), int(transport, 16), int(lookup[0][0])
 
-          def literal_atoms(binary):
-              with binary.open("rb") as source, mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                  first = {}
-                  for match in atom.finditer(data):
-                      first.setdefault(match[0].decode("ascii"), match.start())
-              candidates.update(first)
-              for name, offset in sorted(first.items())[:80]:
-                  print("LITERAL_ATOM", binary, f"{offset:#x}", name)
+          message, transport, status = run("unsandboxed", "")
+          if not message >> 24 or transport != 0 or status != 1102:
+              raise SystemExit("INCONCLUSIVE unsandboxed: no live nonzero-domain unknown-service reply")
+          number = message & 0xFFFFFF
+          prefix = profile_base + "(allow mach-bootstrap (apply-message-filter (deny mach-message-send)"
+          allow = prefix + f" (allow mach-message-send (message-number {number}))))"
+          deny = prefix + f" (allow mach-message-send (message-number {number ^ 1}))))"
 
-          for binary in map(Path, ("/sbin/launchd", "/bin/launchctl")):
-              print("BINARY", binary, binary.stat().st_size, hashlib.sha256(binary.read_bytes()).hexdigest())
-              for line in tool("/usr/bin/file", str(binary)):
-                  print("FILE", line)
-              for line in tool("/usr/bin/dwarfdump", "--uuid", str(binary)):
-                  print("BINARY_UUID", line)
-              imports = set()
-              for argv in (("/usr/bin/nm", "-um"), ("/usr/bin/dyld_info", "-imports")):
-                  for line in tool(*argv, str(binary)):
-                      if symbol.search(line):
-                          imports.add(line.strip())
-              for line in sorted(imports)[:60]:
-                  print("IMPORT", binary, line)
-              print("RELEVANT_IMPORT_COUNT", binary, len(imports))
-              literal_atoms(binary)
-              matches = [
-                  line.strip()[:230]
-                  for line in tool("/usr/bin/strings", "-a", "-t", "x", str(binary))
-                  if action.search(line) and len(line) <= 500
-              ]
-              print("ACTION_LITERAL_COUNT", binary, len(matches))
-              for line in matches[:65]:
-                  print("ACTION_LITERAL", binary, line)
-
-          # Symbolized static references only. No process attachment or Mach requests.
-          binary = "/sbin/launchd"
-          lines = tool("/usr/bin/otool", "-tvV", binary)
-          policy_calls = re.compile(r"\b(?:b|bl)\b.*sandbox_(?:check|reference)")
-          caller_calls = re.compile(r"\b(?:b|bl)\b.*(?:sandbox_check|audit_token|entitlement)")
-          check_refs = [(index, line) for index, line in enumerate(lines) if policy_calls.search(line)]
-          action_refs = [(index, line) for index, line in enumerate(lines)
-                         if "literal pool" in line and action.search(line)]
-          print("STATIC_POLICY_CALL_COUNT", len(check_refs))
-          for index, line in check_refs[:24]:
-              args = [row.strip()[:180] for row in lines[max(0, index - 12):index]
-                      if "literal pool" in row or re.search(r"\b(?:mov|add|ldr)\s+[xw][0-3],", row)]
-              print("STATIC_POLICY_CALL", line.strip()[:230], "NEARBY_ARGUMENTS", args)
-          print("STATIC_ACTION_REFERENCE_COUNT", len(action_refs))
-          for index, line in action_refs[:35]:
-              nearby = [row.strip()[:180] for row in lines[max(0, index - 12):index + 13]
-                        if caller_calls.search(row)]
-              print("STATIC_ACTION_REFERENCE", line.strip()[:230], "NEARBY_CALLS", nearby)
-
-          profile_roots = (
-              "/System/Library/Sandbox/Profiles",
-              "/usr/share/sandbox",
-              "/System/Library/PrivateFrameworks/Sandbox.framework/Versions/A/Resources",
-          )
-          seen = set()
-          profile_hits = 0
-          for root in map(Path, profile_roots):
-              print("PROFILE_ROOT", root, root.is_dir())
-              for profile in sorted(root.rglob("*")):
-                  if profile.suffix not in (".sb", ".sbpl") or profile.is_symlink() or not profile.is_file():
-                      continue
-                  physical = profile.resolve()
-                  if physical in seen:
-                      continue
-                  seen.add(physical)
-                  try:
-                      lines = profile.read_bytes().splitlines()
-                  except OSError as error:
-                      print("PROFILE_READ_ERROR", profile, type(error).__name__)
-                      continue
-                  for lineno, line in enumerate(lines, 1):
-                      match = profile_term.search(line.split(b";", 1)[0])
-                      if match:
-                          profile_hits += 1
-                          if profile_hits <= 50:
-                              print("PROFILE_RULE", f"{profile}:{lineno}", line.strip()[:230].decode(errors="replace"))
-          print("PROFILE_SUMMARY", "files", len(seen), "matched_lines", profile_hits)
-
-          # Inspect only exact operation-shaped NUL-terminated names in readable
-          # system images. A name alone does not establish dispatch or policy use.
-          for image in map(Path, (
-              "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox",
-              "/System/Library/KernelCollections/BootKernelExtensions.kc",
-              "/System/Library/KernelCollections/SystemKernelExtensions.kc",
-          )):
-              if image.is_file():
-                  try:
-                      literal_atoms(image)
-                  except (OSError, ValueError) as error:
-                      print("IMAGE_READ_ERROR", image, type(error).__name__)
-              else:
-                  print("IMAGE_ABSENT", image)
-          print("DISTINCT_LITERAL_ATOMS", len(candidates))
+          if run("filter-allow", allow) != (message, 0, 1102):
+              raise SystemExit("INCONCLUSIVE filter-allow: original lookup did not survive")
+          denied_message, denied_transport, denied_status = run("filter-deny", deny)
+          if denied_message != message:
+              raise SystemExit("INCONCLUSIVE filter-deny: message ID changed")
+          if denied_transport == 0 and denied_status == 1102:
+              raise SystemExit("FILTER_NOT_ENFORCED: deny leg received the same live reply")
+          if denied_transport != 0x10000017:
+              raise SystemExit("INCONCLUSIVE filter-deny: no kernel MACH_SEND_MSG_FILTERED")
+          print(f"PASS read-only inherited-bootstrap filter full_id={message:08x} message_number={number}")
           PY
