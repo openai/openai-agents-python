@@ -199,6 +199,7 @@ pub(crate) struct Frame {
     tool_outcomes: Option<ToolOutcomes>,
     fresh: Option<crate::python_tools::FreshTerminalReceipts>,
     terminal_calls: HashSet<String>,
+    batch_completion: bool,
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
@@ -754,6 +755,7 @@ fn validate_frame(
         tool_outcomes,
         fresh: None,
         terminal_calls: HashSet::new(),
+        batch_completion: false,
         turn,
         pending: admitted,
         order,
@@ -916,12 +918,13 @@ impl Frame {
             if let Some(outcomes) = &mut self.tool_outcomes {
                 outcomes.record(&key.call, value.success);
             }
-            if value.success {
+            if value.success || self.batch_completion {
                 crate::python_tools::FreshTerminalReceipts::record(
                     &mut self.fresh,
                     generation,
                     key,
                     invocation,
+                    self.batch_completion,
                 );
             }
             self.accepted.insert(
@@ -1021,6 +1024,17 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
         &history,
         &frame.order.iter().cloned().collect(),
     )?;
+    frame.batch_completion = captured
+        .as_ref()
+        .and_then(|source| {
+            source
+                .profile
+                .data
+                .get::<crate::python_tools::ProfileCatalog>()
+        })
+        .map_or(tools.tool_batch_completion_enabled, |catalog| {
+            catalog.tool_batch_completion
+        });
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
     let model = crate::checkpoint::managed_settings(&history, source_id)
         .map(|settings| settings.model.as_str());

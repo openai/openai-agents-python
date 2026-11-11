@@ -13,11 +13,14 @@ from agents import (
     Agent,
     CompletionContext,
     ContinueTurn,
+    FinishToolBatch,
     FunctionTool,
     NativeProvider,
     OutputValidationError,
     SessionState,
     StopTurn,
+    ToolBatchCompletionContext,
+    ToolOutput,
     ToolRef,
     TurnStoppedError,
     function_tool,
@@ -34,6 +37,176 @@ from tests.test_native_manual_tools import LookupArgs, next_request
 
 def provider(peer: ResponsesFixture) -> NativeProvider:
     return NativeProvider(base_url=peer.url, api_key="synthetic-terminal-tools")
+
+
+async def test_native_batch_completion_uses_ordered_known_results_and_typed_final_value(
+    responses: ResponsesFixture,
+) -> None:
+    second_finished = asyncio.Event()
+    effects: list[str] = []
+    proposals: list[tuple[str, ...]] = []
+
+    class Final(BaseModel):
+        failed: tuple[str, ...]
+
+    @function_tool
+    async def first() -> str:
+        await second_finished.wait()
+        effects.append("first")
+        return "first result"
+
+    @function_tool
+    async def second() -> ToolOutput:
+        effects.append("second")
+        second_finished.set()
+        return ToolOutput.error("explicit tool failure")
+
+    async def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishToolBatch[Final]:
+        proposals.append(tuple(str(result.call.call_id) for result in ctx.results))
+        return FinishToolBatch(
+            Final(
+                failed=tuple(
+                    str(result.call.call_id) for result in ctx.results if not result.output.success
+                )
+            )
+        )
+
+    responses.respond(
+        function_call("first", {}, "first-call"), function_call("second", {}, "second-call")
+    )
+    agent = Agent(
+        instructions="Use both tools.",
+        model="gpt-5.5",
+        tools=[first, second],
+        output_type=Final,
+        provider=provider(responses),
+        tool_batch_completion=complete,
+    )
+    async with timeout(30), agent.session() as session:
+        completed = await (await session.submit("finish")).get_result()
+        assert completed.final_output == Final(failed=("second-call",))
+        assert completed.tool_call is None
+        assert completed.tool_batch_call_ids == ("first-call", "second-call")
+        history = (await session.save_state()).history
+        terminals = [
+            row["payload"]["tool_completion"]
+            for row in history
+            if row.get("type") == "event_msg" and row.get("payload", {}).get("tool_completion")
+        ]
+        assert len(terminals) == 1
+        assert terminals[0]["batch_call_ids"] == ["first-call", "second-call"]
+    assert effects == ["second", "first"]
+    assert proposals == [("first-call", "second-call")]
+    assert len(responses.requests) == 1
+
+
+async def test_native_batch_completion_yields_to_accepted_handoff(
+    responses: ResponsesFixture,
+) -> None:
+    calls: list[str] = []
+    proposals: list[ToolBatchCompletionContext[Any]] = []
+
+    @function_tool
+    def lookup() -> str:
+        calls.append("lookup")
+        return "lookup result"
+
+    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishToolBatch[str]:
+        proposals.append(ctx)
+        return FinishToolBatch("source batch output")
+
+    destination = Agent(name="Destination", instructions="Answer from the destination.")
+    source = Agent(
+        instructions="Look up the record and hand off.",
+        model="gpt-5.5",
+        tools=[lookup],
+        handoffs=[destination],
+        provider=provider(responses),
+        tool_batch_completion=complete,
+    )
+    responses.respond(
+        function_call("lookup", {}, "lookup"),
+        function_call("transfer_to_destination", {}, "handoff"),
+    )
+    responses.respond(assistant_output("destination output"))
+    async with timeout(30), source.session() as session:
+        completed = await (await session.submit("look up and hand off")).get_result()
+        assert completed.final_output == "destination output"
+        assert await session.get_active_agent() is destination
+    assert calls == ["lookup"]
+    assert not proposals
+    assert len(responses.requests) == 2
+
+
+async def test_native_batch_completion_uses_fresh_failed_manual_reply_after_resume(
+    responses: ResponsesFixture,
+) -> None:
+    manual = FunctionTool(
+        name="lookup",
+        description="Look up a record.",
+        input_type=LookupArgs,
+        output_type=ToolOutput,
+    )
+    proposals: list[tuple[str | None, bool]] = []
+
+    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishToolBatch[str]:
+        proposals.extend((result.call.call_id, result.output.success) for result in ctx.results)
+        return FinishToolBatch("lookup could not be completed")
+
+    agent = Agent(
+        instructions="Use lookup.",
+        model="gpt-5.5",
+        tools=[manual],
+        provider=provider(responses),
+        tool_batch_completion=complete,
+    )
+    responses.respond(function_call("lookup", {"key": "A"}, "lookup-pending"))
+    async with timeout(30), agent.session() as source:
+        await source.submit("look up A")
+        await next_request(source.interactions(), manual)
+        serialized = (await source.suspend()).to_json()
+    async with timeout(30), agent.session(state=SessionState.from_json(serialized)) as restored:
+        assert restored.restored_turn is not None
+        request = await next_request(restored.interactions(), manual)
+        await request.respond(ToolOutput.error("lookup failed"))
+        completed = await restored.restored_turn.get_result()
+        assert completed.final_output == "lookup could not be completed"
+        assert completed.tool_call is None
+        assert completed.tool_batch_call_ids == ("lookup-pending",)
+    assert proposals == [("lookup-pending", False)]
+    assert len(responses.requests) == 1
+
+
+async def test_native_batch_completion_can_continue_without_replaying_tools(
+    responses: ResponsesFixture,
+) -> None:
+    effects: list[str] = []
+    proposals: list[tuple[str, ...]] = []
+
+    @function_tool
+    def lookup() -> str:
+        effects.append("lookup")
+        return "lookup result"
+
+    def complete(ctx: ToolBatchCompletionContext[Any]) -> None:
+        proposals.append(tuple(str(result.call.call_id) for result in ctx.results))
+
+    responses.respond(function_call("lookup", {}, "lookup-call"))
+    responses.respond(assistant_output("assistant result"))
+    agent = Agent(
+        instructions="Use lookup.",
+        model="gpt-5.5",
+        tools=[lookup],
+        provider=provider(responses),
+        tool_batch_completion=complete,
+    )
+    async with timeout(30), agent.session() as session:
+        assert (
+            await (await session.submit("finish")).get_result()
+        ).final_output == "assistant result"
+    assert effects == ["lookup"]
+    assert proposals == [("lookup-call",)]
+    assert len(responses.requests) == 2
 
 
 @pytest.mark.parametrize("finish", [False, True])
