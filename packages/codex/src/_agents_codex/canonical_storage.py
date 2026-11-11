@@ -429,5 +429,8 @@ from .canonical_storage_dapr import DaprSessionStore as DaprSessionStore  # noqa
 from .canonical_storage_encrypt import EncryptedSessionStore as EncryptedSessionStore  # noqa: E402
 from .canonical_storage_mongodb import MongoDBSessionStore as MongoDBSessionStore  # noqa: E402
 from .canonical_storage_redis import RedisSessionStore as RedisSessionStore  # noqa: E402
+from .canonical_storage_sqlalchemy_async import (  # noqa: E402
+    AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore,
+)
 
 _preserve_module_identity(globals(), "agents.canonical_storage")
