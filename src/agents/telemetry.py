@@ -6,9 +6,6 @@ awaiting shutdown(). Native owns the exporters and the process lifetime.
 
 from __future__ import annotations
 
-# Runtime TracingIdGenerator type hints resolve this private name in the facade.
-from collections.abc import Callable as _Callable  # noqa: F401
-
 from _agents_codex.telemetry import (
     _MAX_PROCESSOR_WORKERS as _MAX_PROCESSOR_WORKERS,
     Any as Any,
@@ -47,6 +44,7 @@ from _agents_codex.telemetry import (
     TypeVar as TypeVar,
     _activate as _activate,
     _active_processor_ids as _active_processor_ids,
+    _Callable as _Callable,
     _capture as _capture,
     _CapturedTrace as _CapturedTrace,
     _check_processor_capacity as _check_processor_capacity,
