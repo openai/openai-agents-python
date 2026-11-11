@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import sys
 from typing import Any
 from uuid import UUID
 
@@ -12,7 +13,7 @@ import pytest
 
 from agents import Agent, Session
 from agents.observation import EventGap, ModelRequestDispatching, ModelResponseLinked
-from tests._asyncio import timeout
+from tests._asyncio import capture_cancellation, timeout
 from tests.test_buffered_responses import json_peer, json_response, provider
 
 
@@ -69,9 +70,13 @@ async def test_disposable_completion_preserves_request_and_detached_views(
         assert result.final_output == expected.final_output == "answer"
         assert result.thread_usage == expected.thread_usage
         assert len(recorded) == 1
-        assert recorded[0]["private_disposable"] is True
-        assert recorded[0]["status"] == "completed"
-        assert all(recorded[0]["retired"].values())
+        if sys.platform == "linux":
+            assert recorded[0]["private_disposable"] is True
+            assert recorded[0]["status"] == "completed"
+            assert all(recorded[0]["retired"].values())
+        else:
+            assert recorded[0]["private_disposable"] is False
+            assert isinstance(result.turn._session, Session)
         assert len(peer.requests) == 2
         for request in peer.requests:
             assert request["model"] == "gpt-5.2"
@@ -116,6 +121,9 @@ async def test_disposable_run_leaves_public_storage_and_parent_configuration_unc
         assert len(peer.requests) == 3
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="Private archive overflow needs the Linux shared runtime"
+)
 async def test_disposable_archive_overflow_keeps_live_model_history_without_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -183,6 +191,9 @@ async def test_disposable_archive_overflow_keeps_live_model_history_without_repl
         assert link.response_observation_id == linked["response_observation_id"]
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="Private live handoff needs the Linux shared runtime"
+)
 async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -220,7 +231,10 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
     async with timeout(30), json_peer() as peer, provider(peer) as owner:
         peer.json_replies.append(json_response("z" * (96 * 1024), "held", "held-item"))
         agent = Agent(model="gpt-5.2", instructions="Keep cancellation ownership.", provider=owner)
-        task = asyncio.create_task(agent.run("one private request"))
+        cancellations: list[asyncio.CancelledError] = []
+        task = asyncio.create_task(
+            capture_cancellation(agent.run("one private request"), cancellations)
+        )
         try:
             await captured.wait()
             assert observed["info"]["private_disposable"] is True
@@ -234,16 +248,20 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
             await asyncio.sleep(0)
             assert not task.done()
             release.set()
-            with pytest.raises(asyncio.CancelledError) as caught:
+            with pytest.raises(asyncio.CancelledError):
                 await task
-            assert caught.value.args == ("original private cancellation",)
+            assert [error.args for error in cancellations] == [("original private cancellation",)]
             assert len(adopted) == 1 and adopted[0]._closed and adopted[0]._resources_retired
             assert adopted[0]._reader is not None and adopted[0]._reader.done()
             assert len(peer.requests) == 1
+            assert "one private request" in json.dumps(peer.requests[0]["input"])
             monkeypatch.setattr(native, "_prepare_run_conversation", original)
             peer.json_replies.append(json_response("recovered", "recovery", "recovery-item"))
             assert (await agent.run("independent recovery input")).final_output == "recovered"
             assert len(peer.requests) == 2
+            recovery_input = json.dumps(peer.requests[1]["input"])
+            assert "independent recovery input" in recovery_input
+            assert "one private request" not in recovery_input
         finally:
             release.set()
             if not task.done():
@@ -270,8 +288,13 @@ async def test_explicit_websocket_selects_disposable_completion_without_http_pol
                 model="gpt-5.2", instructions="Keep the WebSocket choice.", provider=owner
             ).run(prompt)
             assert result.final_output == "private websocket answer"
-            assert len(recorded) == 1 and recorded[0]["private_disposable"] is True
-            assert recorded[0]["status"] == "completed"
+            assert len(recorded) == 1
+            if sys.platform == "linux":
+                assert recorded[0]["private_disposable"] is True
+                assert recorded[0]["status"] == "completed"
+            else:
+                assert recorded[0]["private_disposable"] is False
+                assert isinstance(result.turn._session, Session)
             assert len(server.requests) == 1
             assert any(
                 item.get("role") == "user"
