@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "56860e2c66653c32a875ce70af57211c362aced7",
+  "baseline": "v0.24.0-alpha.8",
+  "baseline_commit": "baffa313626ec03edb59b8caaa3b7bf214e7f55d",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -46,7 +46,7 @@
           "from types import TracebackType as TracebackType",
           "from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Generic as Generic, Literal, overload as overload",
           "from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar",
-          "from ._tool_errors import ToolErrorFormatter",
+          "from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter",
           "from ._trace_context import TraceContext as TraceContext",
           "from .compaction import _BeforeCompact",
           "from .completion import _BeforeComplete, _ToolBatchCompletion",

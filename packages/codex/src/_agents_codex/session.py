@@ -3130,6 +3130,23 @@ def _capture_project_guidance(
     )
 
 
+def _check_restored_environment(saved: SessionState, executor: Environment[Any] | None) -> None:
+    try:
+        if saved.executor_read_only != (executor is not None and executor.read_only):
+            raise ValueError("Checkpoint and Environment must agree on read-only execution")
+        current_policy = executor._network_policy_digest() if executor is not None else None
+        if saved.network_policy_digest != current_policy:
+            raise ValueError("Checkpoint and Environment must agree on the command network policy")
+        recorded_strict = (
+            saved.executor_policy_digest is not None
+            and saved.executor_policy_digest != _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
+        )
+        if recorded_strict != (executor is not None and executor.writable_roots is not None):
+            raise ValueError("Checkpoint and Environment must agree on the applied executor policy")
+    finally:
+        executor = None
+
+
 def _configure_project_search(
     runtime: dict[str, Any], environment: Environment[Any], cwd: str
 ) -> None:
@@ -3766,23 +3783,7 @@ class Session(Generic[ContextT, OutputT]):
                             f"Python tool collides with enabled environment tool: {tool.name}"
                         )
             if state is not None:
-                if saved.executor_read_only != (executor is not None and executor.read_only):
-                    raise ValueError("Checkpoint and Environment must agree on read-only execution")
-                current_policy = executor._network_policy_digest() if executor is not None else None
-                if saved.network_policy_digest != current_policy:
-                    raise ValueError(
-                        "Checkpoint and Environment must agree on the command network policy"
-                    )
-                recorded_strict = (
-                    saved.executor_policy_digest is not None
-                    and saved.executor_policy_digest != _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
-                )
-                if recorded_strict != (
-                    executor is not None and executor.writable_roots is not None
-                ):
-                    raise ValueError(
-                        "Checkpoint and Environment must agree on the applied executor policy"
-                    )
+                _check_restored_environment(saved, executor)
             _check_native_agents_environment(native_agents, executor)
             if restored_defaults is not None:
                 # Resolve only against destination declarations, without acquiring
