@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "99aec30c872c2819bc694823d3d1a501968e4884",
+  "baseline_commit": "b6c83c19edbf21e85ffb1d5413db68826b9a21f4",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -15,7 +15,7 @@
           "TypedAgentT = TypeVar('TypedAgentT', bound='Agent[Any, Any]')",
           "_MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()",
           "_OBSERVATION_RETENTION_UNSET: Any = object()",
-          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    extra_body: Mapping[str, Any] | None",
+          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)\n    credential_directory: str | Path | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
           "@dataclass(frozen=True, kw_only=True, slots=True, repr=False)\nclass SignInWithChatGPTCredentials:\n    issuer: str\n    client_id: str\n    subject: str\n    access_token: str",
@@ -126,26 +126,32 @@
           "@runtime_checkable\nclass SessionStore(Protocol):\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
           "class SessionStoreCleanup:\n\n    def __init__(self, owner: Any) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
           "@dataclass(frozen=True)\nclass CustomStorage:\n    backend: SessionStore\n\n    async def reconcile(self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput) -> None:\n        pass",
-          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
-          "class SQLAlchemySessionStore(SQLiteSessionStore):\n\n    def __init__(self, engine: Any) -> None:\n        pass"
+          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    @staticmethod\n    async def read_legacy_history(path: Path, session_id: str, *, messages_table: str='agent_messages', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
+          "class SQLAlchemySessionStore(SQLiteSessionStore):\n\n    def __init__(self, engine: Any) -> None:\n        pass",
+          "async def read_dapr_legacy_history(dapr_client: Any, session_id: str, *, state_store_name: str, consistency: Literal['eventual', 'strong']='eventual', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n    pass"
         ],
         "exports": {
           "CustomStorage": "agents.canonical_storage.CustomStorage",
           "SQLAlchemySessionStore": "agents.canonical_storage.SQLAlchemySessionStore",
           "SQLiteSessionStore": "agents.canonical_storage.SQLiteSessionStore",
           "SessionStore": "agents.canonical_storage.SessionStore",
-          "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup"
+          "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup",
+          "read_dapr_legacy_history": "agents.canonical_storage.read_dapr_legacy_history"
         },
         "imports": [
           "from dataclasses import dataclass as dataclass",
           "from pathlib import Path as Path",
-          "from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable",
+          "from typing import Any as Any, Literal, Protocol as Protocol, runtime_checkable as runtime_checkable",
+          "from .canonical_storage_dapr import DaprSessionStore as DaprSessionStore",
           "from .canonical_storage_encrypt import EncryptedSessionStore as EncryptedSessionStore",
           "from .canonical_storage_mongodb import MongoDBSessionStore as MongoDBSessionStore",
           "from .canonical_storage_redis import RedisSessionStore as RedisSessionStore",
+          "from .canonical_storage_sqlalchemy_async import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore",
           "from .tools import ToolOutput as ToolOutput"
         ],
         "references": {
+          "AsyncSQLAlchemySessionStore": "_agents_codex.canonical_storage_sqlalchemy_async.AsyncSQLAlchemySessionStore",
+          "DaprSessionStore": "_agents_codex.canonical_storage_dapr.DaprSessionStore",
           "EncryptedSessionStore": "_agents_codex.canonical_storage_encrypt.EncryptedSessionStore",
           "MongoDBSessionStore": "_agents_codex.canonical_storage_mongodb.MongoDBSessionStore",
           "RedisSessionStore": "_agents_codex.canonical_storage_redis.RedisSessionStore",
@@ -657,6 +663,7 @@
           "ModelRequestOptionsFactory: TypeAlias = Callable[[ModelRequest], ModelRequestOptions | None | Awaitable[ModelRequestOptions | None]]",
           "@dataclass(frozen=True)\nclass ModelResponse:\n    output: list[dict[str, Any]] = field(repr=False)\n    usage: dict[str, int] | None = None\n    response_id: str = field(default_factory=lambda: 'resp_' + uuid4().hex)",
           "class NativeModel(Protocol):\n\n    def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]:\n        pass",
+          "class NativeStreamingModel(NativeModel, Protocol):\n\n    def stream(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]] | Awaitable[AsyncIterator[Mapping[str, Any]]]:\n        pass",
           "class ModelProvider(Protocol):\n\n    def get_model(self, model_name: str) -> NativeModel:\n        pass",
           "@dataclass(frozen=True)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
           "@dataclass(frozen=True)\nclass LitellmModel(ChatCompletionsModel):\n    pass",
@@ -673,10 +680,11 @@
           "ModelRequestOptionsFactory": "collections.abc.Callable",
           "ModelResponse": "agents.models.ModelResponse",
           "NativeModel": "agents.models.NativeModel",
+          "NativeStreamingModel": "agents.models.NativeStreamingModel",
           "ResponsesModel": "agents.models.ResponsesModel"
         },
         "imports": [
-          "from collections.abc import Awaitable, Callable, Mapping",
+          "from collections.abc import AsyncIterator, Awaitable, Callable, Mapping",
           "from dataclasses import dataclass, field",
           "from typing import Any, Protocol, TypeAlias",
           "from uuid import uuid4",
@@ -885,7 +893,7 @@
           "@dataclass(frozen=True)\nclass RealtimePolicyContext:\n    agent: Agent[Any, Any]\n    context: Any\n    realtime_usage: RealtimeUsage | None = None",
           "@dataclass(frozen=True)\nclass RealtimeTool:\n    type: Literal['function', 'handoff']\n    name: str",
           "@dataclass(frozen=True)\nclass RealtimeToolErrorContext:\n    kind: Literal['approval_rejected']\n    tool_type: Literal['function']\n    tool_name: str\n    call_id: str\n    default_message: str\n    run_context: RealtimePolicyContext",
-          "@dataclass(frozen=True)\nclass RealtimeConfig:\n    model: str | None = None\n    voice: str | None = None\n    instructions: str | Callable[[RealtimePolicyContext], str | Awaitable[str]] | None = None\n    settings: NativeRealtimeSettings | None = field(default=None, repr=False)\n    transport: RealtimeWebRTC | RealtimeSIP | None = None\n    tools: tuple[FunctionTool[Any, Any, Any], ...] | None = None\n    output_guardrails: tuple[RealtimeOutputGuardrail, ...] = ()\n    guardrail_text_threshold: int | None = 100\n    automatically_trigger_response_for_mcp_tool_calls: bool = True\n    api_key: str | Callable[[], str | Awaitable[str]] | None = field(default=None, repr=False)\n    adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)\n    output_modality: Literal['audio', 'text'] = 'audio'\n    include_raw_provider_events: bool = False\n    is_tool_enabled: Callable[[RealtimePolicyContext, RealtimeTool], bool | Awaitable[bool]] | None = field(default=None, repr=False)\n    tool_error_formatter: Callable[[RealtimeToolErrorContext], str | None | Awaitable[str | None]] | None = field(default=None, repr=False)",
+          "@dataclass(frozen=True)\nclass RealtimeConfig:\n    model: str | None = None\n    voice: str | None = None\n    instructions: str | Callable[[RealtimePolicyContext], str | Awaitable[str]] | None = None\n    settings: NativeRealtimeSettings | None = field(default=None, repr=False)\n    transport: RealtimeWebRTC | RealtimeSIP | None = None\n    tools: tuple[FunctionTool[Any, Any, Any], ...] | None = None\n    output_guardrails: tuple[RealtimeOutputGuardrail, ...] = ()\n    guardrail_text_threshold: int | None = 100\n    automatically_trigger_response_for_mcp_tool_calls: bool = True\n    api_key: str | Callable[[], str | Awaitable[str]] | None = field(default=None, repr=False)\n    adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)\n    output_modality: Literal['audio', 'text'] = 'audio'\n    include_raw_provider_events: bool = False\n    is_tool_enabled: Callable[[RealtimePolicyContext, RealtimeTool], bool | Awaitable[bool]] | None = field(default=None, repr=False)\n    tool_error_formatter: Callable[[RealtimeToolErrorContext], str | None | Awaitable[str | None]] | None = field(default=None, repr=False)\n    url: str | None = field(default=None, repr=False)\n    headers: Mapping[str, str] | None = field(default=None, repr=False)",
           "class RealtimeUserInputText(TypedDict):\n    type: Literal['input_text']\n    text: str",
           "class RealtimeUserInputImage(TypedDict):\n    type: Literal['input_image']\n    image_url: str\n    detail: NotRequired[Literal['auto', 'low', 'high']]",
           "class RealtimeUserInputMessage(TypedDict):\n    type: Literal['message']\n    role: Literal['user']\n    content: Sequence[RealtimeUserInputText | RealtimeUserInputImage]",
@@ -916,7 +924,12 @@
           "class RealtimeSession:\n    _EVENT_LIMIT = 128\n    _HANDOFF_LIMIT = 1024\n    _PENDING_LIMIT = 16\n    _GUARDRAIL_TEXT_LIMIT = 1048576\n    _GUARDRAIL_TEXT_WORK_LIMIT = 64 * 1024 * 1024\n    _HISTORY_TEXT_WORK_LIMIT = 256 * 1024 * 1024\n    _BUFFER_BYTES_LIMIT = 8 * 1024 * 1024\n    _KINDS = frozenset({'realtime_conversation_started', 'realtime_conversation_realtime', 'realtime_conversation_closed', 'realtime_conversation_sdp'})\n\n    def __init__(self, session: Session[Any, Any], *, config: RealtimeConfig) -> None:\n        pass\n\n    @property\n    def usage(self) -> RealtimeUsage | None:\n        pass\n\n    @property\n    def history(self) -> tuple[RealtimeHistoryItem, ...]:\n        pass\n\n    @property\n    def call_id(self) -> str | None:\n        pass\n\n    async def answer_sdp(self) -> str:\n        pass\n\n    async def __aenter__(self) -> RealtimeSession:\n        pass\n\n    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:\n        pass\n\n    async def send_text(self, text: str) -> None:\n        pass\n\n    async def send_message(self, message: RealtimeUserInput, *, trigger_response: bool=True) -> None:\n        pass\n\n    async def request_response(self, response: NativeRealtimeResponseOptions | None=None) -> None:\n        pass\n\n    async def send_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:\n        pass\n\n    async def delete_conversation_item(self, provider_item_id: str) -> None:\n        pass\n\n    async def update_history(self, items: Sequence[Mapping[str, Any]], *, expected_items: Sequence[Mapping[str, Any]] | None=None) -> None:\n        pass\n\n    async def retrieve_conversation_item(self, provider_item_id: str) -> dict[str, Any]:\n        pass\n\n    async def retrieve_conversation_history(self) -> list[dict[str, Any]]:\n        pass\n\n    async def update(self, update: NativeRealtimeSessionUpdate) -> None:\n        pass\n\n    async def update_agent(self, agent: Agent[Any, Any]) -> None:\n        pass\n\n    async def get_active_agent(self) -> Agent[Any, Any]:\n        pass\n\n    async def approve_hosted_mcp(self, request: RealtimeHostedMcpApprovalRequested, *, approve: bool, reason: str | None=None) -> None:\n        pass\n\n    async def send_audio(self, audio: bytes | RealtimeAudioInput, *, commit: bool=False) -> None:\n        pass\n\n    async def events(self) -> AsyncIterator[RealtimeEvent]:\n        pass\n\n    def subscribe(self, *, max_events: int=128, max_bytes: int=8 * 1024 * 1024) -> _ObservationBuffer:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    def report_playback(self, position: RealtimePlaybackPosition) -> None:\n        pass\n\n    async def interrupt(self, response_id: str | None=None, *, playback: RealtimePlaybackPosition | None=None, feedback: str | None=None) -> None:\n        pass"
         ],
         "exports": {
+          "AssistantMessageItem": "agents.classic.realtime.items.AssistantMessageItem",
+          "AssistantText": "agents.classic.realtime.items.AssistantText",
           "BackgroundResult": "agents.realtime.BackgroundResult",
+          "DEFAULT_MODEL_SETTINGS": "DEFAULT_MODEL_SETTINGS",
+          "InputAudio": "agents.classic.realtime.items.InputAudio",
+          "InputText": "agents.classic.realtime.items.InputText",
           "NativeRealtimeAdapter": "agents.realtime.NativeRealtimeAdapter",
           "NativeRealtimeConnection": "agents.realtime.NativeRealtimeConnection",
           "NativeRealtimeCustomVoice": "agents.realtime.NativeRealtimeCustomVoice",
@@ -939,46 +952,124 @@
           "NativeRealtimeToolChoiceMcp": "agents.realtime.NativeRealtimeToolChoiceMcp",
           "NativeRealtimeTracing": "agents.realtime.NativeRealtimeTracing",
           "NativeRealtimeTranscription": "agents.realtime.NativeRealtimeTranscription",
+          "OpenAIRealtimeSIPModel": "agents.classic.realtime.openai_realtime.OpenAIRealtimeSIPModel",
+          "OpenAIRealtimeWebSocketModel": "agents.classic.realtime.openai_realtime.OpenAIRealtimeWebSocketModel",
           "RealtimeAdapterContext": "agents.realtime.RealtimeAdapterContext",
+          "RealtimeAgent": "agents.classic.realtime.agent.RealtimeAgent",
           "RealtimeAgentConfig": "agents.realtime.RealtimeAgentConfig",
           "RealtimeAgentContext": "agents.realtime.RealtimeAgentContext",
+          "RealtimeAgentEndEvent": "agents.classic.realtime.events.RealtimeAgentEndEvent",
+          "RealtimeAgentHooks": "agents.classic.lifecycle.AgentHooksBase",
+          "RealtimeAgentStartEvent": "agents.classic.realtime.events.RealtimeAgentStartEvent",
           "RealtimeAudio": "agents.realtime.RealtimeAudio",
+          "RealtimeAudioEnd": "agents.classic.realtime.events.RealtimeAudioEnd",
+          "RealtimeAudioFormat": "RealtimeAudioFormat",
           "RealtimeAudioInput": "agents.realtime.RealtimeAudioInput",
+          "RealtimeAudioInterrupted": "agents.classic.realtime.events.RealtimeAudioInterrupted",
+          "RealtimeClientMessage": "agents.classic.realtime.config.RealtimeClientMessage",
           "RealtimeConfig": "agents.realtime.RealtimeConfig",
+          "RealtimeConnectionStatus": "typing.Literal",
           "RealtimeConversationItemDeleted": "agents.realtime.RealtimeConversationItemDeleted",
           "RealtimeConversationItemObserved": "agents.realtime.RealtimeConversationItemObserved",
           "RealtimeDelegation": "agents.realtime.RealtimeDelegation",
           "RealtimeDetachedFunctionCall": "agents.realtime.RealtimeDetachedFunctionCall",
+          "RealtimeError": "agents.classic.realtime.events.RealtimeError",
           "RealtimeEvent": "RealtimeEvent",
+          "RealtimeEventInfo": "agents.classic.realtime.events.RealtimeEventInfo",
           "RealtimeGuardrailEvent": "agents.realtime.RealtimeGuardrailEvent",
           "RealtimeGuardrailInput": "agents.realtime.RealtimeGuardrailInput",
           "RealtimeGuardrailResult": "agents.realtime.RealtimeGuardrailResult",
+          "RealtimeGuardrailTripped": "agents.classic.realtime.events.RealtimeGuardrailTripped",
+          "RealtimeGuardrailsSettings": "agents.classic.realtime.config.RealtimeGuardrailsSettings",
           "RealtimeHandoff": "agents.realtime.RealtimeHandoff",
+          "RealtimeHandoffEvent": "agents.classic.realtime.events.RealtimeHandoffEvent",
           "RealtimeHistory": "agents.realtime.RealtimeHistory",
+          "RealtimeHistoryAdded": "agents.classic.realtime.events.RealtimeHistoryAdded",
           "RealtimeHistoryItem": "agents.realtime.RealtimeHistoryItem",
+          "RealtimeHistoryUpdated": "agents.classic.realtime.events.RealtimeHistoryUpdated",
           "RealtimeHostedMcpApprovalRequested": "agents.realtime.RealtimeHostedMcpApprovalRequested",
           "RealtimeHostedMcpCallCompleted": "agents.realtime.RealtimeHostedMcpCallCompleted",
           "RealtimeHostedMcpTool": "agents.realtime.RealtimeHostedMcpTool",
           "RealtimeHostedMcpToolsListed": "agents.realtime.RealtimeHostedMcpToolsListed",
+          "RealtimeInputAudioNoiseReductionConfig": "agents.classic.realtime.config.RealtimeInputAudioNoiseReductionConfig",
+          "RealtimeInputAudioTranscriptionConfig": "agents.classic.realtime.config.RealtimeInputAudioTranscriptionConfig",
+          "RealtimeItem": "RealtimeItem",
           "RealtimeLifecycle": "agents.realtime.RealtimeLifecycle",
+          "RealtimeMessageItem": "typing.Annotated",
+          "RealtimeModel": "agents.classic.realtime.model.RealtimeModel",
+          "RealtimeModelAudioDoneEvent": "agents.classic.realtime.model_events.RealtimeModelAudioDoneEvent",
+          "RealtimeModelAudioEvent": "agents.classic.realtime.model_events.RealtimeModelAudioEvent",
+          "RealtimeModelAudioInterruptedEvent": "agents.classic.realtime.model_events.RealtimeModelAudioInterruptedEvent",
+          "RealtimeModelCachedTokensDetails": "agents.classic.realtime.model_events.RealtimeModelCachedTokensDetails",
+          "RealtimeModelConfig": "agents.classic.realtime.model.RealtimeModelConfig",
+          "RealtimeModelConnectionStatusEvent": "agents.classic.realtime.model_events.RealtimeModelConnectionStatusEvent",
+          "RealtimeModelEndOfStreamEvent": "agents.classic.realtime.model_events.RealtimeModelEndOfStreamEvent",
+          "RealtimeModelErrorEvent": "agents.classic.realtime.model_events.RealtimeModelErrorEvent",
+          "RealtimeModelEvent": "RealtimeModelEvent",
+          "RealtimeModelExceptionEvent": "agents.classic.realtime.model_events.RealtimeModelExceptionEvent",
+          "RealtimeModelInputAudioTranscriptionCompletedEvent": "agents.classic.realtime.model_events.RealtimeModelInputAudioTranscriptionCompletedEvent",
+          "RealtimeModelInputTextContent": "agents.classic.realtime.model_inputs.RealtimeModelInputTextContent",
+          "RealtimeModelInputTokensDetails": "agents.classic.realtime.model_events.RealtimeModelInputTokensDetails",
+          "RealtimeModelItemDeletedEvent": "agents.classic.realtime.model_events.RealtimeModelItemDeletedEvent",
+          "RealtimeModelItemUpdatedEvent": "agents.classic.realtime.model_events.RealtimeModelItemUpdatedEvent",
+          "RealtimeModelListener": "agents.classic.realtime.model.RealtimeModelListener",
+          "RealtimeModelName": "RealtimeModelName",
+          "RealtimeModelOtherEvent": "agents.classic.realtime.model_events.RealtimeModelOtherEvent",
+          "RealtimeModelOutputTextDeltaEvent": "agents.classic.realtime.model_events.RealtimeModelOutputTextDeltaEvent",
+          "RealtimeModelOutputTokensDetails": "agents.classic.realtime.model_events.RealtimeModelOutputTokensDetails",
+          "RealtimeModelRawClientMessage": "agents.classic.realtime.model_inputs.RealtimeModelRawClientMessage",
+          "RealtimeModelSendAudio": "agents.classic.realtime.model_inputs.RealtimeModelSendAudio",
+          "RealtimeModelSendEvent": "RealtimeModelSendEvent",
+          "RealtimeModelSendInterrupt": "agents.classic.realtime.model_inputs.RealtimeModelSendInterrupt",
+          "RealtimeModelSendRawMessage": "agents.classic.realtime.model_inputs.RealtimeModelSendRawMessage",
+          "RealtimeModelSendSessionUpdate": "agents.classic.realtime.model_inputs.RealtimeModelSendSessionUpdate",
+          "RealtimeModelSendToolOutput": "agents.classic.realtime.model_inputs.RealtimeModelSendToolOutput",
+          "RealtimeModelSendUserInput": "agents.classic.realtime.model_inputs.RealtimeModelSendUserInput",
+          "RealtimeModelToolCallEvent": "agents.classic.realtime.model_events.RealtimeModelToolCallEvent",
+          "RealtimeModelTracingConfig": "agents.classic.realtime.config.RealtimeModelTracingConfig",
+          "RealtimeModelTranscriptDeltaEvent": "agents.classic.realtime.model_events.RealtimeModelTranscriptDeltaEvent",
+          "RealtimeModelTurnEndedEvent": "agents.classic.realtime.model_events.RealtimeModelTurnEndedEvent",
+          "RealtimeModelTurnStartedEvent": "agents.classic.realtime.model_events.RealtimeModelTurnStartedEvent",
+          "RealtimeModelUsageEvent": "agents.classic.realtime.model_events.RealtimeModelUsageEvent",
+          "RealtimeModelUserInput": "RealtimeModelUserInput",
+          "RealtimeModelUserInputMessage": "agents.classic.realtime.model_inputs.RealtimeModelUserInputMessage",
           "RealtimeOutputGuardrail": "agents.realtime.RealtimeOutputGuardrail",
           "RealtimePlaybackInterrupted": "agents.realtime.RealtimePlaybackInterrupted",
           "RealtimePlaybackPosition": "agents.realtime.RealtimePlaybackPosition",
+          "RealtimePlaybackState": "agents.classic.realtime.model.RealtimePlaybackState",
+          "RealtimePlaybackTracker": "agents.classic.realtime.model.RealtimePlaybackTracker",
           "RealtimeProviderRequestError": "agents.realtime.RealtimeProviderRequestError",
+          "RealtimeRawModelEvent": "agents.classic.realtime.events.RealtimeRawModelEvent",
           "RealtimeRawProviderEvent": "agents.realtime.RealtimeRawProviderEvent",
+          "RealtimeReasoningConfig": "agents.classic.realtime.config.RealtimeReasoningConfig",
+          "RealtimeReasoningEffort": "RealtimeReasoningEffort",
           "RealtimeResponse": "agents.realtime.RealtimeResponse",
+          "RealtimeRunConfig": "agents.classic.realtime.config.RealtimeRunConfig",
+          "RealtimeRunHooks": "agents.classic.lifecycle.RunHooksBase",
+          "RealtimeRunner": "agents.classic.realtime.runner.RealtimeRunner",
           "RealtimeSIP": "agents.realtime.RealtimeSIP",
           "RealtimeSession": "agents.realtime.RealtimeSession",
+          "RealtimeSessionEvent": "RealtimeSessionEvent",
+          "RealtimeSessionModelSettings": "agents.classic.realtime.config.RealtimeSessionModelSettings",
           "RealtimeText": "agents.realtime.RealtimeText",
+          "RealtimeToolApprovalRequired": "agents.classic.realtime.events.RealtimeToolApprovalRequired",
           "RealtimeToolBatchError": "agents.realtime.RealtimeToolBatchError",
           "RealtimeToolCall": "agents.realtime.RealtimeToolCall",
+          "RealtimeToolCallItem": "agents.classic.realtime.items.RealtimeToolCallItem",
+          "RealtimeToolEnd": "agents.classic.realtime.events.RealtimeToolEnd",
+          "RealtimeToolExecutionConfig": "agents.classic.realtime.config.RealtimeToolExecutionConfig",
+          "RealtimeToolStart": "agents.classic.realtime.events.RealtimeToolStart",
+          "RealtimeTurnDetectionConfig": "agents.classic.realtime.config.RealtimeTurnDetectionConfig",
           "RealtimeUsage": "agents.realtime.RealtimeUsage",
           "RealtimeUserInput": "RealtimeUserInput",
           "RealtimeUserInputImage": "agents.realtime.RealtimeUserInputImage",
           "RealtimeUserInputMessage": "agents.realtime.RealtimeUserInputMessage",
           "RealtimeUserInputText": "agents.realtime.RealtimeUserInputText",
           "RealtimeWebRTC": "agents.realtime.RealtimeWebRTC",
+          "SystemMessageItem": "agents.classic.realtime.items.SystemMessageItem",
+          "UserMessageItem": "agents.classic.realtime.items.UserMessageItem",
           "background_result": "agents.realtime.background_result",
+          "get_api_key": "agents.classic.realtime.openai_realtime.get_api_key",
           "realtime_handoff": "agents.realtime.realtime_handoff"
         },
         "imports": [
@@ -1781,6 +1872,7 @@
       "ApprovalRequest": "agents.manual.ApprovalRequest",
       "ApprovalRequested": "agents.manual.ApprovalRequested",
       "AssistantMessage": "agents.input.AssistantMessage",
+      "AsyncSQLAlchemySessionStore": "agents.canonical_storage.AsyncSQLAlchemySessionStore",
       "Capabilities": "agents.session.Capabilities",
       "CapabilityError": "agents.session.CapabilityError",
       "ChatCompletionsModel": "agents.models.ChatCompletionsModel",
@@ -1808,6 +1900,7 @@
       "ComputerSafetyError": "agents.computer.ComputerSafetyError",
       "ContinueTurn": "agents.completion.ContinueTurn",
       "CustomStorage": "agents.canonical_storage.CustomStorage",
+      "DaprSessionStore": "agents.canonical_storage.DaprSessionStore",
       "DecisionError": "agents.decisions.DecisionError",
       "DecisionInput": "agents.decisions.DecisionInput",
       "DecisionProvider": "agents.decisions.DecisionProvider",
@@ -1885,6 +1978,7 @@
       "NativeOutput": "agents.schema.NativeOutput",
       "NativeProvider": "agents.agent.NativeProvider",
       "NativeRole": "agents.native_agents.NativeRole",
+      "NativeStreamingModel": "agents.models.NativeStreamingModel",
       "NativeToolCall": "agents.native_interception.NativeToolCall",
       "NetworkPolicy": "agents.executor.NetworkPolicy",
       "OpenAIDecisions": "agents.decisions.OpenAIDecisions",
@@ -2015,12 +2109,24 @@
         ],
         "references": {}
       },
-      "_agents_codex.canonical_storage_encrypt": {
+      "_agents_codex.canonical_storage_dapr": {
         "declarations": [
-          "class EncryptedSessionStore:\n\n    def __init__(self, backend: SessionStore, *, encryption_key: str) -> None:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+          "class DaprSessionStore:\n\n    def __init__(self, client: DaprClient, *, state_store_name: str, key_prefix: str='agents:canonical:v1', lease_seconds: float=30) -> None:\n        pass\n\n    @classmethod\n    async def from_address(cls, dapr_address: str='localhost:50001', *, state_store_name: str, key_prefix: str='agents:canonical:v1', lease_seconds: float=30) -> DaprSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
+          "from dapr.aio.clients import DaprClient"
+        ],
+        "references": {}
+      },
+      "_agents_codex.canonical_storage_encrypt": {
+        "declarations": [
+          "class EncryptedSessionStore:\n\n    def __init__(self, backend: SessionStore, *, encryption_key: str) -> None:\n        pass\n\n    @staticmethod\n    def read_legacy_history(items: Sequence[Mapping[str, Any]], session_id: str, *, encryption_key: str, ttl: int=600, limit: int | None=None, max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Mapping, Sequence",
+          "from typing import Any",
           "from .canonical_storage import SessionStore"
         ],
         "references": {
@@ -2029,7 +2135,7 @@
       },
       "_agents_codex.canonical_storage_mongodb": {
         "declarations": [
-          "class MongoDBSessionStore:\n\n    def __init__(self, client: Any, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_uri(cls, uri: str, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> MongoDBSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass"
+          "class MongoDBSessionStore:\n\n    def __init__(self, client: Any, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_uri(cls, uri: str, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> MongoDBSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    async def read_legacy_history(self, session_id: str, *, sessions_collection: str='agent_sessions', messages_collection: str='agent_messages', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -2039,11 +2145,23 @@
       },
       "_agents_codex.canonical_storage_redis": {
         "declarations": [
-          "class RedisSessionStore:\n\n    def __init__(self, client: Any, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_url(cls, url: str, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> RedisSessionStore:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+          "class RedisSessionStore:\n\n    def __init__(self, client: Any, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_url(cls, url: str, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> RedisSessionStore:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    async def read_legacy_history(self, session_id: str, *, key_prefix: str='agents:session', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
           "from typing import Any"
+        ],
+        "references": {}
+      },
+      "_agents_codex.canonical_storage_sqlalchemy_async": {
+        "declarations": [
+          "class AsyncSQLAlchemySessionStore:\n\n    def __init__(self, engine: AsyncEngine, *, table_name: str='agents_canonical_threads', schema: str | None=None, create_tables: bool=False, lease_seconds: float=30) -> None:\n        pass\n\n    @classmethod\n    async def from_url(cls, url: str | URL, *, table_name: str='agents_canonical_threads', schema: str | None=None, create_tables: bool=False, lease_seconds: float=30, **engine_options: Any) -> AsyncSQLAlchemySessionStore:\n        pass\n\n    async def read_legacy_history(self, session_id: str, *, messages_table: str='agent_messages', schema: str | None=None, order_by: Literal['created_at', 'id']='created_at', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from typing import Any, Literal",
+          "from sqlalchemy.engine import URL",
+          "from sqlalchemy.ext.asyncio import AsyncEngine"
         ],
         "references": {}
       },
@@ -4541,6 +4659,7 @@
       "ApprovalRequest",
       "ApprovalRequested",
       "AssistantMessage",
+      "AsyncSQLAlchemySessionStore",
       "Capabilities",
       "CapabilityError",
       "ChatCompletionsModel",
@@ -4568,6 +4687,7 @@
       "ComputerSafetyError",
       "ContinueTurn",
       "CustomStorage",
+      "DaprSessionStore",
       "DecisionError",
       "DecisionInput",
       "DecisionProvider",
@@ -4645,6 +4765,7 @@
       "NativeOutput",
       "NativeProvider",
       "NativeRole",
+      "NativeStreamingModel",
       "NativeToolCall",
       "NetworkPolicy",
       "OpenAIDecisions",
@@ -4710,7 +4831,7 @@
       "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, ToolInputErrorContext as ToolInputErrorContext, ToolTimeoutBehavior as ToolTimeoutBehavior, ToolTimeoutError as ToolTimeoutError, function_tool as function_tool",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
-      "from .canonical_storage import CustomStorage as CustomStorage, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
+      "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn",
       "from .computer import Computer as Computer, ComputerProvider as ComputerProvider, ComputerSafetyError as ComputerSafetyError, computer_tool as computer_tool",
@@ -4721,7 +4842,7 @@
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalDecision as ApprovalDecision, ApprovalRequest as ApprovalRequest, ApprovalRequested as ApprovalRequested, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",
       "from .model_context import ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",
-      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, NativeModel as NativeModel, ResponsesModel as ResponsesModel",
+      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, NativeModel as NativeModel, NativeStreamingModel as NativeStreamingModel, ResponsesModel as ResponsesModel",
       "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
       "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",

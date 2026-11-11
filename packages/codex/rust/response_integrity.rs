@@ -337,6 +337,8 @@ mod registered_plan_tests {
             encrypted_function_args: None,
             call_id: "synthetic-function".into(),
             internal_chat_message_metadata_passthrough: None,
+            asynchronous: None,
+            status: None,
         };
         for (item, registered_plan, completed) in [
             (&local_shell, true, true),
