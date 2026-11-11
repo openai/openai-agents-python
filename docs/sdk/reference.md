@@ -258,10 +258,11 @@ The decorator declares a Python function without starting a runtime. Input annot
 ```text
 @function_tool
 @function_tool(name=None, description=None, callback_timeout=None,
-               before=None, after=None, defer_loading=False)
+               before=None, after=None, defer_loading=False,
+               timeout_behavior="raise_exception", timeout_error_function=None)
 ```
 
-Names and descriptions default to the function declaration. `callback_timeout=None` sets no callback body deadline. `defer_loading=True` lets supported models discover selected schemas when needed; other models receive them directly. It does not defer MCP connection startup or admit tools outside the selection. See [Python tools](tools.md#python-functions) and [notifications](tools.md#tool-notifications).
+Names and descriptions default to the function declaration. `callback_timeout=None` leaves the callback body without a deadline. See [callback deadlines](tools.md#callback-deadlines) for timeout behavior. With `defer_loading=True`, supported models discover selected schemas when needed. Other models receive the schemas directly. See [tool notifications](tools.md#tool-notifications).
 
 ### FunctionTool
 
@@ -438,11 +439,12 @@ Supplies application context, the owning Python Session and Agent, and the actua
 ### NativeProvider
 
 ```text
-NativeProvider(*, base_url=None, api_key=None, supports_websockets=None, auth=None)
+NativeProvider(*, base_url=None, api_key=None, supports_websockets=None, auth=None,
+               response_mode="streaming")
 await provider.aclose() -> None
 ```
 
-Use the [provider configuration guide](configuration.md#provider-connection) for connection defaults, WebSocket selection and provider lifetime. The default transport has been requiring Responses support from custom endpoints. Matching source builds have also been accepting `model_backend` with [application models](#application-models). Close every Session using the provider before calling `aclose()`.
+Use the [provider configuration guide](configuration.md#provider-connection) for connection defaults, WebSocket selection and provider lifetime. The default transport has been requiring Responses support from custom endpoints. In [buffered mode](configuration.md#buffer-model-responses), the SDK has been reading the complete HTTP JSON response before delivering its output events. Matching source builds have also been accepting `model_backend` with [application models](#application-models). Close every Session using the provider before calling `aclose()`.
 
 ### Application models
 
@@ -574,6 +576,6 @@ Matching development builds also accept absolute HTTP(S) image URLs and `detail`
 
 ## Existing MCP clients
 
-`agents.migration.mcp` provides the independent `MCPNamespace` and `select_mcp_tools` adapter for application-owned classic MCP clients. It returns native function tools; it does not run classic Agents or Models. See [client ownership and policy limits](mcp.md#reuse-an-application-owned-mcp-client).
+`agents.migration.mcp` provides `MCPNamespace` and `select_mcp_tools` to expose an application-owned Classic MCP client's tools as native function tools. Use a matching development build. See [client ownership, policy limits, and alpha.7 alternatives](mcp.md#reuse-an-application-owned-mcp-client).
 
 Import native cleanup recovery as [`agents.get_cleanup`](#get_cleanup).

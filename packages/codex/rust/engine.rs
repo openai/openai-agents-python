@@ -431,7 +431,7 @@ impl EngineState {
             "Custom canonical storage cannot combine with local storage, goals or checkpoints"
         );
         let store: Arc<dyn ThreadStore> = if let Some(backend) = canonical_store {
-            Arc::new(crate::canonical_storage::CanonicalStore::new(backend))
+            crate::canonical_storage::CanonicalStore::new(backend)
         } else {
             match &local_checklist_store {
                 Some(store) => store.clone(),

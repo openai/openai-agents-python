@@ -19,6 +19,8 @@ use codex_protocol::models::ResponseItem;
 use futures_core::Stream;
 use serde::Serialize;
 
+use crate::local_reconciliation::shell_call_id;
+
 pub struct Seed {
     turn_id: String,
     original_ids: Arc<HashSet<String>>,
@@ -234,6 +236,12 @@ impl Stream for GuardedStream {
                 | ResponseItem::ComputerCall { call_id, .. }
                 | ResponseItem::ComputerCallOutput { call_id, .. } => Some(call_id.as_str()),
                 ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_deref(),
+                ResponseItem::ShellCall {
+                    provider_fields, ..
+                }
+                | ResponseItem::ShellCallOutput {
+                    provider_fields, ..
+                } => shell_call_id(provider_fields).map(String::as_str),
                 _ => None,
             };
             if id.is_some_and(|id| this.original_ids.contains(id)) {
