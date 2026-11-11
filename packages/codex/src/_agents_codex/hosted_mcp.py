@@ -60,6 +60,7 @@ class HostedMCP(Generic[ContextT_contra]):
 
     tool_config retains the Responses MCP declaration, including its approval
     requirement. An approval callback returns approve and an optional reason.
+    A callback defaults to always and requires provider approval.
     Without a callback, the Session exposes a live ActionRequested whose
     arguments contain the original request and whose reply takes the same
     decision. Provider request IDs and caller metadata cannot be replaced by
@@ -79,9 +80,11 @@ class HostedMCP(Generic[ContextT_contra]):
     _binding: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        config = _capture_config(self.tool_config)
         if self.on_approval_request is not None and not callable(self.on_approval_request):
             raise TypeError("Hosted MCP approval callback must be callable or None")
+        config = _capture_config(
+            self.tool_config, has_approval_callback=self.on_approval_request is not None
+        )
         object.__setattr__(self, "tool_config", config)
         from ._hosted_mcp_binding import _binding
 
@@ -100,7 +103,7 @@ class HostedMCP(Generic[ContextT_contra]):
         return binding.match(event)
 
 
-def _capture_config(value: Mapping[str, Any]) -> dict[str, Any]:
+def _capture_config(value: Mapping[str, Any], *, has_approval_callback: bool) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError("Hosted MCP tool_config must be an object")
     config = json.loads(json.dumps(dict(value), allow_nan=False))
@@ -125,11 +128,19 @@ def _capture_config(value: Mapping[str, Any]) -> dict[str, Any]:
         or any(caller not in ("direct", "programmatic") for caller in callers)
     ):
         raise ValueError("Hosted MCP allowed_callers must contain direct or programmatic")
+    if has_approval_callback:
+        approval_policy = config.get("require_approval")
+        if approval_policy == "never":
+            raise ValueError("Hosted MCP approval callback requires provider approval")
+        if approval_policy is None:
+            config["require_approval"] = "always"
     return cast(dict[str, Any], config)
 
 
 def _live_config(tool: HostedMCP[Any]) -> dict[str, Any]:
-    config = _capture_config(tool.tool_config)
+    config = _capture_config(
+        tool.tool_config, has_approval_callback=tool.on_approval_request is not None
+    )
     if config["server_label"] != tool.ref.name:
         raise ValueError("Hosted MCP server identity cannot change after declaration")
     return config

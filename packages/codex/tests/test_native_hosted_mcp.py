@@ -91,6 +91,41 @@ def test_hosted_mcp_catalog_keeps_only_identity_and_captures_each_session_separa
     assert second.tools[0].config["allowed_tools"] == ["lookup", "later"]
 
 
+@pytest.mark.parametrize("policy", [None, "never"])
+def test_hosted_mcp_callback_needs_provider_approval(policy: str | None) -> None:
+    config = dict(declaration().tool_config)
+    if policy is None:
+        config.pop("require_approval")
+        assert (
+            HostedMCP(
+                tool_config=config, on_approval_request=lambda _: {"approve": False}
+            ).tool_config.get("require_approval")
+            == "always"
+        )
+    else:
+        config["require_approval"] = policy
+        with pytest.raises(ValueError, match="approval callback requires provider approval"):
+            HostedMCP(tool_config=config, on_approval_request=lambda _: {"approve": False})
+
+
+@pytest.mark.asyncio
+async def test_native_hosted_mcp_rejects_mutated_callback_approval(
+    responses: ResponsesFixture,
+) -> None:
+    docs = declaration(callback=lambda _: {"approve": False})
+    docs.tool_config["require_approval"] = "never"
+    async with timeout(15), provider(responses) as native:
+        with pytest.raises(ValueError, match="approval callback requires provider approval"):
+            async with Agent(
+                instructions="Use the configured server.",
+                provider=native,
+                model="gpt-5.2",
+                tools=[docs],
+            ).session():
+                pytest.fail("Session opened with provider approval disabled")
+    assert responses.requests == []
+
+
 @pytest.mark.asyncio
 async def test_native_hosted_mcp_handoff_callback_uses_captured_tool_slot(
     responses: ResponsesFixture,
@@ -181,7 +216,10 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
         assert request.context.context is context
         return {"approve": approve, "reason": "Explicit decision."}
 
-    tool = declaration(callback=decide, allowed_tools=["lookup"])
+    config = dict(declaration(allowed_tools=["lookup"]).tool_config)
+    if not approve and mode == "run":
+        config.pop("require_approval")
+    tool = HostedMCP(tool_config=config, on_approval_request=decide)
     responses.respond(approval())
     responses.respond(assistant_output("Decision received."))
     storage: LocalStorage | CustomStorage | None = None
@@ -223,6 +261,8 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
                     for item in resumed_input
                 )
     assert result.final_output == "Decision received."
+    request_tool = next(entry for entry in responses.requests[0]["tools"] if entry["type"] == "mcp")
+    assert request_tool["require_approval"] == "always"
     assert len(observed) == 1
     assert (observed[0].request_id, observed[0].server_label, observed[0].name) == (
         "approval_1",
@@ -349,11 +389,7 @@ async def test_native_hosted_mcp_provider_receipts_are_progress_without_local_di
             instructions="Use docs.",
             model="gpt-5.2",
             provider=native,
-            tools=[
-                declaration(
-                    callback=lambda request: calls.append(request), require_approval="never"
-                )
-            ],
+            tools=[declaration(callback=lambda request: calls.append(request))],
         )
         result = await agent.run("Lookup.", return_items=True, return_history=True)
     assert result.final_output == ""
