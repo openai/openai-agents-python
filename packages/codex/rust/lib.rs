@@ -3972,6 +3972,7 @@ fn conversation_opening(
         || options.transform_context
         || options.before_compact
         || options.before_complete
+        || options.tool_batch_completion
     {
         return Err(PyValueError::new_err(
             "atomic opening requires a fresh ordinary conversation",
