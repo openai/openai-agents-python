@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "2c0b9c1082d789ec3963b3c26587b03007c92583",
+  "baseline_commit": "99aec30c872c2819bc694823d3d1a501968e4884",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -2025,7 +2025,7 @@
       },
       "_agents_codex.canonical_storage_mongodb": {
         "declarations": [
-          "class MongoDBSessionStore:\n\n    def __init__(self, client: Any, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_uri(cls, uri: str, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> MongoDBSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass"
+          "class MongoDBSessionStore:\n\n    def __init__(self, client: Any, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_uri(cls, uri: str, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> MongoDBSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -2035,7 +2035,7 @@
       },
       "_agents_codex.canonical_storage_redis": {
         "declarations": [
-          "class RedisSessionStore:\n\n    def __init__(self, client: Any, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_url(cls, url: str, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> RedisSessionStore:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+          "class RedisSessionStore:\n\n    def __init__(self, client: Any, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_url(cls, url: str, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> RedisSessionStore:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
