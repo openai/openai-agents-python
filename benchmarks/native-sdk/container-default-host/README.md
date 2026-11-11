@@ -23,11 +23,12 @@ BENCH="$PWD/benchmarks/native-sdk"
 WHEEL="/absolute/path/to/exact-native-wheel.whl"
 CPYTHON_DIR="/absolute/path/to/cpython-3.13.16-linux-x86_64-gnu"
 LAB="$(mktemp -d /tmp/agents-default-host.XXXXXX)"
+RUN_ID="$(cat /proc/sys/kernel/random/uuid)"
 CTX="$LAB/context"
 mkdir "$CTX" "$LAB/output" "$LAB/docker-config"
 export DOCKER_CONFIG="$LAB/docker-config"
-IMAGE="agents-default-host-smoke-$$:local"
-CONTAINER="agents-default-host-smoke-$$"
+IMAGE="agents-default-host-smoke:$RUN_ID"
+CONTAINER="agents-default-host-smoke-$RUN_ID"
 sha256sum "$WHEEL" > "$LAB/wheel.sha256"
 cp -a "$CPYTHON_DIR" "$CTX/python"
 cp "$(command -v uv)" "$CTX/uv"
@@ -55,7 +56,7 @@ timeout --signal=TERM --kill-after=15s 600s \
 docker image inspect "$IMAGE" > "$LAB/image.json"
 ```
 
-The pins have been selecting direct dependencies; complete installed versions have been remaining in the image's two package inventories. A writable task-local `DOCKER_CONFIG` has been avoiding writes to the host's Docker configuration. No host credentials, home, runtime, trust-store or Docker-socket mounts in the smoke container.
+The image's package inventories have been recording the full installed versions. The UUID has been keeping the image tag and container name independent of the temporary directory. A task-local `DOCKER_CONFIG` has been keeping Docker configuration writes in `LAB`. Container mount: the results directory only.
 
 ## Run one offline functional smoke
 

@@ -40,6 +40,7 @@ nav:
   - Build:
       - Task recipes: recipes.md
       - Tools: tools.md
+      - Guardrails: guardrails.md
       - MCP servers: mcp.md
       - Conversations and streaming: sessions.md
       - Save and restore state: state.md
