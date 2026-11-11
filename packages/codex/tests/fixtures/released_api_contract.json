@@ -1148,8 +1148,8 @@
       },
       "agents.recovery": {
         "declarations": [
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UncertainCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue = field(repr=False)\n\n    def reconcile(self, *, outcome: Literal['applied', 'not_applied'], result: str) -> ReconciledCall:\n        pass",
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ReconciledCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    outcome: Literal['applied', 'not_applied']\n    result: str = field(repr=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UncertainCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue = field(repr=False)\n\n    def reconcile(self, *, outcome: Literal['applied', 'not_applied'], result: str | ShellOutput) -> ReconciledCall:\n        pass",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ReconciledCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    outcome: Literal['applied', 'not_applied']\n    result: str | ShellOutput = field(repr=False)",
           "class LocalRecoveryRequired(RuntimeError):\n\n    def __init__(self, calls: tuple[UncertainCall, ...], turns: tuple[RecordedTurn, ...], items: tuple[SessionItem, ...]) -> None:\n        pass"
         ],
         "exports": {
@@ -1159,14 +1159,16 @@
         },
         "imports": [
           "from dataclasses import dataclass as dataclass, field as field",
-          "from typing import Literal as Literal",
+          "from typing import Literal",
           "from pydantic import JsonValue as JsonValue",
           "from ._events import SessionItem as SessionItem",
-          "from .history import RecordedTurn as RecordedTurn"
+          "from .history import RecordedTurn as RecordedTurn",
+          "from .shell import ShellOutput as ShellOutput"
         ],
         "references": {
           "RecordedTurn": "agents.history.RecordedTurn",
-          "SessionItem": "agents._events.SessionItem"
+          "SessionItem": "agents._events.SessionItem",
+          "ShellOutput": "agents.shell.ShellOutput"
         }
       },
       "agents.repl": {

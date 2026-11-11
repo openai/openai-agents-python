@@ -206,7 +206,9 @@ def project_execution_completion(
     return cast(ExecutionItem | None, _execution_item(native, thread_id, turn_id))
 
 
-def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> dict[str, Any] | None:
+def project_hosted_response_item(
+    raw: dict[str, Any], turn_id: str | None, *, item_id: str | None = None
+) -> dict[str, Any] | None:
     """Keep the complete provider payload alongside its public typed fields."""
     raw = {
         key: value
@@ -221,11 +223,12 @@ def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> di
         "shell_call_output": ("call_id", "output"),
         "image_generation_call": ("result", "revised_prompt"),
     }.get(kind)
-    if fields is None or not raw.get("id"):
+    resolved_id = raw.get("id") or item_id
+    if fields is None or not resolved_id:
         return None
     return {
         "type": kind,
-        "id": raw["id"],
+        "id": resolved_id,
         "turn_id": turn_id,
         "status": (
             (raw.get("status") or "unknown")

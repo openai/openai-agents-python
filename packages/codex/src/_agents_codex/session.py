@@ -256,6 +256,7 @@ from .recovery import (
     LocalRecoveryRequired as LocalRecoveryRequired,
     ReconciledCall as ReconciledCall,
     UncertainCall as UncertainCall,
+    _application_shell_recovery,
 )
 from .response_facts import _response_fact_record
 from .schema import (
@@ -4678,7 +4679,10 @@ class Session(Generic[ContextT, OutputT]):
             raise RuntimeError("Native local history has a live descendant writer")
         children = {child["id"]: child for child in descendants}
         histories: dict[str, dict[str, Any]] = {}
-        projected: dict[str, tuple[list[RecordedTurn], list[SessionItem], list[UncertainCall]]] = {}
+        projected: dict[
+            str,
+            tuple[list[RecordedTurn], list[SessionItem], list[UncertainCall], set[tuple[str, str]]],
+        ] = {}
         for subagent_id in [None, *children]:
             read_history = (
                 self._native.read_thread_history(None)
@@ -4687,10 +4691,9 @@ class Session(Generic[ContextT, OutputT]):
             )
             encoded = await self._publish_startup(read_history)
             thread_id = subagent_id if subagent_id is not None else self.id
-            calls: list[UncertainCall] = []
-            turns, items = project_history(
-                json.loads(encoded), self.id, subagent_id, uncertain_calls=calls
-            )
+            history = json.loads(encoded)
+            calls, shell_receipts = _application_shell_recovery(history, thread_id)
+            turns, items = project_history(history, self.id, subagent_id, uncertain_calls=calls)
             if subagent_id is not None:
                 child = children[subagent_id]
                 histories[subagent_id] = {
@@ -4699,13 +4702,13 @@ class Session(Generic[ContextT, OutputT]):
                     "status": child["status"],
                     "interrupted": [],
                 }
-            projected[thread_id] = turns, items, calls
+            projected[thread_id] = turns, items, calls, shell_receipts
 
         recorded: dict[str, list[RecordedTurn]] = {}
         recorded_items: list[SessionItem] = []
         unknown: list[UncertainCall] = []
         prior: set[tuple[str, str, str]] = set()
-        for thread_id, (turns, items, calls) in projected.items():
+        for thread_id, (turns, items, calls, shell_receipts) in projected.items():
             if thread_id in children:
                 # Forks can retain parent turns. Only their owner can reconcile them.
                 parent = children[thread_id]["parent_agent_id"]
@@ -4713,9 +4716,13 @@ class Session(Generic[ContextT, OutputT]):
                 turns = [turn for turn in turns if turn["id"] not in inherited]
                 items = [item for item in items if item["turn_id"] not in inherited]
                 calls = [call for call in calls if call.turn_id not in inherited]
+                shell_receipts = {
+                    (turn, call) for turn, call in shell_receipts if turn not in inherited
+                }
             recorded[thread_id] = turns
             recorded_items.extend(items)
             unknown.extend(calls)
+            prior.update((thread_id, turn, call) for turn, call in shell_receipts)
             prior.update(
                 (thread_id, item["turn_id"], item["call_id"])
                 for item in items
@@ -4766,7 +4773,7 @@ class Session(Generic[ContextT, OutputT]):
                 self._native._reconcile_local_calls(
                     json.dumps(
                         {
-                            "receipts": [asdict(call) for call in reconciliation],
+                            "receipts": [call._wire() for call in reconciliation],
                             "histories": histories,
                         }
                     )

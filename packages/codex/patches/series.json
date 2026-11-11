@@ -691,7 +691,11 @@
     {
       "path": "sdk-application-shell.patch",
       "sha256": "45f726f28dd4ffdc63ae4b28f773d4ed4558312ca10d001bb974665ad7870612"
+    },
+    {
+      "path": "sdk-application-tool-durable-owner.patch",
+      "sha256": "a6e10d1e8a347c5a8623ffd275b858738b848380460cfbdace7f567fa1905705"
     }
   ],
-  "result_tree": "e12576416a14c9973eec1552bf5033dc1fd9a987"
+  "result_tree": "e35ce0fcafc3a499e2d5b8ed295499fbbcbd9d75"
 }

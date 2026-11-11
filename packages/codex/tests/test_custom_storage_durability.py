@@ -433,6 +433,11 @@ async def test_application_shell_commits_one_typed_receipt_to_custom_storage(
                     await turn.get_result()
             else:
                 assert (await turn.get_result()).final_output == "done"
+                (history_receipt,) = [
+                    item async for item in session.items() if item["type"] == "shell_call_output"
+                ]
+                assert history_receipt["id"] == "shell-local:output"
+                assert history_receipt["call_id"] == "shell-local"
 
         if interrupted:
             assert len(responses.requests) == 1
@@ -491,6 +496,124 @@ async def test_application_shell_commits_one_typed_receipt_to_custom_storage(
         item for item in responses.requests[1]["input"] if item["type"] == "shell_call_output"
     ]
     assert sent["call_id"] == receipt["call_id"] and sent["output"] == receipt["output"]
+
+
+async def test_local_storage_reconciles_interrupted_application_shell(responses, tmp_path):
+    from tests.test_native_application_shell import shell_call
+    from tests.test_native_manual_tools import provider
+
+    entered = asyncio.Event()
+    calls: list[str] = []
+
+    async def execute(_context: ToolContext[None], call: ShellCall) -> ShellOutput:
+        calls.append(call.call_id)
+        entered.set()
+        await asyncio.Future()
+        raise AssertionError("The interrupted executor must not return")
+
+    responses.respond(shell_call())
+    storage = LocalStorage(tmp_path / "local")
+    async with timeout(30), provider(responses) as native_provider:
+        agent = Agent(
+            instructions="Use the application Shell tool.",
+            model="gpt-5",
+            provider=native_provider,
+            tools=[shell_tool(execute)],
+        )
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            turn = await session.submit("Run the test command.")
+            await entered.wait()
+            await turn.cancel()
+
+        with pytest.raises(LocalRecoveryRequired) as blocked:
+            async with agent.session(storage=storage, resume=identity):
+                pytest.fail("The unresolved application Shell call allowed reopening")
+        (uncertain,) = blocked.value.calls
+        assert (uncertain.thread_id, uncertain.call_id, uncertain.name) == (
+            identity,
+            "shell-local",
+            "shell",
+        )
+        assert len(responses.requests) == 1
+
+        untyped = uncertain.reconcile(outcome="applied", result="verified")
+        with pytest.raises(RuntimeError, match="requires a verified ShellOutput"):
+            async with agent.session(storage=storage, resume=identity, reconciled_calls=[untyped]):
+                pytest.fail("A text result settled the application Shell call")
+        verified = uncertain.reconcile(
+            outcome="applied",
+            result=ShellOutput(
+                output=[
+                    ShellCommandOutput(
+                        stdout="ready and more", stderr="details", outcome=ShellExit(exit_code=0)
+                    )
+                ]
+            ),
+        )
+        async with agent.session(
+            storage=storage, resume=identity, reconciled_calls=[verified]
+        ) as confirmed:
+            (confirmed_receipt,) = [
+                item async for item in confirmed.items() if item["type"] == "shell_call_output"
+            ]
+            assert confirmed_receipt["id"]
+        conflicting = uncertain.reconcile(
+            outcome="applied",
+            result=ShellOutput(
+                output=[
+                    ShellCommandOutput(stdout="wrong", stderr="", outcome=ShellExit(exit_code=0))
+                ]
+            ),
+        )
+        with pytest.raises(RuntimeError, match="Reconciliation conflicts with a retained result"):
+            async with agent.session(
+                storage=storage, resume=identity, reconciled_calls=[conflicting]
+            ):
+                pytest.fail("A second result replaced the confirmed application Shell receipt")
+        responses.respond(assistant_output("done"))
+        async with agent.session(
+            storage=storage, resume=identity, reconciled_calls=[verified]
+        ) as resumed:
+            (history_receipt,) = [
+                item async for item in resumed.items() if item["type"] == "shell_call_output"
+            ]
+            assert history_receipt["id"] == confirmed_receipt["id"]
+            assert history_receipt["turn_id"] == uncertain.turn_id
+            assert (await (await resumed.submit("Continue.")).get_result()).final_output == "done"
+
+    assert calls == ["shell-local"]
+    assert len(responses.requests) == 2
+    (receipt,) = [
+        item for item in responses.requests[1]["input"] if item["type"] == "shell_call_output"
+    ]
+    assert receipt["call_id"] == "shell-local" and receipt["max_output_length"] == 5
+    assert receipt["output"] == [
+        {"stdout": "ready", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+    ]
+
+
+async def test_local_storage_reopens_after_markerless_hosted_shell(responses, tmp_path):
+    from tests.test_native_application_shell import shell_call
+    from tests.test_native_manual_tools import provider
+
+    responses.respond(shell_call(), assistant_output("Provider finished."))
+    storage = LocalStorage(tmp_path / "local")
+    async with timeout(30), provider(responses) as native_provider:
+        agent = Agent(
+            instructions="Use the provider's Shell tool.",
+            model="gpt-5.5",
+            provider=native_provider,
+            tools=[HostedShell(environment={"type": "container_auto"})],
+        )
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            assert (await (await session.submit("Answer.")).get_result()).final_output == (
+                "Provider finished."
+            )
+        async with agent.session(storage=storage, resume=identity):
+            pass
+    assert len(responses.requests) == 1
 
 
 @pytest.mark.parametrize(
