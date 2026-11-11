@@ -25,6 +25,7 @@ from tests.native_fixtures import (
     function_call,
     responses as responses,
 )
+from tests.test_native_code_mode import code_call, code_output
 from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_mcp_tools import Peer, mcp_call
 
@@ -95,6 +96,50 @@ async def test_native_application_data_is_detached_and_survives_checkpoint(
 
     assert effects == ["lookup"]
     assert "private-application-receipt" not in json.dumps(responses.requests)
+
+
+async def test_programmatic_function_data_uses_the_accepted_nested_result(
+    responses: ResponsesFixture,
+) -> None:
+    application_data: dict[str, JsonValue] = {"receipt": "private-nested-receipt"}
+
+    @function_tool
+    def lookup() -> ToolOutput:
+        output = ToolOutput.text("value for the code cell")
+        output.application_data = application_data
+        return output
+
+    responses.respond(code_call("text(await tools.lookup({}));", "cell"))
+    responses.respond(assistant_output("complete"))
+    agent = Agent(
+        instructions="Use lookup from code.",
+        programmatic_tool_calling=True,
+        tools=[lookup],
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-application-tool-data"),
+    )
+    async with timeout(45), agent.session() as session:
+        turn = await session.submit("go")
+        completed = await turn.get_result()
+        assert completed.final_output == "complete"
+        assert "value for the code cell" in code_output(responses.requests[1], "cell")
+        (record,) = completed.application_tool_outputs
+        (finished,) = [
+            event
+            async for event in turn.events(include_execution_details=True)
+            if isinstance(event, ToolFinished) and event.name == "lookup"
+        ]
+        assert (record.submission_id, record.turn_id, record.call_id, record.name) == (
+            turn.submission_id,
+            turn.turn_id,
+            finished.call_id,
+            "lookup",
+        )
+        assert record.application_data == application_data
+        saved = SessionState.from_json((await session.save_state()).to_json())
+        assert saved.application_tool_outputs == [record]
+        assert "private-nested-receipt" not in json.dumps(saved.history)
+
+    assert "private-nested-receipt" not in json.dumps(responses.requests)
 
 
 async def test_manual_application_data_belongs_to_the_accepted_reply(

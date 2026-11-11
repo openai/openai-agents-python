@@ -647,7 +647,11 @@
     {
       "path": "sdk-native-model-response-stream.patch",
       "sha256": "043d40e59af9ce390c8cb8e3eedd9d5104b413a14e943cfa0c09241b8a57f533"
+    },
+    {
+      "path": "sdk-nested-tool-output-acceptance.patch",
+      "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
     }
   ],
-  "result_tree": "80425f722e374126c0b82a91c6d23dd65460bcaa"
+  "result_tree": "0d6fcf1fb4dbdff7baac96ef10732a24c994fa9a"
 }

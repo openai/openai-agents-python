@@ -13034,13 +13034,28 @@ class Session(Generic[ContextT, OutputT]):
             if not admitted():
                 return
             reply = json.dumps(value, allow_nan=False)
-            accepted = self._native._resolve_native_mcp_result(
-                nonce, notice["turn_id"], notice["call_id"], reply
-            )
-            if not accepted and not state.stopping:
+            if application_output is None:
+                delivered = self._native._resolve_native_mcp_result(
+                    nonce, notice["turn_id"], notice["call_id"], reply
+                )
+            else:
+                assignment = asyncio.ensure_future(
+                    self._native._resolve_native_mcp_result_with_assignment(
+                        nonce, notice["turn_id"], notice["call_id"], reply
+                    )
+                )
+                try:
+                    delivered, _ = await _join(assignment)
+                finally:
+                    if (
+                        assignment.done()
+                        and not assignment.cancelled()
+                        and assignment.exception() is None
+                        and assignment.result()[1]
+                    ):
+                        self._application_tool_outputs.append(application_output)
+            if not delivered and not state.stopping:
                 raise NativeError("Native MCP result policy failed")
-            if accepted and application_output is not None:
-                self._application_tool_outputs.append(application_output)
         except BaseException as error:
             if not state.stopping and not state.failure.done():
                 # Callback or result errors may contain the unaccepted peer data.
@@ -13067,16 +13082,35 @@ class Session(Generic[ContextT, OutputT]):
                 return False
             raise
 
-    async def _respond_tool(self, state: _CallbackState, reply: str) -> bool:
+    async def _respond_tool(
+        self,
+        state: _CallbackState,
+        reply: str,
+        *,
+        application_output: ApplicationToolOutput | None = None,
+    ) -> bool:
         # Keep the writer's result observable when its callback is cancelled.
-        # Native cancellation joins publication but discards the cancelled result.
-        pending = asyncio.ensure_future(self._native._respond_python_tool(reply))
+        response = (
+            self._native._respond_python_tool(reply, wait_for_acceptance=True)
+            if application_output is not None
+            else self._native._respond_python_tool(reply)
+        )
+        pending = asyncio.ensure_future(response)
         try:
             return cast(bool, await _join(pending))
         except asyncio.CancelledError:
             if not pending.cancelled() and (error := pending.exception()) is not None:
                 state.retain_cleanup_error(error)
             raise
+        finally:
+            if (
+                application_output is not None
+                and pending.done()
+                and not pending.cancelled()
+                and pending.exception() is None
+                and pending.result() is True
+            ):
+                self._application_tool_outputs.append(application_output)
 
     def _tool_usage_reporter(
         self, state: _CallbackState, admitted: Callable[[], bool]
@@ -13622,24 +13656,31 @@ class Session(Generic[ContextT, OutputT]):
             del response
             if not self._admit_tool(state, request):
                 return
+            nested_application_output = None
             if started is not None:
                 application_data = _capture_application_data(output.application_data)
                 if application_data is not None:
-                    application_call_id = started.call_id
-                    state.pending_application_outputs[application_call_id] = ApplicationToolOutput(
+                    application_output = ApplicationToolOutput(
                         submission_id=started.submission_id,
                         turn_id=started.turn_id,
-                        call_id=application_call_id,
+                        call_id=started.call_id,
                         name=started.name,
                         namespace=started.namespace,
                         application_data=application_data,
                     )
+                    if code_origin is None:
+                        application_call_id = started.call_id
+                        state.pending_application_outputs[application_call_id] = application_output
+                    else:
+                        nested_application_output = application_output
             if entry.finish_turn and response_output["success"] and started is not None:
                 if started.call_id in state.terminal_observations:
                     raise NativeError("Repeated terminal tool observation identity")
                 state.terminal_observations[started.call_id] = started
                 deferred_observation = True
-            accepted = await self._respond_tool(state, reply)
+            accepted = await self._respond_tool(
+                state, reply, application_output=nested_application_output
+            )
             # A retired receiver grants no delivery authority; the native owner
             # still supplies the selected terminal cause. Writer errors still raise.
             if accepted:

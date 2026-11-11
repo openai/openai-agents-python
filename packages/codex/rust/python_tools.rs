@@ -602,6 +602,7 @@ enum Phase {
 pub(crate) struct ToolReply {
     pub(crate) response: DynamicToolResponse,
     pub(crate) start_response: bool,
+    pub(crate) acceptance: Option<oneshot::Sender<()>>,
 }
 
 impl From<DynamicToolResponse> for ToolReply {
@@ -609,6 +610,7 @@ impl From<DynamicToolResponse> for ToolReply {
         Self {
             response,
             start_response: true,
+            acceptance: None,
         }
     }
 }
@@ -3180,6 +3182,7 @@ impl PythonTools {
             .send(ToolReply {
                 response,
                 start_response,
+                acceptance: None,
             })
             .is_ok();
         if accepted {
@@ -3735,7 +3738,8 @@ impl PythonTools {
         media: Option<NativeMediaContext>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
-            thread, generation, slot, turn, call, arguments, source, model, reentry, None, media, None,
+            thread, generation, slot, turn, call, arguments, source, model, reentry, None, media,
+            None,
         )
     }
 
@@ -5801,6 +5805,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
             Ok(Box::new(ReplyOutput {
                 output: PythonOutput(response.response),
                 start_response: response.start_response,
+                acceptance: response.acceptance,
             }) as Box<dyn ToolOutput>)
         })
     }
@@ -5809,6 +5814,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
 struct ReplyOutput {
     output: PythonOutput,
     start_response: bool,
+    acceptance: Option<oneshot::Sender<()>>,
 }
 
 impl ToolOutput for ReplyOutput {
@@ -5823,6 +5829,11 @@ impl ToolOutput for ReplyOutput {
     }
     fn realtime_response_requested(&self) -> bool {
         self.start_response
+    }
+    fn mark_accepted(&mut self) {
+        if let Some(acceptance) = self.acceptance.take() {
+            let _ = acceptance.send(());
+        }
     }
 }
 
@@ -9246,6 +9257,7 @@ pub(crate) mod managed_tests {
         let background = ReplyOutput {
             output: PythonOutput(response),
             start_response: false,
+            acceptance: None,
         };
         assert!(!background.realtime_response_requested());
         assert_eq!(
