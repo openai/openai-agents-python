@@ -221,6 +221,34 @@ class CodeInterpreter:
     """Additional provider fields; declared fields and tool identity cannot be replaced."""
 
 
+class HostedShellAutoEnvironment(TypedDict, total=False):
+    type: Required[Literal["container_auto"]]
+    file_ids: Sequence[str]
+    memory_limit: Literal["1g", "4g", "16g", "64g"] | None
+    network_policy: ContainerNetworkDisabled | ContainerNetworkAllowlist
+    skills: Sequence[dict[str, Any]]
+
+
+class HostedShellReferenceEnvironment(TypedDict):
+    type: Literal["container_reference"]
+    container_id: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class HostedShell:
+    """Provider containers have been running shell commands through Responses.
+
+    container_auto has been provisioning containers; container_reference has
+    been reusing them. The provider has been controlling lifetime and validating
+    resource, skill and network settings. Closing a Session has been leaving
+    the provider container and its files intact.
+    """
+
+    environment: HostedShellAutoEnvironment | HostedShellReferenceEnvironment
+    allowed_callers: Sequence[Literal["direct", "programmatic"]] | None = None
+    provider_data: dict[str, Any] | None = None
+
+
 @dataclass(frozen=True, kw_only=True)
 class ImageGeneration:
     """Generate or edit images with a provider-hosted Responses tool.
@@ -295,14 +323,18 @@ class ToolSearch:
         )
 
 
-_HOSTED_TOOLS = (FileSearch, CodeInterpreter, ImageGeneration, ToolSearch)
+_HOSTED_TOOLS = (FileSearch, CodeInterpreter, HostedShell, ImageGeneration, ToolSearch)
 
 
-def _hosted_tool_name(tool: FileSearch | CodeInterpreter | ImageGeneration | ToolSearch) -> str:
+def _hosted_tool_name(
+    tool: FileSearch | CodeInterpreter | HostedShell | ImageGeneration | ToolSearch,
+) -> str:
     if isinstance(tool, FileSearch):
         return "file_search"
     if isinstance(tool, CodeInterpreter):
         return "code_interpreter"
+    if isinstance(tool, HostedShell):
+        return "shell"
     if isinstance(tool, ToolSearch):
         return "tool_search"
     return "image_generation"

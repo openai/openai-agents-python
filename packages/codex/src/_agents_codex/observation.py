@@ -37,6 +37,8 @@ from ._events import (
     McpListToolsItem,
     MessageItem,
     ReasoningItem,
+    ShellCallItem,
+    ShellCallOutputItem,
     WebSearchCallItem,
 )
 from ._mcp_errors import _protect_mcp_methods
@@ -164,6 +166,8 @@ class HostedToolCallSummary:
         "file_search_call",
         "code_interpreter_call",
         "image_generation_call",
+        "shell_call",
+        "shell_call_output",
         "mcp_list_tools",
         "mcp_call",
     ]
@@ -194,6 +198,8 @@ class ModelOutputItemCompleted(_SubmissionEvent):
         | HostedMcpCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
+        | ShellCallItem
+        | ShellCallOutputItem
         | ImageGenerationCallItem
         | HostedToolCallSummary
     )
@@ -659,6 +665,8 @@ class EventStream(AsyncIterator[Observation]):
                                     or model_item["type"] == "mcp_call"
                                     or model_item["type"] == "file_search_call"
                                     or model_item["type"] == "code_interpreter_call"
+                                    or model_item["type"] == "shell_call"
+                                    or model_item["type"] == "shell_call_output"
                                     or model_item["type"] == "image_generation_call"
                                 )
                             ):
