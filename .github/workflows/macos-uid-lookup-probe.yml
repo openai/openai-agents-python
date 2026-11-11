@@ -168,7 +168,7 @@ jobs:
                     if(kr==KERN_SUCCESS) {
                       size_t ro=(response.h.msgh_size+3u)&~3u;mach_msg_audit_trailer_t *ra=(void*)(response.bytes+ro);
                       bool trusted=ra->msgh_trailer_type==MACH_MSG_TRAILER_FORMAT_0 && ra->msgh_trailer_size>=sizeof(*ra) && ra->msgh_audit.val[1]==0;
-                      bool shape=response.h.msgh_id==lookup_template_id+100 && response.h.msgh_remote_port==MACH_PORT_NULL;
+                      bool shape=response.h.msgh_id==0x20000000 && response.h.msgh_remote_port==MACH_PORT_NULL;
                       unsigned rights=0;
                       if(response.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) {
                         mach_msg_body_t *body=(void*)(response.bytes+sizeof(response.h));rights=body->msgh_descriptor_count;
