@@ -431,6 +431,16 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
     used_bytes = len(
         "\n\n".join([*compact_sections, mount_commands, storage_prefix + "]"]).encode("utf-8")
     )
+    if policy is not None and captured.remote_mount_command_allowlist:
+        allowlist = (
+            "Only use these commands on remote-mounted paths: "
+            + encode(captured.remote_mount_command_allowlist)
+            + ". Use them only when explicitly required."
+        )
+        added_bytes = len(allowlist.encode("utf-8")) - len(mount_commands.encode("utf-8"))
+        if used_bytes + added_bytes <= max_bytes:
+            mount_commands = allowlist
+            used_bytes += added_bytes
     included_storage: list[dict[str, str]] = []
     storage_rows: list[str] = []
     # Reserve complete paths and modes before optional descriptions.
@@ -442,16 +452,6 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
         included_storage.append(entry)
         storage_rows.append(row)
         used_bytes += added_bytes
-    if policy is not None and captured.remote_mount_command_allowlist:
-        allowlist = (
-            "Only use these commands on remote-mounted paths: "
-            + encode(captured.remote_mount_command_allowlist)
-            + ". Use them only when explicitly required."
-        )
-        added_bytes = len(allowlist.encode("utf-8")) - len(mount_commands.encode("utf-8"))
-        if used_bytes + added_bytes <= max_bytes:
-            mount_commands = allowlist
-            used_bytes += added_bytes
 
     filesystem_prefix = "Filesystem layout:\n["
     included_filesystem: list[dict[str, str]] = []

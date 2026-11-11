@@ -111,7 +111,8 @@ async def test_native_workspace_appendix_preserves_providers_and_replaces_curren
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
 @pytest.mark.parametrize(
-    "scenario", ["unicode", "empty_allowlist", "oversized_allowlist", "path_priority"]
+    "scenario",
+    ["unicode", "empty_allowlist", "oversized_allowlist", "path_priority", "dense_mounts"],
 )
 async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     tmp_path, monkeypatch, responses, scenario
@@ -121,7 +122,9 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     (home / "AGENTS.md").write_text("UNDISCOVERED_GLOBAL_RULE")
     monkeypatch.setenv("CODEX_HOME", str(home))
     commands = (
-        [f"fixture-mount-{index}" for index in range(2500)]
+        Manifest().remote_mount_command_allowlist
+        if scenario == "dense_mounts"
+        else [f"fixture-mount-{index}" for index in range(2500)]
         if scenario == "oversized_allowlist"
         else []
         if scenario == "empty_allowlist"
@@ -147,6 +150,11 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
                         "description": file_description,
                     }
                 },
+            ),
+            **(
+                {f"mount-{index:04d}": declaration() for index in range(600)}
+                if scenario == "dense_mounts"
+                else {}
             ),
         },
     )
@@ -179,7 +187,27 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     assert "Do not write to read-only mounts" in text
     assert "UNDISCOVERED_GLOBAL_RULE" not in text
     assert "UNDISCOVERED_PROJECT_RULE" not in text
-    storage = json.loads(text.split("Declared storage access:\n")[1].split("\n\n")[0])
+    if scenario == "dense_mounts":
+        assert "Do not run commands on remote-mounted paths." not in text
+        assert (
+            "Only use these commands on remote-mounted paths: "
+            + json.dumps(commands, separators=(",", ":"))
+            + "."
+        ) in text
+        assert "cp" in commands and "cat" in commands
+    storage, _ = json.JSONDecoder().raw_decode(text.split("Declared storage access:\n")[1])
+    if scenario == "dense_mounts":
+        assert 2 < len(storage) < 602
+        assert [{"path": entry["path"], "access": entry["access"]} for entry in storage[:2]] == [
+            {"path": root + "/data", "access": "read_only"},
+            {"path": root + "/output", "access": "read_write"},
+        ]
+        assert storage[2:] == [
+            {"path": root + f"/mount-{index:04d}", "access": "read_only"}
+            for index in range(len(storage) - 2)
+        ]
+        assert client.events == ["create", "start", "close", "delete"]
+        return
     assert storage == [
         {"path": root + "/data", "access": "read_only"},
         {
