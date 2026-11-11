@@ -21,12 +21,14 @@ enum {
     rendezvous_id = -2047655147,
     control_id = -2047655146,
     transfer_id = -2047655145,
+    header_transfer_id = -2047655144,
     registered_slot_limit = 3,
     stock_request_size = 200,
     startup_timeout = 4000,
     observation_window = 3000,
     send_timeout = 500,
     sink_timeout = 15000,
+    source_watchdog_seconds = 20,
 };
 
 struct registry_readback {
@@ -203,6 +205,41 @@ static mach_msg_return_t send_port(mach_port_t destination, mach_msg_id_t id,
     return status;
 }
 
+static mach_msg_return_t send_reply_header(mach_port_t destination, mach_port_t reply) {
+    mach_msg_header_t message = {
+        .msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MOVE_SEND_ONCE),
+        .msgh_size = sizeof(message),
+        .msgh_remote_port = destination,
+        .msgh_local_port = reply,
+        .msgh_id = header_transfer_id,
+    };
+    mach_msg_return_t status = send_message(&message);
+    fprintf(stderr, "ordinary transfer_status=%#x\n", (unsigned)status);
+    if (status != MACH_MSG_SUCCESS) {
+        // A failed send can return the reply right under a new local name.
+        bool returned_reply = MACH_MSGH_BITS_LOCAL(message.msgh_bits) == MACH_MSG_TYPE_MOVE_SEND_ONCE &&
+                              MACH_PORT_VALID(message.msgh_local_port);
+        if (returned_reply) {
+            mach_port_type_t type = 0;
+            kern_return_t type_status = mach_port_type(mach_task_self(), message.msgh_local_port, &type);
+            bool release = type_status == KERN_SUCCESS &&
+                           (type & (MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME)) != 0;
+            fprintf(stderr, "ordinary failed_header_reply_type_status=%d right_type=%#x drop_attempted=%d\n",
+                    type_status, type, release);
+            if (release) {
+                kern_return_t dropped = mach_port_deallocate(mach_task_self(), message.msgh_local_port);
+                fprintf(stderr, "ordinary failed_header_reply_drop_status=%d\n", dropped);
+            }
+            message.msgh_local_port = MACH_PORT_NULL;
+            message.msgh_bits &= ~MACH_MSGH_BITS_LOCAL_MASK;
+        } else {
+            fprintf(stderr, "ordinary failed_header_reply_drop_attempted=0\n");
+        }
+        mach_msg_destroy(&message);
+    }
+    return status;
+}
+
 static mach_msg_return_t receive_message(union received_message *message, mach_port_t port,
                                          mach_msg_timeout_t timeout) {
     return mach_msg(&message->header,
@@ -249,7 +286,27 @@ static bool live_right(const char *phase, mach_port_t port, mach_port_type_t exp
     return status == KERN_SUCCESS && (type & rights) == expected;
 }
 
-static void inert_sink(int report, pid_t observer) {
+static bool drop_reply_header(union received_message *message, mach_port_t receive, pid_t observer) {
+    mach_msg_header_t *header = &message->header;
+    if (!has_sender(message, observer) || header->msgh_size != sizeof(*header) ||
+        header->msgh_id != header_transfer_id || (header->msgh_bits & MACH_MSGH_BITS_COMPLEX) ||
+        header->msgh_local_port != receive ||
+        MACH_MSGH_BITS_LOCAL(header->msgh_bits) != MACH_MSG_TYPE_PORT_SEND ||
+        MACH_MSGH_BITS_REMOTE(header->msgh_bits) != MACH_MSG_TYPE_PORT_SEND_ONCE ||
+        header->msgh_voucher_port != MACH_PORT_NULL || MACH_MSGH_BITS_VOUCHER(header->msgh_bits) != 0 ||
+        !MACH_PORT_VALID(header->msgh_remote_port) ||
+        !live_right("header-sink", header->msgh_remote_port, MACH_PORT_TYPE_SEND_ONCE)) {
+        return false;
+    }
+
+    kern_return_t dropped = mach_port_deallocate(mach_task_self(), header->msgh_remote_port);
+    fprintf(stderr, "header-sink reply_drop_status=%d\n", dropped);
+    header->msgh_remote_port = MACH_PORT_NULL;
+    header->msgh_bits &= ~MACH_MSGH_BITS_REMOTE_MASK;
+    return dropped == KERN_SUCCESS;
+}
+
+static void inert_sink(int report, pid_t observer, bool header_transfer) {
     mach_port_t bootstrap = check_replacement();
     mach_port_t receive = make_receiver();
     require(send_port(bootstrap, rendezvous_id, receive, MACH_MSG_TYPE_MAKE_SEND) ==
@@ -257,15 +314,22 @@ static void inert_sink(int report, pid_t observer) {
 
     union received_message message;
     mach_msg_return_t status = receive_message(&message, receive, sink_timeout);
-    fprintf(stderr, "sink receive_status=%#x\n", (unsigned)status);
+    fprintf(stderr, "%s receive_status=%#x\n", header_transfer ? "header-sink" : "sink",
+            (unsigned)status);
     bool received = status == MACH_MSG_SUCCESS;
     bool verified = received &&
-                    fixture_port_message(&message, observer, transfer_id, MACH_MSG_TYPE_PORT_SEND_ONCE) &&
-                    live_right("sink", message.port.port.name, MACH_PORT_TYPE_SEND_ONCE);
+                    (header_transfer
+                         ? drop_reply_header(&message, receive, observer)
+                         : fixture_port_message(&message, observer, transfer_id, MACH_MSG_TYPE_PORT_SEND_ONCE) &&
+                               live_right("sink", message.port.port.name, MACH_PORT_TYPE_SEND_ONCE));
     if (received) {
         mach_msg_destroy(&message.header);
     }
-    mach_port_destroy(mach_task_self(), receive);
+    kern_return_t destroyed = mach_port_destroy(mach_task_self(), receive);
+    if (header_transfer) {
+        fprintf(stderr, "header-sink receive_port_destroy_status=%d\n", destroyed);
+        verified &= destroyed == KERN_SUCCESS;
+    }
     require(verified, "sink receipt");
     signal_phase(report, 'D');
 }
@@ -373,10 +437,10 @@ static bool check_pre_exec(struct fixture *fixture, const char *role) {
            memcmp(readback.registry.slots, "NNN", registered_slot_limit) == 0;
 }
 
-static bool finish_fixture(struct fixture fixture, const char *role) {
+static bool finish_fixture(struct fixture fixture, const char *role, unsigned timeout) {
     close(fixture.gate);
     int status;
-    unsigned long long deadline = milliseconds() + 1000;
+    unsigned long long deadline = milliseconds() + timeout;
     for (;;) {
         pid_t result = waitpid(fixture.pid, &status, WNOHANG);
         if (result == fixture.pid) {
@@ -516,20 +580,30 @@ static int observe_request(const char *binary, const char *role, bool stock, mac
         !lookup.invalid && lookup.matched == 1 && lookup.canary == 0 && MACH_PORT_VALID(lookup.reply) &&
         live_right("observer", lookup.reply, MACH_PORT_TYPE_SEND_ONCE)) {
         fprintf(stderr, "%s transfer_attempt=1\n", role);
-        mach_msg_return_t status = send_port(destination, transfer_id, lookup.reply,
-                                             MACH_MSG_TYPE_MOVE_SEND_ONCE);
+        mach_msg_return_t status = stock
+                                       ? send_reply_header(destination, lookup.reply)
+                                       : send_port(destination, transfer_id, lookup.reply,
+                                                   MACH_MSG_TYPE_MOVE_SEND_ONCE);
         lookup.reply = MACH_PORT_NULL;
-        fprintf(stderr, "%s transfer_status=%#x\n", role, (unsigned)status);
+        if (!stock) {
+            fprintf(stderr, "%s transfer_status=%#x\n", role, (unsigned)status);
+        }
+        bool dropped = false;
         if (status == MACH_MSG_SUCCESS) {
             char ack;
-            bool dropped = read_within(sink.report, &ack, 1, 1500) && ack == 'D';
-            receive_for(port, source, stock, false, &progress, &settlement, 200, false);
+            dropped = read_within(sink.report, &ack, 1, 1500) && ack == 'D';
+        }
+        if (status == MACH_MSG_SUCCESS || stock) {
+            receive_for(port, source, stock, false, &progress, &settlement, stock ? 1000 : 200, false);
             fprintf(stderr, "%s sink_drop_ack=%d settlement_resumed=%d settlement_unavailable=%d "
                             "settlement_extra=%u invalid=%d\n",
                     role, dropped, progress.resumed, progress.unavailable,
                     settlement.canary + settlement.matched, settlement.invalid);
+        }
+        if (status == MACH_MSG_SUCCESS) {
             outcome = dropped && !settlement.invalid &&
-                      settlement.canary == 0 && settlement.matched == 0 ? 0 : 1;
+                      settlement.canary == 0 && settlement.matched == 0 &&
+                      (!stock || (progress.resumed && progress.unavailable)) ? 0 : 1;
         } else if (status == MACH_SEND_INVALID_RIGHT) {
             fprintf(stderr, "%s result=kernel_invalid_right\n", role);
             outcome = 10;
@@ -541,7 +615,7 @@ static int observe_request(const char *binary, const char *role, bool stock, mac
         kern_return_t released = mach_port_deallocate(mach_task_self(), lookup.reply);
         fprintf(stderr, "%s retained_reply_release_status=%d\n", role, released);
     }
-    bool source_exited = finish_fixture(source, role);
+    bool source_exited = finish_fixture(source, role, 1000);
     return outcome == 0 && !source_exited ? 1 : outcome;
 }
 
@@ -551,9 +625,10 @@ static int run_arm(const char *binary, const char *role, bool stock) {
                 KERN_SUCCESS, "fixture bootstrap send right");
     require(task_set_bootstrap_port(mach_task_self(), port) == KERN_SUCCESS,
             "assign inert task bootstrap port");
-    struct fixture sink = spawn_fixture(binary, "sink");
+    const char *sink_role = stock ? "header-sink" : "sink";
+    struct fixture sink = spawn_fixture(binary, sink_role);
     mach_port_t destination = MACH_PORT_NULL;
-    if (check_pre_exec(&sink, "sink")) {
+    if (check_pre_exec(&sink, sink_role)) {
         destination = receive_rendezvous(port, sink.pid);
     }
     int outcome = MACH_PORT_VALID(destination)
@@ -562,7 +637,7 @@ static int run_arm(const char *binary, const char *role, bool stock) {
     if (MACH_PORT_VALID(destination)) {
         mach_port_deallocate(mach_task_self(), destination);
     }
-    bool sink_exited = finish_fixture(sink, "sink");
+    bool sink_exited = finish_fixture(sink, sink_role, stock ? sink_timeout + 1000 : 1000);
     mach_port_destroy(mach_task_self(), port);
     return outcome == 0 && !sink_exited ? 1 : outcome;
 }
@@ -591,11 +666,20 @@ int main(int argc, char *argv[]) {
         int report = atoi(argv[2]), gate = atoi(argv[3]);
         pid_t observer = atoi(argv[4]);
         require(observer > 1 && observer == getppid(), "fixture observer");
-        if (strcmp(argv[1], "sink") == 0) {
-            inert_sink(report, observer);
+        bool header_sink = strcmp(argv[1], "header-sink") == 0;
+        if (header_sink || strcmp(argv[1], "sink") == 0) {
+            inert_sink(report, observer, header_sink);
         } else {
             bool stock = strcmp(argv[1], "ordinary") == 0;
             require(stock || strcmp(argv[1], "generic") == 0, "fixture role");
+            if (stock) {
+                // A blocked XPC resume may never reach the observer gate.
+                sigset_t watchdog;
+                require(sigemptyset(&watchdog) == 0 && sigaddset(&watchdog, SIGALRM) == 0 &&
+                        signal(SIGALRM, SIG_DFL) != SIG_ERR &&
+                        sigprocmask(SIG_UNBLOCK, &watchdog, NULL) == 0, "ordinary source watchdog");
+                alarm(source_watchdog_seconds);
+            }
             request_child(stock, report, gate);
         }
         return 0;
