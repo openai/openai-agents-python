@@ -913,6 +913,8 @@ class Completed(Generic[OutputT, TurnT]):
     Session.items(). final_output contains display text without those ranges.
     One-shot runners populate state when called with return_state=True.
     Existing native checkpoint restrictions still apply.
+    One-shot runners populate history with conversation records for replay when
+    called with return_history=True. The destination Session supplies its instructions.
     """
 
     turn: TurnT
@@ -922,6 +924,7 @@ class Completed(Generic[OutputT, TurnT]):
     repair_attempts: tuple[RecordedTurn, ...] = ()
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
+    history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
 
     def __post_init__(self) -> None:
@@ -7186,6 +7189,11 @@ class Session(Generic[ContextT, OutputT]):
         omitted prefixes. Imported unknown fields and missing IDs unchanged;
         current model context and projected ``items()`` available separately.
         """
+        return await self._capture_canonical_history(limit)
+
+    async def _capture_canonical_history(
+        self, limit: int | None, *, for_replay: bool = False
+    ) -> CanonicalHistorySnapshot:
         self._check_callback_operation("read canonical history from its own Session")
         self._check_idle_update()
         if limit is not None and (
@@ -7194,7 +7202,7 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("limit must be a nonnegative integer or None")
 
         async def capture() -> CanonicalHistorySnapshot:
-            value = json.loads(await self._native._canonical_history(limit))
+            value = json.loads(await self._native._canonical_history(limit, for_replay))
             return CanonicalHistorySnapshot(
                 value["revision"],
                 value["total"],
@@ -7202,6 +7210,19 @@ class Session(Generic[ContextT, OutputT]):
             )
 
         return await self._join_mutation(asyncio.create_task(capture()))
+
+    async def _run_history(self) -> tuple[dict[str, Any], ...]:
+        try:
+            snapshot = await self._capture_canonical_history(None, for_replay=True)
+        except NativeError:
+            raise
+        except RuntimeError as error:
+            raise NativeError(str(error)) from error
+        return tuple(
+            item
+            for item in snapshot.items
+            if item.get("type") != "message" or item.get("role") not in ("developer", "system")
+        )
 
     async def transact_history(
         self,
@@ -7684,6 +7705,7 @@ class Session(Generic[ContextT, OutputT]):
         handler: _InteractionHandler | None,
         *,
         return_state: bool = False,
+        return_history: bool = False,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
         """Own live replies and Session shutdown for a one-shot run."""
@@ -7803,6 +7825,8 @@ class Session(Generic[ContextT, OutputT]):
             result = await waiter
             if return_state:
                 result = replace(result, state=await self.save_state())
+            if return_history:
+                result = replace(result, history=await self._run_history())
         except BaseException as error:
             await _close_after_error(error, close)
             raise

@@ -631,7 +631,11 @@
     {
       "path": "0161-sdk-realtime-call-metadata.patch",
       "sha256": "fa87c499a02627ab02b834e07014a1e0c594adcf72833a3a0722f798d6dde80c"
+    },
+    {
+      "path": "sdk-bounded-one-shot-history.patch",
+      "sha256": "02da72f8e5bcfab13b3be4680356a62156eb429dcb7497ecc0b9644625c05f98"
     }
   ],
-  "result_tree": "2ff86b8205df0c1475025e6d9071db0702ed2029"
+  "result_tree": "fdbd4e60a29f0e6e538413243fe41cccbc3880a9"
 }
