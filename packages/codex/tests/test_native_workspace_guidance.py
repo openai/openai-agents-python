@@ -110,7 +110,9 @@ async def test_native_workspace_appendix_preserves_providers_and_replaces_curren
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@pytest.mark.parametrize("scenario", ["unicode", "oversized_allowlist", "path_priority"])
+@pytest.mark.parametrize(
+    "scenario", ["unicode", "empty_allowlist", "oversized_allowlist", "path_priority"]
+)
 async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     tmp_path, monkeypatch, responses, scenario
 ) -> None:
@@ -121,6 +123,8 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     commands = (
         [f"fixture-mount-{index}" for index in range(2500)]
         if scenario == "oversized_allowlist"
+        else []
+        if scenario == "empty_allowlist"
         else ["fixture-mount", "fixture-unmount"]
     )
     root = "/workspace/fixtures/workspace-guidance-boundary"
@@ -191,10 +195,13 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
         },
         {"path": root + "/src/café.py", "description": file_description},
     ]
-    if scenario == "oversized_allowlist":
-        assert "Do not use remote mount management commands." in text
-        assert "Allowed remote mount commands:" not in text
+    if scenario in ("empty_allowlist", "oversized_allowlist"):
+        assert "Do not run commands on remote-mounted paths." in text
+        assert "Only use these commands on remote-mounted paths:" not in text
         assert "fixture-mount-0" not in text
     else:
-        assert 'Allowed remote mount commands: ["fixture-mount","fixture-unmount"].' in text
+        assert (
+            'Only use these commands on remote-mounted paths: ["fixture-mount","fixture-unmount"].'
+            in text
+        )
     assert client.events == ["create", "start", "close", "delete"]

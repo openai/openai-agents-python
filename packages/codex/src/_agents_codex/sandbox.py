@@ -426,7 +426,7 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
         "workspace path, edit and validate there, then copy back.",
         "Some workspace details have been omitted to fit the instruction limit.",
     ]
-    mount_commands = "Do not use remote mount management commands."
+    mount_commands = "Do not run commands on remote-mounted paths."
     storage_prefix = "Declared storage access:\n["
     used_bytes = len(
         "\n\n".join([*compact_sections, mount_commands, storage_prefix + "]"]).encode("utf-8")
@@ -444,7 +444,7 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
         used_bytes += added_bytes
     if policy is not None and captured.remote_mount_command_allowlist:
         allowlist = (
-            "Allowed remote mount commands: "
+            "Only use these commands on remote-mounted paths: "
             + encode(captured.remote_mount_command_allowlist)
             + ". Use them only when explicitly required."
         )
