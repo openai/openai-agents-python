@@ -7788,8 +7788,8 @@ class Session(Generic[ContextT, OutputT]):
                     else {}
                 ),
             )
-            thread = await engine.restore_checkpoint(
-                checkpoint,
+            thread = await change.restore_candidate(
+                engine,
                 json.dumps(options),
                 self._catalog.native_specs(),
             )

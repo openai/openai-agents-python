@@ -2166,11 +2166,11 @@ impl PythonTools {
         };
         if let Some(request) = hosted_mcp {
             let output = hosted_mcp_output(response)?;
-            return Ok(Some(
-                output
-                    .to_response_item(&key.call, &ToolPayload::HostedMcpApproval { request })
-                    .into(),
-            ));
+            let mut item: ResponseItem = output
+                .to_response_item(&key.call, &ToolPayload::HostedMcpApproval { request })
+                .into();
+            item.set_turn_id_if_missing(&key.turn);
+            return Ok(Some(item));
         }
         let Some(arguments) = arguments else {
             return Ok(Some(PythonOutput(response).receipt(key)));
@@ -7898,7 +7898,7 @@ pub(crate) mod managed_tests {
             payload.as_object_mut().unwrap().remove("native_continuation");
             let restored = checkpoint::restore(
                 &restored_engine, serde_json::from_value(payload).unwrap(),
-                restored_options, Some(restored_specs),
+                restored_options, Some(restored_specs), None,
             ).await.unwrap();
             *restored.manual.lock().unwrap() = Some(frame);
             let resumed = restored.current().unwrap();

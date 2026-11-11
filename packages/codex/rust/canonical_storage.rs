@@ -250,25 +250,23 @@ impl CanonicalStore {
                     turn = Some(event.turn_id.as_str())
                 }
                 RolloutItem::ResponseItem(envelope) => {
-                    let owner = envelope.item.turn_id().or(turn);
-                    match &envelope.item {
+                    if envelope.item.turn_id().or(turn) != Some(key.turn.as_str()) {
+                        continue;
+                    }
+                    let call_id = match &envelope.item {
                         ResponseItem::FunctionCall { call_id, .. }
-                        | ResponseItem::ComputerCall { call_id, .. }
-                            if call_id == &key.call && owner == Some(key.turn.as_str()) =>
-                        {
-                            if invocation.replace(&envelope.item).is_some() {
-                                return Err(failure());
-                            }
+                        | ResponseItem::ComputerCall { call_id, .. } => Some(call_id.as_str()),
+                        ResponseItem::McpApprovalRequest { id: Some(id), .. } => Some(id.as_str()),
+                        _ => None,
+                    };
+                    if call_id == Some(key.call.as_str()) {
+                        if invocation.replace(&envelope.item).is_some() {
+                            return Err(failure());
                         }
-                        _ => {
-                            if crate::local_reconciliation::output_identity(&envelope.item)
-                                .is_some_and(|(call, _)| {
-                                    call == key.call && owner == Some(key.turn.as_str())
-                                })
-                            {
-                                completed = true;
-                            }
-                        }
+                    } else if crate::local_reconciliation::output_identity(&envelope.item)
+                        .is_some_and(|(call, _)| call == key.call)
+                    {
+                        completed = true;
                     }
                 }
                 _ => {}
@@ -491,14 +489,16 @@ impl ThreadStore for CanonicalStore {
         Box::pin(async move {
             let mut writers = self.writers.lock().await;
             self.load(params.thread_id, &mut writers).await?;
-            Ok(Arc::new(
+            let mut history = Arc::new(
                 writers[&params.thread_id]
                     .snapshot
                     .as_ref()
                     .unwrap()
                     .items
                     .clone(),
-            ))
+            );
+            crate::checkpoint::remove_replayed_mcp_approvals(&mut history);
+            Ok(history)
         })
     }
 

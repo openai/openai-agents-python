@@ -235,30 +235,20 @@ impl Engine {
             .cloned()
             .ok_or_else(|| py_error("Codex engine is closed"))
     }
-}
 
-#[pymethods]
-impl Engine {
-    #[getter]
-    fn _runtime_is_shared(&self) -> PyResult<bool> {
-        Ok(!self.current()?.owns_runtime_services())
-    }
-
-    #[pyo3(signature = (payload_json, options_json="{}", specs_json=None))]
-    fn restore_checkpoint<'py>(
+    fn restore_decoded_checkpoint<'py>(
         &self,
         py: Python<'py>,
-        payload_json: &str,
+        mut payload: serde_json::Value,
         options_json: &str,
         specs_json: Option<&str>,
+        source: Option<Arc<context::Change>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let lease = self
             .managed_lease
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
-        let raw = serde_json::from_str(payload_json).map_err(py_error)?;
-        let mut payload = checkpoint_json_value(raw, 0).map_err(py_error)?;
         let mut options: options::ThreadOptions =
             config::decode(serde_json::from_str(options_json).map_err(py_error)?)
                 .map_err(py_error)?;
@@ -289,7 +279,7 @@ impl Engine {
         let payload = serde_json::from_value(payload).map_err(py_error)?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.operation(false).map_err(py_error)?;
-            let thread = checkpoint::restore(&inner, payload, options, specs)
+            let thread = checkpoint::restore(&inner, payload, options, specs, source.as_deref())
                 .await
                 .map_err(py_error)?;
             *thread.manual.lock().map_err(py_error)? = manual;
@@ -298,6 +288,27 @@ impl Engine {
             }
             Ok(thread)
         })
+    }
+}
+
+#[pymethods]
+impl Engine {
+    #[getter]
+    fn _runtime_is_shared(&self) -> PyResult<bool> {
+        Ok(!self.current()?.owns_runtime_services())
+    }
+
+    #[pyo3(signature = (payload_json, options_json="{}", specs_json=None))]
+    fn restore_checkpoint<'py>(
+        &self,
+        py: Python<'py>,
+        payload_json: &str,
+        options_json: &str,
+        specs_json: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let raw = serde_json::from_str(payload_json).map_err(py_error)?;
+        let payload = checkpoint_json_value(raw, 0).map_err(py_error)?;
+        self.restore_decoded_checkpoint(py, payload, options_json, specs_json, None)
     }
     #[getter]
     fn _codex_account(&self) -> PyResult<Option<(Option<String>, String, String)>> {
@@ -3471,7 +3482,10 @@ impl NativeThread {
     fn _take_produced_items(&self, turn_id: &str) -> PyResult<String> {
         let inner = self.current()?;
         let _operation = inner.engine.operation(false).map_err(py_error)?;
-        inner.thread.sdk_take_produced_items(turn_id).map_err(py_error)
+        inner
+            .thread
+            .sdk_take_produced_items(turn_id)
+            .map_err(py_error)
     }
 
     #[pyo3(signature = (subagent_id=None, *, for_reconciliation=false))]
@@ -3904,6 +3918,31 @@ impl ContextChange {
         let result = serde_json::to_string(&candidate).map_err(py_error)?;
         change.prepared = Some(candidate);
         Ok(result)
+    }
+
+    #[pyo3(signature = (engine, options_json="{}", specs_json=None))]
+    fn restore_candidate<'py>(
+        &self,
+        py: Python<'py>,
+        engine: &Engine,
+        options_json: &str,
+        specs_json: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let slot = self.inner.lock().map_err(py_error)?;
+        let owner = slot
+            .as_ref()
+            .ok_or_else(|| py_error("context lease is closed"))?;
+        let payload = owner
+            .prepared
+            .clone()
+            .ok_or_else(|| py_error("context compaction has not been prepared"))?;
+        engine.restore_decoded_checkpoint(
+            py,
+            payload,
+            options_json,
+            specs_json,
+            Some(Arc::clone(&*owner.change)),
+        )
     }
 
     fn fence(&self) -> PyResult<()> {

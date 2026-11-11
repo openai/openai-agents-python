@@ -1475,13 +1475,14 @@ impl EngineState {
                 ForkSelection::BeforeTurn(id) => ForkBoundary::BeforeTurn(id),
                 ForkSelection::ThroughTurn(id) => ForkBoundary::ThroughTurn(id),
             };
-            let prepared = self
+            let mut prepared = self
                 .store
                 .prepare_fork(PrepareForkParams {
                     thread_id: record.thread_id,
                     boundary,
                 })
                 .await?;
+            crate::checkpoint::remove_replayed_mcp_approvals(&mut prepared.model_context);
             (
                 ForkSnapshot::Interrupted,
                 InitialHistory::Resumed(ResumedHistory {
@@ -1500,7 +1501,12 @@ impl EngineState {
             let snapshot = nth_user_message
                 .map(ForkSnapshot::TruncateBeforeNthUserMessage)
                 .unwrap_or(ForkSnapshot::Interrupted);
-            let history = self.history(id_or_path).await?;
+            let mut history = self.history(id_or_path).await?;
+            if let InitialHistory::Resumed(resumed) = &mut history
+                && crate::checkpoint::remove_replayed_mcp_approvals(&mut resumed.history)
+            {
+                resumed.history_revision = None;
+            }
             (snapshot, history, None)
         };
         if let Some(specs) = python_specs {

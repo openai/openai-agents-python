@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,14 @@ import pytest
 from agents import (
     Agent,
     CapabilityError,
+    CustomStorage,
     HostedMCP,
     InteractionExpiredError,
     InteractionRequired,
+    LocalStorage,
     NativeError,
     NativeProvider,
+    SQLiteSessionStore,
     TurnStoppedError,
 )
 from agents.realtime import realtime_handoff
@@ -149,9 +153,25 @@ async def test_native_hosted_mcp_operation_exposes_only_its_selected_server(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approve", [True, False])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "run",
+        "compact",
+        "local",
+        pytest.param(
+            "canonical",
+            marks=pytest.mark.skipif(
+                os.name != "posix", reason="SQLiteSessionStore requires POSIX locking"
+            ),
+        ),
+    ],
+)
 async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
     responses: ResponsesFixture,
+    tmp_path: Path,
     approve: bool,
+    mode: str,
 ) -> None:
     observed = []
     context = {"application": "context"}
@@ -164,13 +184,44 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
     tool = declaration(callback=decide, allowed_tools=["lookup"])
     responses.respond(approval())
     responses.respond(assistant_output("Decision received."))
+    storage: LocalStorage | CustomStorage | None = None
+    if mode == "local":
+        storage = LocalStorage(tmp_path / "local")
+    elif mode == "canonical":
+        storage = CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
     async with timeout(30), provider(responses) as native:
-        result = await Agent(
-            instructions="Use docs.", provider=native, model="gpt-5.2", tools=[tool]
-        ).run(
-            "Lookup.",
-            context=context,
-        )
+        agent = Agent(instructions="Use docs.", provider=native, model="gpt-5.2", tools=[tool])
+        identity = None
+        if mode == "run":
+            result = await agent.run("Lookup.", context=context)
+        else:
+            async with agent.session(context=context, storage=storage) as session:
+                identity = session.id
+                result = await (await session.submit("Lookup.")).get_result()
+                if mode == "compact":
+                    await session.compact(summary="The provider approval was processed.")
+                    responses.respond(assistant_output("Ready."))
+                    continuation = await (await session.submit("Continue.")).get_result()
+                    assert continuation.final_output == "Ready."
+        output = [dict(item) for item in replies(responses)]
+        if storage is not None:
+            assert identity is not None
+            responses.respond(assistant_output("Resumed."))
+            async with agent.session(context=context, storage=storage, resume=identity) as resumed:
+                assert (
+                    await (await resumed.submit("Continue.")).get_result()
+                ).final_output == "Resumed."
+            resumed_input = responses.requests[-1]["input"]
+            assert [
+                item["approve"]
+                for item in resumed_input
+                if item.get("type") == "mcp_approval_response"
+            ] == ([] if approve else [False])
+            if approve:
+                assert not any(
+                    item.get("type") == "mcp_approval_request" and item.get("id") == "approval_1"
+                    for item in resumed_input
+                )
     assert result.final_output == "Decision received."
     assert len(observed) == 1
     assert (observed[0].request_id, observed[0].server_label, observed[0].name) == (
@@ -179,7 +230,6 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
         "lookup",
     )
     assert observed[0].arguments == ' {"key": "blue"} '
-    output = [dict(item) for item in replies(responses)]
     local_id = output[0].pop("id")
     assert isinstance(local_id, str) and local_id and local_id != "approval_1"
     assert output == [

@@ -2508,9 +2508,11 @@ impl ThreadStore for LocalChecklistStore {
                         .success = Some(success);
                 }
                 writer.rebuilding = None;
-                return Ok(Arc::new(history.items));
+                let mut replay = Arc::new(history.items);
+                crate::checkpoint::remove_replayed_mcp_approvals(&mut replay);
+                return Ok(replay);
             }
-            let history = self.inner.resume_thread(params).await?;
+            let mut history = self.inner.resume_thread(params).await?;
             if let Some((expected_id, expected_model)) = self.resume_model.get()
                 && *expected_id == id
             {
@@ -2557,6 +2559,7 @@ impl ThreadStore for LocalChecklistStore {
                 observe_turn(&mut writer.sampling.turn_id, item);
             }
             writers.insert(id, writer);
+            crate::checkpoint::remove_replayed_mcp_approvals(&mut history);
             Ok(history)
         })
     }

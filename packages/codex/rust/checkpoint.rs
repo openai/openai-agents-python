@@ -794,15 +794,60 @@ pub(crate) fn validate_external_mcp_approvals(history: &[RolloutItem]) -> anyhow
     Ok(())
 }
 
+/// A saved approval is transcript data. Only live SDK decisions authorize a provider request.
+pub(crate) fn remove_replayed_mcp_approvals(history: &mut Arc<Vec<RolloutItem>>) -> bool {
+    let approved: HashSet<String> = history
+        .iter()
+        .flat_map(|record| match record {
+            RolloutItem::ResponseItem(item) => std::slice::from_ref(item),
+            RolloutItem::Compacted(item) => item.replacement_history.as_deref().unwrap_or_default(),
+            _ => &[],
+        })
+        .filter_map(|item| match &item.item {
+            ResponseItem::McpApprovalResponse {
+                approve: true,
+                approval_request_id,
+                ..
+            } => Some(approval_request_id.clone()),
+            _ => None,
+        })
+        .collect();
+    if approved.is_empty() {
+        return false;
+    }
+    let retain = |item: &codex_history::ResponseItemEnvelope| match &item.item {
+        ResponseItem::McpApprovalRequest { id: Some(id), .. } => !approved.contains(id.as_str()),
+        ResponseItem::McpApprovalResponse {
+            approval_request_id,
+            ..
+        } => !approved.contains(approval_request_id),
+        _ => true,
+    };
+    Arc::make_mut(history).retain_mut(|record| match record {
+        RolloutItem::ResponseItem(item) => retain(item),
+        RolloutItem::Compacted(item) => {
+            if let Some(replacement) = &mut item.replacement_history {
+                replacement.retain(retain);
+            }
+            true
+        }
+        _ => true,
+    });
+    true
+}
+
 pub async fn restore(
     engine: &Arc<EngineState>,
     mut checkpoint: Checkpoint,
     mut options: options::ThreadOptions,
     python_specs: Option<Vec<DynamicToolSpec>>,
+    source: Option<&crate::context::Change>,
 ) -> anyhow::Result<NativeThread> {
     let _lifecycle = engine.lifecycle.lock().await;
     checkpoint.check_revision()?;
-    validate_external_mcp_approvals(&checkpoint.history)?;
+    if let Err(error) = validate_external_mcp_approvals(&checkpoint.history) {
+        source.ok_or(error)?.validate_mcp_provider(engine)?;
+    }
     for child in &checkpoint.descendants {
         validate_external_mcp_approvals(&child.history)?;
     }

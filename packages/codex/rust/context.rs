@@ -2,7 +2,7 @@ use anyhow::ensure;
 use codex_protocol::protocol::AgentStatus;
 use serde_json::{Value, json};
 
-use crate::engine::ThreadState;
+use crate::engine::{EngineState, ThreadState};
 
 pub async fn read(state: &ThreadState) -> anyhow::Result<Value> {
     let _mutation = state.mutations.lock().await;
@@ -130,6 +130,31 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
 }
 
 impl Change {
+    pub(crate) fn validate_mcp_provider(&self, candidate: &EngineState) -> anyhow::Result<()> {
+        let source = &self.state.engine;
+        let source_auth = source.manager.auth_manager().auth_cached();
+        let candidate_auth = candidate.manager.auth_manager().auth_cached();
+        let same_credentials = source_auth
+            .as_ref()
+            .zip(candidate_auth.as_ref())
+            .is_some_and(|(source, candidate)| {
+                source.api_auth_mode() == candidate.api_auth_mode()
+                    && source
+                        .get_token()
+                        .ok()
+                        .zip(candidate.get_token().ok())
+                        .is_some_and(|(source, candidate)| source == candidate)
+            });
+        ensure!(
+            same_credentials
+                && source.service_config.model_provider_id
+                    == candidate.service_config.model_provider_id
+                && source.service_config.model_provider == candidate.service_config.model_provider,
+            "Hosted MCP compaction requires the current provider credentials"
+        );
+        Ok(())
+    }
+
     pub fn options(&self) -> Value {
         let instruction_files = self
             .state

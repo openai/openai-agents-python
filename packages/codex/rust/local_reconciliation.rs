@@ -31,7 +31,11 @@ pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>
             ..
         }
         | ResponseItem::CustomToolCallOutput { call_id: call, .. }
-        | ResponseItem::ComputerCallOutput { call_id: call, .. } => call,
+        | ResponseItem::ComputerCallOutput { call_id: call, .. }
+        | ResponseItem::McpApprovalResponse {
+            approval_request_id: call,
+            ..
+        } => call,
         _ => return None,
     };
     Some((call, item.turn_id()))
@@ -64,6 +68,20 @@ pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseIt
                 call_id: actual, ..
             },
         ) => expected == actual,
+        (
+            ResponseItem::McpApprovalRequest {
+                id: Some(expected),
+                provider_fields,
+                ..
+            },
+            ResponseItem::McpApprovalResponse {
+                approval_request_id: actual,
+                caller,
+                ..
+            },
+        ) => {
+            expected.as_str() == actual.as_str() && provider_fields.get("caller") == caller.as_ref()
+        }
         _ => false,
     }
 }
