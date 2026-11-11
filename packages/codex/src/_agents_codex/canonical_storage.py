@@ -35,7 +35,7 @@ from ._legacy_history import (
 )
 from ._lifecycle import _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
-from .tools import ToolOutput as ToolOutput
+from .tools import ToolOutput as ToolOutput, _capture_application_data
 
 # Register one hook without retaining adapters after their application lifetime.
 # Serializing registration and ownership changes with fork prevents a child
@@ -159,7 +159,7 @@ class CustomStorage:
         Close the Session first. Check authoritative external records, then pass
         the actual string or ToolOutput result, preserving its original identity.
         Structured content and explicit failure retain their original meaning.
-        Model-visible content only. Application data requires a live Session.
+        Nonempty application data requires a live Session.
         This operation acquires exclusive ownership and never runs the tool.
         A known receipt cannot be replaced. Reopen with current tools afterward.
         If cleanup fails, get_cleanup(error) returns an owner whose aclose()
@@ -171,7 +171,7 @@ class CustomStorage:
             raise TypeError("output must be str or ToolOutput")
         response = ToolOutput.text(output) if isinstance(output, str) else output
         response._validate()
-        if response.application_data is not None:
+        if _capture_application_data(response.application_data) is not None:
             raise ValueError(
                 "Canonical store reconciliation requires a result without application data"
             )
