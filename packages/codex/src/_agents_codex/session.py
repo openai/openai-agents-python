@@ -2529,6 +2529,8 @@ def _capture_profile_runtimes(
     context: Any,
     output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     input_guardrails: Sequence[InputGuardrail[Any]] = (),
+    *,
+    run_error_formatter: bool = False,
 ) -> tuple[dict[str, _ProfileRuntime], list[dict[str, Any]]]:
     captured: dict[str, _ProfileRuntime] = {}
     roster: list[dict[str, Any]] = []
@@ -2597,6 +2599,16 @@ def _capture_profile_runtimes(
                 "manual_slots": catalog.manual_slots(),
                 "terminal_slots": catalog.finish_slots(),
                 "input_error_slots": catalog.input_error_slots(),
+                **(
+                    {
+                        "run_input_error_slots": sorted(
+                            set(catalog.input_error_slots(run_formatter=True))
+                            - set(catalog.input_error_slots())
+                        )
+                    }
+                    if run_error_formatter
+                    else {}
+                ),
                 "step_defaults": list(range(len(catalog.tools))),
                 "handoffs": dict(profile.handoffs),
                 **(
@@ -3497,9 +3509,31 @@ def _supports_atomic_first_turn(
     output_mode: str,
     programmatic_tool_calling: bool,
     tools: Sequence[Tool[Any]],
+    initial_messages_json: str | None,
+    selected: object | None,
+    profiles: tuple[_AgentProfile, ...],
+    state: SessionState | None,
+    storage: LocalStorage | CustomStorage | None,
+    resume: str | None,
+    environment: object | None,
+    input_guardrails: Sequence[InputGuardrail[Any]],
+    output_guardrails: Sequence[OutputGuardrail[Any]],
+    instruction_files: Sequence[Path],
+    auth: object | None,
 ) -> bool:
     return (
-        output_mode == "plain"
+        initial_messages_json is None
+        and selected is None
+        and not profiles
+        and state is None
+        and storage is None
+        and resume is None
+        and environment is None
+        and not input_guardrails
+        and not output_guardrails
+        and not instruction_files
+        and auth is None
+        and output_mode == "plain"
         and not programmatic_tool_calling
         and agent.transform_context is None
         and agent.hosted_prompt is None
@@ -3544,6 +3578,58 @@ def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
         and error.args == ("api_key must not be empty",)
     ):
         error.args = ("Provide api_key or set OPENAI_API_KEY",)
+
+
+def _prepare_opening_model_settings(
+    agent: Agent[Any, Any],
+    model: str | None,
+    instructions: str,
+    codex_login: CodexLogin | None,
+    restored_model_settings: tuple[str, dict[str, Any]] | None,
+    restored_profile: _ProfileRuntime | None,
+    profile_roster: list[dict[str, Any]],
+) -> tuple[str | None, dict[str, Any]]:
+    settings = _native_model_settings(model, agent.model_settings)
+    prompt_controls = _hosted_prompt_controls(
+        agent.hosted_prompt,
+        model=agent.model,
+        instructions=instructions
+        if getattr(agent, "_hosted_instructions_provided", True)
+        else None,
+        tools_provided=getattr(agent, "_hosted_tools_provided", True)
+        or bool(agent.tools)
+        or bool(agent.handoffs),
+        extra_body=agent.model_settings.get("extra_body"),
+    )
+    if prompt_controls is not None:
+        settings.setdefault("request_controls", {})["hosted_prompt"] = prompt_controls
+    if codex_login is not None and settings.get("request_controls", {}).get("store") is True:
+        raise ValueError("store=True requires API-key Responses authentication")
+    if restored_model_settings is not None:
+        current_controls = settings.get("request_controls", {})
+        attempt_controls = {
+            "retry": current_controls.get("retry"),
+            "attempt_timeout_ms": current_controls.get("attempt_timeout_ms"),
+        }
+        if restored_profile is not None:
+            profile_controls = next(
+                row["model"]["request_controls"]
+                for row in profile_roster
+                if row["id"] == restored_profile.profile.id
+            )
+            if "attempt_timeout_ms" in profile_controls:
+                attempt_controls["attempt_timeout_ms"] = profile_controls["attempt_timeout_ms"]
+            if "retry" in profile_controls:
+                profile_retry = profile_controls["retry"]
+                current_retry = attempt_controls["retry"]
+                attempt_controls["retry"] = (
+                    {**(current_retry or {}), **profile_retry}
+                    if profile_retry is not None
+                    else None
+                )
+        model, settings = restored_model_settings
+        settings.setdefault("request_controls", {}).update(attempt_controls)
+    return model, settings
 
 
 class Session(Generic[ContextT, OutputT]):
@@ -3814,6 +3900,7 @@ class Session(Generic[ContextT, OutputT]):
                 context,
                 output_guardrails,
                 (*input_guardrails, *agent.input_guardrails),
+                run_error_formatter=tool_error_formatter is not None,
             )
             restored_profile, operation_profile, operation_source = _restore_profile_sources(
                 native,
@@ -3854,51 +3941,15 @@ class Session(Generic[ContextT, OutputT]):
                 if restored_profile is not None
                 else output
             )
-            settings = _native_model_settings(model, agent.model_settings)
-            prompt_controls = _hosted_prompt_controls(
-                agent.hosted_prompt,
-                model=agent.model,
-                instructions=instructions
-                if getattr(agent, "_hosted_instructions_provided", True)
-                else None,
-                tools_provided=getattr(agent, "_hosted_tools_provided", True)
-                or bool(agent.tools)
-                or bool(agent.handoffs),
-                extra_body=agent.model_settings.get("extra_body"),
+            model, settings = _prepare_opening_model_settings(
+                agent,
+                model,
+                instructions,
+                codex_login,
+                restored_model_settings,
+                restored_profile,
+                profile_roster,
             )
-            if prompt_controls is not None:
-                settings.setdefault("request_controls", {})["hosted_prompt"] = prompt_controls
-            if (
-                codex_login is not None
-                and settings.get("request_controls", {}).get("store") is True
-            ):
-                raise ValueError("store=True requires API-key Responses authentication")
-            if restored_model_settings is not None:
-                current_controls = settings.get("request_controls", {})
-                attempt_controls = {
-                    "retry": current_controls.get("retry"),
-                    "attempt_timeout_ms": current_controls.get("attempt_timeout_ms"),
-                }
-                if restored_profile is not None:
-                    profile_controls = next(
-                        row["model"]["request_controls"]
-                        for row in profile_roster
-                        if row["id"] == restored_profile.profile.id
-                    )
-                    if "attempt_timeout_ms" in profile_controls:
-                        attempt_controls["attempt_timeout_ms"] = profile_controls[
-                            "attempt_timeout_ms"
-                        ]
-                    if "retry" in profile_controls:
-                        profile_retry = profile_controls["retry"]
-                        current_retry = attempt_controls["retry"]
-                        attempt_controls["retry"] = (
-                            {**(current_retry or {}), **profile_retry}
-                            if profile_retry is not None
-                            else None
-                        )
-                model, settings = restored_model_settings
-                settings.setdefault("request_controls", {}).update(attempt_controls)
             native_specs = catalog.native_specs()
             manual_slots = catalog.manual_slots()
             if state is not None:
@@ -3925,25 +3976,22 @@ class Session(Generic[ContextT, OutputT]):
 
             # Capture the supported ceiling before acquiring a provider lease.
             # Excluded openings keep their durable zero-turn publication path.
-            _atomic_first_turn = (
-                _atomic_first_turn
-                and initial_messages_json is None
-                and selected is None
-                and not profiles
-                and state is None
-                and storage is None
-                and resume is None
-                and opening.environment is None
-                and not input_guardrails
-                and not output_guardrails
-                and not instruction_files
-                and auth is None
-                and _supports_atomic_first_turn(
-                    agent,
-                    output_mode=output.mode,
-                    programmatic_tool_calling=programmatic_tool_calling,
-                    tools=available,
-                )
+            _atomic_first_turn = _atomic_first_turn and _supports_atomic_first_turn(
+                agent,
+                output_mode=output.mode,
+                programmatic_tool_calling=programmatic_tool_calling,
+                tools=available,
+                initial_messages_json=initial_messages_json,
+                selected=selected,
+                profiles=profiles,
+                state=state,
+                storage=storage,
+                resume=resume,
+                environment=opening.environment,
+                input_guardrails=input_guardrails,
+                output_guardrails=output_guardrails,
+                instruction_files=instruction_files,
+                auth=auth,
             )
             # Owned defaults keep ordinary startup and its existing close custody.
             _private_default_opening = (
@@ -4275,7 +4323,9 @@ class Session(Generic[ContextT, OutputT]):
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
                     "_terminal_tool_slots": restored_catalog.finish_slots(),
-                    "_input_error_tool_slots": restored_catalog.input_error_slots(),
+                    "_input_error_tool_slots": restored_catalog.input_error_slots(
+                        run_formatter=tool_error_formatter is not None
+                    ),
                     **(
                         {
                             "_native_agent_roles": [
@@ -7915,7 +7965,9 @@ class Session(Generic[ContextT, OutputT]):
             options["_application_instructions"] = self._instructions
             options["_manual_tool_slots"] = self._catalog.manual_slots()
             options["_terminal_tool_slots"] = self._catalog.finish_slots()
-            options["_input_error_tool_slots"] = self._catalog.input_error_slots()
+            options["_input_error_tool_slots"] = self._catalog.input_error_slots(
+                run_formatter=self._tool_error_formatter is not None
+            )
             current_options = json.loads(change.options())
             options["_sdk_instruction_files"] = current_options["instruction_files"]
             applied_roots = current_options["executor_writable_roots"]
@@ -9042,7 +9094,9 @@ class Session(Generic[ContextT, OutputT]):
                             }
                         ),
                         terminal_slots=candidate.finish_slots(),
-                        input_error_slots=candidate.input_error_slots(),
+                        input_error_slots=candidate.input_error_slots(
+                            run_formatter=self._tool_error_formatter is not None
+                        ),
                     )
                     if self._profiles
                     else self._native._replace_tools(
@@ -9051,7 +9105,9 @@ class Session(Generic[ContextT, OutputT]):
                         manual_slots,
                         default_slots,
                         terminal_slots=candidate.finish_slots(),
-                        input_error_slots=candidate.input_error_slots(),
+                        input_error_slots=candidate.input_error_slots(
+                            run_formatter=self._tool_error_formatter is not None
+                        ),
                     )
                     if default_slots is not None
                     else self._native._replace_tools(
@@ -9059,14 +9115,18 @@ class Session(Generic[ContextT, OutputT]):
                         specs,
                         manual_slots,
                         terminal_slots=candidate.finish_slots(),
-                        input_error_slots=candidate.input_error_slots(),
+                        input_error_slots=candidate.input_error_slots(
+                            run_formatter=self._tool_error_formatter is not None
+                        ),
                     )
                     if manual_slots
                     else self._native._replace_tools(
                         candidate.generation,
                         specs,
                         terminal_slots=candidate.finish_slots(),
-                        input_error_slots=candidate.input_error_slots(),
+                        input_error_slots=candidate.input_error_slots(
+                            run_formatter=self._tool_error_formatter is not None
+                        ),
                     )
                 )
             except BaseException as error:

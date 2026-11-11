@@ -581,7 +581,43 @@ class ChatCompletionsModel:
                 **options,
             )
             value = response.model_dump() if hasattr(response, "model_dump") else response
-            if not isinstance(value, dict) or len(value.get("choices", [])) != 1:
+            if not isinstance(value, dict):
+                raise ValueError("ChatCompletionsModel requires exactly one response choice")
+            raw_usage = value.get("usage")
+            usage = (
+                None
+                if raw_usage is None
+                else {
+                    "input_tokens": raw_usage.get("prompt_tokens", 0),
+                    "output_tokens": raw_usage.get("completion_tokens", 0),
+                    "total_tokens": raw_usage.get("total_tokens", 0),
+                    "cached_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
+                        "cached_tokens", 0
+                    ),
+                    "cache_write_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
+                        "cache_write_tokens", 0
+                    ),
+                    "reasoning_output_tokens": (
+                        raw_usage.get("completion_tokens_details") or {}
+                    ).get("reasoning_tokens", 0),
+                }
+            )
+            if usage is not None:
+                usage = {
+                    key: 0
+                    if counter is None
+                    and key
+                    in (
+                        "cached_input_tokens",
+                        "cache_write_input_tokens",
+                        "reasoning_output_tokens",
+                    )
+                    else counter
+                    for key, counter in usage.items()
+                }
+            if usage is not None:
+                request.report_usage(usage)
+            if len(value.get("choices", [])) != 1:
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
             choice = value["choices"][0]
             message = choice["message"]
@@ -647,40 +683,6 @@ class ChatCompletionsModel:
                         "arguments": call["function"]["arguments"],
                     }
                 )
-            raw_usage = value.get("usage")
-            usage = (
-                None
-                if raw_usage is None
-                else {
-                    "input_tokens": raw_usage.get("prompt_tokens", 0),
-                    "output_tokens": raw_usage.get("completion_tokens", 0),
-                    "total_tokens": raw_usage.get("total_tokens", 0),
-                    "cached_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
-                        "cached_tokens", 0
-                    ),
-                    "cache_write_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
-                        "cache_write_tokens", 0
-                    ),
-                    "reasoning_output_tokens": (
-                        raw_usage.get("completion_tokens_details") or {}
-                    ).get("reasoning_tokens", 0),
-                }
-            )
-            if usage is not None:
-                usage = {
-                    key: 0
-                    if counter is None
-                    and key
-                    in (
-                        "cached_input_tokens",
-                        "cache_write_input_tokens",
-                        "reasoning_output_tokens",
-                    )
-                    else counter
-                    for key, counter in usage.items()
-                }
-            if usage is not None:
-                request.report_usage(usage)
             return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
@@ -766,6 +768,8 @@ class LitellmModel(ChatCompletionsModel):
                     **options.get("extra_body", {}),
                     "prompt_cache_key": options.pop("prompt_cache_key"),
                 }
+            if request.disable_provider_retries:
+                options["num_retries"] = 0
             response = await self.client.acompletion(**options)
             value = response.model_dump()
             for choice in value["choices"]:
@@ -792,6 +796,8 @@ class AnyLLMModel(ChatCompletionsModel):
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
         try:
+            if request.disable_provider_retries:
+                raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
             if self._request_options_source is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
             if "max_completion_tokens" in options:
@@ -873,19 +879,6 @@ class ResponsesModel:
                 stream=False, extra_body=body, **_client_request_options(selected)
             )
             value = response.model_dump() if hasattr(response, "model_dump") else response
-            output = value.get("output") or []
-            refusal = False
-            for item in output:
-                if item.get("type") != "message":
-                    continue
-                for part in item.get("content", []):
-                    if part.get("type") == "refusal":
-                        refusal = True
-                        break
-                if refusal:
-                    break
-            if value.get("status") != "completed" and not refusal:
-                raise ValueError("ResponsesModel requires a completed response")
             raw_usage = value.get("usage")
             usage = (
                 None
@@ -917,6 +910,19 @@ class ResponsesModel:
                 }
             if usage is not None:
                 request.report_usage(usage)
+            output = value.get("output") or []
+            refusal = False
+            for item in output:
+                if item.get("type") != "message":
+                    continue
+                for part in item.get("content", []):
+                    if part.get("type") == "refusal":
+                        refusal = True
+                        break
+                if refusal:
+                    break
+            if value.get("status") != "completed" and not refusal:
+                raise ValueError("ResponsesModel requires a completed response")
             return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
 
         finally:

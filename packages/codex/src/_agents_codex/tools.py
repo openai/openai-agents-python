@@ -569,21 +569,18 @@ class _ToolCatalog:
             )
         ]
 
-    def input_error_slots(self) -> list[int]:
+    def input_error_slots(self, *, run_formatter: bool = False) -> list[int]:
         from ._function_tools import _CapturedApproval
 
-        return [
-            slot
-            for slot, tool in enumerate(self.tools)
-            if (
-                tool.function.input_error_function
-                if isinstance(tool, _CapturedApproval)
-                else tool.input_error_function
-                if isinstance(tool, _CapturedFunction)
-                else None
-            )
-            is not None
-        ]
+        slots = []
+        for slot, tool in enumerate(self.tools):
+            function = tool.function if isinstance(tool, _CapturedApproval) else tool
+            if isinstance(function, _CapturedFunction) and (
+                function.input_error_function is not None
+                or (run_formatter and function._allow_run_error_formatter)
+            ):
+                slots.append(slot)
+        return slots
 
     def native_specs(self) -> str:
         return json.dumps([json.loads(tool.spec_json) for tool in self.tools])
