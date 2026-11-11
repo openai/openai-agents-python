@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, UnionType
-from typing import Any, Union, get_origin
+from typing import Annotated, Any, Union, get_origin
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -192,14 +192,17 @@ def _module_contract(
     bindings = {}
     for name in sorted(exports):
         value = getattr(module, name)
+        origin = get_origin(value)
         # Python 3.14 gives union objects a typing.Union runtime identity.
         # The source declaration, not that interpreter detail, defines the alias.
-        if get_origin(value) in (Union, UnionType):
+        if origin in (Union, UnionType):
             bindings[name] = name
         else:
+            # Annotated aliases can report an interpreter-specific module name.
+            binding = origin if origin is Annotated else value
             bindings[name] = (
-                f"{value.__module__}.{value.__qualname__}"
-                if hasattr(value, "__module__") and hasattr(value, "__qualname__")
+                f"{binding.__module__}.{binding.__qualname__}"
+                if hasattr(binding, "__module__") and hasattr(binding, "__qualname__")
                 else name
             )
     selected = set(exports) | (include or set())
@@ -300,6 +303,7 @@ def _public_owner(name: str) -> str:
 def public_api() -> dict[str, Any]:
     sys.path[:0] = [str(ROOT / "src"), str(ROOT / "packages/codex/src")]
     import agents
+    from agents import realtime
 
     root_exports = sorted(agents.__all__)
     public_modules = {
@@ -307,9 +311,12 @@ def public_api() -> dict[str, Any]:
         for path in sorted((ROOT / "src/agents").glob("*.py"))
         if not path.stem.startswith("_") and path.stem != "version"
     }
-    # Realtime is a supported native package facade, not a top-level .py module.
-    # Include every explicit export without importing optional Classic packages.
+    # The Realtime snapshot also covers Classic names available by explicit import.
     public_modules.add("agents.realtime")
+    explicit_exports = {
+        "agents": set(root_exports),
+        "agents.realtime": set(realtime.__all__) | set(realtime._CLASSIC_EXPORTS),
+    }
     # Follow only imports used by retained declarations. A typing alias reports
     # its runtime owner as typing, so its source binding defines this boundary.
     required: dict[str, set[str]] = {name: set() for name in public_modules | {"agents"}}
@@ -317,11 +324,7 @@ def public_api() -> dict[str, Any]:
         contracts = {
             name: _module_contract(
                 importlib.import_module(name),
-                set(root_exports)
-                if name == "agents"
-                else None
-                if name in public_modules
-                else set(),
+                explicit_exports.get(name, None if name in public_modules else set()),
                 include=names,
             )
             for name, names in sorted(required.items())

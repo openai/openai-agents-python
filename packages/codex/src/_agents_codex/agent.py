@@ -135,6 +135,12 @@ class ModelSettings(TypedDict, total=False, closed=True):
     and cache behavior. Known formatting loss fails locally. ``store=True``
     requires API-key authentication.
 
+    ``reset_tool_choice=True``: ordinary text sampling only; opt-in release of
+    required/named forcing after an
+    accepted tool batch on the captured profile. Omission, False, and None:
+    persistent forcing. Independent runs and incoming handoff profiles:
+    their own declared initial choice. No change to ``tool_choice="none"``.
+
     ``invocation_timeout_ms`` sets one local model invocation deadline in positive
     integer milliseconds (at most 4,294,967,295). ``None`` clears it. It includes
     internal request waits and retries. Cleanup can finish after expiry; accepted
@@ -167,6 +173,8 @@ class ModelSettings(TypedDict, total=False, closed=True):
     include: list[str] | None
     context_management: list[dict[str, Any]] | None
     extra_body: Mapping[str, Any] | None
+    # Local opt-in; false/None preserve persistent forcing.
+    reset_tool_choice: bool | None
 
 
 def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
@@ -221,7 +229,7 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
                 finite = False
             if not finite:
                 raise ValueError(f"{key} must be a finite 64-bit number")
-        elif key in ("parallel_tool_calls", "store"):
+        elif key in ("parallel_tool_calls", "store", "reset_tool_choice"):
             if type(value) is not bool:
                 raise TypeError(f"{key} must be bool or None")
         elif key == "truncation":
@@ -239,6 +247,7 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
                 raise TypeError("extra_body must be a JSON object")
             if key == "extra_body" and set(value) & {
                 "input_modalities",
+                "reset_tool_choice",
                 "tool_choice",
                 "client_metadata",
                 "service_tier",

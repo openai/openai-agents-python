@@ -17,6 +17,45 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.native_storage_fixtures import MemorySessionStore
 
 
+async def test_provider_item_references_survive_native_history_restore(responses):
+    references = [
+        {"type": "item_reference", "id": "msg_remote_first"},
+        {"type": "item_reference", "id": "msg_remote_second"},
+        {"type": "item_reference", "id": "msg_remote_first"},
+    ]
+    storage = CustomStorage(MemorySessionStore())
+    responses.respond(assistant_output("continued"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
+        agent = Agent(instructions="Answer briefly.", provider=provider)
+        async with agent.session(storage=storage) as session:
+            session_id = session.id
+            snapshot = await session.history_snapshot()
+            for invalid in [
+                {"type": "item_reference"},
+                {"type": "item_reference", "id": 17},
+            ]:
+                with pytest.raises(RuntimeError, match="Invalid canonical history item"):
+                    await session.transact_history(
+                        expected_revision=snapshot.revision, keep=0, items=[invalid]
+                    )
+                assert (await session.history_snapshot()).revision == snapshot.revision
+            await session.transact_history(
+                expected_revision=snapshot.revision, keep=0, items=references
+            )
+            assert (await session.history_snapshot()).items == tuple(references)
+        async with agent.session(storage=storage, resume=session_id) as restored:
+            restored_items = (await restored.history_snapshot()).items
+            assert [
+                item for item in restored_items if item["type"] == "item_reference"
+            ] == references
+            assert responses.requests == []
+            result = await (await restored.submit("continue")).get_result()
+    assert result.final_output == "continued"
+    assert len(responses.requests) == 1
+    wire = responses.requests[0]["input"]
+    assert [item for item in wire if item["type"] == "item_reference"] == references
+
+
 async def test_replay_capture_rejects_oversized_original_tool_output(responses):
     effects = []
 
@@ -635,3 +674,46 @@ async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp
                 current.revision, current.total, current.items[-1:]
             )
             assert responses.requests == []
+
+
+@pytest.mark.parametrize("async_value", [None, True, False], ids=["old-record", "true", "false"])
+async def test_function_call_fields_survive_native_acceptance_and_replay(
+    responses, async_value: bool | None
+) -> None:
+    calls = []
+
+    @function_tool
+    def lookup(key: str) -> str:
+        calls.append(key)
+        return f"value:{key}"
+
+    event = function_call("lookup", {"key": "replay"}, "wire-call")
+    event["item"]["created_by"] = "provider-owned"
+    expected = {} if async_value is None else {"async": async_value, "status": "completed"}
+    event["item"].update(expected)
+    responses.respond(event)
+    responses.respond(assistant_output("tool result accepted"))
+    responses.respond(assistant_output("replayed"))
+
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-wire-alias") as provider:
+        agent = Agent(instructions="Use the lookup result.", tools=[lookup], provider=provider)
+        async with agent.session() as source:
+            await (await source.submit("call the tool")).get_result()
+            snapshot = await source.history_snapshot()
+        async with agent.session() as target:
+            initial = await target.history_snapshot()
+            await target.transact_history(
+                expected_revision=initial.revision, keep=0, items=snapshot.items
+            )
+            await (await target.submit("continue from the replay")).get_result()
+
+    assert calls == ["replay"]
+    assert len(responses.requests) == 3
+    for items in (snapshot.items, responses.requests[-1]["input"]):
+        item = next(
+            item
+            for item in items
+            if item["type"] == "function_call" and item.get("call_id") == "wire-call"
+        )
+        assert {key: item[key] for key in ("async", "status") if key in item} == expected
+        assert "created_by" not in item

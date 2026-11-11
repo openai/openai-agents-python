@@ -266,7 +266,7 @@ enum PreparationReply {
     },
     ModelProducer {
         ticket: Arc<model_producer::Ticket>,
-        reply: oneshot::Sender<model_producer::Reply>,
+        reply: model_producer::Delivery,
     },
     ToolCompletion {
         reply: oneshot::Sender<std::result::Result<ToolCompletionReply, ()>>,
@@ -8642,6 +8642,8 @@ pub(crate) mod managed_tests {
 
     fn function(name: &str) -> DynamicToolFunctionSpec {
         DynamicToolFunctionSpec {
+            strict: false,
+            output_schema: None,
             name: name.into(),
             description: "test tool".into(),
             input_schema: json!({"type":"object","properties":{}}),
@@ -8735,6 +8737,8 @@ pub(crate) mod managed_tests {
             .to_string(),
             encrypted_function_args: None,
             internal_chat_message_metadata_passthrough: None,
+            asynchronous: None,
+            status: None,
         }
     }
 

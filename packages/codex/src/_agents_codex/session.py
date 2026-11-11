@@ -356,6 +356,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "retry",
         "attempt_timeout_ms",
         "input_modalities",
+        "reset_tool_choice",
         "max_output_tokens",
         "temperature",
         "top_p",
@@ -449,6 +450,7 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
         controls = captured["request_controls"]
         ordinary = {
             "input_modalities",
+            "reset_tool_choice",
             "max_output_tokens",
             "temperature",
             "top_p",
@@ -4427,6 +4429,7 @@ class Session(Generic[ContextT, OutputT]):
                 await session._publish_opening_configuration(
                     settings=settings,
                     fresh=checkpoint is None and not _atomic_first_turn,
+                    restored=checkpoint is not None,
                     validate_provider_model=(
                         uses_siwc or (web_search is not None and web_search.route == "hosted")
                     ),
@@ -4968,6 +4971,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         settings: dict[str, Any],
         fresh: bool,
+        restored: bool = False,
         validate_provider_model: bool,
         instructions: str,
         instruction_receipts: Sequence[Mapping[str, Any]],
@@ -4982,6 +4986,29 @@ class Session(Generic[ContextT, OutputT]):
         thread = self._native
         if validate_provider_model and (not fresh or "model" not in settings):
             await self._publish_startup(thread._validate_provider_model())
+        if restored:
+            controls = settings.get("request_controls", {})
+            reset = {
+                "request_controls": {
+                    "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
+                    "retry": None,
+                }
+            }
+            if (
+                await self._publish_startup(thread._update_model_settings(json.dumps(reset)))
+                is not True
+            ):
+                raise NativeError("Native model update acknowledgement did not match")
+            retry = controls.get("retry")
+            if retry is not None:
+                current_retry = {"request_controls": {"retry": retry}}
+                if (
+                    await self._publish_startup(
+                        thread._update_model_settings(json.dumps(current_retry))
+                    )
+                    is not True
+                ):
+                    raise NativeError("Native model update acknowledgement did not match")
         if fresh and settings:
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(settings)))
@@ -10984,11 +11011,56 @@ class Session(Generic[ContextT, OutputT]):
             finally:
                 del message, reply, invocation, native
 
+    async def _produce_model_stream(
+        self,
+        native: Any,
+        stream: Callable[..., Any],
+        request: Any,
+        request_id: int,
+        active: Callable[[], bool],
+    ) -> bool:
+        produced: Any = None
+        iterator: Any = None
+        event: Any = None
+        data: str | None = None
+        close: Any = None
+        closed: Any = None
+        try:
+            produced = await _call_callback(stream, active, request)
+            if produced is None and not active():
+                return False
+            iterator = aiter(produced)
+            if not active() or not native._start_model_producer_stream(request_id):
+                return False
+            while active():
+                try:
+                    event = await anext(iterator)
+                except StopAsyncIteration:
+                    return active()
+                if not active():
+                    return False
+                if not isinstance(event, Mapping):
+                    raise TypeError("NativeModel.stream must yield Responses event mappings")
+                data = json.dumps(dict(event), allow_nan=False)
+                if not await native._push_model_producer_event(request_id, data):
+                    return False
+            return False
+        finally:
+            try:
+                close = getattr(iterator, "aclose", None)
+                if callable(close):
+                    closed = close()
+                    if inspect.isawaitable(closed):
+                        await closed
+            finally:
+                del event, data, produced, iterator, request, stream, native, active, close, closed
+
     async def _produce_model_response(self, state: _Submission, message: dict[str, Any]) -> None:
         request: Any = None
         produced: Any = None
         backend: Any = None
         complete: Any = None
+        stream: Any = None
         attempt_id = message.get("attempt_id")
         request_id = message["request_id"]
         issuing = _invocation.get()
@@ -11055,7 +11127,7 @@ class Session(Generic[ContextT, OutputT]):
             )
             backend = self._model_backend
             complete = getattr(backend, "complete", None)
-            if not callable(complete):
+            if not callable(complete) and not callable(getattr(backend, "stream", None)):
                 routing_model = message.get("model", request.body.get("model"))
                 if not isinstance(routing_model, str):
                     raise TypeError("Native model producer must capture a routing model")
@@ -11063,8 +11135,14 @@ class Session(Generic[ContextT, OutputT]):
                 if not active():
                     return
                 complete = getattr(backend, "complete", None)
+            stream = getattr(backend, "stream", None)
+            if callable(stream):
+                failed = not await self._produce_model_stream(
+                    native, stream, request, request_id, active
+                )
+                return
             if not callable(complete):
-                raise TypeError("Native model provider must resolve a complete method")
+                raise TypeError("Native model provider must resolve a complete or stream method")
 
             def invoke(request: ModelRequest) -> Any:
                 value: Any = None
@@ -11140,6 +11218,7 @@ class Session(Generic[ContextT, OutputT]):
                 # Native reply admission has finished; retained failures need no payloads.
                 message = {}
                 complete = None
+                stream = None
                 del request, produced, reply, backend, callback_owner, issuing
 
     async def _prepare_sampling_request(self, state: _Submission, message: dict[str, Any]) -> None:

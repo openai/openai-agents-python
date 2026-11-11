@@ -1,5 +1,5 @@
 {
-  "result_tree": "415fb39b195262f69d506a8e3e969080c829bc54",
+  "result_tree": "717b63dc3e241d8497dedf44c2117fdc78afb6f2",
   "patches": [
     {
       "path": "0001-native-schema-recovery.patch",
@@ -626,6 +626,10 @@
       "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     },
     {
+      "path": "0160-realtime-connection-options.patch",
+      "sha256": "04481c9ccc44ae1667299a20757f75ff1c12ca047f46a8072a9d2b1ee6d7c8e3"
+    },
+    {
       "path": "0160-sdk-realtime-event-context.patch",
       "sha256": "1c8909ef7718231b9b1fc54154617565751b6b7f67d2e3bd0211a8f1c7ced112"
     },
@@ -640,6 +644,26 @@
     {
       "path": "0162-sdk-realtime-provider-error-observation.patch",
       "sha256": "69a74476497a8189f717036a231c5f48a3e391dc06191693dc7507851c81e7dc"
+    },
+    {
+      "path": "sdk-function-call-wire.patch",
+      "sha256": "921c9d5823942c2b5ca69221231b9b8dc7ed7c2ea032eca11afa2de3111e1e86"
+    },
+    {
+      "path": "sdk-native-model-response-stream.patch",
+      "sha256": "0c23bbf1515d26979e84697b7e457dfaf4507cb489dd593927b073b7a5142ae6"
+    },
+    {
+      "path": "sdk-provider-item-references.patch",
+      "sha256": "721e67310d0269e626bdefce41f4bd625a985cd0eb9925b8912a3c8a8c300f56"
+    },
+    {
+      "path": "sdk-reset-tool-choice-after-use.patch",
+      "sha256": "b2381c223988ede75ad31b30a4e67a40d230963d5608838713f32935e0ef134f"
+    },
+    {
+      "path": "sdk-function-provider-schemas.patch",
+      "sha256": "2dc9df2134da65d9f7ebf158260a6a3504d370c22d906f213b38abceeafec55f"
     },
     {
       "path": "sdk-trace-credential-destination.patch",
@@ -659,7 +683,7 @@
     },
     {
       "path": "sdk-realtime-incarnation-ownership.patch",
-      "sha256": "ee1896bb24052d7c1c02d73b89fe1ab245222ed82f63f5c7782fb95d75056ba4"
+      "sha256": "dce764365e8b640621b6507285d8d213119a215d43b0d8c34987a717aafae2dd"
     },
     {
       "path": "sdk-preserved-speech-tool-continuation.patch",

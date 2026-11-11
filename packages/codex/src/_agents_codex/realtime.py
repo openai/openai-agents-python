@@ -7,6 +7,7 @@ import base64
 import hashlib
 import inspect
 import json
+import re
 from collections import deque
 from collections.abc import (
     AsyncIterator,
@@ -22,9 +23,11 @@ from contextvars import Context, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
+from pydantic import AnyUrl
 from typing_extensions import NotRequired, TypedDict
 
 from ._lifecycle import _close_after_error, _join, _retain_cleanup_error
@@ -224,9 +227,15 @@ async def _resolve_realtime_policy(
 class RealtimeConfig:
     """Native Realtime configuration; defaults to a server WebSocket.
 
-    ``api_key`` may be a string or a synchronous/asynchronous callback. It is
-    resolved once for this connection and never replaces the Session's auth.
-    Closing during resolution cancels the owned callback before connecting.
+    ``api_key`` may be a string or a synchronous/asynchronous callback. The
+    connection resolves it once when ``headers`` is omitted. The Session keeps
+    its own auth. Closing during resolution cancels the callback before connecting.
+
+    ``url`` selects an exact trusted application WebSocket endpoint. An override
+    never inherits provider credentials; supply ``api_key`` or ``headers`` when
+    authentication is needed. ``headers`` replaces all application headers,
+    including authentication; an empty mapping sends none. These options apply
+    to built-in WebSockets and SIP attachment, not WebRTC or custom adapters.
     """
 
     model: str | None = None
@@ -249,6 +258,8 @@ class RealtimeConfig:
     tool_error_formatter: (
         Callable[[RealtimeToolErrorContext], str | None | Awaitable[str | None]] | None
     ) = field(default=None, repr=False)
+    url: str | None = field(default=None, repr=False)
+    headers: Mapping[str, str] | None = field(default=None, repr=False)
 
 
 async def _prepare_realtime_params(
@@ -972,6 +983,48 @@ class RealtimeSession:
             raise TypeError("Realtime is_tool_enabled must be a callback")
         if config.tool_error_formatter is not None and not callable(config.tool_error_formatter):
             raise TypeError("Realtime tool_error_formatter must be a callback")
+        if config.url is not None or config.headers is not None:
+            if config.adapter is not None or isinstance(config.transport, RealtimeWebRTC):
+                raise ValueError("url and headers require a built-in WebSocket connection")
+        if config.url is not None:
+            if not isinstance(config.url, str):
+                raise TypeError("url must be a WebSocket URL string")
+            try:
+                parsed_url = urlsplit(config.url)
+                port = parsed_url.port
+                valid_url = (
+                    parsed_url.scheme in {"ws", "wss"}
+                    and parsed_url.hostname is not None
+                    and parsed_url.username is None
+                    and parsed_url.password is None
+                    and "#" not in config.url
+                    and (port is None or 0 <= port <= 65535)
+                )
+                if valid_url:
+                    # Validate host syntax with the Rust URL parser used at activation.
+                    AnyUrl(config.url)
+            except ValueError:
+                valid_url = False
+            if not valid_url:
+                raise ValueError(
+                    "url requires ws or wss, a valid host and port, and no credentials or fragments"
+                )
+        if config.headers is not None:
+            if not isinstance(config.headers, Mapping):
+                raise TypeError("headers must map strings to strings")
+            headers = dict(config.headers)
+            if any(
+                not isinstance(name, str) or not isinstance(value, str)
+                for name, value in headers.items()
+            ):
+                raise TypeError("headers must map strings to strings")
+            for name, value in headers.items():
+                if not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name):
+                    raise ValueError("Invalid Realtime header name")
+                if any(char != "\t" and not 0x20 <= ord(char) <= 0x7E for char in value):
+                    raise ValueError("Invalid Realtime header value")
+            config = replace(config, headers=headers)
+            self._config = config
         self._input_lock = asyncio.Lock()
         self._input_count = 0
         self._input_bytes = 0
@@ -1230,15 +1283,23 @@ class RealtimeSession:
             if prepared.get("generation") != self._generation:
                 raise RuntimeError("Native Realtime preparation returned a different generation")
             self._check_live(require_ready=False)
-            self._credentials = asyncio.create_task(self._resolve_api_key())
             api_key: str | None = None
             try:
-                try:
-                    api_key = await self._credentials
-                finally:
-                    self._credentials = None
+                if self._config.headers is None:
+                    self._credentials = asyncio.create_task(self._resolve_api_key())
+                    try:
+                        api_key = await self._credentials
+                    finally:
+                        self._credentials = None
                 self._check_live(require_ready=False)
-                result = await self._call("activate", api_key=api_key)
+                result = await self._call(
+                    "activate",
+                    api_key=api_key,
+                    connection_options={
+                        "url": self._config.url,
+                        "headers": self._config.headers,
+                    },
+                )
             finally:
                 api_key = None
             self._call_id = result["call_id"]
@@ -1251,6 +1312,8 @@ class RealtimeSession:
             self._config = replace(
                 self._config,
                 api_key=None,
+                url=None,
+                headers=None,
                 settings=None,
                 transport=self._config.transport if self._start_succeeded else None,
             )
