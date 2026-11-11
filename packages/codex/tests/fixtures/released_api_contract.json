@@ -2089,6 +2089,7 @@
           "OtlpHttp": "agents.telemetry.OtlpHttp",
           "SpanContext": "agents.telemetry.SpanContext",
           "TraceContext": "agents._trace_context.TraceContext",
+          "TraceDeliveryConfig": "agents.telemetry.TraceDeliveryConfig",
           "TraceExportCredentials": "agents.telemetry.TraceExportCredentials",
           "TraceLifecycleEvent": "agents.telemetry.TraceLifecycleEvent",
           "TraceOptions": "agents.telemetry.TraceOptions",
@@ -2125,7 +2126,8 @@
           "@dataclass(frozen=True, kw_only=True)\nclass OtlpHttp:\n    endpoint: str = field(repr=False)\n    protocol: Literal['binary', 'json'] = 'binary'\n    headers: Mapping[str, str] | None = field(default=None, repr=False)\n    tls: OtelTlsConfig | None = None",
           "Exporter: TypeAlias = OtlpGrpc | OtlpHttp",
           "@dataclass(frozen=True, kw_only=True)\nclass ConsoleDiagnostics:\n    level: Literal['error', 'warn', 'info', 'debug', 'trace'] = 'warn'\n    targets: tuple[str, ...] = ()\n    include_fields: bool = False",
-          "async def configure(*, traces: Exporter | None=None, logs: Exporter | None=None, metrics: Exporter | None=None, environment: str='dev', span_attributes: Mapping[str, str] | None=None, log_user_prompt: bool=False, log_agent_responses: bool=False, tool_result_max_bytes: int=0, processors: Sequence[TraceProcessor]=(), diagnostics: ConsoleDiagnostics | None=None) -> None:\n    pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass TraceDeliveryConfig:\n    max_queue_size: int = 2048\n    max_queue_bytes: int = 4 * 1024 * 1024\n    max_batch_size: int = 64\n    schedule_delay_ms: int = 0\n    export_trigger_ratio: float = 0.7\n    callback_timeout_ms: int | None = 1000",
+          "async def configure(*, traces: Exporter | None=None, logs: Exporter | None=None, metrics: Exporter | None=None, environment: str='dev', span_attributes: Mapping[str, str] | None=None, log_user_prompt: bool=False, log_agent_responses: bool=False, tool_result_max_bytes: int=0, processors: Sequence[TraceProcessor]=(), diagnostics: ConsoleDiagnostics | None=None, trace_delivery: TraceDeliveryConfig | None=None) -> None:\n    pass",
           "async def shutdown(*, timeout_ms: int | None=None) -> None:\n    pass",
           "@dataclass(frozen=True, kw_only=True)\nclass TraceExportCredentials:\n    headers: Mapping[str, str] = field(repr=False)\n\n    def __init__(self, *, headers: Mapping[str, str]) -> None:\n        pass",
           "@dataclass(frozen=True, kw_only=True)\nclass SpanContext:\n    trace_id: str\n    span_id: str\n    parent_span_id: str | None\n    disabled: bool\n    include_sensitive_data: bool\n    _handle: str = field(repr=False, compare=False)\n\n    @property\n    def trace_metadata(self) -> Mapping[str, Any] | None:\n        pass",
@@ -2448,7 +2450,7 @@
         ],
         "references": {},
         "declarations": [
-          "class OpenAITraceExporter:\n\n    def __init__(self, *, api_key: str, endpoint: str='https://api.openai.com/v1/traces/ingest', organization: str | None=None, project: str | None=None, timeout_ms: int=750, max_retries: int=0) -> None:\n        pass\n\n    def set_api_key(self, api_key: str) -> None:\n        pass\n\n    async def on_trace_event(self, event: Mapping[str, Any]) -> None:\n        pass\n\n    async def on_trace_events(self, events: Sequence[Mapping[str, Any]]) -> None:\n        pass",
+          "class OpenAITraceExporter:\n\n    def __init__(self, *, api_key: str, endpoint: str='https://api.openai.com/v1/traces/ingest', organization: str | None=None, project: str | None=None, timeout_ms: int=750, max_retries: int=0, retry_delay_ms: int=0, max_retry_delay_ms: int=30000) -> None:\n        pass\n\n    def set_api_key(self, api_key: str) -> None:\n        pass\n\n    async def on_trace_event(self, event: Mapping[str, Any]) -> None:\n        pass\n\n    async def on_trace_events(self, events: Sequence[Mapping[str, Any]]) -> None:\n        pass",
           "class ConsoleTraceProcessor:\n\n    def __init__(self, *, stream: TextIO | None=None) -> None:\n        pass\n\n    def on_trace_event(self, event: Mapping[str, Any]) -> None:\n        pass"
         ]
       },

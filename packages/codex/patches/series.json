@@ -1,5 +1,5 @@
 {
-  "result_tree": "b928fae4cc9e59d0f40a8cc5f0b1ae5c03352d8e",
+  "result_tree": "e20d0a5ac522165524aa5935664acb4555204df2",
   "patches": [
     {
       "path": "0001-native-schema-recovery.patch",
@@ -724,6 +724,10 @@
     {
       "path": "sdk-provider-hosted-replay-fence.patch",
       "sha256": "cc46a7a1c697e833784f9f5ffa7245b0e2354e5bbc5a0a8bb892fae7ae55c53e"
+    },
+    {
+      "path": "sdk-trace-delivery-controls.patch",
+      "sha256": "ab69e05e28487153d3ab44a9bdae4862e24ad7dc1284a0872118dc703f0e49e8"
     }
   ]
 }
