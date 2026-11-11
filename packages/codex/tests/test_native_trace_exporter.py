@@ -146,6 +146,7 @@ def native_trace_child_env() -> dict[str, str]:
     [
         "native_case",
         "native_deadline_case",
+        "native_deadline_reset_case",
         "native_outcome_privacy_case",
         "native_auth_case",
         "native_auth_destination_case",
@@ -371,6 +372,7 @@ async def native_deadline_case():
         handler = asyncio.current_task()
         handlers.add(handler)
         eof = None
+        trickling = False
         try:
             header = await reader.readuntil(b"\r\n\r\n")
             length = next(
@@ -380,7 +382,8 @@ async def native_deadline_case():
             )
             requests.append(json.loads(await reader.readexactly(length)))
             writer.write(b"HTTP/1.1 200 OK\r\n")
-            if len(requests) == 2:
+            trickling = len(requests) == 2
+            if trickling:
                 eof = asyncio.create_task(reader.read())
                 for _ in range(30):
                     done, _ = await asyncio.wait((eof,), timeout=0.02)
@@ -392,16 +395,25 @@ async def native_deadline_case():
                     await writer.drain()
             writer.write(b"Content-Length: 0\r\n\r\n")
             await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            if not trickling:
+                raise
+            first_closed.set()
         finally:
             if eof is not None and not eof.done():
                 eof.cancel()
                 await asyncio.gather(eof, return_exceptions=True)
             writer.close()
-            await writer.wait_closed()
-            handlers.discard(handler)
+            try:
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                if not trickling:
+                    raise
+                first_closed.set()
 
     server = await asyncio.start_server(receive, "127.0.0.1", 0)
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
+    configured = False
     try:
         # Warm the lazy HTTP transport before the bounded native request.
         warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
@@ -411,6 +423,7 @@ async def native_deadline_case():
             api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
         )
         await telemetry.configure(processors=[exporter])
+        configured = True
         with telemetry.trace("deadline-first"):
             pass
         flushed = await telemetry.force_flush()
@@ -425,12 +438,31 @@ async def native_deadline_case():
             record.get("span_data", {}).get("name") == "recovered-after-deadline"
             for record in records
         )
-        await telemetry.shutdown()
     finally:
-        server.close()
-        await server.wait_closed()
-        if handlers:
-            await asyncio.wait_for(asyncio.gather(*handlers), 1)
+        try:
+            if configured:
+                await telemetry.shutdown()
+        finally:
+            server.close()
+            await server.wait_closed()
+            if handlers:
+                await asyncio.wait_for(asyncio.gather(*handlers), 1)
+
+
+async def native_deadline_reset_case():
+    import asyncio
+
+    read = asyncio.StreamReader.read
+
+    async def reset_on_eof(reader, n=-1):
+        data = await read(reader, n)
+        if data == b"":
+            raise ConnectionResetError("synthetic Windows peer close")
+        return data
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(asyncio.StreamReader, "read", reset_on_eof)
+        await native_deadline_case()
 
 
 async def test_failed_root_descriptor_metadata_and_rotation_survive_delivery():

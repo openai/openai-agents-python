@@ -1,5 +1,5 @@
 {
-  "result_tree": "717b63dc3e241d8497dedf44c2117fdc78afb6f2",
+  "result_tree": "b928fae4cc9e59d0f40a8cc5f0b1ae5c03352d8e",
   "patches": [
     {
       "path": "0001-native-schema-recovery.patch",
@@ -666,6 +666,22 @@
       "sha256": "2dc9df2134da65d9f7ebf158260a6a3504d370c22d906f213b38abceeafec55f"
     },
     {
+      "path": "sdk-tool-batch-completion.patch",
+      "sha256": "1090afd706b9ce7ef2f1337dc66c42bf8f7b2cf4d8e5cbbd17275b143724bb70"
+    },
+    {
+      "path": "sdk-raw-provider-events.patch",
+      "sha256": "192f9f23ac35e03a1f6b91a5ac14a13b0570397c9846f0e238c08c750460cd9c"
+    },
+    {
+      "path": "sdk-produced-run-items.patch",
+      "sha256": "c2577104f3f07363b5e3703b0219bd7a71d927c73cb84c4c78ebca23160f2e93"
+    },
+    {
+      "path": "sdk-nested-tool-output-acceptance.patch",
+      "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
       "sha256": "68668e758695b7f95164852c62a310cf0fd9bc78d310145ebe81b17fa8aa1eb9"
     },
@@ -679,7 +695,7 @@
     },
     {
       "path": "sdk-native-model-attempt-retry.patch",
-      "sha256": "feb1176b06c5897daa8d195ea81e75cd71b3e19501e30d8ca1bfeb8fe44cdf92"
+      "sha256": "5e4aa4e1cada9c42c47a4fa13900329c15aec286036c7734b1b2b097a7fcee1a"
     },
     {
       "path": "sdk-realtime-incarnation-ownership.patch",

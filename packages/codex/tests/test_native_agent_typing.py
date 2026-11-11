@@ -1199,3 +1199,17 @@ def hosted_handoff_type_contract() -> None:
         output_type=PromptAnswer,
         handoffs=[Handoff(typed, transfer)],
     )
+
+
+def body_error_formatter(context: ToolContext[Application], error: Exception) -> str:
+    return context.context.tenant
+
+
+def body_error_callback(key: str) -> str:
+    return key
+
+
+direct_body_formatter = function_tool(body_error_callback, error_function=body_error_formatter)
+decorated_body_formatter = function_tool(error_function=body_error_formatter)(body_error_callback)
+assert_type(Agent(instructions="Read.", tools=[direct_body_formatter]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[decorated_body_formatter]), Agent[Application, str])

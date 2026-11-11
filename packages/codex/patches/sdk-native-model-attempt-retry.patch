@@ -25,10 +25,10 @@ index 60e872e7..b657e8e8 100644
              CoreCodexErrorInfo::RateLimitExceeded => CodexErrorInfo::RateLimitExceeded,
              CoreCodexErrorInfo::FlexUnavailable => CodexErrorInfo::FlexUnavailable,
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index 3a884ffe..9662ba67 100644
+index f319648a..d91f201a 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
-@@ -483,11 +483,15 @@ impl Stream for ResponseStream {
+@@ -485,11 +485,15 @@ impl Stream for ResponseStream {
      }
  }
  
@@ -46,7 +46,7 @@ index 3a884ffe..9662ba67 100644
  
  #[derive(Debug)]
  pub struct ModelInvocationDeadlineState {
-@@ -499,21 +503,41 @@ pub struct ModelInvocationDeadlineState {
+@@ -501,21 +505,41 @@ pub struct ModelInvocationDeadlineState {
  }
  
  impl ModelInvocationDeadlineState {
@@ -97,7 +97,7 @@ index 3a884ffe..9662ba67 100644
          // An external cancellation already observed before expiry stays cancellation.
          // Expiry reserves its status before it cancels this same request token.
          if self.request_cancel.is_cancelled() {
-@@ -527,29 +551,46 @@ impl ModelInvocationDeadlineState {
+@@ -529,29 +553,46 @@ impl ModelInvocationDeadlineState {
      }
      fn notify(&self, outcome: InvocationDeadlineOutcome) {
          // Wake other owners only after releasing the status mutex.
@@ -151,7 +151,7 @@ index 3a884ffe..9662ba67 100644
                  InvocationDeadlineOutcome::Cancelled | InvocationDeadlineOutcome::Expired => None,
              };
              (result, *outcome)
-@@ -559,9 +600,14 @@ impl ModelInvocationDeadlineState {
+@@ -561,9 +602,14 @@ impl ModelInvocationDeadlineState {
      }
      pub fn accept_outcome(&self) -> bool {
          let current = {
@@ -168,7 +168,7 @@ index 3a884ffe..9662ba67 100644
              *outcome
          };
          self.notify(current);
-@@ -569,8 +615,13 @@ impl ModelInvocationDeadlineState {
+@@ -571,8 +617,13 @@ impl ModelInvocationDeadlineState {
      }
      pub fn cancel(&self) {
          let current = {
@@ -185,10 +185,10 @@ index 3a884ffe..9662ba67 100644
          };
          self.notify(current);
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 540c4370..bc038c40 100644
+index be5cb579..09ec94fd 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -2222,6 +2222,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
+@@ -2226,6 +2226,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
              None,
              Some(&child_usage),
              /*usage_metadata*/ None,
@@ -197,10 +197,10 @@ index 540c4370..bc038c40 100644
          .await;
      child_thread
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 4f79369d..719bfae9 100644
+index 728f3cb7..1eb65cce 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -2077,10 +2077,32 @@ impl ModelClientSession {
+@@ -2079,10 +2079,32 @@ impl ModelClientSession {
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<ResponseStream> {
          loop {
@@ -234,7 +234,7 @@ index 4f79369d..719bfae9 100644
              if prompt.prefer_buffered_response
                  && !client_setup
                      .auth
-@@ -2352,10 +2374,21 @@ impl ModelClientSession {
+@@ -2355,10 +2377,21 @@ impl ModelClientSession {
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
@@ -257,7 +257,7 @@ index 4f79369d..719bfae9 100644
              let include_internal = self
                  .client
                  .state
-@@ -2527,6 +2560,21 @@ impl ModelClientSession {
+@@ -2530,6 +2563,21 @@ impl ModelClientSession {
                  ),
                  ..ResponseCreateWsRequest::from(&request)
              };
@@ -280,10 +280,10 @@ index 4f79369d..719bfae9 100644
                  &mut ws_payload.client_metadata,
                  responses_metadata.parent_response_id.as_deref(),
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 3a06a85c..0686d3dc 100644
+index d43452c1..ce0ff876 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -1012,6 +1012,7 @@ async fn drain_to_completed(
+@@ -1020,6 +1020,7 @@ async fn drain_to_completed(
                      response_observation_id.take(),
                      token_usage.as_ref(),
                      usage_metadata.as_ref(),
@@ -292,7 +292,7 @@ index 3a06a85c..0686d3dc 100644
                  .await;
                  sess.update_token_usage_info(turn_context, token_usage.as_ref())
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 2102d4c7..20b75494 100644
+index 591db25d..48481a97 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -535,6 +535,7 @@ async fn collect_compaction_output(
@@ -452,7 +452,7 @@ index cb87601b..95c7103d 100644
      }
      let turn_context = &step_context.turn;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 54bdeda7..3161f7e4 100644
+index 39e028aa..6da2d007 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -256,6 +256,7 @@ mod mcp_prewarm;
@@ -463,7 +463,7 @@ index 54bdeda7..3161f7e4 100644
  pub(crate) mod model_invocation_deadline;
  pub(crate) mod multi_agents;
  mod plugin_selection;
-@@ -888,7 +889,8 @@ impl Session {
+@@ -889,7 +890,8 @@ impl Session {
                  tool_choice: config.sdk_tool_choice.or_else(|| {
                      persisted_thread_settings.and_then(|settings| settings.tool_choice)
                  }),
@@ -473,7 +473,7 @@ index 54bdeda7..3161f7e4 100644
                  request_controls: {
                      let mut selected = persisted_thread_settings
                          .map(|settings| settings.request_controls.clone())
-@@ -5446,10 +5448,12 @@ impl Session {
+@@ -5486,10 +5488,12 @@ impl Session {
          response_observation_id: Option<String>,
          usage: Option<&TokenUsage>,
          usage_metadata: Option<&ResponseUsageMetadata>,
@@ -1449,7 +1449,7 @@ index 4e794f69..0a81c87d 100644
          }
          if errors.is_empty() {
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 339a9055..7305d816 100644
+index 712c80eb..c09bbb14 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -1,3 +1,4 @@
@@ -1457,19 +1457,7 @@ index 339a9055..7305d816 100644
  use std::borrow::Cow;
  use std::collections::HashMap;
  use std::collections::HashSet;
-@@ -1561,7 +1562,10 @@ async fn pre_sampling_compaction_or_report(
-         // Preserve the original prompt above, then leave an admitted writer
-         // failure to the exact task's terminal owner.
-         if matches!(err.details(), CodexErrorDetails::Fatal(_))
--            && turn_context.extension_data.get::<PendingCompactionFatal>().is_some()
-+            && turn_context
-+                .extension_data
-+                .get::<PendingCompactionFatal>()
-+                .is_some()
-         {
-             return Err(err);
-         }
-@@ -2011,13 +2015,42 @@ async fn run_sampling_request(
+@@ -2026,13 +2027,42 @@ async fn run_sampling_request(
                  Some(stop),
              ),
          );
@@ -1513,7 +1501,7 @@ index 339a9055..7305d816 100644
      let invocation = async {
          loop {
              // Running code-mode cells can request review while this response is in flight.
-@@ -2100,54 +2133,140 @@ async fn run_sampling_request(
+@@ -2126,54 +2156,140 @@ async fn run_sampling_request(
                  )
                  .await?;
              }
@@ -1547,9 +1535,9 @@ index 339a9055..7305d816 100644
 +                            || retry_settings.and_then(|settings| settings.max_retries) == Some(0)),
 +                )
 +                .map_err(CodexErr::Fatal)?;
-+            step_context.extension_data.insert(
-+                codex_extension_api::CapturedModelAttempt(attempt.clone()),
-+            );
++            step_context
++                .extension_data
++                .insert(codex_extension_api::CapturedModelAttempt(attempt.clone()));
 +            let admission = crate::model_request::tool_admission_for_step(
 +                sess.thread_id.to_string(),
 +                step_context.clone(),
@@ -1698,7 +1686,7 @@ index 339a9055..7305d816 100644
                  Ok(output) => {
                      return Ok((output, original_input.unwrap_or(prompt.input)));
                  }
-@@ -2186,6 +2305,185 @@ async fn run_sampling_request(
+@@ -2212,6 +2328,185 @@ async fn run_sampling_request(
  
              let original_input = original_input.get_or_insert(prompt.input);
  
@@ -1884,7 +1872,7 @@ index 339a9055..7305d816 100644
              let retry = handle_response_stream_error(
                  &mut retry_state,
                  max_retries,
-@@ -2213,6 +2511,12 @@ async fn run_sampling_request(
+@@ -2239,6 +2534,12 @@ async fn run_sampling_request(
                  ));
              }
              retry??;
@@ -1897,7 +1885,7 @@ index 339a9055..7305d816 100644
              recovery_attempt += 1;
              turn_context.turn_timing_state.record_sampling_retry();
          }
-@@ -2242,6 +2546,41 @@ async fn run_sampling_request(
+@@ -2268,6 +2569,41 @@ async fn run_sampling_request(
      outcome
  }
  
@@ -1939,28 +1927,18 @@ index 339a9055..7305d816 100644
  pub(crate) struct PreparedToolRecommendations {
      auth: Option<CodexAuth>,
      endpoint_candidates: Option<Vec<DiscoverableTool>>,
-@@ -2736,7 +3075,10 @@ async fn propose_tool_completion(
-                     return Ok(None);
-                 }
-                 Some(codex_extension_api::ToolCompletionDecision::Accept { .. })
--                    if !tools.all_succeeded => continue,
-+                    if !tools.all_succeeded =>
-+                {
-+                    continue;
-+                }
-                 Some(codex_extension_api::ToolCompletionDecision::Accept { final_output }) => {
-                     return Ok(Some(codex_protocol::protocol::ToolTurnCompletion {
-                         call_id: call_id.clone(),
-@@ -2925,7 +3267,7 @@ pub(super) enum RealtimeEventText {
+@@ -3153,7 +3489,9 @@ pub(super) enum RealtimeEventText {
  
  pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventText> {
      match msg {
--        EventMsg::ResponseFact(_) => None,
-+        EventMsg::ResponseFact(_) | EventMsg::SdkModelAttempt(_) => None,
+-        EventMsg::ResponseFact(_) | EventMsg::SdkRawProviderEvent(_) => None,
++        EventMsg::ResponseFact(_)
++        | EventMsg::SdkRawProviderEvent(_)
++        | EventMsg::SdkModelAttempt(_) => None,
          EventMsg::ElicitationRequest(request)
              if matches!(
                  &request.request,
-@@ -3500,6 +3842,10 @@ async fn try_run_sampling_request(
+@@ -3731,6 +4069,10 @@ async fn try_run_sampling_request(
      }
      // Every request, including a stream retry, depends on accepted durable history.
      sess.ensure_rollout_durable().await?;
@@ -1971,7 +1949,7 @@ index 339a9055..7305d816 100644
      let sample_cancel = cancellation_token.child_token();
      let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
      let tool_cancellation = sample_cancel.child_token();
-@@ -3572,7 +3918,12 @@ async fn try_run_sampling_request(
+@@ -3803,7 +4145,12 @@ async fn try_run_sampling_request(
              .await??;
          // Publish owned handles synchronously before checking raced cancellation.
          deadline.attach_stream_stop(stream.consumer_dropped.clone(), stream.producer_stop.take());
@@ -1985,7 +1963,7 @@ index 339a9055..7305d816 100644
              deadline.attach_tasks([stream.mapper_task.take(), stream.producer_task.take()]);
          }
          if sample_cancel.is_cancelled() {
-@@ -3680,6 +4031,10 @@ async fn try_run_sampling_request(
+@@ -3911,6 +4258,10 @@ async fn try_run_sampling_request(
                      }
                  }
                  ResponseEvent::Created { response_id } => {
@@ -1996,7 +1974,7 @@ index 339a9055..7305d816 100644
                      response_fact_response_id.clone_from(&response_id);
                      if let Some(response_id) = response_id {
                          turn_context
-@@ -3688,6 +4043,13 @@ async fn try_run_sampling_request(
+@@ -3919,6 +4270,13 @@ async fn try_run_sampling_request(
                      }
                  }
                  ResponseEvent::OutputItemDone(mut item) => {
@@ -2010,7 +1988,7 @@ index 339a9055..7305d816 100644
                      assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                      sess.reserve_assistant_message_order(&turn_context, &item)
                          .await;
-@@ -4008,6 +4370,12 @@ async fn try_run_sampling_request(
+@@ -4247,6 +4605,12 @@ async fn try_run_sampling_request(
                      usage_metadata,
                      end_turn,
                  } => {
@@ -2023,7 +2001,7 @@ index 339a9055..7305d816 100644
                      sess.services
                          .analytics_events_client
                          .track_code_mode_tool_call(
-@@ -4031,6 +4399,7 @@ async fn try_run_sampling_request(
+@@ -4270,6 +4634,7 @@ async fn try_run_sampling_request(
                          response_observation_id.take(),
                          token_usage.as_ref(),
                          usage_metadata.as_ref(),
@@ -2031,7 +2009,7 @@ index 339a9055..7305d816 100644
                      )
                      .await;
                      let budget_result = sess
-@@ -4062,6 +4431,11 @@ async fn try_run_sampling_request(
+@@ -4301,6 +4666,11 @@ async fn try_run_sampling_request(
                          if !active_item_is_streaming_to_client {
                              continue;
                          }
@@ -2043,7 +2021,7 @@ index 339a9055..7305d816 100644
                          let item_id = active.id();
                          if matches!(active, TurnItem::AgentMessage(_)) {
                              let parsed =
-@@ -4219,7 +4593,8 @@ async fn try_run_sampling_request(
+@@ -4458,7 +4828,8 @@ async fn try_run_sampling_request(
      };
      // A final success (including preemption) or nonretryable error owns its
      // outcome before cleanup. Only a retryable failure retains the logical clock.
@@ -2053,7 +2031,7 @@ index 339a9055..7305d816 100644
          || outcome
              .as_ref()
              .err()
-@@ -4246,7 +4621,7 @@ async fn try_run_sampling_request(
+@@ -4485,7 +4856,7 @@ async fn try_run_sampling_request(
              }
          }
      }
@@ -2062,7 +2040,7 @@ index 339a9055..7305d816 100644
          deadline_cleanup_errors.extend(deadline.retire_tasks().await);
      }
      let mut tool_cleanup = if !in_flight.is_empty() {
-@@ -4303,7 +4678,17 @@ async fn try_run_sampling_request(
+@@ -4542,7 +4913,17 @@ async fn try_run_sampling_request(
          } else {
              format!("; {}", deadline_cleanup_errors.join("; "))
          };
@@ -2307,10 +2285,10 @@ index f69668a1..6a0122da 100644
                      .dispatch_tool_call_with_state(
                          session,
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 2de77689..3c17eede 100644
+index 36d736d1..ec3eb521 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -156,6 +156,9 @@ pub use model_request::ResponseEvent;
+@@ -158,6 +158,9 @@ pub use model_request::ResponseEvent;
  pub use model_request::ToolsOnlyCallInput;
  pub use model_request::ToolsOnlyWorkCancellation;
  pub use model_request::TurnSamplingStop;
@@ -2680,7 +2658,7 @@ index b6ec4b44..4b9c7f15 100644
  pub mod network_policy;
  pub mod num_format;
 diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
-index 4b981504..6789f248 100644
+index 992878f8..6418acce 100644
 --- a/codex-rs/protocol/src/model_request_controls.rs
 +++ b/codex-rs/protocol/src/model_request_controls.rs
 @@ -60,6 +60,24 @@ pub struct HostedPromptControls {
@@ -2708,7 +2686,7 @@ index 4b981504..6789f248 100644
      #[serde(
          default,
          skip_serializing_if = "Option::is_none",
-@@ -203,7 +221,9 @@ pub struct ModelRequestControls {
+@@ -212,7 +230,9 @@ pub struct ModelRequestControls {
  
  impl ModelRequestControls {
      pub fn is_empty(&self) -> bool {
@@ -2719,7 +2697,7 @@ index 4b981504..6789f248 100644
              && self.input_modalities.is_none()
              && self.truncation.is_none()
              && self.include.is_none()
-@@ -223,6 +243,14 @@ impl ModelRequestControls {
+@@ -233,6 +253,14 @@ impl ModelRequestControls {
      }
  
      pub fn apply_patch(&mut self, patch: &Self) {
@@ -3004,10 +2982,10 @@ index 00000000..a4d07713
 +    }
 +}
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index dda1a5cf..504f3ab6 100644
+index 53ec0f6c..20e022a5 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -1971,6 +1971,10 @@ pub enum EventMsg {
+@@ -2040,6 +2040,10 @@ pub enum EventMsg {
      #[serde(rename = "task_complete", alias = "turn_complete")]
      TurnComplete(TurnCompleteEvent),
  
@@ -3018,7 +2996,7 @@ index dda1a5cf..504f3ab6 100644
      /// Usage update for the current session, including totals and last turn.
      /// Optional means unknown — UIs should not display when `None`.
      TokenCount(TokenCountEvent),
-@@ -2418,6 +2422,7 @@ pub enum CodexErrorInfo {
+@@ -2487,6 +2491,7 @@ pub enum CodexErrorInfo {
      SessionBudgetExceeded,
      /// Local SDK invocation allowance expired; never a provider/idle timeout.
      ModelInvocationDeadlineExceeded,
@@ -3026,7 +3004,7 @@ index dda1a5cf..504f3ab6 100644
      UsageLimitExceeded,
      RateLimitExceeded,
      FlexUnavailable,
-@@ -2464,6 +2469,7 @@ impl CodexErrorInfo {
+@@ -2533,6 +2538,7 @@ impl CodexErrorInfo {
              Self::ContextWindowExceeded
              | Self::SessionBudgetExceeded
              | Self::ModelInvocationDeadlineExceeded
@@ -3034,7 +3012,7 @@ index dda1a5cf..504f3ab6 100644
              | Self::UsageLimitExceeded
              | Self::RateLimitExceeded
              | Self::FlexUnavailable
-@@ -2501,6 +2507,10 @@ pub struct RawResponseItemEvent {
+@@ -2570,6 +2576,10 @@ pub struct RawResponseItemEvent {
  /// Unlike TokenCountEvent, this is not accumulated, estimated, or replayed.
  #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
  pub struct RawResponseCompletedEvent {
@@ -3045,8 +3023,8 @@ index dda1a5cf..504f3ab6 100644
      pub response_id: String,
      pub token_usage: Option<TokenUsage>,
      pub usage_metadata: Option<crate::ResponseUsageMetadata>,
-@@ -2736,8 +2746,26 @@ pub struct ToolTurnCompletion {
-     pub final_output: serde_json::Value,
+@@ -2809,8 +2819,26 @@ pub struct ToolTurnCompletion {
+     pub batch_call_ids: Option<Vec<String>>,
  }
  
 +#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -3072,7 +3050,7 @@ index dda1a5cf..504f3ab6 100644
      /// Present only for validated tool-origin completion. The accepted call/result
      /// remains in canonical history; this value is not an assistant message.
      #[serde(default, skip_serializing_if = "Option::is_none")]
-@@ -4945,6 +4973,9 @@ pub struct Chunk {
+@@ -5021,6 +5049,9 @@ pub struct Chunk {
  
  #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
  pub struct TurnAbortedEvent {
@@ -3082,7 +3060,7 @@ index dda1a5cf..504f3ab6 100644
      pub turn_id: Option<String>,
      pub reason: TurnAbortReason,
      /// Optional error describing why the turn was interrupted.
-@@ -7224,3 +7255,27 @@ mod realtime_previous_item_tests {
+@@ -7304,3 +7335,27 @@ mod realtime_previous_item_tests {
          }
      }
  }
@@ -3111,32 +3089,36 @@ index dda1a5cf..504f3ab6 100644
 +    }
 +}
 diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
-index c6e954a0..b4a84717 100644
+index f6a634c3..3f713d68 100644
 --- a/codex-rs/rollout-trace/src/protocol_event.rs
 +++ b/codex-rs/rollout-trace/src/protocol_event.rs
-@@ -267,7 +267,7 @@ impl<'a> From<&'a ExecCommandEndEvent> for ExecCommandEndTracePayload<'a> {
+@@ -267,7 +267,9 @@ impl<'a> From<&'a ExecCommandEndEvent> for ExecCommandEndTracePayload<'a> {
  
  pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTraceEvent<'_>> {
      match event {
--        EventMsg::ResponseFact(_) => None,
-+        EventMsg::ResponseFact(_) | EventMsg::SdkModelAttempt(_) => None,
+-        EventMsg::ResponseFact(_) | EventMsg::SdkRawProviderEvent(_) => None,
++        EventMsg::ResponseFact(_)
++        | EventMsg::SdkRawProviderEvent(_)
++        | EventMsg::SdkModelAttempt(_) => None,
          EventMsg::ExecCommandBegin(event) if event.source != ExecCommandSource::UserShell => {
              Some(ToolRuntimeTraceEvent::Started {
                  tool_call_id: &event.call_id,
-@@ -431,7 +431,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+@@ -431,7 +433,9 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
  
  pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static str> {
      match event {
--        EventMsg::ResponseFact(_) => None,
-+        EventMsg::ResponseFact(_) | EventMsg::SdkModelAttempt(_) => None,
+-        EventMsg::ResponseFact(_) | EventMsg::SdkRawProviderEvent(_) => None,
++        EventMsg::ResponseFact(_)
++        | EventMsg::SdkRawProviderEvent(_)
++        | EventMsg::SdkModelAttempt(_) => None,
          EventMsg::SessionConfigured(_) => Some("session_configured"),
          EventMsg::TurnStarted(_) => Some("turn_started"),
          EventMsg::TurnComplete(_) => Some("turn_complete"),
 diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
-index 4412e421..7324b6d0 100644
+index 25ad762a..6fdd65bc 100644
 --- a/codex-rs/rollout/src/policy.rs
 +++ b/codex-rs/rollout/src/policy.rs
-@@ -141,7 +141,8 @@ pub fn persisted_event_msg(
+@@ -143,7 +143,8 @@ pub fn persisted_event_msg(
  ) -> Option<Cow<'_, EventMsg>> {
      match ev {
          EventMsg::ItemCompleted(event) => persisted_item_completed_event(ev, event, history_mode),

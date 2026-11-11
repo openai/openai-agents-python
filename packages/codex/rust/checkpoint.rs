@@ -835,6 +835,7 @@ pub async fn restore(
     let transform_context = options.transform_context;
     let before_compact = options.before_compact;
     let before_complete = options.before_complete;
+    let tool_batch_completion = options.tool_batch_completion;
     let (mut startup, instructions) = engine.build_startup(options, None).await?;
     // Snapshot data is not authority to enable model-facing goal tools. The
     // validated record still requires goal storage above, but never the feature.
@@ -876,6 +877,7 @@ pub async fn restore(
             transform_context,
             before_compact,
             before_complete,
+            tool_batch_completion,
         )?;
     }
     if startup

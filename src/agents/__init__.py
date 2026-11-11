@@ -13,6 +13,10 @@ if TYPE_CHECKING:
         ToolTimeoutError as ToolTimeoutError,
         function_tool as function_tool,
     )
+    from ._tool_errors import (
+        ToolErrorContext as ToolErrorContext,
+        ToolErrorFormatter as ToolErrorFormatter,
+    )
     from ._trace_context import TraceContext as TraceContext
     from .agent import (
         Agent as Agent,
@@ -36,7 +40,13 @@ if TYPE_CHECKING:
         SQLiteSessionStore as SQLiteSessionStore,
     )
     from .compaction import CompactionContext as CompactionContext
-    from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn
+    from .completion import (
+        CompletionContext as CompletionContext,
+        ContinueTurn as ContinueTurn,
+        FinishToolBatch as FinishToolBatch,
+        ToolBatchCompletionContext as ToolBatchCompletionContext,
+        ToolBatchResult as ToolBatchResult,
+    )
     from .computer import (
         Computer as Computer,
         ComputerProvider as ComputerProvider,
@@ -195,6 +205,7 @@ if TYPE_CHECKING:
         InteractionExpiredError as InteractionExpiredError,
         InteractionRequired as InteractionRequired,
         NativeError as NativeError,
+        ProducedItem as ProducedItem,
         ResponseIntegrityReason as ResponseIntegrityReason,
         Session as Session,
         SessionBusyError as SessionBusyError,
@@ -203,6 +214,7 @@ if TYPE_CHECKING:
         get_cleanup as get_cleanup,
     )
     from .state import (
+        ApplicationToolOutput as ApplicationToolOutput,
         ChecklistState as ChecklistState,
         ChecklistStep as ChecklistStep,
         CheckpointStatus as CheckpointStatus,
@@ -268,6 +280,9 @@ _MODULES = {
     "OutputGuardrail": ".guardrails",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",
+    "FinishToolBatch": ".completion",
+    "ToolBatchCompletionContext": ".completion",
+    "ToolBatchResult": ".completion",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "HostedPromptReference": ".model_context",
@@ -299,6 +314,7 @@ _MODULES = {
     "CodeInterpreter": ".tools",
     "ImageGeneration": ".tools",
     "SessionState": ".state",
+    "ApplicationToolOutput": ".state",
     "ChecklistState": ".state",
     "ChecklistStep": ".state",
     "ActionReply": ".manual",
@@ -400,6 +416,8 @@ _MODULES = {
     "ToolOutputFile": ".tools",
     "ToolContext": "._function_tools",
     "ToolInputErrorContext": "._function_tools",
+    "ToolErrorContext": "._tool_errors",
+    "ToolErrorFormatter": "._tool_errors",
     "ToolTimeoutBehavior": "._function_tools",
     "ToolTimeoutError": "._function_tools",
     "ToolCallInfo": ".tools",
@@ -417,6 +435,7 @@ _MODULES = {
     "TurnStoppedError": ".session",
     "InteractionRequired": ".session",
     "NativeError": ".session",
+    "ProducedItem": ".session",
     "ResponseIntegrityReason": ".session",
     "Session": ".session",
     "SessionBusyError": ".session",
