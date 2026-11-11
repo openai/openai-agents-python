@@ -534,7 +534,7 @@
     },
     {
       "path": "sdk-agent-profile-observations.patch",
-      "sha256": "6e7ccb5f3b38d26fa69dbfc33338d829011692ab29a544baa074fb71bbcea607"
+      "sha256": "bb9c6aeb6d2ac7131ed73c91e5d40a869549096dc1b8ea559cda5ed038bdd043"
     },
     {
       "path": "sdk-realtime-filter-forwarded-batches.patch",
@@ -637,5 +637,5 @@
       "sha256": "fa87c499a02627ab02b834e07014a1e0c594adcf72833a3a0722f798d6dde80c"
     }
   ],
-  "result_tree": "095e123217960ce170bcf7bd9e984f0f62ed35a3"
+  "result_tree": "d2cf83e39e7bfbb530aec5959a2381a662bc2559"
 }
