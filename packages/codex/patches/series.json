@@ -683,7 +683,11 @@
     {
       "path": "sdk-provider-tool-search.patch",
       "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
+    },
+    {
+      "path": "sdk-application-apply-patch.patch",
+      "sha256": "ee1246f7c84f80cc4a9ce61968dd978f838b7c397c0069899425fca72eb8343a"
     }
   ],
-  "result_tree": "52ed03837ce2e6774ea3a7e3be127361aa2c4d68"
+  "result_tree": "ec4f2633d42f30ffdf33a43eae22b661ae09a52b"
 }

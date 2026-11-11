@@ -252,6 +252,10 @@ impl CanonicalStore {
                 RolloutItem::ResponseItem(envelope) => {
                     let owner = envelope.item.turn_id().or(turn);
                     match &envelope.item {
+                        ResponseItem::ApplyPatchCall { call_id, .. }
+                            if call_id == &key.call && owner == Some(key.turn.as_str()) && crate::local_reconciliation::owns_application_patch(envelope) => {
+                                if invocation.replace(&envelope.item).is_some() { return Err(failure()); }
+                            }
                         ResponseItem::FunctionCall { call_id, .. }
                         | ResponseItem::ComputerCall { call_id, .. }
                             if call_id == &key.call && owner == Some(key.turn.as_str()) =>
@@ -317,6 +321,10 @@ impl CanonicalStore {
                     RolloutItem::ResponseItem(envelope) => {
                         let owner = envelope.item.turn_id().or(turn);
                         match &envelope.item {
+                            ResponseItem::ApplyPatchCall { call_id: saved, .. }
+                                if saved == call_id && owner == Some(turn_id) && crate::local_reconciliation::owns_application_patch(envelope) => {
+                                    if invocation.replace(&envelope.item).is_some() { return Err(failure()); }
+                                }
                             ResponseItem::FunctionCall { call_id: saved, .. }
                             | ResponseItem::ComputerCall { call_id: saved, .. }
                                 if saved == call_id && owner == Some(turn_id) => {
@@ -346,7 +354,10 @@ impl CanonicalStore {
                         message: "Reconciliation requires valid tool output".into(),
                     })?;
             let original = invocation.expect("original invocation was checked");
-            let item = if matches!(original, ResponseItem::ComputerCall { .. }) {
+            let item = if matches!(original, ResponseItem::ApplyPatchCall { .. }) {
+                crate::local_reconciliation::application_patch_receipt(original, response, turn_id)
+                    .map_err(|_| ThreadStoreError::InvalidRequest { message:"Invalid application patch reconciliation".into() })?
+            } else if matches!(original, ResponseItem::ComputerCall { .. }) {
                 crate::local_reconciliation::computer_receipt(original, response, turn_id)
                     .map_err(|_| ThreadStoreError::InvalidRequest { message: "Computer reconciliation requires a valid screenshot and safety acknowledgements".into() })?
             } else {

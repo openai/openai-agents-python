@@ -231,7 +231,9 @@ impl Stream for GuardedStream {
                 ResponseItem::FunctionCall { call_id, .. }
                 | ResponseItem::CustomToolCall { call_id, .. }
                 | ResponseItem::CustomToolCallOutput { call_id, .. }
+                | ResponseItem::ApplyPatchCall { call_id, .. }
                 | ResponseItem::ComputerCall { call_id, .. }
+                | ResponseItem::ApplyPatchCallOutput { call_id, .. }
                 | ResponseItem::ComputerCallOutput { call_id, .. } => Some(call_id.as_str()),
                 ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_deref(),
                 _ => None,

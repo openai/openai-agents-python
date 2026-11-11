@@ -435,6 +435,8 @@ pub(crate) fn check_pairs(
             ResponseItem::FunctionCallOutput { call_id, .. } => {
                 ("function", call_id.as_ref(), false)
             }
+            ResponseItem::ApplyPatchCall { call_id, .. } => ("apply_patch", Some(call_id), true),
+            ResponseItem::ApplyPatchCallOutput { call_id, .. } => ("apply_patch", Some(call_id), false),
             ResponseItem::ComputerCall { call_id, .. } => ("computer", Some(call_id), true),
             ResponseItem::ComputerCallOutput { call_id, .. } => ("computer", Some(call_id), false),
             ResponseItem::CustomToolCall { call_id, .. } => ("custom", Some(call_id), true),

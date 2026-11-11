@@ -1,0 +1,1421 @@
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index cb4b70e0..20479a78 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -46,8 +46,10 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                 | ResponseItem::LocalShellCall { .. }
+                 | ResponseItem::FunctionCall { .. }
+                 | ResponseItem::ToolSearchCall { .. }
+-                | ResponseItem::ComputerCall { .. }
+-                | ResponseItem::ComputerCallOutput { .. }
++                | ResponseItem::ApplyPatchCall { .. }
++        | ResponseItem::ComputerCall { .. }
++                | ResponseItem::ApplyPatchCallOutput { .. }
++        | ResponseItem::ComputerCallOutput { .. }
+                 | ResponseItem::CustomToolCall { .. }
+                 | ResponseItem::ToolSearchOutput { .. }
+                 | ResponseItem::FileSearchCall { .. }
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index d246c8b3..06e9593d 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -389,6 +389,9 @@ fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
+     for spec in tools {
+         match spec {
+             DynamicToolSpec::ToolSearch(_) => { return Err("client tool search requires an extension-owned executor".to_string()); },
++            DynamicToolSpec::ApplyPatch => {
++                if !seen_tools.insert("apply_patch") { return Err("duplicate dynamic application patch tool".into()); }
++            }
+             DynamicToolSpec::Computer(tool) => {
+                 tool.validate()?;
+                 if !seen_tools.insert("computer") {
+@@ -1462,7 +1465,7 @@ impl ThreadRequestProcessor {
+         let dynamic_tool_count: usize = dynamic_tools
+             .iter()
+             .map(|tool| match tool {
+-                DynamicToolSpec::Computer(_) | DynamicToolSpec::ToolSearch(_) | DynamicToolSpec::Function(_) => 1,
++                DynamicToolSpec::ApplyPatch | DynamicToolSpec::Computer(_) | DynamicToolSpec::ToolSearch(_) | DynamicToolSpec::Function(_) => 1,
+                 DynamicToolSpec::Namespace(namespace) => namespace.tools.len(),
+             })
+             .sum();
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 344d2987..ff1d9316 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -61,8 +61,10 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+         | ResponseItem::LocalShellCall { .. }
+         | ResponseItem::FunctionCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
++        | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
+-            | ResponseItem::ComputerCallOutput { .. }
++            | ResponseItem::ApplyPatchCallOutput { .. }
++        | ResponseItem::ComputerCallOutput { .. }
+             | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::WebSearchCall { .. }
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 98c18f34..a2ea3417 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -105,8 +105,10 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+             | ResponseItem::FunctionCallOutput {
+                 call_id: Some(_), ..
+             }
+-            | ResponseItem::ComputerCall { .. }
+-            | ResponseItem::ComputerCallOutput { .. }
++            | ResponseItem::ApplyPatchCall { .. }
++        | ResponseItem::ComputerCall { .. }
++            | ResponseItem::ApplyPatchCallOutput { .. }
++        | ResponseItem::ComputerCallOutput { .. }
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::CustomToolCallOutput { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 7e55734d..3c8cb5f2 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -184,8 +184,10 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::LocalShellCall { .. }
+             | ResponseItem::FunctionCall { .. }
+             | ResponseItem::ToolSearchCall { .. }
+-            | ResponseItem::ComputerCall { .. }
+-            | ResponseItem::ComputerCallOutput { .. }
++            | ResponseItem::ApplyPatchCall { .. }
++        | ResponseItem::ComputerCall { .. }
++            | ResponseItem::ApplyPatchCallOutput { .. }
++        | ResponseItem::ComputerCallOutput { .. }
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 8d734cdd..28775875 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1049,7 +1049,8 @@ pub(crate) fn rollback_retained_item(
+         (matches!(&item.item, ResponseItem::Message { role, .. } if role == "assistant")
+             || matches!(
+                 &item.item,
+-                ResponseItem::FunctionCall { .. } | ResponseItem::ComputerCall { .. }
++                ResponseItem::FunctionCall { .. } | ResponseItem::ApplyPatchCall { .. }
++        | ResponseItem::ComputerCall { .. }
+             ))
+             && RetainedInputSource::from(item.metadata.as_ref())
+                 .acceptance_order()
+@@ -1110,7 +1111,9 @@ pub(crate) fn is_api_message(
+         | ResponseItem::FunctionCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::ToolSearchOutput { .. }
++        | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
++        | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+@@ -1222,6 +1225,9 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+             encrypted_content: Some(content),
+             ..
+         } => i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
++        ResponseItem::ApplyPatchCall { operation, fields, .. } => text_bytes(&serde_json::to_string(operation).unwrap_or_default())
++            .saturating_add(text_bytes(&serde_json::to_string(fields).unwrap_or_default())),
++        ResponseItem::ApplyPatchCallOutput { output, .. } => output.as_deref().map(text_bytes).unwrap_or_default(),
+         ResponseItem::ComputerCall { fields, .. } => {
+             text_bytes(&serde_json::to_string(fields).unwrap_or_default())
+         }
+@@ -1476,6 +1482,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
+         | ResponseItem::ImageGenerationCall { .. }
++        | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::LocalShellCall { .. }
+@@ -1483,6 +1490,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         | ResponseItem::ContextCompaction { .. } => true,
+         ResponseItem::ConfigurationUpdate { .. } | ResponseItem::CompactionTrigger { .. } => false,
+         ResponseItem::AdditionalTools { .. }
++        | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
+         | ResponseItem::FunctionCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+diff --git a/codex-rs/core/src/context_manager/normalize.rs b/codex-rs/core/src/context_manager/normalize.rs
+index 6dd8e2e4..22702b17 100644
+--- a/codex-rs/core/src/context_manager/normalize.rs
++++ b/codex-rs/core/src/context_manager/normalize.rs
+@@ -19,6 +19,11 @@ use tracing::info;
+ const SYNTHETIC_OUTPUT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x90d38d3e_6a5b_4d52_bfe2_2f1e634bfac4);
+ 
+ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItemEnvelope>) {
++    let completed_patch_calls = items.iter().filter_map(|entry| match &entry.item {
++        ResponseItem::ApplyPatchCallOutput { call_id, .. } => Some(call_id.clone()), _ => None,
++    }).collect::<HashSet<_>>();
++    items.retain(|entry| !matches!(&entry.item, ResponseItem::ApplyPatchCall { call_id, .. } if !completed_patch_calls.contains(call_id)));
++
+     let completed_computer_calls = items
+         .iter()
+         .filter_map(|entry| match &entry.item {
+@@ -162,6 +167,11 @@ fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<ResponseIt
+ }
+ 
+ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
++    let patch_calls = items.iter().filter_map(|entry| match &entry.item {
++        ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id.clone()), _ => None,
++    }).collect::<HashSet<_>>();
++    items.retain(|entry| !matches!(&entry.item, ResponseItem::ApplyPatchCallOutput { call_id, .. } if !patch_calls.contains(call_id)));
++
+     let computer_calls = items
+         .iter()
+         .filter_map(|entry| match &entry.item {
+@@ -300,6 +310,12 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
+                 },
+             );
+         }
++        ResponseItem::ApplyPatchCall { call_id, .. } => {
++            remove_first_matching(items, |item| matches!(item, ResponseItem::ApplyPatchCallOutput { call_id: existing, .. } if existing == call_id));
++        }
++        ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
++            remove_first_matching(items, |item| matches!(item, ResponseItem::ApplyPatchCall { call_id: existing, .. } if existing == call_id));
++        }
+         ResponseItem::ComputerCall { call_id, .. } => {
+             remove_first_matching(items, |item| matches!(item, ResponseItem::ComputerCallOutput { call_id: existing, .. } if existing == call_id));
+         }
+diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
+index 10728bcf..713f8384 100644
+--- a/codex-rs/core/src/image_preparation.rs
++++ b/codex-rs/core/src/image_preparation.rs
+@@ -277,8 +277,10 @@ pub(crate) async fn prepare_response_items(
+             | ResponseItem::LocalShellCall { .. }
+             | ResponseItem::FunctionCall { .. }
+             | ResponseItem::ToolSearchCall { .. }
+-            | ResponseItem::ComputerCall { .. }
+-            | ResponseItem::ComputerCallOutput { .. }
++            | ResponseItem::ApplyPatchCall { .. }
++        | ResponseItem::ComputerCall { .. }
++            | ResponseItem::ApplyPatchCallOutput { .. }
++        | ResponseItem::ComputerCallOutput { .. }
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
+diff --git a/codex-rs/core/src/session/sdk_produced_items.rs b/codex-rs/core/src/session/sdk_produced_items.rs
+index 5366d7ca..14c01d3d 100644
+--- a/codex-rs/core/src/session/sdk_produced_items.rs
++++ b/codex-rs/core/src/session/sdk_produced_items.rs
+@@ -149,7 +149,9 @@ fn is_produced_response(item: &ResponseItem) -> bool {
+         }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
++        | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
++        | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
+         | ResponseItem::LocalShellCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 712c80eb..a0c0b3ad 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2554,6 +2554,7 @@ fn recovered_tools_from_history(
+         .map_or(original_start + 1, |index| original_start + index + 2);
+     let call_id = |item: &ResponseItem| match item {
+         ResponseItem::FunctionCall { call_id, .. }
++        | ResponseItem::ApplyPatchCall { call_id, .. }
+         | ResponseItem::ComputerCall { call_id, .. }
+         | ResponseItem::CustomToolCall { call_id, .. } => Some(call_id.clone()),
+         ResponseItem::ToolSearchCall { call_id, .. } => call_id.clone(),
+@@ -2590,7 +2591,8 @@ fn recovered_tools_from_history(
+         let id = match &item.item {
+             ResponseItem::FunctionCallOutput { call_id, .. }
+             | ResponseItem::ToolSearchOutput { call_id, .. } => call_id.as_ref(),
+-            ResponseItem::ComputerCallOutput { call_id, .. }
++            ResponseItem::ApplyPatchCallOutput { call_id, .. }
++            | ResponseItem::ComputerCallOutput { call_id, .. }
+             | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id),
+             _ => None,
+         };
+@@ -2632,6 +2634,7 @@ fn recovered_tools_from_history(
+                 ResponseItem::CustomToolCall { .. },
+                 ResponseItem::CustomToolCallOutput { output, .. },
+             ) => output.success,
++            (ResponseItem::ApplyPatchCall { .. }, ResponseItem::ApplyPatchCallOutput { status, .. }) => Some(*status == codex_protocol::models::ApplyPatchStatus::Completed),
+             (ResponseItem::ComputerCall { .. }, ResponseItem::ComputerCallOutput { .. }) => {
+                 Some(true)
+             }
+@@ -3553,6 +3556,7 @@ async fn handle_assistant_item_done_in_plan_mode(
+             step_context,
+             item,
+             finalized_facts.as_ref(),
++            /*application_tool*/ None,
+         )
+         .await;
+         if let Some(agent_message) = final_last_agent_message {
+@@ -3925,7 +3929,8 @@ async fn try_run_sampling_request(
+                     if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
+                         let call_id = match &item {
+                             ResponseItem::FunctionCall { call_id, .. }
+-                            | ResponseItem::ComputerCall { call_id, .. }
++                            | ResponseItem::ApplyPatchCall { call_id, .. }
++        | ResponseItem::ComputerCall { call_id, .. }
+                             | ResponseItem::CustomToolCall { call_id, .. } => {
+                                 Some(call_id.as_str())
+                             }
+@@ -4000,8 +4005,10 @@ async fn try_run_sampling_request(
+                         | ResponseItem::FunctionCall { .. }
+                         | ResponseItem::ToolSearchCall { .. }
+                         | ResponseItem::FunctionCallOutput { .. }
+-                        | ResponseItem::ComputerCall { .. }
+-                        | ResponseItem::ComputerCallOutput { .. }
++                        | ResponseItem::ApplyPatchCall { .. }
++        | ResponseItem::ComputerCall { .. }
++                        | ResponseItem::ApplyPatchCallOutput { .. }
++        | ResponseItem::ComputerCallOutput { .. }
+                         | ResponseItem::CustomToolCall { .. }
+                         | ResponseItem::CustomToolCallOutput { .. }
+                         | ResponseItem::ToolSearchOutput { .. }
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 83c308c2..587a8124 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -2,6 +2,8 @@ use std::pin::Pin;
+ use std::sync::Arc;
+ 
+ use codex_extension_api::ExtensionData;
++use codex_history::CodexHarnessMetadata;
++use codex_history::ResponseItemEnvelope;
+ use codex_protocol::ResponseItemId;
+ use codex_protocol::config_types::ModeKind;
+ use codex_protocol::items::TurnItem;
+@@ -80,12 +82,14 @@ pub(crate) async fn record_completed_response_item(
+     sess: &Session,
+     step_context: &StepContext,
+     item: &ResponseItem,
++    application_tool: Option<&str>,
+ ) {
+     record_completed_response_item_with_finalized_facts(
+         sess,
+         step_context,
+         item,
+         /*finalized_facts*/ None,
++        application_tool,
+     )
+     .await;
+ }
+@@ -95,14 +99,30 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+     step_context: &StepContext,
+     item: &ResponseItem,
+     finalized_facts: Option<&FinalizedTurnItemFacts>,
++    application_tool: Option<&str>,
+ ) {
+     let turn_context = &step_context.turn;
+-    sess.record_conversation_items(
+-        turn_context,
+-        &step_context.settings.model_info,
+-        std::slice::from_ref(item),
+-    )
+-    .await;
++    if let Some(tool) = application_tool {
++        sess.record_annotated_conversation_items(
++            turn_context,
++            &step_context.settings.model_info,
++            vec![ResponseItemEnvelope {
++                item: item.clone(),
++                metadata: Some(CodexHarnessMetadata {
++                    sdk_application_tool: Some(tool.to_owned()),
++                    ..Default::default()
++                }),
++            }],
++        )
++        .await;
++    } else {
++        sess.record_conversation_items(
++            turn_context,
++            &step_context.settings.model_info,
++            std::slice::from_ref(item),
++        )
++        .await;
++    }
+     if turn_context.config.otel.agent_response_logging_enabled() {
+         turn_context
+             .extension_data
+@@ -334,8 +354,18 @@ pub(crate) async fn handle_output_item_done(
+                 call.tool_name,
+             );
+ 
+-            record_completed_response_item(ctx.sess.as_ref(), ctx.step_context.as_ref(), &item)
+-                .await;
++            let application_tool =
++                matches!(&call.payload, codex_tools::ToolPayload::ApplyPatch { .. }).then_some("apply_patch");
++            record_completed_response_item(
++                ctx.sess.as_ref(),
++                ctx.step_context.as_ref(),
++                &item,
++                application_tool,
++            )
++            .await;
++            if application_tool.is_some() {
++                ctx.sess.ensure_rollout_durable().await?;
++            }
+ 
+             let cancellation_token = ctx.cancellation_token.child_token();
+             let tool_future: InFlightFuture<'static> = Box::pin(
+@@ -382,6 +412,7 @@ pub(crate) async fn handle_output_item_done(
+                 ctx.step_context.as_ref(),
+                 &item,
+                 finalized_facts.as_ref(),
++                /*application_tool*/ None,
+             )
+             .await;
+ 
+@@ -400,8 +431,13 @@ pub(crate) async fn handle_output_item_done(
+                     ..Default::default()
+                 },
+             };
+-            record_completed_response_item(ctx.sess.as_ref(), ctx.step_context.as_ref(), &item)
+-                .await;
++            record_completed_response_item(
++                ctx.sess.as_ref(),
++                ctx.step_context.as_ref(),
++                &item,
++                /*application_tool*/ None,
++            )
++            .await;
+             if let Some(response_item) = response_input_to_response_item(&response) {
+                 ctx.sess
+                     .record_conversation_items(
+@@ -438,7 +474,9 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::FunctionCall { .. } => "function_call",
+         ResponseItem::ToolSearchCall { .. } => "tool_search_call",
+         ResponseItem::FunctionCallOutput { .. } => "function_call_output",
+-        ResponseItem::ComputerCall { .. } => "computer_call",
++        ResponseItem::ApplyPatchCall { .. } => "apply_patch_call",
++            ResponseItem::ApplyPatchCallOutput { .. } => "apply_patch_call_output",
++            ResponseItem::ComputerCall { .. } => "computer_call",
+         ResponseItem::ComputerCallOutput { .. } => "computer_call_output",
+         ResponseItem::CustomToolCall { .. } => "custom_tool_call",
+         ResponseItem::CustomToolCallOutput { .. } => "custom_tool_call_output",
+@@ -545,7 +583,7 @@ fn completed_item_defers_mailbox_delivery_to_next_turn(
+ 
+ pub(crate) fn response_input_to_response_item(input: &ResponseInputItem) -> Option<ResponseItem> {
+     match input {
+-        ResponseInputItem::ComputerCallOutput { .. } => Some(input.clone().into()),
++        ResponseInputItem::ApplyPatchCallOutput { .. } | ResponseInputItem::ComputerCallOutput { .. } => Some(input.clone().into()),
+         ResponseInputItem::FunctionCallOutput { call_id, output } => {
+             Some(ResponseItem::FunctionCallOutput {
+                 id: None,
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index 814945b5..304c06d9 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -109,7 +109,8 @@ impl ToolInvocation {
+             .rev()
+             .find_map(|item| match item {
+                 ResponseItem::FunctionCall { id, call_id, .. }
+-                | ResponseItem::ComputerCall { id, call_id, .. }
++                | ResponseItem::ApplyPatchCall { id, call_id, .. }
++        | ResponseItem::ComputerCall { id, call_id, .. }
+                 | ResponseItem::CustomToolCall { id, call_id, .. }
+                     if call_id == &self.call_id =>
+                 {
+diff --git a/codex-rs/core/src/tools/executed_tool_calls.rs b/codex-rs/core/src/tools/executed_tool_calls.rs
+index d655988a..2ad00236 100644
+--- a/codex-rs/core/src/tools/executed_tool_calls.rs
++++ b/codex-rs/core/src/tools/executed_tool_calls.rs
+@@ -739,7 +739,7 @@ fn is_code_mode_wrapper(call: &ToolCall, source: &ToolCallSource, tool_mode: Too
+ 
+ fn recorded_call(call: &ToolCall) -> (ExecutedToolCall, usize) {
+     let original_bytes = match &call.payload {
+-        ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
++        ToolPayload::ApplyPatch { arguments } | ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
+             arguments.len()
+         }
+         ToolPayload::Custom { input } => serialized_json_bytes(input).unwrap_or(usize::MAX),
+@@ -753,7 +753,7 @@ fn recorded_call(call: &ToolCall) -> (ExecutedToolCall, usize) {
+         ExecutedToolCall::truncated(name, original_bytes, MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES)
+     } else {
+         let arguments = match &call.payload {
+-            ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
++            ToolPayload::ApplyPatch { arguments } | ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
+                 serde_json::from_str(arguments)
+                     .unwrap_or_else(|_| JsonValue::String(arguments.clone()))
+             }
+diff --git a/codex-rs/core/src/tools/handlers/application_apply_patch.rs b/codex-rs/core/src/tools/handlers/application_apply_patch.rs
+new file mode 100644
+index 00000000..1935fea5
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/application_apply_patch.rs
+@@ -0,0 +1,85 @@
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolOutput;
++use crate::tools::context::ToolPayload;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::ToolExecutor;
++use crate::tools::registry::ToolExposure;
++use codex_tools::ApplyPatchToolOutput;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
++
++pub(crate) struct ApplicationApplyPatchHandler {
++    spec: ToolSpec,
++}
++impl ApplicationApplyPatchHandler {
++    pub(crate) fn new() -> Self {
++        Self {
++            spec: ToolSpec::ApplyPatch {},
++        }
++    }
++}
++impl ToolExecutor<ToolInvocation> for ApplicationApplyPatchHandler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("apply_patch")
++    }
++    fn spec(&self) -> ToolSpec {
++        self.spec.clone()
++    }
++    fn exposure(&self) -> ToolExposure {
++        ToolExposure::DirectModelOnly
++    }
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(async move {
++            let ToolPayload::ApplyPatch { arguments } = &invocation.payload else {
++                return Err(FunctionCallError::Fatal(
++                    "application patch handler requires native apply patch call".into(),
++                ));
++            };
++            let args = serde_json::from_str(arguments).map_err(|err| {
++                FunctionCallError::Fatal(format!("invalid application patch call: {err}"))
++            })?;
++            let response = super::dynamic::request_dynamic_tool(
++                &invocation.session,
++                &invocation.turn,
++                invocation.call_id,
++                self.tool_name(),
++                args,
++            )
++            .await
++            .ok_or_else(|| FunctionCallError::Fatal("application patch call cancelled".into()))?;
++            Ok(Box::new(ApplyPatchToolOutput::from_dynamic_response(
++                arguments, response,
++            )?) as Box<dyn ToolOutput>)
++        })
++    }
++}
++impl CoreToolRuntime for ApplicationApplyPatchHandler {
++    fn matches_kind(&self, payload: &ToolPayload) -> bool {
++        matches!(payload, ToolPayload::ApplyPatch { .. })
++    }
++    fn is_third_party_tool(&self) -> bool {
++        true
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn generic_function_and_workspace_patch_payloads_cannot_masquerade_as_typed_editor_calls() {
++        let handler = ApplicationApplyPatchHandler::new();
++        assert!(handler.matches_kind(&ToolPayload::ApplyPatch {
++            arguments: "{}".into()
++        }));
++        assert!(!handler.matches_kind(&ToolPayload::Function {
++            arguments: "{}".into()
++        }));
++        assert!(!handler.matches_kind(&ToolPayload::Custom {
++            input: "*** Begin Patch".into()
++        }));
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index 57a2497e..fcda865e 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -118,13 +118,14 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+ 
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         match payload {
++            ToolPayload::ApplyPatch { .. } => matches!(self.spec(), ToolSpec::ApplyPatch {}),
+             ToolPayload::Computer { .. } => matches!(
+                 self.0.spec(),
+                 ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }
+             ),
+             ToolPayload::Function { .. } => !matches!(
+                 self.0.spec(),
+-                ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }
++                ToolSpec::ApplyPatch {} | ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }
+             ),
+             ToolPayload::Custom { .. } => match self.0.spec() {
+                 ToolSpec::Freeform(_) => true,
+@@ -141,7 +142,7 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+                 | ToolSpec::CodeInterpreter(_)
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::ProviderToolSearch(_)
+-                | ToolSpec::Computer { .. }
++                | ToolSpec::ApplyPatch {} | ToolSpec::Computer { .. }
+                 | ToolSpec::ComputerUsePreview { .. }
+                 | ToolSpec::WebSearch { .. } => false,
+             },
+diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
+index 519b555a..dcc2061d 100644
+--- a/codex-rs/core/src/tools/handlers/mod.rs
++++ b/codex-rs/core/src/tools/handlers/mod.rs
+@@ -1,3 +1,4 @@
++pub(crate) mod application_apply_patch;
+ pub(crate) mod apply_patch;
+ pub(crate) mod apply_patch_spec;
+ pub(crate) mod computer;
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 9d85cb53..e6fdb781 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -258,7 +258,7 @@ impl ToolCallRuntime {
+                     (result.into_response(), pending_exec, succeeded)
+                 }
+                 Err(FunctionCallError::Fatal(message)) => return Err(CodexErr::Fatal(message)),
+-                Err(other) if matches!(error_call.payload, ToolPayload::Computer { .. }) => {
++                Err(other) if matches!(error_call.payload, ToolPayload::Computer { .. } | ToolPayload::ApplyPatch { .. }) => {
+                     return Err(CodexErr::Fatal(other.to_string()));
+                 }
+                 Err(other) => (
+@@ -430,7 +430,7 @@ impl ToolCallRuntime {
+                         match dispatch_handle.await {
+                             Ok(result) => result,
+                             Err(err) if err.is_cancelled() => {
+-                                if matches!(call.payload, ToolPayload::Computer { .. }) {
++                                if matches!(call.payload, ToolPayload::Computer { .. } | ToolPayload::ApplyPatch { .. }) {
+                                     return Err(FunctionCallError::Fatal("computer call cancelled".into()));
+                                 }
+                                 let response = Self::aborted_response(&call, secs);
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 85fcd41f..ff41e474 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -54,7 +54,7 @@ pub use codex_tools::ToolExposure;
+ ///
+ /// Implementers provide the shared `ToolExecutor` behavior plus optional
+ /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
+-pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
++pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> + std::any::Any {
+     /// Whether this built-in control tool needs a structured tool-call event.
+     fn is_builtin_control_tool(&self) -> bool {
+         false
+@@ -453,6 +453,16 @@ impl ToolRegistry {
+                 entry.insert(RegisteredTool { runtime, exposure });
+                 true
+             }
++            Entry::Occupied(mut entry)
++                if matches!(runtime.spec(), codex_tools::ToolSpec::ApplyPatch {})
++                    && entry.key().is_default_namespace()
++                    && entry.key().name == "apply_patch"
++                    && entry.get().runtime.as_ref().type_id()
++                        == std::any::TypeId::of::<super::handlers::apply_patch::ApplyPatchHandler>() =>
++            {
++                entry.insert(RegisteredTool { runtime, exposure });
++                true
++            }
+             Entry::Occupied(entry) => {
+                 tracing::warn!(
+                     tool_name = %entry.key(),
+@@ -523,7 +533,8 @@ impl ToolRegistry {
+                 | ToolSpec::CodeInterpreter(_)
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::ProviderToolSearch(_)
+-                | ToolSpec::Computer { .. }
++                | ToolSpec::ApplyPatch {}
++            | ToolSpec::Computer { .. }
+                 | ToolSpec::ComputerUsePreview { .. }
+                 | ToolSpec::WebSearch { .. } => "",
+             };
+@@ -853,6 +864,11 @@ impl ToolRegistry {
+                             "native computer result must retain its protocol type and call ID".into(),
+                         ));
+                     }
++                    if matches!(invocation.payload, ToolPayload::ApplyPatch { .. })
++                        && !matches!(&final_item, codex_protocol::models::ResponseItem::ApplyPatchCallOutput { call_id, .. } if call_id == &invocation.call_id)
++                    {
++                        return Err(FunctionCallError::Fatal("application patch result must retain its protocol type and call ID".into()));
++                    }
+                     crate::file_admission::validate_response_items(
+                         invocation
+                             .session
+diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
+index b926ebeb..0c0cdc32 100644
+--- a/codex-rs/core/src/tools/registry_tests.rs
++++ b/codex-rs/core/src/tools/registry_tests.rs
+@@ -969,3 +969,65 @@ fn background_disposition_survives_box_and_post_policy_feedback() {
+     assert!(!wrapped.realtime_response_requested());
+     assert!(wrapped.log_output().contains("background"));
+ }
++
++
++struct OtherTrustedPatchHandler;
++impl ToolExecutor<ToolInvocation> for OtherTrustedPatchHandler {
++    fn tool_name(&self) -> ToolName { ToolName::plain("apply_patch") }
++    fn spec(&self) -> ToolSpec { crate::tools::handlers::apply_patch::ApplyPatchHandler::new(false).spec() }
++    fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where ToolInvocation: 'a {
++        Box::pin(async { Err(FunctionCallError::Fatal("unreachable test handler".into())) })
++    }
++}
++impl CoreToolRuntime for OtherTrustedPatchHandler {}
++
++#[test]
++fn application_patch_replaces_only_builtin_and_retains_other_environment_tools() {
++    let mut registry = ToolRegistry::default();
++    registry.add(crate::tools::handlers::apply_patch::ApplyPatchHandler::new(false));
++    let other: Arc<dyn CoreToolRuntime> = Arc::new(TestHandler { tool_name: ToolName::plain("project_grep") });
++    registry.register_trusted(Arc::clone(&other));
++    assert!(registry.register_external(Arc::new(crate::tools::handlers::application_apply_patch::ApplicationApplyPatchHandler::new())));
++    assert_eq!(registry.tools.len(), 2);
++    let patch = registry.tools.get(&ToolName::plain("apply_patch").with_default_namespace()).unwrap();
++    assert!(matches!(patch.runtime.spec(), ToolSpec::ApplyPatch {}));
++    let retained = registry.tools.get(&ToolName::plain("project_grep").with_default_namespace()).unwrap();
++    assert!(Arc::ptr_eq(&retained.runtime, &other));
++    assert!(registry.first_collision().is_none());
++    assert!(!registry.register_external(Arc::new(crate::tools::handlers::application_apply_patch::ApplicationApplyPatchHandler::new())));
++    assert_eq!(registry.tools.len(), 2);
++    assert_eq!(registry.first_collision(), Some(&ToolName::plain("apply_patch").with_default_namespace()));
++}
++
++#[test]
++fn matching_trusted_extension_cannot_be_replaced_as_builtin_workspace_patch() {
++    let mut registry = ToolRegistry::default();
++    let other: Arc<dyn CoreToolRuntime> = Arc::new(OtherTrustedPatchHandler);
++    registry.register_trusted(Arc::clone(&other));
++    assert!(!registry.register_external(Arc::new(crate::tools::handlers::application_apply_patch::ApplicationApplyPatchHandler::new())));
++    let retained = registry.tools.get(&ToolName::plain("apply_patch").with_default_namespace()).unwrap();
++    assert!(Arc::ptr_eq(&retained.runtime, &other));
++    assert!(registry.first_collision().is_some());
++}
++
++struct ApplicationPatchExtension;
++impl<'call> codex_tools::ToolExecutor<codex_tools::ToolCall<'call>> for ApplicationPatchExtension {
++    fn tool_name(&self) -> ToolName { ToolName::plain("apply_patch") }
++    fn spec(&self) -> ToolSpec { ToolSpec::ApplyPatch {} }
++    fn handle<'a>(&'a self, _invocation: codex_tools::ToolCall<'call>) -> codex_tools::ToolExecutorFuture<'a>
++    where codex_tools::ToolCall<'call>: 'a {
++        Box::pin(async { Err(FunctionCallError::Fatal("unreachable test callback".into())) })
++    }
++}
++
++#[test]
++fn application_patch_extension_retains_typed_payload_admission_and_replaces_builtin() {
++    let runtime = crate::tools::handlers::extension_tools::ExtensionToolAdapter::new(Arc::new(ApplicationPatchExtension));
++    assert!(runtime.matches_kind(&ToolPayload::ApplyPatch { arguments:"{}".into() }));
++    assert!(!runtime.matches_kind(&ToolPayload::Function { arguments:"{}".into() }));
++    assert!(!runtime.matches_kind(&ToolPayload::Custom { input:"patch".into() }));
++    let mut registry=ToolRegistry::default();
++    registry.add(crate::tools::handlers::apply_patch::ApplyPatchHandler::new(false));
++    assert!(registry.register_external(Arc::new(runtime)));
++}
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index d327ac6b..58f63639 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -202,6 +202,7 @@ impl ToolRouter {
+                             ResponsesApiNamespaceTool::Custom(tool) => tool.name == name.name,
+                         })
+                 }
++                ToolSpec::ApplyPatch {} => name.is_default_namespace() && name.name == "apply_patch",
+                 ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
+                     name.is_default_namespace() && name.name == "computer"
+                 }
+@@ -332,6 +333,16 @@ impl ToolRouter {
+ 
+     fn parse_tool_call(item: ResponseItem) -> Result<Option<ToolCall>, FunctionCallError> {
+         match item {
++            item @ ResponseItem::ApplyPatchCall { .. } => {
++                let ResponseItem::ApplyPatchCall { call_id, .. } = &item else { unreachable!() };
++                let value = serde_json::to_value(&item).map_err(|error| FunctionCallError::Fatal(error.to_string()))?;
++                codex_tools::validate_apply_patch_call(&value).map_err(FunctionCallError::Fatal)?;
++                Ok(Some(ToolCall {
++                    tool_name: ToolName::plain("apply_patch"), call_id: call_id.clone(),
++                    payload: ToolPayload::ApplyPatch { arguments: serde_json::to_string(&item).map_err(|error| FunctionCallError::Fatal(error.to_string()))? },
++                    encrypted_function_args: None,
++                }))
++            }
+             item @ ResponseItem::ComputerCall { .. } => {
+                 let ResponseItem::ComputerCall { call_id, .. } = &item else {
+                     unreachable!()
+diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
+index 27cbbd83..41ed0d5e 100644
+--- a/codex-rs/core/src/tools/router_tests.rs
++++ b/codex-rs/core/src/tools/router_tests.rs
+@@ -651,7 +651,8 @@ fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<Str
+                     })
+                     .collect(),
+             ),
+-            ToolSpec::Computer {}
++            ToolSpec::ApplyPatch {}
++            | ToolSpec::Computer {}
+             | ToolSpec::ComputerUsePreview { .. }
+             | ToolSpec::Function(_)
+             | ToolSpec::Freeform(_)
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index cfc470af..5ac66e6e 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -699,7 +699,8 @@ fn finalize_selected_tool_router(
+                     | ToolSpec::CodeInterpreter(_)
+                     | ToolSpec::ImageGeneration(_)
+                     | ToolSpec::ProviderToolSearch(_)
+-                    | ToolSpec::Computer { .. }
++                    | ToolSpec::ApplyPatch {}
++            | ToolSpec::Computer { .. }
+                     | ToolSpec::ComputerUsePreview { .. }
+                     | ToolSpec::WebSearch { .. } => continue,
+                 };
+@@ -1152,6 +1153,7 @@ fn register_code_mode_executors(
+             | ToolSpec::CodeInterpreter(_)
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::ProviderToolSearch(_)
++            | ToolSpec::ApplyPatch {}
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+             | ToolSpec::WebSearch { .. } => {
+@@ -1748,6 +1750,9 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
+ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mut ToolRegistry) {
+     for spec in dynamic_tools {
+         match spec {
++            DynamicToolSpec::ApplyPatch => {
++                registry.register_external(Arc::new(super::handlers::application_apply_patch::ApplicationApplyPatchHandler::new()));
++            }
+             DynamicToolSpec::ToolSearch(_) => {},
+             DynamicToolSpec::Computer(tool) => {
+                 if let Ok(handler) = super::handlers::computer::ComputerToolHandler::new(tool) {
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index 0dc7c029..c6d2451d 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -108,7 +108,8 @@ impl ToolPlanProbe {
+                         })
+                         .collect::<Vec<_>>(),
+                 )),
+-                ToolSpec::Computer {}
++                ToolSpec::ApplyPatch {}
++                | ToolSpec::Computer {}
+                 | ToolSpec::ComputerUsePreview { .. }
+                 | ToolSpec::Function(_)
+                 | ToolSpec::ToolSearch { .. }
+diff --git a/codex-rs/core/src/tools/tool_dispatch_trace.rs b/codex-rs/core/src/tools/tool_dispatch_trace.rs
+index 7b64b6e9..c9976554 100644
+--- a/codex-rs/core/src/tools/tool_dispatch_trace.rs
++++ b/codex-rs/core/src/tools/tool_dispatch_trace.rs
+@@ -111,7 +111,7 @@ fn tool_dispatch_result(
+ 
+ fn tool_dispatch_payload(payload: &ToolPayload) -> ToolDispatchPayload {
+     match payload {
+-        ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
++        ToolPayload::ApplyPatch { arguments } | ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
+             ToolDispatchPayload::Function {
+                 arguments: arguments.clone(),
+             }
+diff --git a/codex-rs/core/src/tools/tool_namespaces_info.rs b/codex-rs/core/src/tools/tool_namespaces_info.rs
+index 8114c597..49efd19c 100644
+--- a/codex-rs/core/src/tools/tool_namespaces_info.rs
++++ b/codex-rs/core/src/tools/tool_namespaces_info.rs
+@@ -44,6 +44,7 @@ pub(super) fn collect_tool_namespaces_info(
+             | ToolSpec::CodeInterpreter(_)
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::ProviderToolSearch(_)
++            | ToolSpec::ApplyPatch {}
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+             | ToolSpec::WebSearch { .. } => {}
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index 6b5c316b..d4ee7020 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -438,6 +438,7 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         ResponseItem::AgentMessage { .. } => false,
+         ResponseItem::LocalShellCall { .. }
+         | ResponseItem::FunctionCall { .. }
++        | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+@@ -449,6 +450,7 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         | ResponseItem::ContextCompaction { .. } => true,
+         ResponseItem::ConfigurationUpdate { .. } | ResponseItem::CompactionTrigger { .. } => false,
+         ResponseItem::AdditionalTools { .. }
++        | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
+         | ResponseItem::FunctionCallOutput { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/action.rs b/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
+index abd8d42c..17867185 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
+@@ -22,7 +22,7 @@ pub(super) enum ActionRenderError {
+ impl GuardianAction {
+     pub(super) fn render(self, max_action_tokens: usize) -> Result<String, ActionRenderError> {
+         let arguments = match self.payload {
+-            ToolPayload::Function { arguments } | ToolPayload::Computer { arguments } => {
++            ToolPayload::Function { arguments } | ToolPayload::Computer { arguments } | ToolPayload::ApplyPatch { arguments } => {
+                 serde_json::from_str(&arguments).unwrap_or(serde_json::Value::String(arguments))
+             }
+             ToolPayload::Custom { input } => serde_json::Value::String(input),
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index 4d5b5579..8c5f2164 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -518,8 +518,10 @@ fn recent_images(
+             | ResponseItem::LocalShellCall { .. }
+             | ResponseItem::FunctionCall { .. }
+             | ResponseItem::ToolSearchCall { .. }
+-            | ResponseItem::ComputerCall { .. }
+-            | ResponseItem::ComputerCallOutput { .. }
++            | ResponseItem::ApplyPatchCall { .. }
++        | ResponseItem::ComputerCall { .. }
++            | ResponseItem::ApplyPatchCallOutput { .. }
++        | ResponseItem::ComputerCallOutput { .. }
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index 82f1e9f7..e69b8068 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -202,6 +202,14 @@ pub fn collect_transcript(
+                     format!("Agent message from {author}:\n{text}"),
+                 )
+             }
++            ResponseItem::ApplyPatchCall { operation, .. } => {
++                if !config.options.include_tool_calls { continue; }
++                (ConversationTranscriptEntryKind::ToolCall("tool apply patch call".into()), serde_json::to_string(operation).unwrap_or_default())
++            }
++            ResponseItem::ApplyPatchCallOutput { status, output, .. } => {
++                if !config.options.include_tool_outputs { continue; }
++                (ConversationTranscriptEntryKind::ToolOutput("tool apply patch result".into()), serde_json::json!({"status":status,"output":output}).to_string())
++            }
+             ResponseItem::ComputerCall { fields, .. } => {
+                 if !config.options.include_tool_calls {
+                     continue;
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index dcc172b3..31e88ee4 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -77,6 +77,10 @@ pub struct CodexHarnessMetadata {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_agent_profile: Option<serde_json::Value>,
+ 
++    /// Application tool routed by Core before dispatch; never sent to the provider.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_application_tool: Option<String>,
++
+     /// Provider/native function correlation; history metadata, never execution authority.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub realtime_tool_call: Option<serde_json::Value>,
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index ab7be519..eda2523b 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1414,6 +1414,8 @@ impl SessionTelemetry {
+             ResponseItem::ToolSearchCall { .. } => "tool_search_call".into(),
+             ResponseItem::FunctionCallOutput { .. } => "function_call_output".into(),
+             ResponseItem::ToolSearchOutput { .. } => "tool_search_output".into(),
++            ResponseItem::ApplyPatchCall { .. } => "apply_patch_call".into(),
++            ResponseItem::ApplyPatchCallOutput { .. } => "apply_patch_call_output".into(),
+             ResponseItem::ComputerCall { .. } => "computer_call".into(),
+             ResponseItem::ComputerCallOutput { .. } => "computer_call_output".into(),
+             ResponseItem::CustomToolCall { .. } => "custom_tool_call".into(),
+diff --git a/codex-rs/protocol/src/dynamic_tools.rs b/codex-rs/protocol/src/dynamic_tools.rs
+index 48d65f8e..0edcbeb1 100644
+--- a/codex-rs/protocol/src/dynamic_tools.rs
++++ b/codex-rs/protocol/src/dynamic_tools.rs
+@@ -11,6 +11,7 @@ use ts_rs::TS;
+ #[serde(tag = "type", rename_all = "camelCase")]
+ #[ts(tag = "type", export_to = "v2/")]
+ pub enum DynamicToolSpec {
++    ApplyPatch,
+     Computer(DynamicComputerToolSpec),
+     ToolSearch(DynamicToolSearchSpec),
+     Function(DynamicToolFunctionSpec),
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index ee9d2e06..1d3715c3 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -836,9 +836,40 @@ impl From<&FileSystemPermissions> for FileSystemSandboxPolicy {
+     }
+ }
+ 
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum ApplyPatchOperation {
++    CreateFile { path: String, diff: String },
++    UpdateFile {
++        path: String,
++        diff: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        move_to: Option<String>,
++    },
++    DeleteFile { path: String },
++}
++
++#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum ApplyPatchStatus { Completed, Failed }
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ApplyPatchResult {
++    pub status: ApplyPatchStatus,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output: Option<String>,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+ #[serde(tag = "type", rename_all = "snake_case")]
+ pub enum ResponseInputItem {
++    ApplyPatchCallOutput {
++        call_id: String,
++        status: ApplyPatchStatus,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        output: Option<String>,
++    },
+     ComputerCallOutput {
+         call_id: String,
+         output: serde_json::Value,
+@@ -1024,6 +1055,26 @@ impl InternalChatMessageMetadataPassthrough {
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+ #[serde(tag = "type", rename_all = "snake_case")]
+ pub enum ResponseItem {
++    ApplyPatchCall {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<ResponseItemId>,
++        call_id: String,
++        operation: ApplyPatchOperation,
++        #[serde(flatten)]
++        fields: std::collections::BTreeMap<String, serde_json::Value>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++    },
++    ApplyPatchCallOutput {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        id: Option<ResponseItemId>,
++        call_id: String,
++        status: ApplyPatchStatus,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        output: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++    },
+     /// Opaque Responses provider pointer, not a local occurrence ID.
+     ItemReference {
+         id: String,
+@@ -1349,7 +1400,7 @@ impl ResponseItem {
+             | Self::FunctionCall { id, .. }
+             | Self::ToolSearchCall { id, .. }
+             | Self::FunctionCallOutput { id, .. }
+-            | Self::ComputerCall { id, .. }
++            | Self::ApplyPatchCall { id, .. } | Self::ApplyPatchCallOutput { id, .. } | Self::ComputerCall { id, .. }
+             | Self::ComputerCallOutput { id, .. }
+             | Self::CustomToolCall { id, .. }
+             | Self::CustomToolCallOutput { id, .. }
+@@ -1378,7 +1429,7 @@ impl ResponseItem {
+             | Self::FunctionCall { id, .. }
+             | Self::ToolSearchCall { id, .. }
+             | Self::FunctionCallOutput { id, .. }
+-            | Self::ComputerCall { id, .. }
++            | Self::ApplyPatchCall { id, .. } | Self::ApplyPatchCallOutput { id, .. } | Self::ComputerCall { id, .. }
+             | Self::ComputerCallOutput { id, .. }
+             | Self::CustomToolCall { id, .. }
+             | Self::CustomToolCallOutput { id, .. }
+@@ -1408,6 +1459,8 @@ impl ResponseItem {
+             Self::FunctionCall { .. } => Some("fc"),
+             Self::ToolSearchCall { .. } => Some("tsc"),
+             Self::FunctionCallOutput { .. } => Some("fco"),
++            Self::ApplyPatchCall { .. } => Some("apc"),
++            Self::ApplyPatchCallOutput { .. } => Some("apco"),
+             Self::ComputerCall { .. } => Some("cc"),
+             Self::ComputerCallOutput { .. } => Some("cco"),
+             Self::CustomToolCall { .. } => Some("ctc"),
+@@ -1452,6 +1505,10 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::ApplyPatchCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::ComputerCallOutput {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -1532,6 +1589,14 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::ApplyPatchCall {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
++            | Self::ApplyPatchCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::ComputerCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -1616,6 +1681,14 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::ApplyPatchCall {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
++            | Self::ApplyPatchCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::ComputerCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -2005,6 +2078,9 @@ fn local_image_content_items(
+ impl From<ResponseInputItem> for ResponseItem {
+     fn from(item: ResponseInputItem) -> Self {
+         match item {
++            ResponseInputItem::ApplyPatchCallOutput { call_id, status, output } => Self::ApplyPatchCallOutput {
++                id: None, call_id, status, output, internal_chat_message_metadata_passthrough: None,
++            },
+             ResponseInputItem::ComputerCallOutput {
+                 call_id,
+                 output,
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index 7cae1d39..fdf28376 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -328,6 +328,8 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+         ResponseItem::ToolSearchCall { .. } => "response.tool_search_call",
+         ResponseItem::FunctionCallOutput { .. } => "response.function_call_output",
+         ResponseItem::ToolSearchOutput { .. } => "response.tool_search_output",
++        ResponseItem::ApplyPatchCall { .. } => "response.apply_patch_call",
++        ResponseItem::ApplyPatchCallOutput { .. } => "response.apply_patch_call_output",
+         ResponseItem::ComputerCall { .. } => "response.computer_call",
+         ResponseItem::ComputerCallOutput { .. } => "response.computer_call_output",
+         ResponseItem::CustomToolCall { .. } => "response.custom_tool_call",
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 25ad762a..6463ab4d 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -90,7 +90,9 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::FunctionCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
++        | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
++        | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+@@ -117,7 +119,9 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::FunctionCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
++        | ResponseItem::ApplyPatchCall { .. }
+         | ResponseItem::ComputerCall { .. }
++        | ResponseItem::ApplyPatchCallOutput { .. }
+         | ResponseItem::ComputerCallOutput { .. }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+diff --git a/codex-rs/tools/src/apply_patch.rs b/codex-rs/tools/src/apply_patch.rs
+new file mode 100644
+index 00000000..c4063006
+--- /dev/null
++++ b/codex-rs/tools/src/apply_patch.rs
+@@ -0,0 +1,119 @@
++use crate::{FunctionCallError, ToolOutput, ToolPayload};
++use codex_protocol::dynamic_tools::{DynamicToolCallOutputContentItem, DynamicToolResponse};
++use codex_protocol::models::{
++    ApplyPatchOperation, ApplyPatchResult, ApplyPatchStatus, ResponseInputItem,
++};
++use serde_json::Value;
++
++pub fn validate_apply_patch_call(call: &Value) -> Result<(), String> {
++    if call["type"] != "apply_patch_call" || call["call_id"].as_str().is_none_or(str::is_empty) {
++        return Err("invalid application apply patch call".into());
++    }
++    let operation: ApplyPatchOperation = serde_json::from_value(call["operation"].clone())
++        .map_err(|_| "invalid application apply patch operation".to_owned())?;
++    if let ApplyPatchOperation::UpdateFile {
++        move_to: Some(destination),
++        ..
++    } = operation
++        && destination.is_empty()
++    {
++        return Err("invalid application apply patch move destination".into());
++    }
++    Ok(())
++}
++
++pub struct ApplyPatchToolOutput {
++    result: ApplyPatchResult,
++}
++impl ApplyPatchToolOutput {
++    pub fn from_dynamic_response(
++        arguments: &str,
++        response: DynamicToolResponse,
++    ) -> Result<Self, FunctionCallError> {
++        let invalid = || FunctionCallError::Fatal("invalid application apply patch result".into());
++        let call: Value = serde_json::from_str(arguments).map_err(|_| invalid())?;
++        validate_apply_patch_call(&call).map_err(FunctionCallError::Fatal)?;
++        let [DynamicToolCallOutputContentItem::InputText { text }] =
++            response.content_items.as_slice()
++        else {
++            return Err(invalid());
++        };
++        let result: ApplyPatchResult = serde_json::from_str(text).unwrap_or_else(|_| ApplyPatchResult {
++            status: if response.success { ApplyPatchStatus::Completed } else { ApplyPatchStatus::Failed },
++            output: Some(text.clone()),
++        });
++        if response.success != (result.status == ApplyPatchStatus::Completed) {
++            return Err(invalid());
++        }
++        Ok(Self { result })
++    }
++}
++impl ToolOutput for ApplyPatchToolOutput {
++    fn log_output(&self) -> String {
++        self.result.output.clone().unwrap_or_default()
++    }
++    fn success_for_logging(&self) -> bool {
++        self.result.status == ApplyPatchStatus::Completed
++    }
++    fn contains_external_context(&self) -> bool {
++        true
++    }
++    fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
++        ResponseInputItem::ApplyPatchCallOutput {
++            call_id: call_id.to_owned(),
++            status: self.result.status,
++            output: self.result.output.clone(),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++    #[test]
++    fn operation_paths_remain_application_owned_and_malformed_operations_are_rejected() {
++        let call = json!({"type":"apply_patch_call","call_id":"patch-1","operation":{"type":"update_file","path":"virtual://workspace/custom/path","diff":"@@\n-a\n+b","move_to":"tenant://other/path"}});
++        assert!(validate_apply_patch_call(&call).is_ok());
++        for operation in [
++            json!({"type":"update_file","path":"x","diff":17}),
++            json!({"type":"update_file","path":"x","diff":"d","move_to":""}),
++            json!({"type":"delete_file","path":null}),
++            json!({"type":"unknown","path":"x"}),
++        ] {
++            let mut invalid = call.clone();
++            invalid["operation"] = operation;
++            assert!(validate_apply_patch_call(&invalid).is_err());
++        }
++    }
++    #[test]
++    fn ordinary_policy_error_text_keeps_failed_typed_disposition() {
++        let arguments=serde_json::json!({"type":"apply_patch_call","call_id":"p1","operation":{"type":"delete_file","path":"custom"}}).to_string();
++        let output=ApplyPatchToolOutput::from_dynamic_response(&arguments,DynamicToolResponse { success:false, content_items:vec![DynamicToolCallOutputContentItem::InputText { text:"policy refused".into() }] }).unwrap();
++        assert!(matches!(output.to_response_item("p1",&ToolPayload::ApplyPatch { arguments }),ResponseInputItem::ApplyPatchCallOutput { status:ApplyPatchStatus::Failed, output:Some(text), .. } if text=="policy refused"));
++    }
++    #[test]
++    fn typed_result_retains_status_text_and_native_call_identity() {
++        let call=json!({"type":"apply_patch_call","call_id":"patch-1","operation":{"type":"delete_file","path":"application-owned-path"}}).to_string();
++        for (status, success) in [("completed", true), ("failed", false)] {
++            let response = DynamicToolResponse {
++                success,
++                content_items: vec![DynamicToolCallOutputContentItem::InputText {
++                    text: json!({"status":status,"output":"exact result"}).to_string(),
++                }],
++            };
++            let output = ApplyPatchToolOutput::from_dynamic_response(&call, response).unwrap();
++            let item = serde_json::to_value(output.to_response_item(
++                "patch-1",
++                &ToolPayload::ApplyPatch {
++                    arguments: call.clone(),
++                },
++            ))
++            .unwrap();
++            assert_eq!(
++                item,
++                json!({"type":"apply_patch_call_output","call_id":"patch-1","status":status,"output":"exact result"})
++            );
++        }
++    }
++}
+diff --git a/codex-rs/tools/src/code_mode.rs b/codex-rs/tools/src/code_mode.rs
+index 73581e77..bb575a1c 100644
+--- a/codex-rs/tools/src/code_mode.rs
++++ b/codex-rs/tools/src/code_mode.rs
+@@ -228,6 +228,7 @@ fn code_mode_tool_definitions_for_spec(
+         | ToolSpec::CodeInterpreter(_)
+         | ToolSpec::ImageGeneration(_)
+         | ToolSpec::ProviderToolSearch(_)
++        | ToolSpec::ApplyPatch {}
+         | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+         | ToolSpec::WebSearch { .. } => Vec::new(),
+diff --git a/codex-rs/tools/src/lib.rs b/codex-rs/tools/src/lib.rs
+index 291e266f..e15c2e4f 100644
+--- a/codex-rs/tools/src/lib.rs
++++ b/codex-rs/tools/src/lib.rs
+@@ -1,6 +1,9 @@
+ //! Shared tool definitions and Responses API tool primitives that can live
+ //! outside `codex-core`.
+ 
++mod apply_patch;
++pub use apply_patch::{ApplyPatchToolOutput, validate_apply_patch_call};
++
+ mod code_mode;
+ mod computer;
+ mod dynamic_tool;
+diff --git a/codex-rs/tools/src/tool_call.rs b/codex-rs/tools/src/tool_call.rs
+index 254fa9ee..c92e7c75 100644
+--- a/codex-rs/tools/src/tool_call.rs
++++ b/codex-rs/tools/src/tool_call.rs
+@@ -217,7 +217,7 @@ impl ToolCall<'_> {
+ 
+     pub fn function_arguments(&self) -> Result<&str, FunctionCallError> {
+         match &self.payload {
+-            ToolPayload::Function { arguments } | ToolPayload::Computer { arguments } => {
++            ToolPayload::Function { arguments } | ToolPayload::Computer { arguments } | ToolPayload::ApplyPatch { arguments } => {
+                 Ok(arguments)
+             }
+             _ => Err(FunctionCallError::Fatal(format!(
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index 115c00ac..13fa24b5 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -257,6 +257,7 @@ impl ToolOutput for codex_protocol::mcp::CallToolResult {
+ 
+ fn response_input_to_code_mode_result(response: ResponseInputItem) -> JsonValue {
+     match response {
++        ResponseInputItem::ApplyPatchCallOutput { status, output, .. } => serde_json::json!({"status":status,"output":output}),
+         ResponseInputItem::ComputerCallOutput { output, .. } => output,
+         ResponseInputItem::Message { content, .. } => content_items_to_code_mode_result(
+             &content
+diff --git a/codex-rs/tools/src/tool_payload.rs b/codex-rs/tools/src/tool_payload.rs
+index 262cb560..32685f10 100644
+--- a/codex-rs/tools/src/tool_payload.rs
++++ b/codex-rs/tools/src/tool_payload.rs
+@@ -8,6 +8,7 @@ use codex_protocol::models::SearchToolCallParams;
+ /// Canonical payload shapes accepted by model-visible tool runtimes.
+ #[derive(Clone, Debug, PartialEq)]
+ pub enum ToolPayload {
++    ApplyPatch { arguments: String },
+     Computer { arguments: String },
+     Function { arguments: String },
+     ToolSearch { arguments: SearchToolCallParams },
+@@ -18,6 +19,7 @@ pub enum ToolPayload {
+ impl ToolPayload {
+     pub fn log_payload(&self) -> Cow<'_, str> {
+         match self {
++            ToolPayload::ApplyPatch { .. } => Cow::Borrowed("[native application patch call]"),
+             ToolPayload::Computer { .. } => Cow::Borrowed("[native computer call]"),
+             ToolPayload::Function { arguments } => Cow::Borrowed(arguments),
+             ToolPayload::ToolSearch { arguments } => Cow::Owned(arguments.query.clone()),
+diff --git a/codex-rs/tools/src/tool_search.rs b/codex-rs/tools/src/tool_search.rs
+index eab3fdfb..050d4195 100644
+--- a/codex-rs/tools/src/tool_search.rs
++++ b/codex-rs/tools/src/tool_search.rs
+@@ -48,6 +48,7 @@ impl ToolSearchInfo {
+             | ToolSpec::CodeInterpreter(_)
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::ProviderToolSearch(_)
++            | ToolSpec::ApplyPatch {}
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+             | ToolSpec::WebSearch { .. } => None,
+@@ -98,7 +99,8 @@ fn normalize_search_spec(spec: ToolSpec) -> Option<LoadableToolSpec> {
+         | ToolSpec::CodeInterpreter(_)
+         | ToolSpec::ImageGeneration(_)
+         | ToolSpec::ProviderToolSearch(_)
+-        | ToolSpec::Computer { .. }
++        | ToolSpec::ApplyPatch {}
++            | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+         | ToolSpec::WebSearch { .. } => {
+             return None;
+@@ -150,7 +152,8 @@ fn default_tool_search_text(spec: &ToolSpec) -> String {
+         ToolSpec::FileSearch(_) | ToolSpec::CodeInterpreter(_) | ToolSpec::ImageGeneration(_) => {
+             push_search_part(&mut parts, spec.name().to_string());
+         }
+-        ToolSpec::Computer { .. }
++        ToolSpec::ApplyPatch {}
++        | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+         | ToolSpec::ProviderToolSearch(_) => {}
+         ToolSpec::WebSearch { .. } => {
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index ad608dda..cd7f6b5c 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -21,6 +21,8 @@ use std::sync::Arc;
+ #[derive(Debug, Clone, Serialize, PartialEq)]
+ #[serde(tag = "type")]
+ pub enum ToolSpec {
++    #[serde(rename = "apply_patch")]
++    ApplyPatch {},
+     #[serde(rename = "computer")]
+     Computer {},
+     #[serde(rename = "computer_use_preview")]
+@@ -79,6 +81,7 @@ impl ToolSpec {
+     /// captured namespace. A namespace group or a deferred declaration is not a leaf.
+     pub fn has_eager_callable(&self, target: &codex_protocol::ToolName) -> bool {
+         match self {
++            ToolSpec::ApplyPatch { .. } => target.is_default_namespace() && target.name == "apply_patch",
+             ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
+                 target.is_default_namespace() && target.name == "computer"
+             }
+@@ -139,6 +142,7 @@ impl ToolSpec {
+ 
+     pub fn name(&self) -> &str {
+         match self {
++            ToolSpec::ApplyPatch { .. } => "apply_patch",
+             ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => "computer",
+             ToolSpec::Function(tool) => tool.name.as_str(),
+             ToolSpec::Namespace(namespace) => namespace.name.as_str(),
+diff --git a/codex-rs/tui/src/dynamic_tools.rs b/codex-rs/tui/src/dynamic_tools.rs
+index c199c692..d4d1370c 100644
+--- a/codex-rs/tui/src/dynamic_tools.rs
++++ b/codex-rs/tui/src/dynamic_tools.rs
+@@ -264,6 +264,7 @@ pub(crate) fn non_delegation_tool_specs() -> Vec<DynamicToolSpec> {
+     tool_specs()
+         .into_iter()
+         .filter_map(|spec| match spec {
++            DynamicToolSpec::ApplyPatch => Some(DynamicToolSpec::ApplyPatch),
+             DynamicToolSpec::Computer(tool) => Some(DynamicToolSpec::Computer(tool)),
+             DynamicToolSpec::ToolSearch(_) => None,
+             DynamicToolSpec::Function(function) => (!DELEGATION_TOOLS
+diff --git a/codex-rs/tui/src/dynamic_tools_mcp.rs b/codex-rs/tui/src/dynamic_tools_mcp.rs
+index ae738817..9d46c8dd 100644
+--- a/codex-rs/tui/src/dynamic_tools_mcp.rs
++++ b/codex-rs/tui/src/dynamic_tools_mcp.rs
+@@ -262,7 +262,7 @@ impl ServerHandler for DynamicToolMcpHandler {
+         }
+         for spec in specs {
+             let functions = match spec {
+-                DynamicToolSpec::Computer(_) | DynamicToolSpec::ToolSearch(_) => continue,
++                DynamicToolSpec::ApplyPatch | DynamicToolSpec::Computer(_) | DynamicToolSpec::ToolSearch(_) => continue,
+                 DynamicToolSpec::Function(function) => vec![function],
+                 DynamicToolSpec::Namespace(namespace) => namespace
+                     .tools
+diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
+index d6128040..f5eaf549 100644
+--- a/codex-rs/utils/audio/src/lib.rs
++++ b/codex-rs/utils/audio/src/lib.rs
+@@ -76,8 +76,10 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+             | ResponseItem::LocalShellCall { .. }
+             | ResponseItem::FunctionCall { .. }
+             | ResponseItem::ToolSearchCall { .. }
+-            | ResponseItem::ComputerCall { .. }
+-            | ResponseItem::ComputerCallOutput { .. }
++            | ResponseItem::ApplyPatchCall { .. }
++        | ResponseItem::ComputerCall { .. }
++            | ResponseItem::ApplyPatchCallOutput { .. }
++        | ResponseItem::ComputerCallOutput { .. }
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }

@@ -169,7 +169,8 @@ fn starts_tool_call(event: &ResponseEvent) -> bool {
         ResponseItem::FunctionCall { .. }
             | ResponseItem::LocalShellCall { .. }
             | ResponseItem::CustomToolCall { .. }
-            | ResponseItem::ComputerCall { .. }
+            | ResponseItem::ApplyPatchCall { .. }
+                | ResponseItem::ComputerCall { .. }
     ) || matches!(
         item,
         ResponseItem::ToolSearchCall { call_id: Some(_), execution, .. } if execution == "client"
@@ -203,7 +204,8 @@ impl Stream for Generation {
                             call_id: Some(_),
                             ..
                         } | ResponseItem::CustomToolCallOutput { .. }
-                            | ResponseItem::ComputerCallOutput { .. }
+                            | ResponseItem::ApplyPatchCallOutput { .. }
+                | ResponseItem::ComputerCallOutput { .. }
                     ) || matches!(
                         item,
                         ResponseItem::ToolSearchOutput {
@@ -251,7 +253,8 @@ impl Stream for Generation {
                         // WebSearch turn item. A later empty placeholder must
                         // not suppress that genuine native progress.
                         ResponseItem::FunctionCall { .. }
-                        | ResponseItem::ComputerCall { .. }
+                        | ResponseItem::ApplyPatchCall { .. }
+                | ResponseItem::ComputerCall { .. }
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::WebSearchCall { .. }
                         | ResponseItem::FileSearchCall { .. }

@@ -2619,6 +2619,8 @@ def _capture_tools(
 
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
+    if spec.get("type") == "applyPatch":
+        return ToolRef("apply_patch")
     if spec.get("type") == "computer":
         return ToolRef("computer")
     if spec.get("type") == "toolSearch":
