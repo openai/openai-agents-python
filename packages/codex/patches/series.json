@@ -673,9 +673,13 @@
       "sha256": "192f9f23ac35e03a1f6b91a5ac14a13b0570397c9846f0e238c08c750460cd9c"
     },
     {
+      "path": "sdk-produced-run-items.patch",
+      "sha256": "c2577104f3f07363b5e3703b0219bd7a71d927c73cb84c4c78ebca23160f2e93"
+    },
+    {
       "path": "sdk-provider-hosted-shell.patch",
       "sha256": "88696dc1c6612fa4b058a5b6ed0eee93aab7d31904c93ade1ad19e4a5ae7bb7b"
     }
   ],
-  "result_tree": "0edba156befd904e0689feb827b42620b462693c"
+  "result_tree": "7c639ca0c3008688d79f7f78bbb5094f1a2a8bff"
 }

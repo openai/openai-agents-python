@@ -135,6 +135,7 @@ def test_package_root_has_one_public_surface():
         "tool_call",
         "guardrail_results",
         "history",
+        "items",
         "run_usage",
     ]
 
