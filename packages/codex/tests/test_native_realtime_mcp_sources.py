@@ -298,3 +298,89 @@ async def test_native_voice_graph_admission_preserves_backend_tool_replacement(
             turn = await session.submit("Call the updated backend tool")
             assert (await turn.get_result()).final_output == "Backend complete"
             assert "updated backend tool" in str(responses.requests[-1]["input"])
+
+
+async def test_unpublished_voice_mcp_uses_its_captured_raw_selector(
+    realtime_peer: RealtimePeer,
+) -> None:
+    voice = realtime_peer
+    original_peer = Peer(names=("a-b",), label="original endpoint")
+    target_peer = Peer(names=("a_b",), label="target endpoint")
+    async with (
+        timeout(25),
+        original_peer.serve() as original_url,
+        target_peer.serve() as target_url,
+        NativeProvider(
+            base_url=voice.responses.url,
+            api_key="synthetic-unpublished-mcp-selector",
+            supports_websockets=False,
+        ) as provider,
+    ):
+        original = Agent(
+            name="A",
+            instructions="Original records",
+            provider=provider,
+            tools=[
+                HttpMCP(
+                    name="records",
+                    url=original_url,
+                    tools=["a-b"],
+                    approval_mode="preapproved",
+                )
+            ],
+        )
+        target = Agent(
+            name="B",
+            instructions="Target records",
+            tools=[
+                HttpMCP(
+                    name="records",
+                    url=target_url,
+                    tools=["a_b"],
+                    approval_mode="preapproved",
+                )
+            ],
+        )
+        async with (
+            original.session() as session,
+            session.realtime(
+                config=RealtimeConfig(
+                    model="fixture-realtime",
+                    automatically_trigger_response_for_mcp_tool_calls=False,
+                )
+            ) as owner,
+        ):
+            initial = await voice.frame(lambda frame: frame["type"] == "session.update")
+            name = initial["session"]["tools"][0]["name"]
+            assert name == "mcp__records__a_b"
+            start = len(voice.frames)
+            await owner.update_agent(target)
+            updated = await voice.frame(
+                lambda frame: frame["type"] == "session.update", after=start
+            )
+            assert [tool["name"] for tool in updated["session"]["tools"]] == [name]
+            await voice.function(name, {"key": "target"}, "target-raw-selector")
+            result = await voice.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "target-raw-selector"
+            )
+            assert "target endpoint" in result["item"]["output"]
+            assert [(call["name"], call["arguments"]) for call in target_peer.calls] == [
+                ("a_b", {"key": "target"})
+            ]
+            assert original_peer.calls == []
+            assert await owner.get_active_agent() is target
+
+            start = len(voice.frames)
+            await owner.update_agent(original)
+            await voice.frame(lambda frame: frame["type"] == "session.update", after=start)
+            await voice.function(name, {"key": "original"}, "original-raw-selector")
+            restored = await voice.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "original-raw-selector"
+            )
+            assert "original endpoint" in restored["item"]["output"]
+            assert [(call["name"], call["arguments"]) for call in original_peer.calls] == [
+                ("a-b", {"key": "original"})
+            ]
+            assert len(target_peer.calls) == 1
+            assert await owner.get_active_agent() is original
+            assert voice.responses.requests == []
