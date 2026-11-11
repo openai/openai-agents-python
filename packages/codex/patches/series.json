@@ -657,9 +657,13 @@
       "sha256": "721e67310d0269e626bdefce41f4bd625a985cd0eb9925b8912a3c8a8c300f56"
     },
     {
+      "path": "sdk-reset-tool-choice-after-use.patch",
+      "sha256": "b2381c223988ede75ad31b30a4e67a40d230963d5608838713f32935e0ef134f"
+    },
+    {
       "path": "sdk-function-provider-schemas.patch",
       "sha256": "2dc9df2134da65d9f7ebf158260a6a3504d370c22d906f213b38abceeafec55f"
     }
   ],
-  "result_tree": "68ab51110f6bd9ec1f23041b8b32f04f221d7337"
+  "result_tree": "e26f9381c77f5c18b05a80702a565a1368ba5f1f"
 }
