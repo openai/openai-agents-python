@@ -587,6 +587,7 @@ class WebSearchCallItem(TypedDict):
     turn_id: str
     status: OutputItemStatus
     action: WebSearchAction | None
+    results: NotRequired[list[JsonValue]]
 
 
 class _HostedCallItem(TypedDict):

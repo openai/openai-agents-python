@@ -74,10 +74,17 @@ from agents.observation import (
     ToolStarted,
 )
 from agents.subagents import Subagent
-from agents.tools import WebSearchLocation
+from agents.tools import WebSearchImageSettings, WebSearchLocation
 
 search_location: WebSearchLocation = {"timezone": "America/Chicago"}
-search = WebSearch(route="hosted", allowed_domains=["weather.example"], location=search_location)
+image_settings: WebSearchImageSettings = {"max_results": 3, "caption": False}
+search = WebSearch(
+    route="hosted",
+    allowed_domains=["weather.example"],
+    location=search_location,
+    search_content_types=["text", "image"],
+    image_settings=image_settings,
+)
 search_settings: ModelSettings = {"tool_choice": "required"}
 search_agent = Agent(instructions="Research.", tools=[search], model_settings=search_settings)
 assert_type(search_agent, Agent[None, str])

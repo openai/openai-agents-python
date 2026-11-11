@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "84f3e281d28f837fe76a526dcf35819f1e2c60e4",
+  "baseline_commit": "693698f68319aa52c46d425cbd137a80d2547888",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1571,7 +1571,8 @@
         "declarations": [
           "@dataclass(frozen=True)\nclass Checklist:\n    pass",
           "class WebSearchLocation(TypedDict, total=False, closed=True):\n    country: str\n    region: str\n    city: str\n    timezone: str",
-          "@dataclass(frozen=True, kw_only=True)\nclass WebSearch:\n    mode: Literal['cached', 'live'] = 'cached'\n    route: Literal['standalone', 'hosted'] = 'standalone'\n    allowed_domains: Sequence[str] | None = None\n    blocked_domains: Sequence[str] | None = None\n    location: WebSearchLocation | None = None",
+          "class WebSearchImageSettings(TypedDict, total=False, closed=True):\n    max_results: int\n    caption: bool",
+          "@dataclass(frozen=True, kw_only=True)\nclass WebSearch:\n    mode: Literal['cached', 'live'] = 'cached'\n    route: Literal['standalone', 'hosted'] = 'standalone'\n    search_context_size: Literal['low', 'medium', 'high'] | None = None\n    allowed_domains: Sequence[str] | None = None\n    blocked_domains: Sequence[str] | None = None\n    location: WebSearchLocation | None = None\n    search_content_types: Sequence[Literal['text', 'image']] | None = None\n    image_settings: WebSearchImageSettings | None = None",
           "@dataclass(frozen=True)\nclass NativeGoals:\n    pass",
           "class FileSearchComparisonFilter(TypedDict):\n    key: str\n    type: Literal['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in', 'nin']\n    value: str | int | float | bool | list[str] | list[int | float]",
           "class FileSearchCompoundFilter(TypedDict):\n    type: Literal['and', 'or']\n    filters: list[FileSearchComparisonFilter | FileSearchCompoundFilter]",
@@ -1620,6 +1621,7 @@
           "ToolOutputText": "agents.tools.ToolOutputText",
           "ToolRef": "agents.tools.ToolRef",
           "WebSearch": "agents.tools.WebSearch",
+          "WebSearchImageSettings": "agents.tools.WebSearchImageSettings",
           "WebSearchLocation": "agents.tools.WebSearchLocation"
         },
         "imports": [
@@ -2523,7 +2525,7 @@
           "class WebSearchActionFindInPage(TypedDict):\n    type: Literal['find_in_page']\n    url: str | None\n    pattern: str | None",
           "class WebSearchActionOther(TypedDict):\n    type: Literal['other']",
           "WebSearchAction = TypeAliasType('WebSearchAction', WebSearchActionSearch | WebSearchActionOpenPage | WebSearchActionFindInPage | WebSearchActionOther)",
-          "class WebSearchCallItem(TypedDict):\n    type: Literal['web_search_call']\n    id: str\n    turn_id: str\n    status: OutputItemStatus\n    action: WebSearchAction | None",
+          "class WebSearchCallItem(TypedDict):\n    type: Literal['web_search_call']\n    id: str\n    turn_id: str\n    status: OutputItemStatus\n    action: WebSearchAction | None\n    results: NotRequired[list[JsonValue]]",
           "class _HostedCallItem(TypedDict):\n    id: str\n    turn_id: str\n    status: str\n    provider_data: dict[str, JsonValue]",
           "class FileSearchCallItem(_HostedCallItem):\n    type: Literal['file_search_call']\n    queries: list[str]\n    results: list[dict[str, JsonValue]] | None",
           "class CodeInterpreterCallItem(_HostedCallItem):\n    type: Literal['code_interpreter_call']\n    container_id: str\n    code: str | None\n    outputs: list[dict[str, JsonValue]] | None",
