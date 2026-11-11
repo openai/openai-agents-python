@@ -1,0 +1,54 @@
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -543,6 +543,51 @@
+ pub fn trace_span_context(key: &str) -> Result<String, String> {
+     readback(key, resolve(key)?.as_ref())
+ }
++/// Bind retained local ancestry without starting or ending a recording span.
++pub fn borrow_trace_context(
++    parent: &str,
++    restrictions_parent: Option<&str>,
++    disabled: bool,
++    include_sensitive_data: bool,
++) -> Result<String, String> {
++    let source = resolve(parent)?;
++    let captured = policy_for_context(&source.context)
++        .ok_or_else(|| "Native tracing policy unavailable".to_string())?;
++    let restrictions = restrictions_parent
++        .map(|key| {
++            let handle = resolve(key)?;
++            policy_for_context(&handle.context)
++                .ok_or_else(|| "Native tracing policy unavailable".to_string())
++        })
++        .transpose()?;
++    let policy = Arc::new(ScopePolicy {
++        disabled: disabled
++            || captured.disabled
++            || restrictions.as_ref().is_some_and(|policy| policy.disabled),
++        include_sensitive_data: include_sensitive_data
++            && captured.include_sensitive_data
++            && restrictions
++                .as_ref()
++                .is_none_or(|policy| policy.include_sensitive_data),
++        credential: captured.credential.clone(),
++        root_descriptor: captured.root_descriptor.clone(),
++    });
++    let handle = Arc::new(Handle {
++        // A context-local policy restricts this lease without changing the
++        // original identity's registration, routes, credentials, or lifetime.
++        context: source.context.with_value(policy),
++        _registration: source._registration.clone(),
++        parent_span_id: source.parent_span_id.clone(),
++        ended: Mutex::new(true),
++    });
++    let key = token("b");
++    handles()
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .insert(key.clone(), handle);
++    Ok(key)
++}
++
+ pub fn retain_trace_context(key: &str) -> Result<String, String> {
+     let handle = resolve(key)?;
+     let key = token("c");

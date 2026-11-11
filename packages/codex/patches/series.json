@@ -683,7 +683,11 @@
     {
       "path": "sdk-provider-tool-search.patch",
       "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
+    },
+    {
+      "path": "sdk-trace-context-binding.patch",
+      "sha256": "0bf30a17db30a7827be101152f9d99fab48c3d7a73847e1ddf36fe8209482ae4"
     }
   ],
-  "result_tree": "52ed03837ce2e6774ea3a7e3be127361aa2c4d68"
+  "result_tree": "c41e13dfebf476e715dc354f0c60e9c99e1da746"
 }

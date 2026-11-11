@@ -1597,6 +1597,7 @@
           "def set_tracing_disabled(disabled: bool) -> None:\n    pass",
           "def set_sensitive_data_logging_enabled(enabled: bool) -> None:\n    pass",
           "def current_context() -> SpanContext | None:\n    pass",
+          "@contextmanager\ndef use_context(context: SpanContext) -> Iterator[SpanContext]:\n    pass",
           "class TraceScope:\n\n    def __init__(self, name: str, kind: str, options: TraceOptions | Mapping[str, Any] | None, *, _restrictions: tuple[str, ...]=()):\n        pass\n\n    @property\n    def context(self) -> SpanContext:\n        pass\n\n    @property\n    def trace_metadata(self) -> Mapping[str, Any] | None:\n        pass\n\n    def start(self) -> TraceScope:\n        pass\n\n    def end(self) -> None:\n        pass\n\n    def __enter__(self) -> TraceScope:\n        pass\n\n    def set_outcome(self, *, status: str, category: str | None=None, data: Mapping[str, Any] | None=None) -> None:\n        pass\n\n    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:\n        pass",
           "def trace(name: str, *, options: TraceOptions | Mapping[str, Any] | None=None) -> TraceScope:\n    pass",
           "def span(name: str, *, options: TraceOptions | Mapping[str, Any] | None=None) -> TraceScope:\n    pass",
@@ -1632,10 +1633,12 @@
           "set_tracing_disabled": "agents.telemetry.set_tracing_disabled",
           "shutdown": "agents.telemetry.shutdown",
           "span": "agents.telemetry.span",
-          "trace": "agents.telemetry.trace"
+          "trace": "agents.telemetry.trace",
+          "use_context": "agents.telemetry.use_context"
         },
         "imports": [
-          "from collections.abc import Mapping as Mapping, Sequence as Sequence",
+          "from collections.abc import Iterator as Iterator, Mapping as Mapping, Sequence as Sequence",
+          "from contextlib import contextmanager as contextmanager",
           "from dataclasses import dataclass as dataclass, field as field",
           "from pathlib import Path as Path",
           "from typing import Any as Any, Literal as Literal, Protocol as Protocol, TypeAlias as TypeAlias",
