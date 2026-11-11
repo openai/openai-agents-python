@@ -56,6 +56,8 @@ pub struct ThreadOptions {
     #[serde(skip)]
     pub(crate) private_http: bool,
     #[serde(skip)]
+    pub(crate) process_private_http: bool,
+    #[serde(skip)]
     pub(crate) private_disposable: bool,
     // Private Agents SDK entry path; never used for portable checkpoint import.
     #[serde(rename = "_sdk_resume_thread_id")]
