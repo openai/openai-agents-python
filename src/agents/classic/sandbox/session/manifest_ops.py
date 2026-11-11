@@ -60,6 +60,7 @@ def _build_manifest_applier(
         mkdir=lambda path: session.mkdir(path, parents=True),
         exec_checked_nonzero=session._exec_checked_nonzero,
         apply_entry=lambda artifact, dest, base_dir: artifact.apply(session, dest, base_dir),
+        supports_git_repo=session._supports_git_repo,
         max_entry_concurrency=max_entry_concurrency,
     )
 
