@@ -637,9 +637,13 @@
       "sha256": "02da72f8e5bcfab13b3be4680356a62156eb429dcb7497ecc0b9644625c05f98"
     },
     {
+      "path": "0162-sdk-realtime-provider-error-observation.patch",
+      "sha256": "69a74476497a8189f717036a231c5f48a3e391dc06191693dc7507851c81e7dc"
+    },
+    {
       "path": "sdk-provider-item-references.patch",
       "sha256": "721e67310d0269e626bdefce41f4bd625a985cd0eb9925b8912a3c8a8c300f56"
     }
   ],
-  "result_tree": "86f173a38dbddf1ec5e961b3a314ff307e3d5d15"
+  "result_tree": "e3721ed75dc7429d8cab0c6edfacff56c8fc958f"
 }
