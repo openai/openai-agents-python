@@ -60,6 +60,7 @@ from ._events import (
     FileSearchCallItem,
     ImageGenerationCallItem,
     MessageItem,
+    ReasoningItem,
     SessionItem as SessionItem,
     WebSearchCallItem,
 )
@@ -1305,14 +1306,18 @@ def _project_progress(
         elif kind == "item_completed":
             item = project_model_output_item(message["item"], True, turn_id)
             if item is not None and (
-                item["type"]
+                buffer.include_model_output_items
+                or item["type"]
                 in {
                     "web_search_call",
                     "file_search_call",
                     "code_interpreter_call",
                     "image_generation_call",
                 }
-                or any(part.get("annotations") for part in item["content"])
+                or (
+                    item["type"] == "message"
+                    and any(part.get("annotations") for part in item["content"])
+                )
             ):
                 buffer.append(
                     ModelOutputItemCompleted(
@@ -1321,6 +1326,7 @@ def _project_progress(
                         submission_id=submission_id,
                         item=cast(
                             MessageItem
+                            | ReasoningItem
                             | WebSearchCallItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
@@ -3274,6 +3280,7 @@ class Session(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        include_model_output_items: bool = False,
         discover_agents_md: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
@@ -4166,6 +4173,7 @@ class Session(Generic[ContextT, OutputT]):
                     _start_event_reader=handoff is None,
                     max_function_concurrency=max_function_concurrency,
                     observation_retention=observation_retention,
+                    include_model_output_items=include_model_output_items,
                 )
                 session._input_guardrails = input_guardrails
                 session._output_guardrails = output_guardrails
@@ -4561,6 +4569,7 @@ class Session(Generic[ContextT, OutputT]):
         _start_event_reader: bool = True,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
     ) -> None:
         self._trace_context: str | None = None
         self._provider_lease: Any = None
@@ -4683,7 +4692,11 @@ class Session(Generic[ContextT, OutputT]):
         self._interaction_error: BaseException | None = None
         self._sync_cleanup_owner = _sync_run.get()
         self._sync_cleanup_deferred = False
-        self._observations = _ObservationBuffer(self.id, retention=observation_retention)
+        self._observations = _ObservationBuffer(
+            self.id,
+            retention=observation_retention,
+            include_model_output_items=include_model_output_items,
+        )
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._plan_usage_reads: set[asyncio.Task[str]] = set()
         self._rate_limit_parent: Session[Any, Any] | None = None
@@ -10027,6 +10040,7 @@ class Session(Generic[ContextT, OutputT]):
             _captured_siwc_provider=captured_siwc_provider,
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
+            include_model_output_items=self._observations.include_model_output_items,
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
@@ -12113,6 +12127,14 @@ class Session(Generic[ContextT, OutputT]):
                         turn_id=late_turn_id,
                         submission_id=started.submission_id if started is not None else None,
                     ):
+                        continue
+                    late_item = message.get("item")
+                    if (
+                        self._observations.include_model_output_items
+                        and isinstance(late_item, dict)
+                        and late_item.get("type") in {"AgentMessage", "Reasoning"}
+                    ):
+                        self._observations._mark_gap()
                         continue
                 if self._startup_failure is not None and (state is None or state.handle is None):
                     if not self._startup_failure.done() and message.get("type") in {
