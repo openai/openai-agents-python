@@ -1,5 +1,5 @@
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index 625475f..88a38de 100644
+index 625475fa..88a38dec 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
 @@ -44,6 +44,7 @@ pub use crate::common::ReasoningContext;
@@ -11,17 +11,17 @@ index 625475f..88a38de 100644
  pub use crate::common::ResponseId;
  pub use crate::common::ResponseStream;
 diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
-index fd57546..29d0c66 100644
+index fd57546f..84c3251c 100644
 --- a/codex-rs/codex-api/src/received_response_facts.rs
 +++ b/codex-rs/codex-api/src/received_response_facts.rs
 @@ -1,4 +1,6 @@
  //! Select only typed provider refusal/probability members, never arbitrary bodies.
-+use crate::ResponseEvent;
++use crate::{ApiError, ResponseEvent};
 +use codex_protocol::models::ResponseItem;
  use codex_protocol::response_facts::{ProbabilityToken, ResponseFact};
  use serde_json::Value;
  
-@@ -131,6 +133,79 @@ pub(crate) fn contains_refusal(item: &Value) -> bool {
+@@ -131,6 +133,118 @@ pub(crate) fn contains_refusal(item: &Value) -> bool {
                  })
              })
  }
@@ -35,69 +35,120 @@ index fd57546..29d0c66 100644
 +    deferred: Vec<ResponseEvent>,
 +    deferred_bytes: usize,
 +    completion: Option<ResponseEvent>,
++    failure: Option<ApiError>,
 +}
 +
 +impl ApplicationModelStream {
-+    /// Projects a frame, deferring ordered output that can invoke a tool.
-+    pub fn push(&mut self, json: &str) -> Result<Option<ResponseEvent>, &'static str> {
++    /// Returns ready events and whether the application should advance its iterator.
++    pub fn push(&mut self, json: &str) -> (Vec<ResponseEvent>, bool) {
++        let mut ready = Vec::new();
++        if self.failure.is_none() {
++            self.failure = self.project(json, &mut ready).err();
++        }
++        (ready, self.failure.is_none())
++    }
++
++    fn project(&mut self, json: &str, ready: &mut Vec<ResponseEvent>) -> Result<(), ApiError> {
 +        if self.completion.is_some() {
-+            return Err("Native model stream yielded after completion");
++            return Err(invalid_application_stream(
++                "Native model stream yielded after completion",
++            ));
 +        }
 +        if json.len() > MAX_APPLICATION_STREAM_BYTES {
-+            return Err("Native model stream event exceeds the byte limit");
++            return Err(invalid_application_stream(
++                "Native model stream event exceeds the byte limit",
++            ));
 +        }
-+        let event: crate::sse::ResponsesStreamEvent =
-+            serde_json::from_str(json).map_err(|_| "Malformed native model response event")?;
++        let event: crate::sse::ResponsesStreamEvent = serde_json::from_str(json)
++            .map_err(|_| invalid_application_stream("Malformed native model response event"))?;
 +        if event.kind == "error" {
-+            return Err("Native model stream reported a provider error");
++            return Err(invalid_application_stream(
++                "Native model stream reported a provider error",
++            ));
 +        }
 +        let interrupted = event.kind == "response.incomplete";
-+        let Some(event) = crate::sse::process_responses_event(event)
-+            .map_err(|_| "Native model stream reported an invalid or failed response")?
-+        else {
-+            return Ok(None);
-+        };
-+        if let ResponseEvent::Completed { response_id, .. } = &event {
++        ready.extend(
++            event_facts(&event.raw)
++                .into_iter()
++                .map(|fact| ResponseEvent::ResponseFact(fact.into())),
++        );
++        let event =
++            crate::sse::process_responses_event(event).map_err(|error| error.into_api_error())?;
++        if let Some(ResponseEvent::Completed { response_id, .. }) = &event {
 +            if response_id.trim().is_empty() {
-+                return Err("Native model stream completed without a response ID");
++                return Err(invalid_application_stream(
++                    "Native model stream completed without a response ID",
++                ));
 +            }
 +            if interrupted {
 +                self.deferred.clear();
 +            }
-+            self.completion = Some(event);
-+            return Ok(None);
++            self.completion = event;
++            return Ok(());
 +        }
 +        // Finalized non-message items can trigger native tool execution. Keep them
 +        // and the rest of the stream in provider order until the iterator ends.
 +        let can_call_tool = matches!(
 +            &event,
-+            ResponseEvent::OutputItemDone(item)
++            Some(ResponseEvent::OutputItemDone(item))
 +                if !matches!(item, ResponseItem::Message { .. } | ResponseItem::Reasoning { .. })
 +        );
 +        if self.deferred.is_empty() && !can_call_tool {
-+            return Ok(Some(event));
++            ready.extend(event);
++            return Ok(());
++        }
++        let count = ready.len() + usize::from(event.is_some());
++        if count == 0 {
++            return Ok(());
 +        }
 +        self.deferred_bytes = self.deferred_bytes.saturating_add(json.len());
 +        if self.deferred_bytes > MAX_APPLICATION_STREAM_BYTES
-+            || self.deferred.len() >= MAX_DEFERRED_APPLICATION_EVENTS
++            || self.deferred.len().saturating_add(count) > MAX_DEFERRED_APPLICATION_EVENTS
 +        {
-+            return Err("Native model stream deferred output exceeds its limit");
++            ready.clear();
++            return Err(invalid_application_stream(
++                "Native model stream deferred output exceeds its limit",
++            ));
 +        }
-+        self.deferred.push(event);
-+        Ok(None)
++        self.deferred.append(ready);
++        self.deferred.extend(event);
++        Ok(())
 +    }
 +
 +    /// Takes the deferred output and terminal event after the iterator has ended.
-+    pub fn finish(mut self) -> Result<Vec<ResponseEvent>, &'static str> {
-+        let completion = self
-+            .completion
-+            .take()
-+            .ok_or("Native model stream ended without a terminal response")?;
++    pub fn finish(mut self, producer_error: Option<&str>) -> Result<Vec<ResponseEvent>, ApiError> {
++        if let Some(error) = self.failure.take() {
++            return Err(error);
++        }
++        if let Some(message) = producer_error {
++            return Err(invalid_application_stream(message));
++        }
++        let completion = self.completion.take().ok_or_else(|| {
++            invalid_application_stream("Native model stream ended without a terminal response")
++        })?;
 +        self.deferred.push(completion);
 +        Ok(self.deferred)
++    }
++}
++
++fn invalid_application_stream(message: &str) -> ApiError {
++    ApiError::InvalidRequest {
++        message: message.into(),
 +    }
 +}
 +
  /// Convert one completed application model response through the provider fact policy.
  /// Validate the complete output before admitting any tool-bearing item.
  pub fn completed_model_response(
+@@ -229,7 +343,10 @@ mod completed_model_response_tests {
+     fn malformed_later_item_admits_no_tool() {
+         let events = completed_model_response(
+             "response".into(),
+-            vec![call(), json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":7}]})],
++            vec![
++                call(),
++                json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":7}]}),
++            ],
+             None,
+         );
+         assert!(matches!(

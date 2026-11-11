@@ -638,8 +638,8 @@
     },
     {
       "path": "sdk-native-model-response-stream.patch",
-      "sha256": "0fb479d0724d952568dbf14f145c329d77d5eee25515a4a51e508f2b3e01afcb"
+      "sha256": "da7d995b469aa1af0a7743dd059c82e0f6ca3d2ddc32609190e460e181dbbbd9"
     }
   ],
-  "result_tree": "ca8823acb813009abee7ea1912a9af873901b090"
+  "result_tree": "a0f245699dc5b7a2d131f1842b8657d91efc05d3"
 }

@@ -2372,10 +2372,7 @@ impl NativeThread {
             let Some(tools) = tools else {
                 return Ok(false);
             };
-            tools
-                .push_model_producer_event(request_id, &data_json)
-                .await
-                .map_err(py_error)
+            Ok(tools.push_model_producer_event(request_id, &data_json).await)
         })
     }
 

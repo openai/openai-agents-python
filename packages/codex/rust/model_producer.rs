@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 const FAILURE: &str = "Native model producer failed or was cancelled";
 const STREAM_CAPACITY: usize = 8;
-type StreamResult = std::result::Result<Vec<ResponseEvent>, String>;
+type StreamResult = std::result::Result<Vec<ResponseEvent>, ApiError>;
 type Reply = std::result::Result<Response, String>;
 
 enum Response {
@@ -97,20 +97,23 @@ struct StreamCursor {
 }
 
 impl StreamCursor {
-    async fn next(&mut self) -> std::result::Result<Option<ResponseEvent>, String> {
+    async fn next(&mut self) -> std::result::Result<Option<ResponseEvent>, ApiError> {
+        let failure = || ApiError::InvalidRequest {
+            message: FAILURE.into(),
+        };
         let event = if let Some(event) = self.accepted.next() {
             event
         } else if self.finish.is_some() {
             let event = tokio::select! { biased;
-                _ = self.status.wait_for(|status| *status != AdmissionState::Pending) => return Err(FAILURE.into()),
+                _ = self.status.wait_for(|status| *status != AdmissionState::Pending) => return Err(failure()),
                 event = self.events.recv() => event,
             };
             match event {
                 Some(event) => event,
                 None => {
                     let finish = self.finish.take().expect("unfinished model stream");
-                    self.accepted = finish.await.map_err(|_| FAILURE)??.into_iter();
-                    self.accepted.next().ok_or(FAILURE)?
+                    self.accepted = finish.await.map_err(|_| failure())??.into_iter();
+                    self.accepted.next().ok_or_else(failure)?
                 }
             }
         } else {
@@ -123,7 +126,7 @@ impl StreamCursor {
             .lock()
             .expect("Model producer poisoned");
         if !self.ticket.valid(&state) {
-            return Err(FAILURE.into());
+            return Err(failure());
         }
         Ok(Some(event))
     }
@@ -171,11 +174,11 @@ impl PythonTools {
             }))
             .is_ok()
     }
-    pub(crate) async fn push_model_producer_event(&self, id: u64, data: &str) -> Result<bool> {
-        let (event, sender) = {
+    pub(crate) async fn push_model_producer_event(&self, id: u64, data: &str) -> bool {
+        let (projected, sender, continue_stream) = {
             let mut state = self.model_producer.lock().expect("Model producer poisoned");
             if !state.accepts(id) {
-                return Ok(false);
+                return false;
             }
             let (
                 _,
@@ -184,25 +187,22 @@ impl PythonTools {
                 },
             ) = state.pending.get_mut(&id).expect("checked model request")
             else {
-                return Ok(false);
+                return false;
             };
-            let Some(event) = projection
-                .push(data)
-                .map_err(|message| anyhow::anyhow!(message))?
-            else {
-                return Ok(true);
+            let (projected, continue_stream) = projection.push(data);
+            (projected, events.clone(), continue_stream)
+        };
+        for event in projected {
+            let Ok(permit) = sender.reserve().await else {
+                return false;
             };
-            (event, events.clone())
-        };
-        let Ok(permit) = sender.reserve_owned().await else {
-            return Ok(false);
-        };
-        let state = self.model_producer.lock().expect("Model producer poisoned");
-        if !state.accepts(id) {
-            return Ok(false);
+            let state = self.model_producer.lock().expect("Model producer poisoned");
+            if !state.accepts(id) {
+                return false;
+            }
+            permit.send(event);
         }
-        permit.send(event);
-        Ok(true)
+        continue_stream
     }
     pub(crate) fn reply_model_producer(&self, id: u64, data: Option<&str>, error: bool) -> bool {
         let mut state = self.model_producer.lock().expect("Model producer poisoned");
@@ -216,11 +216,7 @@ impl PythonTools {
                 projection, finish, ..
             } => {
                 return finish
-                    .send(if error {
-                        Err(FAILURE.into())
-                    } else {
-                        projection.finish().map_err(str::to_owned)
-                    })
+                    .send(projection.finish(error.then_some(FAILURE)))
                     .is_ok();
             }
         };
@@ -363,10 +359,7 @@ impl ModelResponseInterceptor for Producer {
                     };
                     let stream =
                         futures_util::stream::try_unfold(cursor, |mut cursor| async move {
-                            let event = cursor
-                                .next()
-                                .await
-                                .map_err(|message| ApiError::InvalidRequest { message })?;
+                            let event = cursor.next().await?;
                             Ok(event.map(|event| (event, cursor)))
                         });
                     Ok(stream.boxed())

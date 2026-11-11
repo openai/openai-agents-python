@@ -10719,7 +10719,11 @@ class Session(Generic[ContextT, OutputT]):
         try:
             if not active() or not self._native._start_model_producer_stream(request_id):
                 return False
-            async for event in iterator:
+            while active():
+                try:
+                    event = await anext(iterator)
+                except StopAsyncIteration:
+                    return active()
                 if not active():
                     return False
                 if not isinstance(event, Mapping):
@@ -10727,7 +10731,7 @@ class Session(Generic[ContextT, OutputT]):
                 data = json.dumps(dict(event), allow_nan=False)
                 if not await self._native._push_model_producer_event(request_id, data):
                     return False
-            return active()
+            return False
         finally:
             try:
                 close = getattr(iterator, "aclose", None)
