@@ -1,0 +1,72 @@
+--- a/codex-rs/thread-store/src/store.rs
++++ b/codex-rs/thread-store/src/store.rs
+@@ -206,6 +206,16 @@
+         params: LoadThreadHistoryParams,
+     ) -> ThreadStoreFuture<'_, StoredThreadHistory>;
+
++    /// Reuses an acknowledged result before assigning its live history representation.
++    /// This does not create a receipt or settle a pending external effect.
++    fn canonical_tool_output<'a>(
++        &'a self,
++        _thread_id: ThreadId,
++        _output: &'a codex_protocol::models::ResponseItem,
++    ) -> ThreadStoreFuture<'a, Option<codex_protocol::models::ResponseItem>> {
++        Box::pin(async { Ok(None) })
++    }
++
+     /// Loads the complete canonical-original journal, including frozen reference prefixes.
+     /// Explicit complete reads may allocate their complete requested result.
+     fn load_original_history(
+--- a/codex-rs/thread-store/src/live_thread.rs
++++ b/codex-rs/thread-store/src/live_thread.rs
+@@ -373,6 +373,18 @@
+             .await
+     }
+
++    pub async fn canonical_tool_output(
++        &self,
++        output: &codex_protocol::models::ResponseItem,
++    ) -> ThreadStoreResult<Option<codex_protocol::models::ResponseItem>> {
++        self.check_canonical_history()?;
++        let result = self
++            .thread_store
++            .canonical_tool_output(self.thread_id, output)
++            .await;
++        self.retain_canonical_result(result)
++    }
++
+     pub async fn load_original_history(
+         &self,
+         include_archived: bool,
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3670,6 +3670,29 @@
+         image_preparations: Vec<ImagePreparationMetadata>,
+         pending_exec: Option<crate::unified_exec::PendingLocalExec>,
+     ) {
++        // SDK stores can acknowledge a result before Core's ordered drain. Reuse
++        // that exact item instead of minting a second original identity or time.
++        if let Some(live) = self.live_thread() {
++            for envelope in &mut items {
++                if matches!(
++                    &envelope.item,
++                    ResponseItem::FunctionCallOutput { .. }
++                        | ResponseItem::CustomToolCallOutput { .. }
++                        | ResponseItem::ComputerCallOutput { .. }
++                ) {
++                    match live.canonical_tool_output(&envelope.item).await {
++                        Ok(Some(accepted)) => envelope.item = accepted,
++                        Ok(None) => {}
++                        Err(error) => {
++                            error!("failed to resolve acknowledged tool output: {error:#}");
++                            // The existing live-thread durability latch fences subsequent
++                            // model/tool admission. No part of this batch enters live history.
++                            return;
++                        }
++                    }
++                }
++            }
++        }
+         // Save the originating history budget for replay.
+         // Preserve any existing tool-specific override.
+         let policy: codex_utils_output_truncation::TruncationPolicy =

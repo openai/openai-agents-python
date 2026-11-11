@@ -30,7 +30,12 @@ async def test_retirement_preserves_cold_descendants_and_portable_copies(
         agent = Agent(instructions="Answer.", tools=[read], provider=provider)
 
         async def portable_data_copy(items):
-            # Persistent-to-portable export remains unsupported; this is an explicit data copy.
+            # The portable owner admits its own application instructions.
+            items = [
+                item
+                for item in items
+                if item.get("type") != "message" or item.get("role") not in ("developer", "system")
+            ]
             async with agent.session() as memory:
                 current = await memory.history_snapshot()
                 await memory.transact_history(
@@ -53,6 +58,7 @@ async def test_retirement_preserves_cold_descendants_and_portable_copies(
             child_id = await source.fork_stored()
         async with agent.session(storage=storage, resume=child_id) as child:
             expected_child = await child.history_snapshot()
+            expected_child_turns = [turn["id"] async for turn in child.turns()]
             saved_child = await portable_data_copy(expected_child.items)
             grandchild_id = await child.fork_stored()
         if revert_source:
@@ -75,7 +81,7 @@ async def test_retirement_preserves_cold_descendants_and_portable_copies(
                 raw = (await child.history_snapshot()).items
                 assert raw[: expected_child.total] == expected_child.items
                 assert output in json.dumps(raw)
-                assert [turn["id"] async for turn in child.turns()] == turn_ids
+                assert [turn["id"] async for turn in child.turns()] == expected_child_turns
         # Exported copies have isolated memory ownership, not local resume authority.
         for saved in (saved_source, saved_child):
             async with agent.session(state=saved) as portable:

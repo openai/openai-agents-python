@@ -8,7 +8,14 @@ from typing import Any, cast
 import pytest
 from openai import AsyncOpenAI
 
-from agents import Agent, NativeError, ResponsesCompaction, SessionState, function_tool
+from agents import (
+    Agent,
+    NativeError,
+    ResponsesCompaction,
+    SessionState,
+    TurnStoppedError,
+    function_tool,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_agent import provider
@@ -268,7 +275,7 @@ async def test_cancel_joins_compact_callback_and_rejects_late_window(responses):
             assert not cancelling.done() and not exited
             release.set()
             await cancelling
-            with pytest.raises(NativeError):
+            with pytest.raises(TurnStoppedError):
                 await result
             assert exited
             assert "OPAQUE_COMPLETE_WINDOW" not in (await session.save_state()).to_json()

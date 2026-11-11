@@ -1,5 +1,5 @@
 {
-  "result_tree": "b6df72d9904134486322aca26fc50d76c0c9c023",
+  "result_tree": "220e2c0348cb496ed96887f5325dcbc9a9d7990c",
   "patches": [
     {
       "path": "0001-native-schema-recovery.patch",
@@ -732,6 +732,10 @@
     {
       "path": "sdk-borrowed-responses-compaction.patch",
       "sha256": "21e8b8c861d6844b88d977e5954e4f92d4352e0bcc1e73239800898f5d3fec67"
+    },
+    {
+      "path": "sdk-managed-receipt-original-identity.patch",
+      "sha256": "34fe1f7148b64f5c47be3106db23350ada4b22086e9d73bd4a4da7d50db71995"
     }
   ]
 }
