@@ -729,6 +729,18 @@
       "sha256": "cc46a7a1c697e833784f9f5ffa7245b0e2354e5bbc5a0a8bb892fae7ae55c53e"
     },
     {
+      "path": "sdk-provider-hosted-shell.patch",
+      "sha256": "347831fd574228651709dbc3f0bbb161bcd3b9afdd80fec6489b475f61050ef6"
+    },
+    {
+      "path": "sdk-hosted-shell-replay-fence.patch",
+      "sha256": "a6732ddaadb5a8caab18e88c6c46fa3c4efebada534e32a7c0ed91b7bcf8b279"
+    },
+    {
+      "path": "sdk-raw-provider-usage.patch",
+      "sha256": "c0b0800e001dd18e9860d3ebc0f8219a75496189aeef2034e664ec248015d70a"
+    },
+    {
       "path": "sdk-stored-owner-retirement.patch",
       "sha256": "6e2609766301ec2703199766402600eed66ada05e9ae5d497d7f46542dae76a5"
     },
@@ -741,5 +753,5 @@
       "sha256": "34fe1f7148b64f5c47be3106db23350ada4b22086e9d73bd4a4da7d50db71995"
     }
   ],
-  "result_tree": "4143b9b6628c91b4d4de9db65eed6f4213d8599d"
+  "result_tree": "e59fb5f82d59c9c00c837fa9705be69518a0f004"
 }

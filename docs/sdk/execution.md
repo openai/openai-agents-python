@@ -43,7 +43,7 @@ The example asks the model to list files in that workspace. The final answer des
 
 Local commands can read the workspace, any additional `writable_roots`, and the platform files they need to run. The SDK starts them with a minimal environment and a system `PATH`. Command output can reach the model provider. For untrusted prompts or files, run each job in a job-private OS sandbox or VM. Keep host credentials and other jobs' data outside that boundary.
 
-On macOS, the local sandbox has been isolating commands from host `launchd` services, including with `write_policy="trusted_workspace_write"`. Directory-backed account lookup in `id -F` and `ssh` has been failing inside that sandbox. A Python function tool has been running with the application's permissions for operations that require host account lookup. [Python functions](tools.md#python-functions)
+On macOS, the local sandbox has been isolating commands from host `launchd` services, including with `write_policy="trusted_workspace_write"`. Directory-backed account lookup in `id -F` and `ssh` has been failing inside that sandbox. For an authenticated Git push, use a Python function tool that runs in the application process and uses its Git credentials. The application selects the reviewed commit and destination before the model calls the tool. [Host Git example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/README.md#push-a-reviewed-git-commit-from-macos) · [Python functions](tools.md#python-functions)
 
 ### Allow the Linux sandbox helper to use user namespaces on Ubuntu 24.04
 
