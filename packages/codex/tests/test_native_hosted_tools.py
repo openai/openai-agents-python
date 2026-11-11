@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from agents import (
+    ActionReply,
     Agent,
     CapabilityError,
     CodeInterpreter,
@@ -19,6 +20,9 @@ from agents import (
     NativeProvider,
     Session,
     SessionState,
+    ToolRef,
+    ToolSearch,
+    ToolSearchResult,
     TurnStoppedError,
     function_tool,
 )
@@ -139,6 +143,154 @@ async def test_late_model_output_item_signals_an_observation_gap(
     events = [event async for event in session.events()]
     assert any(isinstance(event, EventGap) for event in events) is include_items
     assert all(not isinstance(event, ModelOutputItemCompleted) for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admitted", [True, False])
+async def test_client_tool_search_delivers_raw_arguments_and_resolves_admitted_tools(
+    responses: ResponsesFixture,
+    admitted: bool,
+) -> None:
+    calls: list[str] = []
+
+    @function_tool(defer_loading=True)
+    def lookup_account(account: str) -> str:
+        calls.append(account)
+        return "active"
+
+    arguments = {"department": "support", "tags": ["blue", "active"]}
+    parameters = {
+        "type": "object",
+        "properties": {
+            "department": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    search = ToolSearch(
+        execution="client", description="Select support tools.", parameters=parameters
+    )
+    selected = lookup_account.ref if admitted else ToolRef("unavailable")
+    responses.respond(
+        completed(
+            {
+                "type": "tool_search_call",
+                "id": "tsc_support_catalog",
+                "call_id": "call_support_catalog",
+                "status": "completed",
+                "execution": "client",
+                "arguments": arguments,
+            }
+        )
+    )
+    if admitted:
+        responses.respond(function_call("lookup_account", {"account": "blue"}, "call_account"))
+    responses.respond(assistant_output("Search finished."))
+
+    def answer(event: object) -> ActionReply[ToolSearchResult]:
+        request = search.match(event)
+        assert request is not None
+        assert request.call_id == "call_support_catalog"
+        assert request.arguments == arguments
+        return request.reply(ToolSearchResult(tool_refs=(selected,)))
+
+    async with timeout(30), provider(responses) as native_provider:
+        result = await Agent(
+            instructions="Find tools for support.",
+            model="gpt-5.5",
+            provider=native_provider,
+            tools=[search, lookup_account],
+        ).run("Find support tools.", on_interaction=answer)
+
+    assert result.final_output == "Search finished."
+    assert calls == (["blue"] if admitted else [])
+    assert [tool for tool in responses.requests[0]["tools"] if tool["type"] == "tool_search"] == [
+        {
+            "type": "tool_search",
+            "execution": "client",
+            "description": "Select support tools.",
+            "parameters": parameters,
+        }
+    ]
+    outputs = [
+        item for item in responses.requests[1]["input"] if item["type"] == "tool_search_output"
+    ]
+    assert len(outputs) == 1
+    assert outputs[0]["call_id"] == "call_support_catalog"
+    if admitted:
+        (namespace,) = outputs[0]["tools"]
+        assert namespace["type"] == "namespace"
+        assert namespace["name"] == "functions"
+        assert [(tool["type"], tool["name"]) for tool in namespace["tools"]] == [
+            ("function", "lookup_account")
+        ]
+    else:
+        assert outputs[0]["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_server_tool_search_advertises_the_deferred_catalog_and_calls_the_tool(
+    responses: ResponsesFixture,
+) -> None:
+    calls: list[str] = []
+
+    @function_tool(defer_loading=True)
+    def lookup_account(account: str) -> str:
+        calls.append(account)
+        return "active"
+
+    parameters = {
+        "type": "object",
+        "properties": {"paths": {"type": "array", "items": {"type": "string"}}},
+    }
+    responses.respond(
+        completed(
+            {
+                "type": "tool_search_call",
+                "id": "tsc_account_lookup",
+                "call_id": "call_account_search",
+                "status": "completed",
+                "execution": "server",
+                "arguments": {"paths": ["lookup_account"]},
+            }
+        ),
+        function_call("lookup_account", {"account": "blue"}, "call_account_lookup"),
+    )
+    responses.respond(assistant_output("Account loaded."))
+    async with (
+        timeout(30),
+        provider(responses) as native_provider,
+        Agent(
+            instructions="Look up accounts.",
+            model="gpt-5.5",
+            provider=native_provider,
+            tools=[
+                ToolSearch(
+                    execution="server", description="Find account tools.", parameters=parameters
+                ),
+                lookup_account,
+            ],
+        ).session() as session,
+    ):
+        result = await (await session.submit("Find account blue.")).get_result()
+    assert result.final_output == "Account loaded."
+    assert calls == ["blue"]
+    tools = responses.requests[0]["tools"]
+    assert [tool for tool in tools if tool["type"] == "tool_search"] == [
+        {
+            "type": "tool_search",
+            "execution": "server",
+            "description": "Find account tools.",
+            "parameters": parameters,
+        }
+    ]
+    leaves = [
+        leaf
+        for tool in tools
+        for leaf in (tool["tools"] if tool["type"] == "namespace" else [tool])
+    ]
+    (lookup,) = (tool for tool in leaves if tool.get("name") == "lookup_account")
+    assert lookup["defer_loading"] is True
+    assert tool_output(responses.requests[1], "call_account_lookup") == "active"
 
 
 # Deliberately include unknown provider fields to detect lossy normalization.

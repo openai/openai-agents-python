@@ -70,6 +70,7 @@ from ._function_tools import (
     ToolContext as ToolContext,
     ToolInputErrorContext as ToolInputErrorContext,
     ToolTimeoutError as ToolTimeoutError,
+    _ClientToolSearch,
 )
 from ._history import project_history as project_history
 from ._lifecycle import (
@@ -284,6 +285,7 @@ from .tools import (
     ToolCallInfo as ToolCallInfo,
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
+    ToolSearch,
     WebSearch as WebSearch,
     _capture_application_data,
     _capture_hosted_tools,
@@ -1909,6 +1911,8 @@ def _fixed_tool_refs(
             fixed.update(
                 ToolRef(n, "functions") for n in ("create_goal", "get_goal", "update_goal")
             )
+        elif isinstance(tool, ToolSearch) and tool._manual is not None:
+            continue
         elif isinstance(tool, _HOSTED_TOOLS):
             fixed.add(ToolRef(_hosted_tool_name(tool), "functions"))
         elif isinstance(tool, WebSearch):
@@ -2009,6 +2013,8 @@ def _split_tools(
                     if isinstance(item, FunctionTool) and item.ref == declaration.ref
                 )
                 admitted[declaration.ref] = current
+            elif isinstance(declaration, ToolSearch) and declaration._manual is not None:
+                admitted[declaration.ref] = declaration._manual
             elif isinstance(declaration, (StdioMCP, HttpMCP)):
                 current_server = next(
                     item
@@ -2141,13 +2147,19 @@ def _split_tools(
                     )
                     assert isinstance(resolved, (HttpMCP, StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
+        if isinstance(tool, ToolSearch) and tool._manual is not None:
+            tool = tool._manual
         if isinstance(tool, FunctionTool):
             if has_native_agents and tool.ref.namespace == "collaboration":
                 raise ValueError(
                     f"NativeAgents reserves the collaboration namespace: {tool.name}; "
                     "choose a custom function namespace"
                 )
-            if tool.ref.namespace in (None, "functions") and tool.name in hosted_names:
+            if (
+                tool.ref.namespace in (None, "functions")
+                and tool.name in hosted_names
+                and not isinstance(tool, _ClientToolSearch)
+            ):
                 raise ValueError(f"Hosted tools reserve the tool name {tool.name}")
             if has_checklist and tool.ref == ToolRef("update_plan"):
                 raise ValueError("Checklist reserves the tool name update_plan")
@@ -2204,7 +2216,7 @@ def _split_tools(
             raise TypeError(
                 "tools must use FunctionTool, function_tool, StdioMCP, HttpMCP, "
                 "Checklist, NativeGoals, WebSearch, FileSearch, CodeInterpreter, "
-                "ImageGeneration or NativeAgents"
+                "ImageGeneration, ToolSearch or NativeAgents"
             )
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
@@ -2604,6 +2616,8 @@ def _capture_tools(
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
     if spec.get("type") == "computer":
         return ToolRef("computer")
+    if spec.get("type") == "toolSearch":
+        return ToolRef("tool_search")
     if spec.get("type") == "namespace":
         tools = spec.get("tools")
         if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
@@ -3601,7 +3615,9 @@ class Session(Generic[ContextT, OutputT]):
             if goals and storage is None:
                 raise ValueError("NativeGoals requires an explicit LocalStorage profile")
             hosted_tools = _capture_hosted_tools(available)
-            if hosted_tools and codex_login is not None:
+            if codex_login is not None and (
+                hosted_tools or any(isinstance(tool, _ClientToolSearch) for tool in tools)
+            ):
                 raise ValueError(
                     "Hosted tools require an API-key Responses provider, not Codex login"
                 )
@@ -4114,6 +4130,7 @@ class Session(Generic[ContextT, OutputT]):
                         + (
                             [{"name": "tool_search", "namespace": "functions"}]
                             if deferred_schemas
+                            and not any(isinstance(tool, ToolSearch) for tool in available)
                             else []
                         )
                         + ([{"name": "update_plan", "namespace": "functions"}] if checklist else [])
@@ -12168,10 +12185,14 @@ class Session(Generic[ContextT, OutputT]):
                 and isinstance(state, _Submission)
                 and state.prepare_request is not None
                 and any(
-                    isinstance(tool, FunctionTool)
-                    and tool._bind is None
-                    and ToolRef(tool.name, "functions") in refs
-                    and ToolRef(tool.name, "functions") in candidates
+                    (
+                        isinstance(tool, FunctionTool)
+                        and tool._bind is None
+                        or isinstance(tool, ToolSearch)
+                        and tool._manual is not None
+                    )
+                    and ToolRef(tool.ref.name, "functions") in refs
+                    and ToolRef(tool.ref.name, "functions") in candidates
                     for tool in source_bindings
                 )
             ):
@@ -12182,7 +12203,14 @@ class Session(Generic[ContextT, OutputT]):
             # Search is an existing discovery helper over selected leaves. It
             # cannot restore an excluded runtime or a cached leaf from another step.
             search = ToolRef("tool_search", "functions")
-            if refs and search in candidates:
+            if (
+                refs
+                and search in candidates
+                and not any(
+                    isinstance(tool, ToolSearch) and tool._manual is not None
+                    for tool in source_bindings
+                )
+            ):
                 refs.add(search)
             selected = refs & candidates
             # The native event reader drains the preceding sample before
