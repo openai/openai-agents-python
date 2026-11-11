@@ -18,7 +18,7 @@ def window() -> dict[str, Any]:
     return {
         "id": "COMPACT_RESULT_NOT_AN_ANCHOR",
         "output": [
-            assistant_output("RETAINED_BEFORE_OPAQUE"),
+            assistant_output("RETAINED_BEFORE_OPAQUE")["item"],
             {"type": "compaction", "encrypted_content": "OPAQUE_COMPLETE_WINDOW"},
             {
                 "type": "function_call",
@@ -31,7 +31,7 @@ def window() -> dict[str, Any]:
                 "call_id": "historic",
                 "output": "HISTORIC_TOOL_OUTPUT",
             },
-            assistant_output("RETAINED_AFTER_OPAQUE"),
+            assistant_output("RETAINED_AFTER_OPAQUE")["item"],
         ],
         "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
     }
