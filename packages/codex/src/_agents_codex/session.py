@@ -258,6 +258,7 @@ from .recovery import (
     LocalRecoveryRequired as LocalRecoveryRequired,
     ReconciledCall as ReconciledCall,
     UncertainCall as UncertainCall,
+    _application_shell_recovery,
 )
 from .response_facts import _response_fact_record
 from .retry import _CombinedRetryPolicy
@@ -2741,11 +2742,12 @@ def _capture_tools(
 
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
-    if spec.get("type") == "computer":
-        return ToolRef("computer")
-    if spec.get("type") == "toolSearch":
+    kind = spec.get("type")
+    if kind in ("computer", "shell"):
+        return ToolRef(kind)
+    if kind == "toolSearch":
         return ToolRef("tool_search")
-    if spec.get("type") == "namespace":
+    if kind == "namespace":
         tools = spec.get("tools")
         if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
             return None
@@ -3662,8 +3664,14 @@ def _prepare_opening_model_settings(
         )
         profile_controls = profile_model["request_controls"] if profile_model is not None else {}
         attempt_controls = _current_attempt_controls(current_controls, profile_controls)
+        invocation_timeout = (
+            profile_model.get("invocation_timeout_ms")
+            if profile_model is not None
+            else settings.get("invocation_timeout_ms")
+        )
         model, settings = restored_model_settings
         settings.setdefault("request_controls", {}).update(attempt_controls)
+        settings["invocation_timeout_ms"] = invocation_timeout
     return model, settings
 
 
@@ -4568,10 +4576,19 @@ class Session(Generic[ContextT, OutputT]):
                 if isinstance(storage, CustomStorage) and resume is not None:
                     # Inspect before Core starts, while the canonical backend's
                     # original writer still fences every other opener.
-                    history = json.loads(
+                    history, shell_calls = json.loads(
                         await opening.acquire(engine._inspect_custom_recovery(resume))
                     )
-                    uncertain: list[UncertainCall] = []
+                    uncertain = [
+                        UncertainCall(
+                            thread_id=resume,
+                            turn_id=turn_id,
+                            call_id=call_id,
+                            name="shell",
+                            arguments=arguments,
+                        )
+                        for turn_id, call_id, arguments in shell_calls
+                    ]
                     turns, items = project_history(history, resume, uncertain_calls=uncertain)
                     if uncertain:
                         raise LocalRecoveryRequired(tuple(uncertain), tuple(turns), tuple(items))
@@ -4905,7 +4922,10 @@ class Session(Generic[ContextT, OutputT]):
             raise RuntimeError("Native local history has a live descendant writer")
         children = {child["id"]: child for child in descendants}
         histories: dict[str, dict[str, Any]] = {}
-        projected: dict[str, tuple[list[RecordedTurn], list[SessionItem], list[UncertainCall]]] = {}
+        projected: dict[
+            str,
+            tuple[list[RecordedTurn], list[SessionItem], list[UncertainCall], set[tuple[str, str]]],
+        ] = {}
         for subagent_id in [None, *children]:
             read_history = (
                 self._native.read_thread_history(None)
@@ -4914,10 +4934,9 @@ class Session(Generic[ContextT, OutputT]):
             )
             encoded = await self._publish_startup(read_history)
             thread_id = subagent_id if subagent_id is not None else self.id
-            calls: list[UncertainCall] = []
-            turns, items = project_history(
-                json.loads(encoded), self.id, subagent_id, uncertain_calls=calls
-            )
+            history = json.loads(encoded)
+            calls, shell_receipts = _application_shell_recovery(history, thread_id)
+            turns, items = project_history(history, self.id, subagent_id, uncertain_calls=calls)
             if subagent_id is not None:
                 child = children[subagent_id]
                 histories[subagent_id] = {
@@ -4926,13 +4945,13 @@ class Session(Generic[ContextT, OutputT]):
                     "status": child["status"],
                     "interrupted": [],
                 }
-            projected[thread_id] = turns, items, calls
+            projected[thread_id] = turns, items, calls, shell_receipts
 
         recorded: dict[str, list[RecordedTurn]] = {}
         recorded_items: list[SessionItem] = []
         unknown: list[UncertainCall] = []
         prior: set[tuple[str, str, str]] = set()
-        for thread_id, (turns, items, calls) in projected.items():
+        for thread_id, (turns, items, calls, shell_receipts) in projected.items():
             if thread_id in children:
                 # Forks can retain parent turns. Only their owner can reconcile them.
                 parent = children[thread_id]["parent_agent_id"]
@@ -4940,9 +4959,13 @@ class Session(Generic[ContextT, OutputT]):
                 turns = [turn for turn in turns if turn["id"] not in inherited]
                 items = [item for item in items if item["turn_id"] not in inherited]
                 calls = [call for call in calls if call.turn_id not in inherited]
+                shell_receipts = {
+                    (turn, call) for turn, call in shell_receipts if turn not in inherited
+                }
             recorded[thread_id] = turns
             recorded_items.extend(items)
             unknown.extend(calls)
+            prior.update((thread_id, turn, call) for turn, call in shell_receipts)
             prior.update(
                 (thread_id, item["turn_id"], item["call_id"])
                 for item in items
@@ -4993,7 +5016,7 @@ class Session(Generic[ContextT, OutputT]):
                 self._native._reconcile_local_calls(
                     json.dumps(
                         {
-                            "receipts": [asdict(call) for call in reconciliation],
+                            "receipts": [call._wire() for call in reconciliation],
                             "histories": histories,
                         }
                     )
@@ -5286,13 +5309,15 @@ class Session(Generic[ContextT, OutputT]):
         thread = self._native
 
         async def publish_attempt_controls(controls: Mapping[str, Any]) -> None:
-            # The accepted native state already owns the invocation deadline.
-            reset = {
+            # Idle restores retain their accepted deadline; manual work uses current authority.
+            reset: dict[str, Any] = {
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
                     "retry": None,
                 },
             }
+            if manual_restore:
+                reset["invocation_timeout_ms"] = settings.get("invocation_timeout_ms")
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(reset)))
                 is not True
@@ -7279,7 +7304,7 @@ class Session(Generic[ContextT, OutputT]):
                     return
                 if isinstance(decision, ReplaceArguments):
                     prepared_input = deepcopy(decision.arguments)
-                    parsed = function._parse_arguments(prepared_input)
+                    parsed = function._parse_replacement(prepared_input)
                     context = replace(
                         context,
                         effective_arguments=_snapshot_function_arguments(
@@ -14047,10 +14072,7 @@ class Session(Generic[ContextT, OutputT]):
                     if type(approved) is not bool:
                         raise TypeError("Environment approval must return a bool")
                     if not approved:
-                        if not self._native._resolve_native_interception(
-                            nonce, '{"action":"deny"}'
-                        ):
-                            raise NativeError("Executor policy decision expired")
+                        self._native._resolve_native_interception(nonce, '{"action":"deny"}')
                         return
                 if callback is not None:
                     # Approval owns its own waiting. Only the transform gets
@@ -14114,8 +14136,8 @@ class Session(Generic[ContextT, OutputT]):
                         decision = {"action": "replace", "value": value}
             if admitted():
                 reply = json.dumps(decision, allow_nan=False)
-                if not self._native._resolve_native_interception(nonce, reply):
-                    raise NativeError("Executor policy decision expired")
+                # Core can retire this nonce between admission and the reply.
+                self._native._resolve_native_interception(nonce, reply)
         except BaseException as error:
             if admitted():
                 fail_original(
@@ -14599,7 +14621,7 @@ class Session(Generic[ContextT, OutputT]):
                     return
                 if isinstance(decision, ReplaceArguments):
                     arguments_replaced = True
-                    parsed = entry._parse_arguments(decision.arguments)
+                    parsed = entry._parse_replacement(decision.arguments)
                     kwargs = entry._arguments(parsed)
                     context = replace(
                         context, effective_arguments=_snapshot_function_arguments(kwargs, ref)

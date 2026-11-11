@@ -70,6 +70,6 @@ async def main():
 
 if __name__ == "__main__":
     if not shutil.which("npx"):
-        raise RuntimeError("npx is required. Install it with `npm install -g npx`.")
+        raise RuntimeError("npx is required. Install Node.js with npm and add npx to PATH.")
 
     asyncio.run(main())

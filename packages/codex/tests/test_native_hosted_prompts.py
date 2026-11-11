@@ -7,7 +7,15 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, FunctionTool, ModelRequest, ModelResponse, NativeProvider, function_tool
+from agents import (
+    Agent,
+    CustomStorage,
+    FunctionTool,
+    ModelRequest,
+    ModelResponse,
+    NativeProvider,
+    function_tool,
+)
 from agents.handoffs import Handoff
 from agents.state import SessionState
 from tests._asyncio import timeout
@@ -18,7 +26,88 @@ from tests.native_fixtures import (
     responses as responses,
     tool_output,
 )
+from tests.native_storage_fixtures import MemorySessionStore
 from tests.test_native_manual_tools import LookupArgs, next_request
+
+
+@pytest.mark.parametrize("location", ["thread_settings", "profile"])
+async def test_canonical_resume_rejects_saved_prompt_reference(
+    responses: ResponsesFixture, location: str
+) -> None:
+    responses.respond(assistant_output("first"))
+    responses.respond(assistant_output("unexpected injected prompt"))
+    backend = MemorySessionStore()
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-prompt-key", supports_websockets=False
+    ) as provider:
+        agent = Agent(
+            instructions="Answer.",
+            provider=provider,
+            handoffs=[Agent(name="Target", instructions="Answer.")]
+            if location == "profile"
+            else [],
+        )
+        storage = CustomStorage(backend)
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            await (await session.submit("first")).get_result()
+        document = json.loads(backend._payloads[identity])
+        changed = 0
+        for row in document["items"]:
+            payload = row.get("payload", {})
+            profile = (row.get("metadata") or {}).get("sdk_agent_profile")
+            if location == "thread_settings" and payload.get("type") == "thread_settings_applied":
+                model = payload["thread_settings"]
+            elif location == "profile" and isinstance(profile, dict):
+                model = profile["model"]
+            else:
+                continue
+            model.setdefault("request_controls", {})["hosted_prompt"] = {
+                "reference": {"id": "pmpt_external_saved"},
+                "omit_model": True,
+                "omit_instructions": True,
+                "omit_tools": True,
+            }
+            changed += 1
+        assert changed
+        backend._payloads[identity] = json.dumps(document)
+        with pytest.raises(Exception, match="Canonical storage failed"):
+            async with agent.session(storage=storage, resume=identity) as restored:
+                await (await restored.submit("second")).get_result()
+    assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+async def test_canonical_resume_preserves_current_prompt(
+    responses: ResponsesFixture, dynamic: bool
+) -> None:
+    for _ in range(2):
+        responses.respond(assistant_output("current prompt result"))
+    reference = {"id": "pmpt_current"}
+
+    def resolve(_context: Any) -> Any:
+        return reference
+
+    backend = MemorySessionStore()
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-prompt-key", supports_websockets=False
+    ) as provider:
+        agent = Agent(
+            hosted_prompt=resolve if dynamic else reference,
+            provider=provider,
+            handoffs=[Agent(name="Target", hosted_prompt=reference)],
+        )
+        storage = CustomStorage(backend)
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            await (await session.submit("first")).get_result()
+        async with agent.session(storage=storage, resume=identity) as session:
+            await (await session.submit("second")).get_result()
+    assert len(responses.requests) == 2
+    for request in responses.requests:
+        assert request["prompt"] == reference
+        assert "model" not in request
+        assert "instructions" not in request
 
 
 @pytest.mark.parametrize("explicit", [False, True])

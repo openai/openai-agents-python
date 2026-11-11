@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -13,7 +14,7 @@ from a2a.types import a2a_pb2 as p
 from a2a.utils.errors import A2AError
 from google.protobuf.json_format import MessageToDict
 
-from agents import FunctionTool
+from agents import FunctionTool, function_tool
 from agents.a2a import NativeA2ABinding, NativeA2AExecutor, connect_a2a
 from tests.a2a_helpers import call_context
 from tests.a2a_http import serve, service
@@ -121,8 +122,23 @@ async def test_cancel_after_handler_restart_retires_waiting_checkpoint(tmp_path,
 async def test_official_wire_fault_recovers_retained_result_in_fresh_process(
     tmp_path, responses, monkeypatch, fault
 ):
+    @function_tool
+    def record_effect() -> str:
+        with executor.store.db() as db:
+            db.execute(
+                "INSERT INTO effects VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+                ("alice", "synthetic-order", "receipt-1"),
+            )
+        return "receipt-1"
+
+    responses.respond(function_call("record_effect", {}, "effect-call"))
     responses.respond(assistant_output("retained wire result"))
-    executor = make_executor(tmp_path, responses)
+    executor = make_executor(tmp_path, responses, [record_effect])
+    with executor.store.db() as db:
+        db.execute(
+            "CREATE TABLE effects (principal TEXT, order_id TEXT, receipt TEXT, "
+            "PRIMARY KEY(principal, order_id))"
+        )
     if fault == "lost-terminal-ack":
         executor.store.lose_ack = True
     original = EventQueueSource.enqueue_event
@@ -144,7 +160,24 @@ async def test_official_wire_fault_recovers_retained_result_in_fresh_process(
 
     monkeypatch.setattr(EventQueueSource, "enqueue_event", fail_publication)
     async with serve(lambda url: service(executor, executor.store, url)) as url:
-        async with connect_a2a(endpoint(url), authorization=token) as client:
+        registry = {"approved-specialist": endpoint(url)}
+        credentials = []
+
+        async def authorization():
+            credentials.append("approved-specialist")
+            return await token()
+
+        def resolve(name):
+            if name not in registry:
+                raise PermissionError("Unknown specialist")
+            return registry[name]
+
+        with pytest.raises(PermissionError, match="Unknown specialist"):
+            resolve("unregistered-specialist")
+        assert credentials == []
+        async with connect_a2a(
+            resolve("approved-specialist"), authorization=authorization
+        ) as client:
             receipt = await start(client)
             binding = NativeA2ABinding(
                 principal="alice", task_id=receipt.id, context_id=receipt.context_id
@@ -158,7 +191,7 @@ async def test_official_wire_fault_recovers_retained_result_in_fresh_process(
     record = executor.store.read(binding)
     assert record.status == "completed"
     assert executor.store.acknowledged(binding) != record.generation
-    assert len(responses.requests) == 1
+    assert len(responses.requests) == 2
     if fault != "lost-terminal-ack":
         assert triggered
     # The new process must use this task's actual generated identity.
@@ -168,8 +201,14 @@ async def test_official_wire_fault_recovers_retained_result_in_fresh_process(
     assert fresh.returncode == 0, errors.decode()
     recovered = json.loads(output)
     assert recovered["snapshot_matches"] and recovered["factory_calls"] == 0
+    assert recovered["pid"] != os.getpid()
     assert executor.store.acknowledged(binding) == record.generation
     final = await executor.store.get(receipt.id, call_context())
     assert final.task.status.state == p.TASK_STATE_COMPLETED
     assert len(final.task.artifacts) == 1
-    assert len(responses.requests) == 1
+    assert len(responses.requests) == 2
+    with executor.store.db() as db:
+        assert db.execute("SELECT principal, order_id, receipt FROM effects").fetchall() == [
+            ("alice", "synthetic-order", "receipt-1")
+        ]
+    assert credentials
