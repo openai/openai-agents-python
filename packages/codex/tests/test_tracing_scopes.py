@@ -3441,6 +3441,9 @@ async def test_interception_reader_keeps_native_context_private_through_dispatch
     issuer._invoke_executor_policy = MethodType(Session._invoke_executor_policy, issuer)
     issuer._invoke_executor_policy_body = MethodType(Session._invoke_executor_policy_body, issuer)
     issuer._call_decision_callback = MethodType(Session._call_decision_callback, issuer)
+    issuer._call_decision_callback_entered = MethodType(
+        Session._call_decision_callback_entered, issuer
+    )
     interception = _NativeInterception(issuer)
     issuer._interception = interception
     if route == "cell":
