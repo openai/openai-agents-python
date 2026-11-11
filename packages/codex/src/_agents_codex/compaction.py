@@ -127,7 +127,7 @@ class ResponsesCompaction(Generic[ContextT]):
         if scope is None:
             return False
         if _responses_client_scope(self.client) != scope:
-            raise ValueError("Compaction client provider scope changed after capture")
+            return False
         provider = config.get("model_providers." + str(config.get("model_provider")))
         if not isinstance(provider, dict) or provider.get("query_params"):
             return False

@@ -380,3 +380,82 @@ async def test_input_only_compaction_does_not_probe_changed_client_scope(respons
     assert len(calls) == 1
     assert "previous_response_id" not in calls[0]
     assert "UNSTORED_NATIVE_WINDOW" in json.dumps(calls[0]["input"])
+
+
+@pytest.mark.parametrize("changed", ["api_key", "project"])
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_auto_compaction_uses_input_after_client_scope_rotation(
+    responses, changed, automatic
+):
+    calls = []
+    modes = []
+
+    async def compact(**body):
+        calls.append(body)
+        return {"output": [{"type": "compaction", "encrypted_content": "ROTATED_SCOPE_WINDOW"}]}
+
+    def should_compact(context):
+        modes.append(context.mode)
+        return automatic
+
+    async with _matching_compaction_client(responses, compact) as client:
+        compaction = ResponsesCompaction(
+            client=client, model="gpt-5.5", mode="auto", should_compact=should_compact
+        )
+        setattr(client, changed, "synthetic-rotated-scope")
+        responses.respond(assistant_output("ACKNOWLEDGED_ROTATED_WINDOW"))
+        agent = Agent(
+            instructions="Current application instructions.",
+            provider=provider(responses),
+            model="gpt-5.5",
+            model_settings={"store": True},
+            compaction=compaction,
+        )
+        async with timeout(30), agent.session() as session:
+            result = await (await session.submit("EXACT_ROTATED_INPUT")).get_result()
+            assert result.final_output == "ACKNOWLEDGED_ROTATED_WINDOW"
+            if not automatic:
+                await session.compact()
+    assert len(calls) == 1
+    assert modes == ["input"]
+    assert "previous_response_id" not in calls[0]
+    assert "EXACT_ROTATED_INPUT" in json.dumps(calls[0]["input"])
+    assert "ACKNOWLEDGED_ROTATED_WINDOW" in json.dumps(calls[0]["input"])
+
+
+async def test_false_predicate_keeps_a_successful_skip_after_scope_rotation(responses, monkeypatch):
+    calls = []
+    replies = []
+
+    async def compact(**body):
+        calls.append(body)
+        return {"output": [{"type": "compaction", "encrypted_content": "UNEXPECTED_WINDOW"}]}
+
+    responses.respond(assistant_output("DELIBERATE_SKIP"))
+    async with _matching_compaction_client(responses, compact) as client:
+
+        def should_compact(context):
+            assert context.mode == "previous_response_id"
+            client.project = "synthetic-rotated-after-selection"
+            return False
+
+        agent = Agent(
+            instructions="Current application instructions.",
+            provider=provider(responses),
+            model="gpt-5.5",
+            model_settings={"store": True},
+            compaction=ResponsesCompaction(client=client, should_compact=should_compact),
+        )
+        async with timeout(30), agent.session() as session:
+            native_type = type(session._native)
+            original = native_type._reply_compaction_policy
+
+            def reply(owner, step_id, value, *args, **kwargs):
+                replies.append((value, kwargs.get("error", False)))
+                return original(owner, step_id, value, *args, **kwargs)
+
+            monkeypatch.setattr(native_type, "_reply_compaction_policy", reply)
+            result = await (await session.submit("SKIP_AFTER_ROTATION")).get_result()
+            assert result.final_output == "DELIBERATE_SKIP"
+    assert replies == [(False, False)]
+    assert not calls

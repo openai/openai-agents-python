@@ -12181,6 +12181,17 @@ class Session(Generic[ContextT, OutputT]):
                             raise asyncio.CancelledError
                         if type(decision) is not bool:
                             raise TypeError("should_compact must return a bool")
+                        if (
+                            decision
+                            and prepared.mode == "previous_response_id"
+                            and not factory._matches_provider(
+                                self._model_api_key,
+                                json.loads(self._native_options or "{}").get("config", {}),
+                            )
+                        ):
+                            raise ValueError(
+                                "Compaction client provider scope changed before dispatch"
+                            )
                         return decision
                     if not active():
                         raise asyncio.CancelledError
