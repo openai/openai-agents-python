@@ -133,9 +133,11 @@ def test_package_root_has_one_public_surface():
         "state",
         "repair_attempts",
         "tool_call",
+        "tool_batch_call_ids",
         "guardrail_results",
         "history",
         "raw_usage",
+        "items",
         "run_usage",
     ]
 

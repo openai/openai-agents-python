@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .input import UserInput
     from .observation import _ObservationBuffer
     from .session import Completed, _ChildCallbacks
+    from .state import ApplicationToolOutput
     from .turn import SteeringReceipt
     from .usage import TokenUsageInfo
 
@@ -23,6 +24,8 @@ _OutputT = TypeVar("_OutputT")
 
 
 class _CompletedTurnOwner:
+    _application_tool_outputs: tuple[ApplicationToolOutput, ...] = ()
+
     def __init__(
         self,
         *,

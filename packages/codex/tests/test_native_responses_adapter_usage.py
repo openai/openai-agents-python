@@ -56,11 +56,18 @@ async def test_borrowed_responses_original_usage(capture: bool, provider_id: boo
             async with NativeProvider(
                 base_url=str(server.make_url("/fallback/v1")), model_backend=ResponsesModel(client)
             ) as provider:
-                result = await Agent(instructions="Answer.", provider=provider).run(
-                    "Continue.", return_raw_usage=capture, return_history=True
+                agent = Agent(instructions="Answer.", provider=provider)
+                result = await agent.run(
+                    "Continue.",
+                    return_raw_usage=capture,
+                    return_items=capture and provider_id,
+                    return_history=True,
                 )
     assert result.final_output == "adapter done"
     assert result.run_usage.requests == 1
+    if capture and provider_id:
+        assert result.items
+        assert result.items[0].agent is agent
     assert requests == ["/v1/responses"]
     assert "synthetic-original-usage" not in json.dumps(result.history)
     assert result.raw_usage == (

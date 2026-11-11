@@ -16,11 +16,11 @@ index 9c4df15e..f48760e9 100644
                      if let ResponseEvent::ResponseFact(received) = &mut event {
                          received.upstream_request_id = upstream_request_id.map(str::to_owned);
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index ad7fb7e1..80ca0103 100644
+index b766a435..20397284 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -328,6 +328,31 @@ impl CodexThread {
-             .is_elicitation_pending(server, token)
+@@ -344,6 +344,31 @@ impl CodexThread {
+             .finish(turn_id)
      }
  
 +    /// Starts ephemeral provider usage capture for one owned SDK run.
@@ -199,10 +199,10 @@ index 1121e68a..aec34988 100644
  pub use thread_startup_metadata::ThreadStartupMetadata;
  mod agent;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 0b6f3344..0c4e80f6 100644
+index 39e028aa..628ce9c6 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -264,6 +264,7 @@ mod retained_context;
+@@ -265,6 +265,7 @@ pub(crate) mod sdk_produced_items;
  mod review;
  mod rollout_budget;
  mod rollout_reconstruction;

@@ -1,0 +1,212 @@
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 84bc7cac..7f51b79f 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -272,6 +272,10 @@ struct PostToolUseFeedbackOutput {
+ }
+ 
+ impl ToolOutput for PostToolUseFeedbackOutput {
++    fn mark_accepted(&mut self) {
++        self.original.mark_accepted();
++    }
++
+     fn realtime_response_requested(&self) -> bool {
+         self.original.realtime_response_requested()
+     }
+@@ -813,78 +817,84 @@ impl ToolRegistry {
+                 handler_executed: true,
+             },
+         };
+-        notify_tool_finish_if_unclaimed(&invocation, call_state.as_deref(), lifecycle_outcome)
+-            .await;
+-
+-        match result {
+-            Ok(mut result) => {
+-                if let Some(outcome) = post_tool_use_outcome {
+-                    if outcome.should_block {
+-                        let message = outcome.feedback_message.unwrap_or_else(|| {
+-                            "PostToolUse hook blocked the tool result".to_string()
+-                        });
+-                        let err = FunctionCallError::RespondToModel(message);
+-                        dispatch_trace.record_failed(&err);
+-                        return Err(err);
++        let notify_finish = claim_tool_finish(call_state.as_deref());
++        // Resolve acceptance before lifecycle observers join the tool's host callback.
++        let result = (|| {
++            match result {
++                Ok(mut result) => {
++                    if let Some(outcome) = post_tool_use_outcome {
++                        if outcome.should_block {
++                            let message = outcome.feedback_message.unwrap_or_else(|| {
++                                "PostToolUse hook blocked the tool result".to_string()
++                            });
++                            let err = FunctionCallError::RespondToModel(message);
++                            dispatch_trace.record_failed(&err);
++                            return Err(err);
++                        }
++                        if let Some(feedback_message) = outcome.feedback_message {
++                            result.result = Box::new(PostToolUseFeedbackOutput {
++                                original: result.result,
++                                model_visible: FunctionToolOutput::from_text(
++                                    feedback_message,
++                                    /*success*/ None,
++                                ),
++                            });
++                        }
+                     }
+-                    if let Some(feedback_message) = outcome.feedback_message {
+-                        result.result = Box::new(PostToolUseFeedbackOutput {
+-                            original: result.result,
+-                            model_visible: FunctionToolOutput::from_text(
+-                                feedback_message,
+-                                /*success*/ None,
+-                            ),
+-                        });
++                    let final_item: codex_protocol::models::ResponseItem = result
++                        .result
++                        .to_response_item(&result.call_id, &result.payload)
++                        .into();
++                    if matches!(invocation.payload, ToolPayload::Computer { .. })
++                        && !matches!(&final_item, codex_protocol::models::ResponseItem::ComputerCallOutput { call_id, .. } if call_id == &invocation.call_id)
++                    {
++                        return Err(FunctionCallError::Fatal(
++                            "native computer result must retain its protocol type and call ID".into(),
++                        ));
+                     }
+-                }
+-                let final_item: codex_protocol::models::ResponseItem = result
+-                    .result
+-                    .to_response_item(&result.call_id, &result.payload)
+-                    .into();
+-                if matches!(invocation.payload, ToolPayload::Computer { .. })
+-                    && !matches!(&final_item, codex_protocol::models::ResponseItem::ComputerCallOutput { call_id, .. } if call_id == &invocation.call_id)
+-                {
+-                    return Err(FunctionCallError::Fatal(
+-                        "native computer result must retain its protocol type and call ID".into(),
+-                    ));
+-                }
+-                crate::file_admission::validate_response_items(
+-                    invocation
+-                        .session
+-                        .captured_provider_image_reference_policy(),
+-                    &invocation.step_context.settings.model_info,
+-                    std::iter::once(&final_item),
+-                )
+-                .map_err(FunctionCallError::Fatal)?;
+-                if invocation.session.captured_provider_image_reference_policy()
+-                    == codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::QualifiedStandardResponses
+-                {
+-                    let supported = crate::image_preparation::inline_data_url_low_detail_supported(
+-                        &invocation.turn.config, &invocation.step_context.settings.model_info,
+-                    );
+-                    let reference_policy = crate::image_preparation::reference_policy_for_model(
+-                        invocation.session.captured_provider_image_reference_policy(),
+-                        invocation.step_context.settings.model_info.use_responses_lite, supported,
++                    crate::file_admission::validate_response_items(
++                        invocation
++                            .session
++                            .captured_provider_image_reference_policy(),
++                        &invocation.step_context.settings.model_info,
++                        std::iter::once(&final_item),
++                    )
++                    .map_err(FunctionCallError::Fatal)?;
++                    if invocation.session.captured_provider_image_reference_policy()
++                        == codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::QualifiedStandardResponses
++                    {
++                        let supported = crate::image_preparation::inline_data_url_low_detail_supported(
++                            &invocation.turn.config, &invocation.step_context.settings.model_info,
++                        );
++                        let reference_policy = crate::image_preparation::reference_policy_for_model(
++                            invocation.session.captured_provider_image_reference_policy(),
++                            invocation.step_context.settings.model_info.use_responses_lite, supported,
++                        );
++                        crate::image_preparation::validate_inline_image_items(
++                            &final_item, supported, reference_policy,
++                        ).map_err(FunctionCallError::Fatal)?;
++                    }
++                    let outcome = tool.on_tool_result_accepted(&invocation, result.result.as_ref());
++                    result.record_accepted_outcome(outcome);
++                    result.result.mark_accepted();
++                    dispatch_trace.record_completed(
++                        &invocation,
++                        &result.call_id,
++                        &result.payload,
++                        result.result.as_ref(),
+                     );
+-                    crate::image_preparation::validate_inline_image_items(
+-                        &final_item, supported, reference_policy,
+-                    ).map_err(FunctionCallError::Fatal)?;
++                    Ok(result)
++                }
++                Err(err) => {
++                    dispatch_trace.record_failed(&err);
++                    Err(err)
+                 }
+-                let outcome = tool.on_tool_result_accepted(&invocation, result.result.as_ref());
+-                result.record_accepted_outcome(outcome);
+-                dispatch_trace.record_completed(
+-                    &invocation,
+-                    &result.call_id,
+-                    &result.payload,
+-                    result.result.as_ref(),
+-                );
+-                Ok(result)
+-            }
+-            Err(err) => {
+-                dispatch_trace.record_failed(&err);
+-                Err(err)
+             }
++        })();
++        if notify_finish {
++            notify_tool_finish(&invocation, lifecycle_outcome).await;
+         }
++        result
+     }
+ }
+ 
+@@ -893,7 +903,7 @@ async fn notify_tool_finish_if_unclaimed(
+     call_state: Option<&ToolCallState>,
+     outcome: ToolCallOutcome,
+ ) -> bool {
+-    if call_state.is_some_and(|state| state.terminal_outcome_reached.swap(true, Ordering::AcqRel)) {
++    if !claim_tool_finish(call_state) {
+         return false;
+     }
+ 
+@@ -901,6 +911,10 @@ async fn notify_tool_finish_if_unclaimed(
+     true
+ }
+ 
++fn claim_tool_finish(call_state: Option<&ToolCallState>) -> bool {
++    !call_state.is_some_and(|state| state.terminal_outcome_reached.swap(true, Ordering::AcqRel))
++}
++
+ async fn handle_any_tool(
+     tool: &dyn CoreToolRuntime,
+     invocation: ToolInvocation,
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index 6ca3c213..8e0cb91a 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -10,6 +10,10 @@ use crate::ToolPayload;
+ 
+ /// Model-facing output contract returned by executable tool runtimes.
+ pub trait ToolOutput: Send {
++    /// Called only after Core accepts this output following hooks and validation.
++    /// Implementations may consume an owned acceptance receipt; dropped outputs stay unaccepted.
++    fn mark_accepted(&mut self) {}
++
+     /// Returns a deliberately lossy diagnostic representation, before telemetry size limits.
+     /// Implementations may summarize results or omit media and encrypted content. This is not
+     /// the authoritative tool result; an untruncated log does not imply a complete result.
+@@ -104,6 +108,10 @@ where
+         (**self).set_handler_duration_ms(handler_duration_ms);
+     }
+ 
++    fn mark_accepted(&mut self) {
++        (**self).mark_accepted();
++    }
++
+     fn contains_external_context(&self) -> bool {
+         (**self).contains_external_context()
+     }

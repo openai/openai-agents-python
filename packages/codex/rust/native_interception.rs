@@ -8011,15 +8011,16 @@ pub(crate) mod tests {
 
         let mut stopped_output = crate::mcp_result_control::withheld();
         let mut retained_output = crate::mcp_result_control::withheld();
-        let (mcp, stopped_assignment) =
+        let (mcp, stopped_ack, stopped_assignment) =
             crate::mcp_result_control::tests::resolved_edit(&thread, &turn, &mut stopped_output)
                 .await;
-        let (_, retained_assignment) = crate::mcp_result_control::tests::resolved_edit(
-            &thread,
-            &retained,
-            &mut retained_output,
-        )
-        .await;
+        let (_, retained_ack, retained_assignment) =
+            crate::mcp_result_control::tests::resolved_edit(
+                &thread,
+                &retained,
+                &mut retained_output,
+            )
+            .await;
         // Both edits are resolved, but neither native receiver has assigned.
         // Ordinary terminal must preserve a retained cell's result. Accept the
         // other owner's stop before letting either MCP receiver run.
@@ -8030,6 +8031,8 @@ pub(crate) mod tests {
 
         stopped_assignment.await;
         retained_assignment.await;
+        assert!(stopped_ack.await.is_err());
+        assert!(retained_ack.await.is_ok());
         assert_eq!(stopped_output, crate::mcp_result_control::withheld());
         assert_eq!(
             retained_output.content,
