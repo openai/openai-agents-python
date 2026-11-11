@@ -32,6 +32,7 @@ from typing import (
     TypeAlias as TypeAlias,
     TypeVar as TypeVar,
 )
+from uuid import uuid4 as _uuid4
 
 from typing_extensions import (
     NotRequired as NotRequired,
@@ -599,6 +600,11 @@ def _admission_policy() -> dict[str, bool]:
     if not _sensitive_data_logging_enabled:
         policy["include_sensitive_data"] = False
     return policy
+
+
+def generate_group_id() -> str:
+    """Generate an ID for grouping workflow traces."""
+    return f"group_{_uuid4().hex[:24]}"
 
 
 def current_context() -> SpanContext | None:
