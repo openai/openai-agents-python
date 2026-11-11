@@ -340,6 +340,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             or self.timeout_behavior != "raise_exception"
             or self.timeout_error_function is not None
             or self.input_error_function is not None
+            or self.error_function is not None
         ):
             raise TypeError("Callback settings require a callback registered with function_tool")
 
@@ -406,7 +407,12 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             )
         if self._bind is not None:
             if context is None:
-                policies: tuple[str, ...] = ("before", "after", "input_error_function")
+                policies: tuple[str, ...] = (
+                    "before",
+                    "after",
+                    "input_error_function",
+                    "error_function",
+                )
                 if self.callback_timeout is not None and self.timeout_behavior == "error_as_result":
                     policies += ("timeout_error_function",)
                 for name in policies:
@@ -569,6 +575,23 @@ def function_tool(
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
     error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
+) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
+
+
+@overload
+def function_tool(
+    function: Callable[ParametersT, Any],
+    /,
+    *,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
+    finish_turn: bool = False,
+    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+    run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[PolicyContextT] | None = None,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[PolicyContextT],
 ) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
 
 

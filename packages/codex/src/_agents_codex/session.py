@@ -13299,7 +13299,11 @@ class Session(Generic[ContextT, OutputT]):
                                     if body_error is not None and not isinstance(
                                         body_error, asyncio.CancelledError
                                     ):
-                                        state.retain_cleanup_error(body_error)
+                                        state.retain_cleanup_error(
+                                            body_error.original
+                                            if isinstance(body_error, _FunctionBodyFailure)
+                                            else body_error
+                                        )
 
                             await _close_after_error(error, join_body)
                             raise
@@ -13309,7 +13313,11 @@ class Session(Generic[ContextT, OutputT]):
                         if body_error is not None and not isinstance(
                             body_error, asyncio.CancelledError
                         ):
-                            state.retain_cleanup_error(body_error)
+                            state.retain_cleanup_error(
+                                body_error.original
+                                if isinstance(body_error, _FunctionBodyFailure)
+                                else body_error
+                            )
                         return
                     if isinstance(body_error, (SystemExit, KeyboardInterrupt)):
                         raise body_error
@@ -13373,6 +13381,7 @@ class Session(Generic[ContextT, OutputT]):
                             expire_callback(cancel_body=False)
             except _FunctionBodyFailure as failure:
                 if not self._admit_tool(state, request):
+                    state.retain_cleanup_error(failure.original)
                     return
                 assert context is not None and entry.error_function is not None
                 text = await self._call_decision_callback(

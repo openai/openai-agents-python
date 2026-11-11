@@ -227,3 +227,104 @@ async def test_sync_body_keeps_worker_execution_and_awaitable_errors(responses, 
     assert formatted == ["awaitable failed" if returns_awaitable else "sync failed"]
     assert len(responses.requests) == 2
     assert not responses.replies
+
+
+async def test_formatter_only_context_is_required_before_opening(responses):
+    def recover(context: ToolContext[dict[str, str]], error: Exception) -> str:
+        return context.context["label"]
+
+    @function_tool(error_function=recover)
+    def lookup() -> str:
+        raise ValueError("body failed")
+
+    agent = Agent(instructions="Use lookup.", tools=[lookup], provider=provider(responses))
+    with pytest.raises(TypeError, match="error_function requires application context"):
+        async with agent.session() as session:  # type: ignore[call-arg]
+            await session.submit("begin")
+    assert responses.requests == []
+
+
+def test_manual_tool_rejects_body_formatter():
+    from pydantic import BaseModel
+
+    from agents import FunctionTool
+
+    class Arguments(BaseModel):
+        key: str
+
+    with pytest.raises(TypeError, match="Callback settings require a callback"):
+        FunctionTool(
+            name="manual",
+            description="Manual function.",
+            input_type=Arguments,
+            output_type=str,
+            error_function=lambda context, error: "must not run",
+        )
+
+
+@pytest.mark.parametrize("policy", [None, "raise_exception", "error_as_result"])
+async def test_parent_cancellation_retains_original_body_cleanup_error(responses, policy):
+    import asyncio
+
+    from agents import NativeError
+
+    entered = asyncio.Event()
+    cleanup = RuntimeError("body cleanup failed")
+    formatted = []
+
+    def recover(context, error):
+        formatted.append(True)
+        return "must not publish"
+
+    @function_tool(
+        error_function=recover,
+        callback_timeout=None if policy is None else 60,
+        timeout_behavior=policy or "raise_exception",
+    )
+    async def lookup() -> str:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise cleanup
+
+    responses.respond(function_call("lookup", {}, "cleanup-error"))
+    manager = Agent(
+        instructions="Use lookup.", tools=[lookup], provider=provider(responses)
+    ).session()
+    session = await manager.__aenter__()
+    turn = await session.submit("begin")
+    waiter = asyncio.create_task(turn.get_result())
+
+    def contains(error):
+        pending = [error]
+        seen = set()
+        while pending:
+            current = pending.pop()
+            if current is cleanup:
+                return True
+            if current is not None and id(current) not in seen:
+                seen.add(id(current))
+                pending.extend((current.__cause__, current.__context__))
+        return False
+
+    try:
+        await entered.wait()
+        with pytest.raises(
+            NativeError, match="cancellation failed during owned cleanup"
+        ) as stopped:
+            await turn.cancel()
+        assert stopped.value.__cause__ is cleanup
+
+        with pytest.raises(NativeError, match="Turn cleanup failed") as completed:
+            await waiter
+        assert contains(completed.value)
+        assert formatted == []
+        assert len(responses.requests) == 1
+        assert not responses.replies
+    finally:
+        await asyncio.gather(waiter, return_exceptions=True)
+        try:
+            await manager.__aexit__(None, None, None)
+        except NativeError as error:
+            assert contains(error)
