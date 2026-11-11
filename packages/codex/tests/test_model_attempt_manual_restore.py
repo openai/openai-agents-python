@@ -196,11 +196,11 @@ async def capture(
         _manual_ready=ready,
         _executor_policy_digest=executor_digest,
         _checkpoint_guardrail_records=lambda _active: [],
-        _application_tool_outputs=[],
         _reader=SimpleNamespace(done=lambda: False),
         _instructions="",
         _sealing=False,
         _observations=SimpleNamespace(notify=lambda: None),
+        _application_tool_outputs=[],
         _model_api_key="private",
     )
     raw = await implementation.Session._capture_checkpoint(owner, active, None, False)

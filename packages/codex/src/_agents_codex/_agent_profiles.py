@@ -16,7 +16,7 @@ from .mcp import _MCP
 from .native_agents import NativeAgents
 from .realtime_agents import RealtimeHandoff, _handoff_tool
 from .schema import OutputSpec, _prepare_spec
-from .tools import ToolRef
+from .tools import ToolRef, ToolSearch
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,12 @@ def _handoff_name(agent: Agent[Any, Any]) -> str:
 def _check_handoff_tool_names(refs: Iterable[ToolRef], handoffs: Mapping[str, str]) -> None:
     if any(ref.namespace in (None, "functions") and ref.name in handoffs for ref in refs):
         raise ValueError("A native handoff name collides with an ordinary function tool")
+
+
+def _python_tool_slot(tool: object) -> FunctionTool[Any, Any, Any] | None:
+    if isinstance(tool, ToolSearch) and tool._manual is not None:
+        return tool._manual
+    return tool if isinstance(tool, FunctionTool) else None
 
 
 def _capture_agent_graph(
@@ -117,6 +123,7 @@ def _capture_agent_graph(
         callbacks: dict[str, int] = {}
         options: dict[str, RealtimeHandoff] = {}
         callback_tools: list[FunctionTool[Any, Any, Any]] = []
+        python_slots = sum(_python_tool_slot(tool) is not None for tool in declaration.tools)
         for reference in declaration.handoffs:
             if isinstance(reference, Handoff):
                 target = reference.target
@@ -156,7 +163,7 @@ def _capture_agent_graph(
             previous = targets.get(name)
             if previous is not None and isinstance(reference, Handoff):
                 slot = callbacks.get(name)
-                base = sum(isinstance(tool, FunctionTool) for tool in declaration.tools)
+                base = python_slots
                 if (
                     previous == target_id
                     and slot is not None
@@ -173,9 +180,7 @@ def _capture_agent_graph(
             if isinstance(reference, (Handoff, RealtimeHandoff)):
                 if isinstance(reference, RealtimeHandoff):
                     options[name] = reference
-                callbacks[name] = len(
-                    tuple(tool for tool in declaration.tools if isinstance(tool, FunctionTool))
-                ) + len(callback_tools)
+                callbacks[name] = python_slots + len(callback_tools)
                 callback_tools.append(
                     reference.callback
                     if isinstance(reference, Handoff)
