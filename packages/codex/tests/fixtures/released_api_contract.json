@@ -1685,6 +1685,7 @@
           "@dataclass(frozen=True)\nclass _ScriptItem:\n    encoded: str",
           "def event(value: Mapping[str, JsonValue]) -> _ScriptItem:\n    pass",
           "def text(value: str, *, item_id: str | None=None) -> _ScriptItem:\n    pass",
+          "def computer_call(actions: Sequence[Mapping[str, JsonValue]], *, call_id: str, item_id: str | None=None, pending_safety_checks: Sequence[Mapping[str, JsonValue]]=()) -> _ScriptItem:\n    pass",
           "def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str, namespace: str | None=None) -> _ScriptItem:\n    pass",
           "@dataclass(frozen=True)\nclass ScriptedResponse:\n    items: Sequence[_ScriptItem]\n    usage: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)\n    headers: Mapping[str, str] | None = field(default=None, kw_only=True)\n    response_id: str | None = field(default=None, kw_only=True)\n    status: int = field(default=200, kw_only=True)\n    error_body: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)",
           "ScriptResult = Sequence[_ScriptItem] | ScriptedResponse",
@@ -1697,6 +1698,7 @@
           "ScriptedRealtimeAdapter": "agents.testing.ScriptedRealtimeAdapter",
           "ScriptedResponse": "agents.testing.ScriptedResponse",
           "ScriptedResponses": "agents.testing.ScriptedResponses",
+          "computer_call": "agents.testing.computer_call",
           "event": "agents.testing.event",
           "text": "agents.testing.text",
           "tool_call": "agents.testing.tool_call"

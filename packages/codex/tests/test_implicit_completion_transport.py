@@ -83,11 +83,12 @@ async def test_private_completion_preserves_explicit_transport_choices(
     assert config["model_providers.native_agent"]["supports_websockets"] is expected
     assert kwargs["_private_http"] is fresh
     assert kwargs["_share_model_http"] is True
+    assert not kwargs.get("_process_private_http", False)
     assert config["model_providers.native_agent"]["base_url"] == "https://api.openai.com/v1"
     assert not openings
 
 
-@pytest.mark.parametrize("profile", ["session", "hook", "state", "events", "context"])
+@pytest.mark.parametrize("profile", ["session", "hook", "batch", "state", "events", "context"])
 async def test_observable_profiles_keep_implicit_websocket_permission(
     openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]], profile: str
 ) -> None:
@@ -95,6 +96,8 @@ async def test_observable_profiles_keep_implicit_websocket_permission(
     options: dict[str, Any] = {}
     if profile == "hook":
         kwargs["before_complete"] = lambda *args: None
+    elif profile == "batch":
+        kwargs["tool_batch_completion"] = lambda *args: None
     elif profile == "state":
         options["return_state"] = True
     elif profile == "events":
@@ -110,7 +113,9 @@ async def test_observable_profiles_keep_implicit_websocket_permission(
             else:
                 await agent.run("observable input", **options)
     route, config, kwargs, _ = openings.pop()
-    assert route == ("create_engine" if profile in ("session", "hook") else "_open_conversation")
+    assert route == (
+        "create_engine" if profile in ("session", "hook", "batch") else "_open_conversation"
+    )
     assert config["model_providers.native_agent"]["supports_websockets"] is True
     assert not kwargs.get("_private_http", False)
     assert not openings
@@ -298,7 +303,7 @@ async def test_large_tool_input_keeps_the_ordinary_collector(
     assert not openings
 
 
-async def test_omitted_provider_keeps_owned_lifetime_and_original_transport(
+async def test_omitted_provider_keeps_owned_lifetime_with_completed_startup(
     openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = importlib.import_module("_agents_codex.session")
@@ -313,9 +318,10 @@ async def test_omitted_provider_keeps_owned_lifetime_and_original_transport(
     with pytest.raises(_OpeningCaptured):
         await Agent(instructions="Answer briefly.").run("owned input")
     route, config, kwargs, _ = openings.pop()
-    assert route == "create_engine"
+    assert route == "_prepare_run_conversation"
     assert config["model_providers.native_agent"]["supports_websockets"] is True
-    assert not kwargs.get("_private_http", False)
+    assert kwargs["_private_http"] is True
+    assert kwargs["_process_private_http"] is True
     assert len(providers) == 1 and providers[0]._closed
     assert not openings
 
@@ -496,4 +502,78 @@ async def test_sign_in_with_chatgpt_keeps_external_bearer_and_original_http(
     assert config["features.unbounded_connection_retries"] is False
     assert kwargs["api_key"] == token
     assert not kwargs.get("_private_http", False)
+    assert not openings
+
+
+@pytest.mark.parametrize(
+    "profile", ["small", "large", "session", "tool", "hook", "state", "context", "events"]
+)
+async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
+    openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    module = importlib.import_module("_agents_codex.session")
+    native = importlib.import_module("agents._native")
+    providers: list[NativeProvider] = []
+    starts: list[dict[str, Any]] = []
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-implicit-process-policy")
+
+    class OwnedProvider(NativeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            providers.append(self)
+
+    class CapturedEngine:
+        async def _start_initial_replaceable_thread(
+            self, options_json: str, specs_json: str, **kwargs: Any
+        ) -> None:
+            starts.append(kwargs)
+            raise _OpeningCaptured
+
+    async def create_engine(config_json: str, *args: Any, **kwargs: Any) -> CapturedEngine:
+        assert kwargs["api_key"] == "synthetic-implicit-process-policy"
+        assert kwargs["_share_model_http"] is False
+        config = json.loads(config_json)
+        assert config["model_providers.native_agent"]["supports_websockets"] is True
+        return CapturedEngine()
+
+    @function_tool
+    def optional_tool() -> str:
+        """Return synthetic output."""
+        return "unused"
+
+    monkeypatch.setattr(module, "NativeProvider", OwnedProvider)
+    monkeypatch.setattr(native, "create_engine", create_engine)
+    agent_options: dict[str, Any] = {}
+    run_options: dict[str, Any] = {}
+    if profile == "tool":
+        agent_options["tools"] = [optional_tool]
+    elif profile == "hook":
+        agent_options["before_complete"] = lambda *args: None
+    elif profile == "state":
+        run_options["return_state"] = True
+    elif profile == "context":
+        run_options["context"] = object()
+    elif profile == "events":
+        run_options["observation_retention"] = "all"
+    agent = Agent(instructions="Answer briefly.", **agent_options)
+    assert agent.provider is None
+    with pytest.raises(_OpeningCaptured):
+        if profile == "session":
+            async with agent.session():
+                raise AssertionError("Native startup was not captured")
+        else:
+            await agent.run("x" * (512 * 1024 if profile == "large" else 8), **run_options)
+    if profile in ("small", "large"):
+        route, config, kwargs, runtime = openings.pop()
+        assert route == "_prepare_run_conversation"
+        assert kwargs["api_key"] == "synthetic-implicit-process-policy"
+        assert kwargs["_private_http"] is True and kwargs["_process_private_http"] is True
+        assert "codex_home" not in runtime and "cwd" not in runtime
+        assert starts == []
+    else:
+        assert starts == [{"initial_messages_json": None}]
+    assert len(providers) == 1 and providers[0].api_key is None and providers[0]._closed
+    assert agent.provider is None
     assert not openings

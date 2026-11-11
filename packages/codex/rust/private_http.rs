@@ -1,5 +1,5 @@
 //! Private HTTP keeps live connections but reloads default trust for new handshakes.
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -113,6 +113,13 @@ fn config(verifier: Arc<CurrentDefaultRoots>) -> ClientConfig {
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
     config
+}
+
+// Process-owned transport; fresh request headers and the existing
+// per-Engine/conversation retirement custody.
+pub(crate) fn process_pool() -> codex_http_client::SdkModelHttpPool {
+    static POOL: OnceLock<codex_http_client::SdkModelHttpPool> = OnceLock::new();
+    POOL.get_or_init(pool).clone()
 }
 
 pub(crate) fn pool() -> codex_http_client::SdkModelHttpPool {

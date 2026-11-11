@@ -106,7 +106,7 @@ fn actual_thread_join_survives_engine_slot_poison_then_retry_releases_lease() {
                 "loader":{"ignore_user_config":true,"ignore_project_config":true}}).to_string();
             let scope = crate::conversation_opening(config, runtime,
                 "{\"_application_instructions\":\"\",\"tool_policy\":{\"allowed_tools\":[]}}", "[]", "{}",
-                "test-key".into(), lease.clone(), false, false, true).unwrap().await.unwrap();
+                "test-key".into(), lease.clone(), false, false, true, false).unwrap().await.unwrap();
             assert!(scope.2.is_none(), "test must use the shared no-home profile");
             assert!(scope.1.current().unwrap().thread.thread_extension_data()
                 .get::<codex_core::PrivateDisposableRun>().is_some());
