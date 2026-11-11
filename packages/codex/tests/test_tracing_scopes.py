@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import re
 import weakref
 from collections.abc import Iterator, Mapping
 from dataclasses import FrozenInstanceError
@@ -22,6 +23,10 @@ import pytest
 from _agents_codex import telemetry as runtime_telemetry
 from agents import telemetry
 from tests._asyncio import timeout
+
+
+def test_native_telemetry_generates_group_id():
+    assert re.fullmatch(r"group_[0-9a-f]{24}", telemetry.generate_group_id())
 
 
 class NativeTracing:
