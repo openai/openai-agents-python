@@ -34,6 +34,53 @@ def test_classic_capabilities_manifest_contains_readable_image(tmp_path):
     assert image.src.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
+def test_tax_prep_uses_selected_local_skills_with_explicit_source_grant(tmp_path):
+    from agents.classic.sandbox.capabilities import Skills
+    from agents.classic.sandbox.entries import LocalDir
+    from agents.classic.sandbox.errors import LocalDirReadError
+    from examples.classic.sandbox.tax_prep import _build_agent
+
+    skills_dir = tmp_path / "skills"
+    skill_file = skills_dir / "federal-tax-prep" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("# Synthetic tax preparation skill\n")
+    agent = _build_agent(model="synthetic-model", skills_dir=skills_dir)
+    skills = next(capability for capability in agent.capabilities if isinstance(capability, Skills))
+    manifest = skills.process_manifest(agent.default_manifest)
+    source = manifest.entries[Path(skills.skills_path)]
+    assert isinstance(source, LocalDir)
+    assert source.src == skills_dir
+    assert len(manifest.extra_path_grants) == 1
+    grant = manifest.extra_path_grants[0]
+    assert grant.path == str(skills_dir)
+    assert grant.read_only
+    assert grant.host_path is None
+    base_dir = tmp_path / "unrelated"
+    with pytest.raises(LocalDirReadError):
+        source._resolve_local_dir_src_root(base_dir)
+    assert (
+        source._resolve_local_dir_src_root(base_dir, source_grants=manifest.extra_path_grants)
+        == skills_dir
+    )
+
+
+async def test_tax_prep_rejects_missing_skill_before_docker_work(tmp_path, monkeypatch):
+    from examples.classic.sandbox import tax_prep
+
+    def unexpected_docker():
+        pytest.fail("Docker setup ran before skills validation")
+
+    monkeypatch.setattr(tax_prep, "_require_docker_dependency", unexpected_docker)
+    with pytest.raises(ValueError, match="federal-tax-prep/SKILL.md"):
+        await tax_prep.main(
+            model="synthetic-model",
+            image="synthetic-image",
+            question="synthetic question",
+            output_dir=tmp_path / "output",
+            skills_dir=tmp_path,
+        )
+
+
 def runner_dry_run(tmp_path, relative_path, *, include_external=False):
     root = Path(__file__).resolve().parents[3]
     environment = {

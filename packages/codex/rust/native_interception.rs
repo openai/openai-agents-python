@@ -686,6 +686,7 @@ pub struct Control {
 // One bounded callback owner per explicit root. Native ThreadSpawn ancestry
 // may share it, but never the parent's turn or thread-stop lifetime.
 struct Channel {
+    raw_usage: Mutex<Option<codex_core::SdkRawUsageLink>>,
     observe_raw_provider_events: AtomicBool,
     state: Mutex<State>,
     // At most MAX_PENDING live requests. Cancellation messages must not be
@@ -794,6 +795,7 @@ impl Control {
             strict_executor_writes: OnceLock::new(),
             collaboration_namespace: std::sync::OnceLock::new(),
             channel: Arc::new(Channel {
+                raw_usage: Mutex::default(),
                 observe_raw_provider_events: AtomicBool::new(false),
                 state: Mutex::new(State {
                     timeout: None,
@@ -809,6 +811,23 @@ impl Control {
                 bytes: Arc::new(Semaphore::new(bytes)),
             }),
         }
+    }
+
+    pub(crate) fn raw_usage_active(&self) -> bool {
+        self.channel
+            .raw_usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(|link| link.is_active())
+    }
+
+    pub(crate) fn set_raw_usage_link(&self, link: codex_core::SdkRawUsageLink) {
+        *self
+            .channel
+            .raw_usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(link);
     }
 
     pub(crate) fn enable_raw_provider_events(&self) {
@@ -2400,6 +2419,17 @@ impl TurnLifecycleContributor for Boundary {
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if let Some(control) = input.thread_store.get::<Control>() {
+                if control.native_ancestor.is_some()
+                    && !control.stopped.is_cancelled()
+                    && let Some(capture) = control
+                        .channel
+                        .raw_usage
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_ref()
+                {
+                    capture.attach(input.thread_store);
+                }
                 if !control.stopped.is_cancelled()
                     && control
                         .channel

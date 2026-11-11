@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ...run_config import DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
 from ..entries import BaseEntry, Dir, Mount, resolve_workspace_path
-from ..entries.artifacts import _validate_git_repo_entry_hosts
+from ..entries.artifacts import _validate_git_repo_entries
 from ..errors import _redact_git_host_error_data
 from ..manifest import Manifest
 from ..materialization import MaterializationResult, MaterializedFile, gather_in_order
@@ -20,6 +20,7 @@ class ManifestApplier:
         mkdir: Callable[[Path], Awaitable[None]],
         exec_checked_nonzero: Callable[..., Awaitable[ExecResult]],
         apply_entry: Callable[[BaseEntry, Path, Path], Awaitable[list[MaterializedFile]]],
+        supports_git_repo: bool = True,
         max_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY,
     ) -> None:
         if max_entry_concurrency is not None and max_entry_concurrency < 1:
@@ -27,6 +28,7 @@ class ManifestApplier:
         self._mkdir = mkdir
         self._exec_checked_nonzero = exec_checked_nonzero
         self._apply_entry = apply_entry
+        self._supports_git_repo = supports_git_repo
         self._max_entry_concurrency = max_entry_concurrency
 
     @_redact_git_host_error_data
@@ -38,7 +40,7 @@ class ManifestApplier:
         provision_accounts: bool = True,
         base_dir: Path | None = None,
     ) -> MaterializationResult:
-        manifest._validate_git_repo_hosts()
+        manifest._validate_git_repo_entries(supports_git_repo=self._supports_git_repo)
         base_dir = posix_path_as_path(coerce_posix_path("/")) if base_dir is None else base_dir
         root = posix_path_as_path(coerce_posix_path(manifest.root))
 
@@ -143,7 +145,9 @@ class ManifestApplier:
         *,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        _validate_git_repo_entry_hosts(artifact for _, artifact in entries)
+        _validate_git_repo_entries(
+            (artifact for _, artifact in entries), supports_git_repo=self._supports_git_repo
+        )
         files: list[MaterializedFile] = []
         parallel_batch: list[tuple[Path, BaseEntry]] = []
 
