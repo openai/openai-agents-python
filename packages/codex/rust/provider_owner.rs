@@ -8,6 +8,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{async_bridge, py_error};
 mod runtime;
+pub(crate) use runtime::{
+    check_process_runtime_pid, close_process_runtime, close_process_runtime_at_exit,
+};
 
 type Closing = Shared<BoxFuture<'static, std::result::Result<(), String>>>;
 type Home = Arc<Mutex<Option<tempfile::TempDir>>>;
@@ -24,6 +27,7 @@ struct Record {
     engines: Vec<Arc<Mutex<crate::EngineOwner>>>,
     threads: Vec<Arc<Mutex<crate::NativeThreadOwner>>>,
     homes: Vec<Home>,
+    process_runtime: Option<runtime::ProcessCheckout>,
 }
 #[derive(Default)]
 struct State {
@@ -132,6 +136,9 @@ impl Lease {
         record.engines.clear();
         record.threads.clear();
         record.homes.clear();
+        if let Some(checkout) = record.process_runtime.take() {
+            checkout.release();
+        }
         state
             .leases
             .retain(|lease| !std::ptr::eq(lease.as_ref(), self));
@@ -334,6 +341,7 @@ impl NativeProviderOwner {
                 engines: vec![],
                 threads: vec![],
                 homes: vec![],
+                process_runtime: None,
             }),
             cleanup: AsyncMutex::new(()),
         });

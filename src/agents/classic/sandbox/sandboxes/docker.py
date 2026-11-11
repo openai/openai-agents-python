@@ -358,6 +358,10 @@ class DockerSandboxSession(BaseSandboxSession):
         async with self._removal_lock:
             await super().shutdown()
 
+    @property
+    def _supports_git_repo(self) -> bool:
+        return False
+
     def supports_docker_volume_mounts(self) -> bool:
         """Docker attaches volume-driver mounts when creating the container."""
 
