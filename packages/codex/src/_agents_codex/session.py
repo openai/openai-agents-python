@@ -3446,6 +3446,28 @@ def _supports_atomic_first_turn(
     )
 
 
+def _capture_opening_hosted_tools(
+    available: Sequence[Tool[Any]],
+    profiles: Sequence[_AgentProfile],
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+    codex_login: CodexLogin | None,
+) -> list[dict[str, Any]]:
+    from .hosted_mcp import HostedMCP
+
+    profile_mcp = (
+        tool
+        for profile in profiles
+        for tool in profile.declaration.tools
+        if isinstance(tool, HostedMCP)
+    )
+    hosted_tools = _capture_hosted_tools([*available, *profile_mcp])
+    if codex_login is not None and (
+        hosted_tools or any(isinstance(tool, _ClientToolSearch) for tool in tools)
+    ):
+        raise ValueError("Hosted tools require an API-key Responses provider, not Codex login")
+    return hosted_tools
+
+
 def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
     if isinstance(error, UnicodeEncodeError) and error.object is api_key:
         # Keep only the character or range shown by the native conversion error.
@@ -3671,25 +3693,7 @@ class Session(Generic[ContextT, OutputT]):
             )
             if goals and storage is None:
                 raise ValueError("NativeGoals requires an explicit LocalStorage profile")
-            from .hosted_mcp import HostedMCP
-
-            hosted_tools = _capture_hosted_tools(
-                [
-                    *available,
-                    *(
-                        tool
-                        for profile in profiles
-                        for tool in profile.declaration.tools
-                        if isinstance(tool, HostedMCP)
-                    ),
-                ]
-            )
-            if codex_login is not None and (
-                hosted_tools or any(isinstance(tool, _ClientToolSearch) for tool in tools)
-            ):
-                raise ValueError(
-                    "Hosted tools require an API-key Responses provider, not Codex login"
-                )
+            hosted_tools = _capture_opening_hosted_tools(available, profiles, tools, codex_login)
             web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
             # Capture the controls before opening can await. Later selections only select the grant.
             web_search_config = _capture_web_search_config(web_search)
