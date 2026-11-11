@@ -3231,6 +3231,8 @@ mod rebuild_consumer_tests {
                                 ..Default::default()
                             },
                         ),
+                        asynchronous: None,
+                        status: None,
                     };
                     let earlier_output = ResponseItem::FunctionCallOutput {
                         id: None,
@@ -3260,6 +3262,8 @@ mod rebuild_consumer_tests {
                                 ..Default::default()
                             },
                         ),
+                        asynchronous: None,
+                        status: None,
                     };
                     // Use Core's public history entry point, which records,
                     // checkpoints and flushes through the real local writer.

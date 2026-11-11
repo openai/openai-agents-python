@@ -641,9 +641,17 @@
       "sha256": "69a74476497a8189f717036a231c5f48a3e391dc06191693dc7507851c81e7dc"
     },
     {
+      "path": "sdk-function-call-wire.patch",
+      "sha256": "921c9d5823942c2b5ca69221231b9b8dc7ed7c2ea032eca11afa2de3111e1e86"
+    },
+    {
+      "path": "sdk-native-model-response-stream.patch",
+      "sha256": "043d40e59af9ce390c8cb8e3eedd9d5104b413a14e943cfa0c09241b8a57f533"
+    },
+    {
       "path": "sdk-raw-provider-events.patch",
       "sha256": "192f9f23ac35e03a1f6b91a5ac14a13b0570397c9846f0e238c08c750460cd9c"
     }
   ],
-  "result_tree": "62614788fb70ba4ad53f612195906889929a634a"
+  "result_tree": "d85c590d40268fc706d6e68078d64e41b24a465f"
 }
