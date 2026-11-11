@@ -255,7 +255,8 @@ class SQLiteSessionStore:
             finally:
                 connection.close()
 
-        return await _join(asyncio.create_task(asyncio.to_thread(read)))
+        items: list[dict[str, Any]] = await _join(asyncio.create_task(asyncio.to_thread(read)))
+        return items
 
     def _check_database(self, *, create: bool = False) -> None:
         if sys.platform == "win32":

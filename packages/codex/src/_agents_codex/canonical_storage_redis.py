@@ -204,7 +204,8 @@ class RedisSessionStore:
                 check_legacy_history_size(count, size, max_items, max_bytes)
                 return [decode_legacy_item(row) for row in rows]
 
-        return await _join(asyncio.create_task(asyncio.to_thread(read)))
+        items: list[dict[str, Any]] = await _join(asyncio.create_task(asyncio.to_thread(read)))
+        return items
 
     def _keys(self, session_id: str) -> tuple[str, str]:
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
