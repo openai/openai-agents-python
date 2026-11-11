@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "7685c18338971110941e638a4e1d9fd4dba25376",
+  "baseline_commit": "c16090bfdd1d40485d84f3392f0ba63a57a9216f",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -126,20 +126,22 @@
           "@runtime_checkable\nclass SessionStore(Protocol):\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
           "class SessionStoreCleanup:\n\n    def __init__(self, owner: Any) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
           "@dataclass(frozen=True)\nclass CustomStorage:\n    backend: SessionStore\n\n    async def reconcile(self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput) -> None:\n        pass",
-          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
-          "class SQLAlchemySessionStore(SQLiteSessionStore):\n\n    def __init__(self, engine: Any) -> None:\n        pass"
+          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    @staticmethod\n    async def read_legacy_history(path: Path, session_id: str, *, messages_table: str='agent_messages', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
+          "class SQLAlchemySessionStore(SQLiteSessionStore):\n\n    def __init__(self, engine: Any) -> None:\n        pass",
+          "async def read_dapr_legacy_history(dapr_client: Any, session_id: str, *, state_store_name: str, consistency: Literal['eventual', 'strong']='eventual', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n    pass"
         ],
         "exports": {
           "CustomStorage": "agents.canonical_storage.CustomStorage",
           "SQLAlchemySessionStore": "agents.canonical_storage.SQLAlchemySessionStore",
           "SQLiteSessionStore": "agents.canonical_storage.SQLiteSessionStore",
           "SessionStore": "agents.canonical_storage.SessionStore",
-          "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup"
+          "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup",
+          "read_dapr_legacy_history": "agents.canonical_storage.read_dapr_legacy_history"
         },
         "imports": [
           "from dataclasses import dataclass as dataclass",
           "from pathlib import Path as Path",
-          "from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable",
+          "from typing import Any as Any, Literal, Protocol as Protocol, runtime_checkable as runtime_checkable",
           "from .canonical_storage_dapr import DaprSessionStore as DaprSessionStore",
           "from .canonical_storage_encrypt import EncryptedSessionStore as EncryptedSessionStore",
           "from .canonical_storage_mongodb import MongoDBSessionStore as MongoDBSessionStore",
@@ -2115,10 +2117,12 @@
       },
       "_agents_codex.canonical_storage_encrypt": {
         "declarations": [
-          "class EncryptedSessionStore:\n\n    def __init__(self, backend: SessionStore, *, encryption_key: str) -> None:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+          "class EncryptedSessionStore:\n\n    def __init__(self, backend: SessionStore, *, encryption_key: str) -> None:\n        pass\n\n    @staticmethod\n    def read_legacy_history(items: Sequence[Mapping[str, Any]], session_id: str, *, encryption_key: str, ttl: int=600, limit: int | None=None, max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
+          "from collections.abc import Mapping, Sequence",
+          "from typing import Any",
           "from .canonical_storage import SessionStore"
         ],
         "references": {
@@ -2127,7 +2131,7 @@
       },
       "_agents_codex.canonical_storage_mongodb": {
         "declarations": [
-          "class MongoDBSessionStore:\n\n    def __init__(self, client: Any, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_uri(cls, uri: str, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> MongoDBSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
+          "class MongoDBSessionStore:\n\n    def __init__(self, client: Any, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_uri(cls, uri: str, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> MongoDBSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    async def read_legacy_history(self, session_id: str, *, sessions_collection: str='agent_sessions', messages_collection: str='agent_messages', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -2137,7 +2141,7 @@
       },
       "_agents_codex.canonical_storage_redis": {
         "declarations": [
-          "class RedisSessionStore:\n\n    def __init__(self, client: Any, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_url(cls, url: str, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> RedisSessionStore:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+          "class RedisSessionStore:\n\n    def __init__(self, client: Any, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_url(cls, url: str, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> RedisSessionStore:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    async def read_legacy_history(self, session_id: str, *, key_prefix: str='agents:session', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
