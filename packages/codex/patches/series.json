@@ -625,6 +625,10 @@
       "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     },
     {
+      "path": "0160-realtime-connection-options.patch",
+      "sha256": "04481c9ccc44ae1667299a20757f75ff1c12ca047f46a8072a9d2b1ee6d7c8e3"
+    },
+    {
       "path": "0160-sdk-realtime-event-context.patch",
       "sha256": "1c8909ef7718231b9b1fc54154617565751b6b7f67d2e3bd0211a8f1c7ced112"
     },
@@ -649,5 +653,5 @@
       "sha256": "043d40e59af9ce390c8cb8e3eedd9d5104b413a14e943cfa0c09241b8a57f533"
     }
   ],
-  "result_tree": "80425f722e374126c0b82a91c6d23dd65460bcaa"
+  "result_tree": "b46957a668f028e768ebfc212c9c9d64d5564ff8"
 }

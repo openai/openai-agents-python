@@ -887,6 +887,41 @@ jobs:
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
+      - name: Prepare the macOS sandbox account
+        if: steps.changes.outputs.run == 'true' && runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          # The managed shell clears its bootstrap port before running commands.
+          # Give libc's local lookup the existing runner account.
+          record="$(python3 - <<'PY'
+          import os
+          import pwd
+          from pathlib import Path
+
+          account = pwd.getpwuid(os.getuid())
+          if account.pw_uid == 0:
+              raise SystemExit("Expected a non-root runner account")
+          uid, gid = str(account.pw_uid), str(account.pw_gid)
+          identity = (account.pw_name, uid, gid, account.pw_dir, account.pw_shell)
+          fields = (account.pw_name, "*", uid, gid, account.pw_gecos, account.pw_dir, account.pw_shell)
+          if any(":" in value or "\r" in value or "\n" in value for value in fields):
+              raise SystemExit("Invalid runner account field in passwd record")
+          for row in Path("/etc/passwd").read_text().splitlines():
+              columns = row.split(":")
+              if len(columns) != 7:
+                  continue
+              name, _, local_uid, local_gid, _, home, shell = columns
+              if name != account.pw_name and local_uid != uid:
+                  continue
+              if (name, local_uid, local_gid, home, shell) != identity:
+                  raise SystemExit("Runner account conflicts with an existing passwd record")
+              raise SystemExit(0)
+          print(":".join(fields))
+          PY
+          )"
+          if [[ -n "$record" ]]; then
+            printf '\n%s\n' "$record" | sudo -n /usr/bin/tee -a /etc/passwd >/dev/null
+          fi
       - name: Run native SDK tests on macOS
         if: steps.changes.outputs.run == 'true'
         timeout-minutes: 30
