@@ -42,6 +42,7 @@ from tests.native_fixtures import (
 )
 from tests.test_native_agent_observation import collect, provider
 from tests.test_native_manual_tools import LookupArgs
+from tests.test_native_registered_compaction import COMPACTION_MARKER, set_compaction_thresholds
 
 
 async def _report_usage(event: dict[str, Any]) -> None:
@@ -107,6 +108,42 @@ async def test_native_original_provider_usage_stays_out_of_history_and_checkpoin
         )
     else:
         assert result.raw_usage is None
+
+
+async def test_native_original_provider_usage_includes_automatic_compaction(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_compaction_thresholds(monkeypatch)
+
+    @function_tool
+    def lookup() -> str:
+        """Look up the record."""
+        return "found"
+
+    async def report(event: dict[str, Any]) -> None:
+        await _report_usage(event)
+        if event["type"] == "response.completed":
+            response = event["response"]
+            usage = response["usage"]
+            usage["provider_sequence"] = response["id"]
+            if response["id"] == "resp_1":
+                usage.update(input_tokens=260_000, output_tokens=1_000, total_tokens=261_000)
+
+    responses.before_event = report
+    responses.respond(function_call("lookup", {}, "before-compaction"))
+    responses.respond(assistant_output("The lookup found the record."))
+    responses.respond(assistant_output("done"))
+    agent = Agent(instructions="Look up the record.", tools=[lookup], provider=provider(responses))
+    async with timeout(30):
+        result = await agent.run("Find it.", return_raw_usage=True)
+
+    assert result.final_output == "done"
+    assert len(responses.requests) == 3
+    assert COMPACTION_MARKER in json.dumps(responses.requests[1])
+    assert result.raw_usage is not None
+    assert [
+        (record.response_id, record.usage["provider_sequence"]) for record in result.raw_usage
+    ] == [("resp_1", "resp_1"), ("resp_2", "resp_2"), ("resp_3", "resp_3")]
 
 
 @pytest.mark.parametrize("delegated", [False, True])

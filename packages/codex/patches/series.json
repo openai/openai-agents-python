@@ -638,8 +638,8 @@
     },
     {
       "path": "sdk-raw-provider-usage.patch",
-      "sha256": "3f881ff85b4cdc4c07b1192ee6cfd25b536e6de37d65088b87f616858c3f0372"
+      "sha256": "7d7e468d9d13730fedf955647ac79e9fa615aea4bcbf98f15c5e32ed1bca9090"
     }
   ],
-  "result_tree": "dcb65bbefbc5a86ba05f15fb4d9013fc2774ab27"
+  "result_tree": "69ea92bf0523a62a13c61efde99e1e2d51472a70"
 }

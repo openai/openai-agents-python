@@ -3376,7 +3376,36 @@ impl NativeThread {
     fn _start_raw_usage(&self) -> PyResult<()> {
         let inner = self.current()?;
         let _operation = inner.engine.operation(false).map_err(py_error)?;
-        inner.thread.sdk_start_raw_usage();
+        let link = inner.thread.sdk_start_raw_usage();
+        if let Some(control) = inner
+            .thread
+            .thread_extension_data()
+            .get::<crate::native_interception::Control>()
+        {
+            control.set_raw_usage_link(link);
+        }
+        Ok(())
+    }
+
+    fn _attach_raw_usage(&self, source: &NativeThread) -> PyResult<()> {
+        let inner = self.current()?;
+        let source = source.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        let _source_operation = source.engine.operation(false).map_err(py_error)?;
+        if Arc::ptr_eq(&inner.thread, &source.thread) {
+            return Err(py_error(
+                "Cannot attach an invocation's usage capture to its own thread",
+            ));
+        }
+        let link = source
+            .thread
+            .sdk_raw_usage_link()
+            .ok_or_else(|| py_error("Provider usage capture was not started"))?;
+        let store = inner.thread.thread_extension_data();
+        link.attach(store);
+        if let Some(control) = store.get::<crate::native_interception::Control>() {
+            control.set_raw_usage_link(link);
+        }
         Ok(())
     }
 

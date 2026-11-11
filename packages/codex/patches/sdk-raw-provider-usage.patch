@@ -1,5 +1,5 @@
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index a8232d2a..860f2ce1 100644
+index a8232d2..860f2ce 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
 @@ -78,10 +78,25 @@ pub struct MemorySummarizeOutput {
@@ -30,7 +30,7 @@ index a8232d2a..860f2ce1 100644
          /// Existing server response ID, when supplied by the stream.
          response_id: Option<String>,
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
-index acf03a3a..e5e9dcaa 100644
+index acf03a3..e5e9dca 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 @@ -98,7 +98,7 @@ async fn complete_received_facts_precede_late_refusal_without_earlier_tool_effec
@@ -43,7 +43,7 @@ index acf03a3a..e5e9dcaa 100644
      assert!(
          matches!(&events[2], Ok(ResponseEvent::ResponseFact(received)) if matches!(&received.fact,
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 535b9366..e2c6e484 100644
+index 535b936..e2c6e48 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -1177,6 +1177,7 @@ mod tests {
@@ -55,7 +55,7 @@ index 535b9366..e2c6e484 100644
          assert_eq!(
              observation.status,
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index 625475fa..9cdd54de 100644
+index 625475f..9cdd54d 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
 @@ -34,6 +34,7 @@ pub use crate::auth::auth_header_telemetry;
@@ -67,7 +67,7 @@ index 625475fa..9cdd54de 100644
  pub use crate::common::OpenAiVerbosity;
  pub use crate::common::PromptCacheOptions;
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
-index bdba7398..52973e8e 100644
+index bdba739..52973e8 100644
 --- a/codex-rs/codex-api/src/sse/responses.rs
 +++ b/codex-rs/codex-api/src/sse/responses.rs
 @@ -265,10 +265,8 @@ impl ResponsesStreamEvent {
@@ -181,7 +181,7 @@ index bdba7398..52973e8e 100644
              observation.status,
              codex_protocol::protocol::ResponseObservationStatus::Failed
 diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
-index dd81df05..b45faa49 100644
+index dd81df0..b45faa4 100644
 --- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
 +++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
 @@ -49,6 +49,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
@@ -193,7 +193,7 @@ index dd81df05..b45faa49 100644
                      assert_eq!(
                          observation.status,
 diff --git a/codex-rs/codex-api/tests/sse_end_to_end.rs b/codex-rs/codex-api/tests/sse_end_to_end.rs
-index aba43ce9..11b6cf91 100644
+index aba43ce..11b6cf9 100644
 --- a/codex-rs/codex-api/tests/sse_end_to_end.rs
 +++ b/codex-rs/codex-api/tests/sse_end_to_end.rs
 @@ -166,6 +166,7 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()>
@@ -205,7 +205,7 @@ index aba43ce9..11b6cf91 100644
              assert_eq!(
                  observation.status,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 832d20f7..c6f74d3a 100644
+index 832d20f..c6f74d3 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -3012,12 +3012,14 @@ where
@@ -225,7 +225,7 @@ index 832d20f7..c6f74d3a 100644
                              && observation.status == codex_protocol::protocol::ResponseObservationStatus::Incomplete
                              && observation.incomplete_reason == Some(codex_protocol::protocol::ResponseIncompleteReason::MaxOutputTokens);
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 2cac85dd..c903f58b 100644
+index 2cac85d..c903f58 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -2832,18 +2832,19 @@ async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Resu
@@ -254,20 +254,29 @@ index 2cac85dd..c903f58b 100644
          }
          let api_stream = futures::stream::iter([
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index ad7fb7e1..c4de2eb3 100644
+index ad7fb7e..80ca010 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -328,6 +328,22 @@ impl CodexThread {
+@@ -328,6 +328,31 @@ impl CodexThread {
              .is_elicitation_pending(server, token)
      }
  
 +    /// Starts ephemeral provider usage capture for one owned SDK run.
-+    pub fn sdk_start_raw_usage(&self) {
-+        self.thread_extension_data()
-+            .insert(crate::session::sdk_raw_usage::SdkRawUsage::default());
++    pub fn sdk_start_raw_usage(&self) -> crate::SdkRawUsageLink {
++        let capture = crate::session::sdk_raw_usage::SdkRawUsage::default();
++        let child_link = capture.child_link();
++        self.thread_extension_data().insert(capture);
++        child_link
 +    }
 +
-+    /// Takes original usage from accepted sampling responses in the completed turn.
++    /// Links a trusted auxiliary thread to this invocation's capture.
++    pub fn sdk_raw_usage_link(&self) -> Option<crate::SdkRawUsageLink> {
++        self.thread_extension_data()
++            .get::<crate::session::sdk_raw_usage::SdkRawUsage>()
++            .map(|capture| capture.child_link())
++    }
++
++    /// Takes original usage from accepted responses in the completed invocation.
 +    pub fn sdk_take_raw_usage(&self, turn_id: &str) -> CodexResult<String> {
 +        self.thread_extension_data()
 +            .remove::<crate::session::sdk_raw_usage::SdkRawUsage>()
@@ -281,37 +290,161 @@ index ad7fb7e1..c4de2eb3 100644
      pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
          &self.session.services.thread_extension_data
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index d43452c1..17ed0c52 100644
+index d43452c..20ac764 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -999,7 +999,8 @@ async fn drain_to_completed(
+@@ -17,6 +17,8 @@ use crate::hook_runtime::run_pre_compact_hooks;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CompactionTurnMetadata;
+ use crate::session::RequestEffortUsage;
++use crate::session::sdk_raw_usage::RawUsage;
++use crate::session::sdk_raw_usage::SdkRawUsage;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn::get_last_assistant_message_from_turn;
+@@ -543,6 +545,7 @@ async fn run_compact_task_inner_impl(
+     if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
+         compaction_response.output.clear();
+     }
++    let raw_usage = compaction_response.raw_usage.take();
+     publish_compaction_summary(
+         &sess,
+         &source_step_context,
+@@ -553,6 +556,11 @@ async fn run_compact_task_inner_impl(
+         Some((compaction_response, cancellation_token)),
+     )
+     .await?;
++    if let Some(record) = raw_usage
++        && let Some(capture) = sess.services.thread_extension_data.get::<SdkRawUsage>()
++    {
++        capture.record_for_turn(&turn_context, record);
++    }
+ 
+     sess.emit_turn_item_completed(&turn_context, compaction_item)
+         .await;
+@@ -905,6 +913,7 @@ fn build_compacted_history_with_limit(
+ 
+ struct CompactionResponse {
+     response_id: String,
++    raw_usage: Option<RawUsage>,
+     output: Vec<ResponseItem>,
+     interrupted: bool,
+ }
+@@ -962,6 +971,8 @@ async fn drain_to_completed(
+         )
+         .await?;
+     let mut output = Vec::new();
++    let raw_usage_capture = sess.services.thread_extension_data.get::<SdkRawUsage>();
++    let mut pending_raw_usage = None;
+     let mut response_observation_id = None;
+     let mut incomplete_response_id = None;
+     let mut response_fact_budget = codex_protocol::response_facts::ResponseFactBudget::default();
+@@ -999,7 +1010,12 @@ async fn drain_to_completed(
                  )
                  .await?;
              }
 -            Ok(ResponseEvent::ResponseObserved(observation)) => {
 +            Ok(ResponseEvent::ResponseObserved(received)) => {
 +                let observation = received.observation;
++                if raw_usage_capture.is_some() {
++                    pending_raw_usage =
++                        RawUsage::from_observation(&observation, received.raw_usage);
++                }
                  incomplete_response_id = (observation.status
                      == ResponseObservationStatus::Incomplete)
                      .then(|| observation.response_id.clone())
+@@ -1026,6 +1042,8 @@ async fn drain_to_completed(
+                     .await?;
+                 return Ok(CompactionResponse {
+                     interrupted: incomplete_response_id.as_ref() == Some(&response_id),
++                    raw_usage: pending_raw_usage
++                        .filter(|record| record.matches_response(&response_id)),
+                     response_id,
+                     output,
+                 });
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 2102d4c7..78f62d3b 100644
+index 2102d4c..e926bfa 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -518,9 +518,9 @@ async fn collect_compaction_output(
+@@ -27,6 +27,8 @@ use crate::responses_retry::ResponsesStreamRequest;
+ use crate::responses_retry::ResponsesStreamRetryState;
+ use crate::responses_retry::handle_response_stream_error;
+ use crate::session::RequestEffortUsage;
++use crate::session::sdk_raw_usage::RawUsage;
++use crate::session::sdk_raw_usage::SdkRawUsage;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
+@@ -491,6 +493,8 @@ async fn collect_compaction_output(
+     let mut compaction_output = None;
+     let mut completed_response_id = None;
+     let mut completed_token_usage = None;
++    let raw_usage_capture = sess.services.thread_extension_data.get::<SdkRawUsage>();
++    let mut pending_raw_usage = None;
+     let mut response_observation_id = None;
+     let mut response_fact_budget = codex_protocol::response_facts::ResponseFactBudget::default();
+     while let Some(event) = stream.next().await {
+@@ -518,9 +522,13 @@ async fn collect_compaction_output(
                  )
                  .await?;
              }
 -            ResponseEvent::ResponseObserved(observation) => {
 +            ResponseEvent::ResponseObserved(received) => {
++                if raw_usage_capture.is_some() {
++                    pending_raw_usage =
++                        RawUsage::from_observation(&received.observation, received.raw_usage);
++                }
                  response_observation_id = sess
 -                    .record_response_observation(turn_context, observation)
 +                    .record_response_observation(turn_context, received.observation)
                      .await?;
              }
              ResponseEvent::Completed {
+@@ -560,6 +568,12 @@ async fn collect_compaction_output(
+     let Some(compaction_output) = compaction_output else {
+         unreachable!("compaction output must exist when count is exactly one");
+     };
++    if let Some(capture) = raw_usage_capture
++        && let Some(record) =
++            pending_raw_usage.filter(|record| record.matches_response(&response_id))
++    {
++        capture.record_for_turn(turn_context, record);
++    }
+     Ok(RemoteCompactionV2Output {
+         compaction_output,
+         response_id,
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 8573cb7..241b453 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -26,8 +26,6 @@ pub use responses_headers::CodexResponsesHeaders;
+ mod responses_metadata;
+ mod responses_retry;
+ pub(crate) mod session;
+-#[doc(hidden)]
+-pub use session::PrivateDisposableRun;
+ pub use codex_protocol::turn_input::NotSubmittedReason;
+ pub use codex_protocol::turn_input::RecoverTurnRequest;
+ pub use codex_protocol::turn_input::StartIfIdleSubmission;
+@@ -38,6 +36,8 @@ pub use codex_protocol::turn_input::TurnInputRequest;
+ pub use codex_protocol::turn_input::TurnInputSubmission;
+ pub use codex_protocol::turn_input::TurnStartOptions;
+ pub use responses_metadata::CodexResponsesMetadata;
++#[doc(hidden)]
++pub use session::PrivateDisposableRun;
+ pub use turn_metadata::detached_memory_responses_metadata;
+ mod codex_thread;
+ mod turn_extension_data;
+@@ -66,6 +66,7 @@ pub use codex_thread::GuardianRootMessage;
+ pub use codex_thread::GuardianRootSnapshot;
+ pub use codex_thread::ThreadConfigSnapshot;
+ pub use owned_question::OwnedQuestion;
++pub use session::sdk_raw_usage::SdkRawUsageLink;
+ pub use session::turn_context::TurnContext;
+ pub use thread_startup_metadata::ThreadStartupMetadata;
+ mod agent;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 54bdeda7..eba2b10d 100644
+index 54bdeda..eba2b10 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -264,6 +264,7 @@ mod retained_context;
@@ -324,16 +457,20 @@ index 54bdeda7..eba2b10d 100644
  pub(crate) mod startup_prewarm;
 diff --git a/codex-rs/core/src/session/sdk_raw_usage.rs b/codex-rs/core/src/session/sdk_raw_usage.rs
 new file mode 100644
-index 00000000..0051b1ee
+index 0000000..54e997d
 --- /dev/null
 +++ b/codex-rs/core/src/session/sdk_raw_usage.rs
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,188 @@
++use crate::session::turn_context::TurnContext;
 +use std::io;
 +use std::io::Write;
++use std::sync::Arc;
 +use std::sync::Mutex;
++use std::sync::Weak;
 +
 +use codex_protocol::error::CodexErr;
 +use codex_protocol::error::Result as CodexResult;
++use codex_protocol::protocol::ResponseObservation;
 +use serde::Serialize;
 +use serde_json::Value;
 +
@@ -341,10 +478,27 @@ index 00000000..0051b1ee
 +const MAX_BYTES: usize = 8 * 1024 * 1024;
 +
 +#[derive(Serialize)]
-+struct RawUsage {
++pub(crate) struct RawUsage {
 +    response_id: String,
 +    upstream_request_id: Option<String>,
 +    usage: Value,
++}
++
++impl RawUsage {
++    pub(crate) fn from_observation(
++        observation: &ResponseObservation,
++        usage: Option<Value>,
++    ) -> Option<Self> {
++        Some(Self {
++            usage: usage?,
++            response_id: observation.response_id.clone()?,
++            upstream_request_id: observation.upstream_request_id.clone(),
++        })
++    }
++
++    pub(crate) fn matches_response(&self, response_id: &str) -> bool {
++        self.response_id == response_id
++    }
 +}
 +
 +struct Capture {
@@ -352,6 +506,7 @@ index 00000000..0051b1ee
 +    records: Vec<RawUsage>,
 +    remaining_bytes: usize,
 +    overflowed: bool,
++    finished: bool,
 +}
 +
 +impl Default for Capture {
@@ -361,14 +516,56 @@ index 00000000..0051b1ee
 +            records: Vec::new(),
 +            remaining_bytes: MAX_BYTES - 2,
 +            overflowed: false,
++            finished: false,
 +        }
 +    }
 +}
 +
-+#[derive(Default)]
-+pub(crate) struct SdkRawUsage(Mutex<Capture>);
++enum CaptureOwner {
++    Root(Arc<Mutex<Capture>>),
++    Child(Weak<Mutex<Capture>>),
++}
++
++/// A link for an admitted child thread to record usage in the root invocation.
++pub struct SdkRawUsageLink(Weak<Mutex<Capture>>);
++
++impl SdkRawUsageLink {
++    /// Attach this invocation's capture without extending its lifetime.
++    pub fn attach(&self, store: &codex_extension_api::ExtensionData) {
++        if self.0.strong_count() == 0 {
++            store.remove::<SdkRawUsage>();
++        } else {
++            store.insert(SdkRawUsage(CaptureOwner::Child(self.0.clone())));
++        }
++    }
++}
++
++pub(crate) struct SdkRawUsage(CaptureOwner);
++
++impl Default for SdkRawUsage {
++    fn default() -> Self {
++        Self(CaptureOwner::Root(Arc::default()))
++    }
++}
 +
 +impl SdkRawUsage {
++    pub(crate) fn child_link(&self) -> SdkRawUsageLink {
++        match &self.0 {
++            CaptureOwner::Root(capture) => SdkRawUsageLink(Arc::downgrade(capture)),
++            CaptureOwner::Child(capture) => SdkRawUsageLink(capture.clone()),
++        }
++    }
++
++    pub(crate) fn record_for_turn(&self, turn_context: &TurnContext, record: RawUsage) {
++        let root_turn_id = turn_context.turn_metadata_state.root_turn_id();
++        self.record(
++            root_turn_id.as_deref().unwrap_or(&turn_context.sub_id),
++            record.response_id,
++            record.upstream_request_id,
++            record.usage,
++        );
++    }
++
 +    pub(crate) fn record(
 +        &self,
 +        turn_id: &str,
@@ -376,11 +573,25 @@ index 00000000..0051b1ee
 +        upstream_request_id: Option<String>,
 +        usage: Value,
 +    ) {
-+        let mut capture = self.0.lock().unwrap_or_else(|error| error.into_inner());
-+        if capture.overflowed || capture.turn_id.as_deref().is_some_and(|id| id != turn_id) {
++        let (capture, turn_id) = match &self.0 {
++            CaptureOwner::Root(capture) => (Arc::clone(capture), Some(turn_id)),
++            CaptureOwner::Child(link) => {
++                let Some(capture) = link.upgrade() else {
++                    return;
++                };
++                (capture, None)
++            }
++        };
++        let mut capture = capture.lock().unwrap_or_else(|error| error.into_inner());
++        if capture.finished || capture.overflowed {
 +            return;
 +        }
-+        capture.turn_id.get_or_insert_with(|| turn_id.to_owned());
++        if let Some(turn_id) = turn_id {
++            if capture.turn_id.as_deref().is_some_and(|id| id != turn_id) {
++                return;
++            }
++            capture.turn_id.get_or_insert_with(|| turn_id.to_owned());
++        }
 +        let record = RawUsage {
 +            response_id,
 +            upstream_request_id,
@@ -399,8 +610,15 @@ index 00000000..0051b1ee
 +    }
 +
 +    pub(crate) fn finish(&self, turn_id: &str) -> CodexResult<String> {
-+        let mut capture = self.0.lock().unwrap_or_else(|error| error.into_inner());
++        let CaptureOwner::Root(capture) = &self.0 else {
++            return Err(CodexErr::InvalidRequest(
++                "Provider usage belongs to the root invocation".into(),
++            ));
++        };
++        let mut capture = capture.lock().unwrap_or_else(|error| error.into_inner());
++        capture.finished = true;
 +        if capture.turn_id.as_deref().is_some_and(|id| id != turn_id) {
++            capture.records.clear();
 +            return Err(CodexErr::InvalidRequest(
 +                "Provider usage belongs to a different turn".into(),
 +            ));
@@ -432,7 +650,7 @@ index 00000000..0051b1ee
 +    }
 +}
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 339a9055..5e6344d3 100644
+index 339a905..5e6344d 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -3513,6 +3513,11 @@ async fn try_run_sampling_request(
