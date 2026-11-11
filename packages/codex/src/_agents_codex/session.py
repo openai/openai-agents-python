@@ -3708,7 +3708,31 @@ class Session(Generic[ContextT, OutputT]):
             ):
                 raise ValueError("store=True requires API-key Responses authentication")
             if restored_model_settings is not None:
+                current_controls = settings.get("request_controls", {})
+                attempt_controls = {
+                    "retry": current_controls.get("retry"),
+                    "attempt_timeout_ms": current_controls.get("attempt_timeout_ms"),
+                }
+                if restored_profile is not None:
+                    profile_controls = next(
+                        row["model"]["request_controls"]
+                        for row in profile_roster
+                        if row["id"] == restored_profile.profile.id
+                    )
+                    if "attempt_timeout_ms" in profile_controls:
+                        attempt_controls["attempt_timeout_ms"] = profile_controls[
+                            "attempt_timeout_ms"
+                        ]
+                    if "retry" in profile_controls:
+                        profile_retry = profile_controls["retry"]
+                        current_retry = attempt_controls["retry"]
+                        attempt_controls["retry"] = (
+                            {**(current_retry or {}), **profile_retry}
+                            if profile_retry is not None
+                            else None
+                        )
                 model, settings = restored_model_settings
+                settings.setdefault("request_controls", {}).update(attempt_controls)
             native_specs = catalog.native_specs()
             manual_slots = catalog.manual_slots()
             if state is not None:

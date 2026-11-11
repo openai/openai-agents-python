@@ -56,7 +56,9 @@ async def test_model_stream_rechecks_admission_before_next_iterator_entry() -> N
             )
         ),
     )
-    assert not await Session._produce_model_stream(session, stream, object(), 1, lambda: admitted)
+    assert not await Session._produce_model_stream(
+        session, session._native, stream, object(), 1, lambda: admitted
+    )
     assert closed
 
 
