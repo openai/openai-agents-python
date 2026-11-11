@@ -94,6 +94,18 @@ class Turn(Generic[OutputT]):
     @property
     def guardrail_results(self) -> tuple[Any, ...]:
         """Completed guardrail diagnostics on this exact owning run."""
+        if self.child_id is not None and hasattr(self._session, "_child_callbacks"):
+            session = cast("Session[Any, Any]", self._session)
+            turn_id = self.turn_id
+            state = (
+                None
+                if turn_id is None
+                else session._child_callbacks.get(
+                    (self.child_id, self._native.incarnation, turn_id)
+                )
+            )
+            if state is not None:
+                object.__setattr__(self, "_guardrail_results", state.guardrail_results)
         return tuple(self._guardrail_results)
 
     @property

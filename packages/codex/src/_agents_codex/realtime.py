@@ -242,13 +242,13 @@ class RealtimeConfig:
     api_key: str | Callable[[], str | Awaitable[str]] | None = field(default=None, repr=False)
     adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)
     output_modality: Literal["audio", "text"] = "audio"
+    include_raw_provider_events: bool = False
     is_tool_enabled: (
         Callable[[RealtimePolicyContext, RealtimeTool], bool | Awaitable[bool]] | None
     ) = field(default=None, repr=False)
     tool_error_formatter: (
         Callable[[RealtimeToolErrorContext], str | None | Awaitable[str | None]] | None
     ) = field(default=None, repr=False)
-    include_raw_provider_events: bool = False
 
 
 async def _prepare_realtime_params(
