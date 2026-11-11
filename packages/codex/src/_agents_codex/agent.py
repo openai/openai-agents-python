@@ -444,7 +444,7 @@ class NativeProvider:
     to permit WebSockets for a compatible custom provider, or ``False`` to use
     HTTP. The native runtime selects the final transport when WebSockets are
     enabled and owns retries. On Linux, an eligible private one-shot
-    ``Agent.run()`` completion may use fresh, unpooled HTTP when this choice is
+    ``Agent.run()`` completion may reuse idle HTTP connections when this choice is
     implicit and no routing, proxy or CA override is present. Explicit WebSocket choices and live
     Session transport permission remain unchanged.
 
