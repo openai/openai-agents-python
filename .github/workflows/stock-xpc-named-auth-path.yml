@@ -1,4 +1,4 @@
-name: Stock macOS XPC named lookup inspection
+name: Stock macOS XPC interface routine inspection
 
 on:
   push:
@@ -51,9 +51,10 @@ jobs:
 
 
           STOCK_UUID = "D3682603-AC67-3242-82EB-1226B435BFF4"
-          ROOTS = (
-              "_xpc_domain_routine_authenticate",
-              "_xpc_dictionary_extract_mach_send",
+          ROOTS = ("_xpc_interface_routine",)
+          DIRECT_CHECK_NAMES = (
+              "audit", "auth", "credential", "entitlement", "identity",
+              "peer", "privilege", "receive", "reply", "routine", "validate", "voucher",
           )
           BRANCH_ADDRESS = re.compile(r"#?(0x[0-9a-f]+)", re.IGNORECASE)
           INDIRECT_BRANCH = re.compile(r"bl?r(?:aa|ab|aaz|abz)?")
@@ -151,23 +152,22 @@ jobs:
                       if destination.GetModule() == module and callee_name == name:
                           continue
                       result.AppendMessage(f"  edge={name}+0x{offset:x} destination={callee_name}")
-                      # Follow only the domain transaction wrapper and its immediate
-                      # routine, leaving all other call targets for manual review.
+                  # List every direct edge above. Expand only immediate
+                  # same-image transaction or validation candidates.
                       if (
-                          depth < 2
-                          and (depth > 0 or name == ROOTS[0])
+                      depth == 0
                           and destination.GetModule() == module
                           and callee.GetType() == lldb.eSymbolTypeCode
-                          and callee_name.lstrip("_").startswith(("xpc_domain_routine", "xpc_pipe_routine"))
+                      and any(part in callee_name for part in DIRECT_CHECK_NAMES)
                       ):
                           pending.append((callee, callee_name, depth + 1))
                   if not remaining:
                       break
               if complete_roots != set(ROOTS):
-                  result.SetError("inspection budget exhausted before both roots")
+                  result.SetError("inspection did not complete the interface routine")
                   return
               result.AppendMessage(f"static_symbols={len(seen)} pending={len(pending)} dynamic_calls=false")
-              result.AppendMessage("stock_named_static_inspection=complete")
+              result.AppendMessage("stock_interface_static_inspection=complete")
 
           def __lldb_init_module(debugger, internal_dict):
               debugger.HandleCommand("command script add -f stock_xpc_observer.observe observe-stock-xpc")
@@ -206,7 +206,7 @@ jobs:
           with open(log) as output:
               receipt = output.read()
           print(receipt, end="")
-          if status == 0 and "stock_named_static_inspection=complete" not in receipt.splitlines():
+          if status == 0 and "stock_interface_static_inspection=complete" not in receipt.splitlines():
               sys.exit("missing static inspection completion marker")
           sys.exit(status if status >= 0 else 128 - status)
           PY
