@@ -348,3 +348,38 @@ async def test_run_formatter_preserves_callback_timeout_owner(responses, behavio
     assert cleaned == [True]
     assert not formatted
     assert len(responses.requests) == (1 if behavior == "raise_exception" else 2)
+
+
+@pytest.mark.parametrize("phase", ["arguments", "execution"])
+@pytest.mark.parametrize("opt_out", [False, True])
+async def test_replaced_declaration_preserves_omission_and_explicit_none(responses, phase, opt_out):
+    from dataclasses import replace
+
+    formatted = []
+
+    def format_error(context):
+        formatted.append(context.phase)
+        return "Copied declaration recovery"
+
+    @function_tool
+    async def lookup(key: str) -> str:
+        raise ValueError("body failed")
+
+    copied = replace(lookup, description="Updated")
+    if opt_out:
+        copied = replace(copied, error_function=None)
+    responses.respond(
+        function_call("lookup", {"key": 7 if phase == "arguments" else "value"}, "copy")
+    )
+    if not opt_out:
+        responses.respond(assistant_output("recovered"))
+    agent = Agent(instructions="Use lookup.", tools=[copied], provider=provider(responses))
+    if opt_out:
+        with pytest.raises(ValueError):
+            await agent.run("begin", tool_error_formatter=format_error)
+    else:
+        result = await agent.run("begin", tool_error_formatter=format_error)
+        assert result.final_output == "recovered"
+        assert "Copied declaration recovery" in str(responses.requests[1]["input"])
+    assert formatted == ([] if opt_out else [phase])
+    assert len(responses.requests) == (1 if opt_out else 2)

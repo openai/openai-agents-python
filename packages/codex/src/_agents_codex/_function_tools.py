@@ -286,18 +286,13 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
         default=_UNSET_ERROR_FUNCTION, repr=False
     )
-    _allow_run_error_formatter: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        implicit_error_function = self.error_function is _UNSET_ERROR_FUNCTION
-        object.__setattr__(
-            self,
-            "_allow_run_error_formatter",
-            implicit_error_function or self.error_function is not None,
-        )
-        if implicit_error_function:
-            object.__setattr__(self, "error_function", None)
-        if self.error_function is not None and not callable(self.error_function):
+        if (
+            self.error_function is not _UNSET_ERROR_FUNCTION
+            and self.error_function is not None
+            and not callable(self.error_function)
+        ):
             raise TypeError("FunctionTool error_function must be callable or None")
         if not isinstance(self.is_enabled, bool) and not callable(self.is_enabled):
             raise TypeError("FunctionTool is_enabled must be a bool or callable")
@@ -354,7 +349,9 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             or self.timeout_behavior != "raise_exception"
             or self.timeout_error_function is not None
             or self.input_error_function is not None
-            or self.error_function is not None
+            or (
+                self.error_function is not _UNSET_ERROR_FUNCTION and self.error_function is not None
+            )
         ):
             raise TypeError("Callback settings require a callback registered with function_tool")
 
@@ -431,7 +428,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                     policies += ("timeout_error_function",)
                 for name in policies:
                     callback = getattr(self, name)
-                    if callback is None:
+                    if callback is None or callback is _UNSET_ERROR_FUNCTION:
                         continue
                     parameters = list(inspect.signature(callback).parameters.values())
                     if parameters:
@@ -918,8 +915,10 @@ def function_tool(
                 timeout_behavior=declaration.timeout_behavior,
                 timeout_error_function=declaration.timeout_error_function,
                 input_error_function=declaration.input_error_function,
-                error_function=declaration.error_function,
-                _allow_run_error_formatter=declaration._allow_run_error_formatter,
+                error_function=None
+                if declaration.error_function is _UNSET_ERROR_FUNCTION
+                else declaration.error_function,
+                _allow_run_error_formatter=declaration.error_function is not None,
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,

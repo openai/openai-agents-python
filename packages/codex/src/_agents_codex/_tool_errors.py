@@ -16,8 +16,22 @@ ContextT = TypeVar("ContextT")
 class ToolErrorContext(Generic[ContextT]):
     """A recoverable function failure. Return only application-approved model text.
 
-    The error and application context remain local to the callback. Formatting
-    never authorizes a retired call or changes callback timeout policy.
+    Agent.session(), Agent.run(), and Agent.run_sync() have been accepting
+    tool_error_formatter callbacks with this context. The callback has been
+    receiving original argument or ordinary body failures, with the original
+    error and application context staying local.
+
+    A returned string, including an empty string, has been supplying a failed
+    non-terminal tool reply. None, another return type, or a formatter exception
+    during active admission has been selecting default_message. Per-tool input
+    and body handlers have been retaining precedence for their own phases;
+    explicit error_function=None has been suppressing run-wide recovery.
+
+    Async formatters have been receiving asyncio cancellation directly. The
+    owner has been joining cleanup and discarding late replies, with cleanup
+    errors retaining their original cause. Timeout, rewritten input, other
+    policies, native MCP/executor errors, and unknown names have been retaining
+    their existing behavior.
     """
 
     context: ContextT = field(repr=False)

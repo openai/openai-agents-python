@@ -134,41 +134,6 @@ Include `report_artifacts` in the Agent's tools. The references can remain in ac
 
 `ToolOutput.error(...)` returns a failed tool reply that the model can handle. Raising an exception can instead fail the owning turn after cleanup. Neither choice undoes earlier effects. Manual tools can declare `output_type=ToolOutput` and submit these values through a live request.
 
-### Run-wide function error text
-
-Matching [development builds](versions.md) have been accepting `tool_error_formatter` on `Agent.session()`, `Agent.run()`, and `Agent.run_sync()`. A synchronous or asynchronous callback has been formatting invalid original arguments and ordinary function-body exceptions into failed tool replies. Omission has been preserving the existing exception behavior.
-
-```python
-import asyncio
-
-from agents import Agent, ToolErrorContext, function_tool
-
-
-@function_tool
-async def lookup(key: str) -> str:
-    raise LookupError("Private database detail")
-
-
-def format_tool_error(error: ToolErrorContext[None]) -> str | None:
-    if error.phase == "arguments":
-        return "Provide a string key."
-    return "Record lookup is unavailable."
-
-
-async def main() -> None:
-    agent = Agent(instructions="Use lookup once, then explain its result.", tools=[lookup])
-    result = await agent.run("Look up sample.", tool_error_formatter=format_tool_error)
-    print(result.final_output)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-The callback has been receiving the application `context`, observed `call` identity, `phase` (`"arguments"` or `"execution"`), safe `default_message`, and original local `error`. A returned string, including an empty string, has been replacing the tool error text. Returning `None`, returning another type, or raising while the call remains active has been selecting the safe default message. Returned text has been entering model input, history, and traces; application-approved details only.
-
-Per-tool `input_error_function` and `error_function` have been taking precedence for their own phases. Explicit `error_function=None` has been suppressing the run-wide formatter for arguments and body failures. Callback deadlines, cancellation, rewritten arguments, other policy failures, result validation, and explicit approval rejection text have been retaining their existing behavior. Unknown tool names and native MCP or executor failures have been remaining outside this formatter. Cancellation has been waiting for formatter cleanup and discarding late replies; cleanup exceptions have been retaining their original cause.
-
 ### Callback deadlines
 
 Set `@function_tool(callback_timeout=2.0)` to limit the callback body, including time spent waiting for synchronous execution. The SDK withholds late results even if the callback suppresses cancellation. It waits for callback cleanup before reporting completion. A running application function can delay cleanup, and the deadline cannot undo earlier effects. The deadline excludes `before`, `after`, argument validation, and result conversion.
