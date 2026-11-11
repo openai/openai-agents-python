@@ -175,6 +175,7 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     assert "Some workspace details have been omitted" in text
     assert f"Executor read-only: {str(scenario == 'path_priority').lower()}" in text
     assert "untrusted external content" in text and "then copy back" in text
+    assert "For any edit to a read-write mount, including apply_patch, copy" in text
     assert "Do not write to read-only mounts" in text
     assert "UNDISCOVERED_GLOBAL_RULE" not in text
     assert "UNDISCOVERED_PROJECT_RULE" not in text
