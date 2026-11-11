@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     )
     from .canonical_storage import (
+        AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore,
         CustomStorage as CustomStorage,
         DaprSessionStore as DaprSessionStore,
         EncryptedSessionStore as EncryptedSessionStore,
@@ -310,6 +311,7 @@ _MODULES = {
     "OutputValidationIssue": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
+    "AsyncSQLAlchemySessionStore": ".canonical_storage",
     "CustomStorage": ".canonical_storage",
     "DaprSessionStore": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
