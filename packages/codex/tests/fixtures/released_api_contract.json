@@ -206,7 +206,7 @@
           "_BeforeCompact: TypeAlias = Callable[[CompactionContext[ContextT]], str | None | Awaitable[str | None]]",
           "@dataclass(frozen=True)\nclass ResponsesCompactionContext(CompactionContext[ContextT]):\n    candidates: tuple[dict[str, Any], ...] = field(repr=False)\n    mode: Literal['input', 'previous_response_id']",
           "_ShouldCompact: TypeAlias = Callable[[ResponsesCompactionContext[ContextT]], bool | Awaitable[bool]]",
-          "@dataclass(frozen=True)\nclass ResponsesCompaction(Generic[ContextT]):\n    client: AsyncOpenAI = field(repr=False)\n    model: str | None = None\n    mode: Literal['auto', 'input', 'previous_response_id'] = 'auto'\n    should_compact: _ShouldCompact[ContextT] | None = field(default=None, repr=False)\n    _compact: Callable[..., Awaitable[Any]] = field(init=False, repr=False, compare=False)"
+          "@dataclass(frozen=True)\nclass ResponsesCompaction(Generic[ContextT]):\n    client: AsyncOpenAI = field(repr=False)\n    model: str | None = None\n    mode: Literal['auto', 'input', 'previous_response_id'] = 'auto'\n    should_compact: _ShouldCompact[ContextT] | None = field(default=None, repr=False)\n    _compact: Callable[..., Awaitable[Any]] = field(init=False, repr=False, compare=False)\n    _client_scope: tuple[str, str, str | None, str | None] | None = field(init=False, repr=False, compare=False)"
         ],
         "exports": {
           "CompactionContext": "agents.compaction.CompactionContext",

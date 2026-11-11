@@ -12076,7 +12076,15 @@ class Session(Generic[ContextT, OutputT]):
                         return None
                     transform = declaration.transform_context
                     provider_response = (
-                        message.get("provider_response") if transform is None else None
+                        message.get("provider_response")
+                        if transform is None
+                        and message.get("provider_response") is not None
+                        and factory.mode != "input"
+                        and factory._matches_provider(
+                            self._model_api_key,
+                            json.loads(self._native_options or "{}").get("config", {}),
+                        )
+                        else None
                     )
                     prepared = factory._context(
                         request,
@@ -12136,6 +12144,11 @@ class Session(Generic[ContextT, OutputT]):
                             ):
                                 raise TypeError("transform_context must return input items or None")
                             prepared = replace(prepared, items=tuple(replacement))
+                    if prepared.mode == "previous_response_id" and not factory._matches_provider(
+                        self._model_api_key,
+                        json.loads(self._native_options or "{}").get("config", {}),
+                    ):
+                        raise ValueError("Compaction client provider scope changed before dispatch")
                     return await factory._window(
                         prepared,
                         provider_response=provider_response,

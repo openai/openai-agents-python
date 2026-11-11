@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
-from typing import cast
+from contextlib import asynccontextmanager
 
 import pytest
 from openai import AsyncOpenAI
@@ -11,6 +10,33 @@ from agents import Agent, ResponsesCompaction
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_native_agent import provider
+
+
+@asynccontextmanager
+async def _matching_compaction_client(responses, compact, **client_options):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def handle(request):
+        result = await compact(**await request.json())
+        return web.json_response(
+            {"id": "cmp_matching", "object": "response.compaction", "created_at": 0, **result}
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", responses.handle)
+    app.router.add_post("/v1/responses/compact", handle)
+    async with TestServer(app) as server:
+        responses.url = str(server.make_url("/v1"))
+        async with AsyncOpenAI(
+            **{
+                "api_key": "synthetic-native-agent-key",
+                "base_url": responses.url,
+                "max_retries": 0,
+                **client_options,
+            }
+        ) as client:
+            yield client
 
 
 @pytest.mark.parametrize(
@@ -37,37 +63,38 @@ async def test_compaction_uses_only_a_stored_acknowledged_native_window(
     def transform(context):
         return [item for item in context.items if item.get("role") != "developer"]
 
-    responses.respond(assistant_output("ACKNOWLEDGED_WINDOW"))
-    agent = Agent(
-        provider=provider(responses),
-        model="gpt-5.5",
-        model_settings={"store": store},
-        instructions="Current application instructions.",
-        transform_context=transform if transformed else None,
-        compaction=ResponsesCompaction(
-            client=cast(AsyncOpenAI, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+    async with _matching_compaction_client(responses, compact) as client:
+        responses.respond(assistant_output("ACKNOWLEDGED_WINDOW"))
+        agent = Agent(
+            provider=provider(responses),
             model="gpt-5.5",
-            mode=mode,
-            should_compact=lambda context: automatic,
-        ),
-    )
-    async with timeout(30), agent.session() as session:
-        await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
-        assert responses.requests[0]["store"] is store
-        if (not store or transformed) and mode == "previous_response_id":
-            with pytest.raises(ValueError, match="acknowledged"):
+            model_settings={"store": store},
+            instructions="Current application instructions.",
+            transform_context=transform if transformed else None,
+            compaction=ResponsesCompaction(
+                client=client,
+                model="gpt-5.5",
+                mode=mode,
+                should_compact=lambda context: automatic,
+            ),
+        )
+        async with timeout(30), agent.session() as session:
+            await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
+            assert responses.requests[0]["store"] is store
+            if (not store or transformed) and mode == "previous_response_id":
+                with pytest.raises(ValueError, match="acknowledged"):
+                    await session.compact()
+                assert not calls
+                return
+            if not automatic:
                 await session.compact()
-            assert not calls
-            return
-        if not automatic:
-            await session.compact()
-        assert len(calls) == 1
-        if store and not transformed:
-            assert calls[0]["previous_response_id"] == "resp_1"
-            assert "input" not in calls[0]
-        else:
-            assert "previous_response_id" not in calls[0]
-            assert "ACKNOWLEDGED_WINDOW" in json.dumps(calls[0]["input"])
+            assert len(calls) == 1
+            if store and not transformed:
+                assert calls[0]["previous_response_id"] == "resp_1"
+                assert "input" not in calls[0]
+            else:
+                assert "previous_response_id" not in calls[0]
+                assert "ACKNOWLEDGED_WINDOW" in json.dumps(calls[0]["input"])
 
 
 @pytest.mark.parametrize(
@@ -94,33 +121,262 @@ async def test_compaction_only_transform_precedes_lineage_selection(responses, m
         policy_modes.append(context.mode)
         return automatic
 
-    responses.respond(assistant_output("PRIVATE_FOR_COMPACTION"))
-    agent = Agent(
-        provider=provider(responses),
-        model="gpt-5.5",
-        model_settings={"store": True},
-        instructions="Current application instructions.",
-        transform_context=transform,
-        compaction=ResponsesCompaction(
-            client=cast(AsyncOpenAI, SimpleNamespace(responses=SimpleNamespace(compact=compact))),
+    async with _matching_compaction_client(responses, compact) as client:
+        responses.respond(assistant_output("PRIVATE_FOR_COMPACTION"))
+        agent = Agent(
+            provider=provider(responses),
             model="gpt-5.5",
-            mode=mode,
-            should_compact=should_compact,
-        ),
-    )
-    async with timeout(30), agent.session() as session:
-        await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
-        if mode == "previous_response_id":
-            with pytest.raises(ValueError, match="acknowledged"):
+            model_settings={"store": True},
+            instructions="Current application instructions.",
+            transform_context=transform,
+            compaction=ResponsesCompaction(
+                client=client,
+                model="gpt-5.5",
+                mode=mode,
+                should_compact=should_compact,
+            ),
+        )
+        async with timeout(30), agent.session() as session:
+            await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
+            if mode == "previous_response_id":
+                with pytest.raises(ValueError, match="acknowledged"):
+                    await session.compact()
+                assert not calls
+                assert compaction_transforms == 0
+                return
+            if not automatic:
                 await session.compact()
-            assert not calls
-            assert compaction_transforms == 0
-            return
-        if not automatic:
+            assert len(calls) == 1
+            assert policy_modes == ["input"]
+            assert compaction_transforms == 1
+            assert "previous_response_id" not in calls[0]
+            assert "EXACT_NATIVE_INPUT" in json.dumps(calls[0]["input"])
+            assert "PRIVATE_FOR_COMPACTION" not in json.dumps(calls[0]["input"])
+
+
+async def test_auto_compaction_keeps_input_for_a_different_borrowed_endpoint(responses):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    calls = []
+
+    async def compact(request):
+        body = await request.json()
+        calls.append(body)
+        if "previous_response_id" in body:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Unknown response in this account",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status=400,
+            )
+        return web.json_response(
+            {
+                "id": "cmp_other",
+                "object": "response.compaction",
+                "created_at": 0,
+                "output": [{"type": "compaction", "encrypted_content": "OTHER_ENDPOINT_WINDOW"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/responses/compact", compact)
+    responses.respond(assistant_output("ACKNOWLEDGED_NATIVE_ENDPOINT"))
+    async with TestServer(app) as server:
+        async with AsyncOpenAI(
+            api_key="synthetic-native-agent-key",
+            base_url=str(server.make_url("/v1")),
+            max_retries=0,
+        ) as client:
+            agent = Agent(
+                provider=provider(responses),
+                model="gpt-5.5",
+                model_settings={"store": True},
+                instructions="Current application instructions.",
+                compaction=ResponsesCompaction(client=client, model="gpt-5.5"),
+            )
+            async with timeout(30), agent.session() as session:
+                await (await session.submit("INPUT_MUST_REACH_BORROWED_ENDPOINT")).get_result()
+                await session.compact()
+    assert len(calls) == 1
+    assert "previous_response_id" not in calls[0]
+    assert "ACKNOWLEDGED_NATIVE_ENDPOINT" in json.dumps(calls[0]["input"])
+    assert "INPUT_MUST_REACH_BORROWED_ENDPOINT" in json.dumps(calls[0]["input"])
+
+
+@pytest.mark.parametrize(
+    "client_options",
+    [
+        {"api_key": "synthetic-other-key"},
+        {"project": "other-project"},
+        {"organization": "other-organization"},
+        {"default_headers": {"x-account-routing": "other"}},
+        {"default_query": {"account": "other"}},
+    ],
+)
+@pytest.mark.parametrize("mode", ["auto", "previous_response_id"])
+async def test_compaction_rejects_unproven_borrowed_account_scope(responses, client_options, mode):
+    calls = []
+    policy_modes = []
+
+    async def compact(**body):
+        calls.append(body)
+        return {"output": [{"type": "compaction", "encrypted_content": "BORROWED_WINDOW"}]}
+
+    def should_compact(context):
+        policy_modes.append(context.mode)
+        return False
+
+    responses.respond(assistant_output("ACKNOWLEDGED_ACCOUNT_WINDOW"))
+    async with _matching_compaction_client(responses, compact, **client_options) as client:
+        agent = Agent(
+            provider=provider(responses),
+            model="gpt-5.5",
+            model_settings={"store": True},
+            instructions="Current application instructions.",
+            compaction=ResponsesCompaction(
+                client=client, model="gpt-5.5", mode=mode, should_compact=should_compact
+            ),
+        )
+        async with timeout(30), agent.session() as session:
+            await (await session.submit("EXACT_ACCOUNT_INPUT")).get_result()
+            if mode == "previous_response_id":
+                with pytest.raises(ValueError, match="acknowledged"):
+                    await session.compact()
+                assert not calls
+                assert not policy_modes
+            else:
+                await session.compact()
+                assert policy_modes == ["input"]
+                assert len(calls) == 1
+                assert "previous_response_id" not in calls[0]
+                assert "ACKNOWLEDGED_ACCOUNT_WINDOW" in json.dumps(calls[0]["input"])
+
+
+async def test_compaction_matches_explicit_native_organization_and_project(responses):
+    from agents import NativeProvider
+
+    calls = []
+
+    async def compact(**body):
+        calls.append(body)
+        return {"output": [{"type": "compaction", "encrypted_content": "SCOPED_WINDOW"}]}
+
+    responses.respond(assistant_output("SCOPED_ACCOUNT_WINDOW"))
+    async with _matching_compaction_client(
+        responses, compact, organization="native-org", project="native-project"
+    ) as client:
+        connection = NativeProvider(
+            base_url=responses.url,
+            api_key="synthetic-native-agent-key",
+            organization="native-org",
+            project="native-project",
+        )
+        async with connection:
+            agent = Agent(
+                provider=connection,
+                model="gpt-5.5",
+                model_settings={"store": True},
+                instructions="Current application instructions.",
+                compaction=ResponsesCompaction(
+                    client=client, model="gpt-5.5", mode="previous_response_id"
+                ),
+            )
+            async with timeout(30), agent.session() as session:
+                await (await session.submit("EXACT_SCOPED_INPUT")).get_result()
+                await session.compact()
+    assert len(calls) == 1
+    assert calls[0]["previous_response_id"] == "resp_1"
+    assert "input" not in calls[0]
+
+
+async def test_compaction_rechecks_client_scope_after_predicate(responses):
+    calls = []
+
+    async def compact(**body):
+        calls.append(body)
+        return {"output": [{"type": "compaction", "encrypted_content": "UNEXPECTED_WINDOW"}]}
+
+    responses.respond(assistant_output("ORIGINAL_ANSWER_SURVIVES_CLIENT_CHANGE"))
+    async with _matching_compaction_client(responses, compact) as client:
+
+        def should_compact(context):
+            assert context.mode == "previous_response_id"
+            client.project = "changed-after-admission"
+            return True
+
+        agent = Agent(
+            provider=provider(responses),
+            model="gpt-5.5",
+            model_settings={"store": True},
+            instructions="Current application instructions.",
+            compaction=ResponsesCompaction(
+                client=client, model="gpt-5.5", should_compact=should_compact
+            ),
+        )
+        async with timeout(30), agent.session() as session:
+            result = await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
+            assert result.final_output == "ORIGINAL_ANSWER_SURVIVES_CLIENT_CHANGE"
+    assert not calls
+
+
+async def test_compaction_falls_back_for_unknown_sdk_private_shape(responses, monkeypatch):
+    import openai._base_client as base_client
+
+    calls = []
+
+    async def compact(**body):
+        calls.append(body)
+        return {"output": [{"type": "compaction", "encrypted_content": "INPUT_WINDOW"}]}
+
+    responses.respond(assistant_output("UNKNOWN_SDK_SHAPE_WINDOW"))
+    async with _matching_compaction_client(responses, compact) as client:
+        wrapper = base_client.AsyncHttpxClientWrapper
+        monkeypatch.delattr(base_client, "AsyncHttpxClientWrapper")
+        try:
+            compaction = ResponsesCompaction(client=client, model="gpt-5.5")
+        finally:
+            monkeypatch.setattr(base_client, "AsyncHttpxClientWrapper", wrapper, raising=False)
+        agent = Agent(
+            provider=provider(responses),
+            model="gpt-5.5",
+            model_settings={"store": True},
+            instructions="Current application instructions.",
+            compaction=compaction,
+        )
+        async with timeout(30), agent.session() as session:
+            await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
             await session.compact()
-        assert len(calls) == 1
-        assert policy_modes == ["input"]
-        assert compaction_transforms == 1
-        assert "previous_response_id" not in calls[0]
-        assert "EXACT_NATIVE_INPUT" in json.dumps(calls[0]["input"])
-        assert "PRIVATE_FOR_COMPACTION" not in json.dumps(calls[0]["input"])
+    assert len(calls) == 1
+    assert "previous_response_id" not in calls[0]
+    assert "UNKNOWN_SDK_SHAPE_WINDOW" in json.dumps(calls[0]["input"])
+
+
+async def test_input_only_compaction_does_not_probe_changed_client_scope(responses):
+    calls = []
+
+    async def compact(**body):
+        calls.append(body)
+        return {"output": [{"type": "compaction", "encrypted_content": "INPUT_WINDOW"}]}
+
+    responses.respond(assistant_output("UNSTORED_NATIVE_WINDOW"))
+    async with _matching_compaction_client(responses, compact) as client:
+        compaction = ResponsesCompaction(client=client, model="gpt-5.5")
+        client.project = "changed-without-native-response-id"
+        agent = Agent(
+            provider=provider(responses),
+            model="gpt-5.5",
+            model_settings={"store": False},
+            instructions="Current application instructions.",
+            compaction=compaction,
+        )
+        async with timeout(30), agent.session() as session:
+            await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
+            await session.compact()
+    assert len(calls) == 1
+    assert "previous_response_id" not in calls[0]
+    assert "UNSTORED_NATIVE_WINDOW" in json.dumps(calls[0]["input"])
