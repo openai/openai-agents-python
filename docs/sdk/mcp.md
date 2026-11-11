@@ -68,9 +68,11 @@ Restore uses the application's current server declarations and Environment.
 
 ## Reuse an application-owned MCP client
 
-If your application already owns a classic `MCPServer` connection, `agents.migration.mcp` can select its tools for a native Agent. This independent adapter remains available after SDKRunner removal. It requires the [classic dependencies](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md#install-the-classic-extra) and `0.24.0-alpha.7` or later.
+If your application already owns a Classic `MCPServer` connection, use `agents.migration.mcp` to select its tools for a native Agent. Install the [Classic extra](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md#install-the-classic-extra) with a [matching development build](installation.md#preview-availability).
 
-The following async fragment assumes `client` is a connected `agents.classic.mcp.MCPServer` that provides `search`, and `app_context` is your application context:
+The alpha.7 wheel can reject valid adapter results with `ValueError: Tool result failed validation`. On alpha.7, keep the existing client on Classic or connect directly with [`HttpMCP`](#connect-an-http-server) or [`StdioMCP`](#start-a-stdio-server).
+
+In this async fragment, `client` is a connected `agents.classic.mcp.MCPServer` that offers `search`. Use your application context for `app_context`.
 
 ```python
 from agents import Agent

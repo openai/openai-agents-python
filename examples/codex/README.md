@@ -15,7 +15,7 @@ For a live model example, supply `OPENAI_API_KEY` through your usual credential 
 With `OPENAI_API_KEY` configured, run the greeting example:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.basic
+python -m examples.codex.basic
 ```
 
 The example asks the agent to greet Ada with the Python `greeting` tool and prints the final answer. Live wording can vary. The [source](basic.py) shows the tool declaration and `Agent.run()` call.
@@ -114,6 +114,8 @@ These programs use the current SDK and model credentials:
 | Store application memory across Sessions | [Packaged memory](packaged_memory.md) | The packaged `SQLiteMemory` store and tools, trusted scope selection, and deletion. Uses scripted responses. |
 | Check and repair a JSON artifact (development-only) | [Packaged artifact validation](packaged_artifact.md) | Matching source builds have been providing `json_artifact_tool` for validation and correction through scripted responses. |
 | Publish accepted output | [Accepted output](recipes/accepted-output.md) | Show application progress while a native Turn reviews and validates its answer. Uses scripted responses. |
+| Pause or restore a budgeted run | [Budgeted recovery](budgeted-recovery.md) | Compare live continuation, checkpoint, and settled reopen with the current source build. |
+| Bound a large function result | [Oversized tool output](recipes/oversized_tool_output.py) | Run `PYTHONPATH=. python -m examples.codex.recipes.oversized_tool_output` with scripted responses to check the next request and retained evidence. |
 | Route to an authorized specialist | [Decisions routing](decisions-guide.md#route-to-an-authorized-specialist) | Choose a specialist through a separate Decisions provider while the main model continues orchestration. Uses a matching source build and scripted responses. |
 | Test application behavior | [Task recipe chooser](../../docs/sdk/recipes.md) | Typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval, and application memory. Each entry identifies scripted or live execution. |
 | Read or revise selected text files | [Selected documents](selected_documents.md) | Bounded pages and search, application-selected writable aliases, and serialized revision checks. The application extracts PDF text. |

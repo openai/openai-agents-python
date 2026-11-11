@@ -102,7 +102,7 @@ Native sandbox and voice integrations remain available under their existing APIs
 
 ### Reuse a classic MCP client with native declarations
 
-`agents.migration.mcp` provides a separate integration for an application-owned Classic MCP client. For native-owned connections, use the [native MCP guide](docs/sdk/mcp.md).
+`agents.migration.mcp` adapts tools from an application-owned Classic MCP client. Use a matching development build for the [adapter](docs/sdk/mcp.md#reuse-an-application-owned-mcp-client). If the SDK can own the connection, use [native MCP declarations](docs/sdk/mcp.md).
 
 Create an `MCPNamespace` with a namespace name and your application-owned Classic `MCPServer`. Open the client connection before discovery, either directly or through the namespace's `authenticate` callback. Call `await select_mcp_tools(namespace, context=app_context, tool_names=["search"])` to select a tool named `search` before opening a native Session. Attach the returned tools to a native Agent, and pass the exact same `app_context` object to the Session or run. An equal but different context object is rejected. Omit `tool_names` to select all tools allowed by the client's filter; an empty list selects none. A missing or filtered-out requested name fails selection.
 

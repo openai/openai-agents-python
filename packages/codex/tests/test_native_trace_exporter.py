@@ -571,9 +571,21 @@ async def native_deadline_case():
                 await telemetry.shutdown()
         finally:
             server.close()
-            await server.wait_closed()
-            if handlers:
-                await asyncio.wait_for(asyncio.gather(*handlers), 1)
+            # Accepted streams can keep wait_closed pending until their handlers close them.
+            for handler in handlers:
+                if not handler.done():
+                    handler.cancel()
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*handlers, return_exceptions=True), 1
+                )
+                for result in results:
+                    if isinstance(result, BaseException) and not isinstance(
+                        result, asyncio.CancelledError
+                    ):
+                        raise result
+            finally:
+                await asyncio.wait_for(server.wait_closed(), 1)
 
 
 async def native_deadline_reset_case():
