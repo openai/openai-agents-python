@@ -24,44 +24,9 @@ jobs:
           #include <pthread.h>
           #include <stdatomic.h>
           extern char **environ;
-          extern kern_return_t bootstrap_look_up2(mach_port_t,const name_t,mach_port_t *,pid_t,uint64_t);
           static unsigned char lookup_template[512];
           static size_t lookup_template_size;
           static mach_msg_id_t lookup_template_id;
-          static _Atomic bool template_done;
-          static void *emit_identity_lookup(void *arg) {
-            mach_port_t result=MACH_PORT_NULL;
-            bootstrap_look_up2(*(mach_port_t*)arg,"com.apple.system.opendirectoryd.libinfo",&result,0,8);
-            if(result!=MACH_PORT_NULL)mach_port_deallocate(mach_task_self(),result);
-            atomic_store(&template_done,true);return NULL;
-          }
-          static void capture_lookup_template(void) {
-            mach_port_t sink=MACH_PORT_NULL;
-            if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&sink)!=KERN_SUCCESS || mach_port_insert_right(mach_task_self(),sink,sink,MACH_MSG_TYPE_MAKE_SEND)!=KERN_SUCCESS)exit(140);
-            pthread_t thread;if(pthread_create(&thread,NULL,emit_identity_lookup,&sink))exit(141);
-            for(int i=0;i<40 && !atomic_load(&template_done);i++) {
-              union { mach_msg_header_t h; unsigned char bytes[65536]; } msg;
-              memset(&msg,0,sizeof(msg));
-              kern_return_t received=mach_msg(&msg.h,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(msg),sink,50,MACH_PORT_NULL);
-              if(received!=KERN_SUCCESS)continue;
-              if(!(msg.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && msg.h.msgh_size>sizeof(msg.h) && msg.h.msgh_size-sizeof(msg.h)<=sizeof(lookup_template)) {
-                size_t len=msg.h.msgh_size-sizeof(msg.h);
-                const char *needle="com.apple.system.opendirectoryd.libinfo";
-                bool contains=false;for(size_t j=sizeof(msg.h);j+strlen(needle)<msg.h.msgh_size;j++)if(!memcmp(msg.bytes+j,needle,strlen(needle)+1))contains=true;
-                if(contains && MACH_MSGH_BITS_REMOTE(msg.h.msgh_bits)==MACH_MSG_TYPE_MOVE_SEND_ONCE) {
-                  memcpy(lookup_template,msg.bytes+sizeof(msg.h),len);lookup_template_size=len;lookup_template_id=msg.h.msgh_id;
-                }
-              }
-              if(msg.h.msgh_remote_port!=MACH_PORT_NULL) {
-                mig_reply_error_t reply={0};reply.Head.msgh_bits=MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(msg.h.msgh_bits),0);reply.Head.msgh_size=sizeof(reply);reply.Head.msgh_remote_port=msg.h.msgh_remote_port;reply.Head.msgh_id=msg.h.msgh_id+100;reply.NDR=NDR_record;reply.RetCode=MIG_BAD_ID;msg.h.msgh_remote_port=MACH_PORT_NULL;
-                if(mach_msg(&reply.Head,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(reply),0,MACH_PORT_NULL,100,MACH_PORT_NULL)!=KERN_SUCCESS)mach_msg_destroy(&reply.Head);
-              }
-              mach_msg_destroy(&msg.h);
-            }
-            mach_port_mod_refs(mach_task_self(),sink,MACH_PORT_RIGHT_RECEIVE,-1);pthread_join(thread,NULL);mach_port_deallocate(mach_task_self(),sink);
-            printf("{\"trusted_template_id\":%d,\"trusted_template_body_size\":%zu}\n",lookup_template_id,lookup_template_size);
-            if(!lookup_template_size)exit(142);
-          }
           extern int posix_spawnattr_setspecialport_np(posix_spawnattr_t *, mach_port_t, int);
           extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t *, uint32_t);
           #include <errno.h>
@@ -106,7 +71,7 @@ jobs:
           }
           static void witness(const char *command, int mode) {
             mach_port_t task=mach_task_self(), sink=MACH_PORT_NULL;
-            if (mode==2 && (mach_port_allocate(task,MACH_PORT_RIGHT_RECEIVE,&sink)!=KERN_SUCCESS ||
+            if (mode>=2 && (mach_port_allocate(task,MACH_PORT_RIGHT_RECEIVE,&sink)!=KERN_SUCCESS ||
                 mach_port_insert_right(task,sink,sink,MACH_MSG_TYPE_MAKE_SEND)!=KERN_SUCCESS)) exit(120);
             posix_spawnattr_t attr; posix_spawn_file_actions_t files;
             if(posix_spawnattr_init(&attr) || posix_spawn_file_actions_init(&files)) exit(121);
@@ -114,14 +79,14 @@ jobs:
             if(mode!=0) {
               mach_port_t empty[3]={MACH_PORT_NULL,MACH_PORT_NULL,MACH_PORT_NULL};
               int ports=posix_spawnattr_set_registered_ports_np(&attr,empty,3);
-              int bootstrap=posix_spawnattr_setspecialport_np(&attr,mode==2?sink:MACH_PORT_NULL,TASK_BOOTSTRAP_PORT);
+              int bootstrap=posix_spawnattr_setspecialport_np(&attr,mode>=2?sink:MACH_PORT_NULL,TASK_BOOTSTRAP_PORT);
               if(ports || bootstrap) { printf("{\"spawn_registered_error\":%d,\"spawn_bootstrap_error\":%d}\n",ports,bootstrap); exit(123); }
             }
-            if(mode!=2 && (posix_spawn_file_actions_addopen(&files,1,"/dev/null",O_RDWR,0) || posix_spawn_file_actions_addopen(&files,2,"/dev/null",O_RDWR,0))) exit(124);
+            if(mode<2 && (posix_spawn_file_actions_addopen(&files,1,"/dev/null",O_RDWR,0) || posix_spawn_file_actions_addopen(&files,2,"/dev/null",O_RDWR,0))) exit(124);
             char *id_args[]={"/usr/bin/id","-F",NULL};
             char *ssh_args[]={"/usr/bin/ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",NULL};
             char *captured_args[]={(char*)self,"--post-exec",(char*)command,NULL};
-            char **args=mode==2?captured_args:!strcmp(command,"id")?id_args:ssh_args;
+            char **args=mode>=2?captured_args:!strcmp(command,"id")?id_args:ssh_args;
             fflush(stdout); pid_t child;
             int spawn=posix_spawn(&child,args[0],&files,&attr,args,environ);
             posix_spawn_file_actions_destroy(&files); posix_spawnattr_destroy(&attr);
@@ -130,7 +95,7 @@ jobs:
             int64_t deadline=millis()+3000;
             while (waitpid(child,&status,WNOHANG)==0) {
               if (millis()>deadline) { timed_out=true; kill(-child,SIGKILL); kill(child,SIGKILL); waitpid(child,&status,0); break; }
-              if (mode!=2) { usleep(10000); continue; }
+              if (mode<2) { usleep(10000); continue; }
               union { mach_msg_header_t h; unsigned char bytes[65536]; } message;
               memset(&message,0,sizeof(message));
               kern_return_t kr=mach_msg(&message.h,MACH_RCV_MSG|MACH_RCV_TIMEOUT|MACH_RCV_VOUCHER|MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)|MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),0,sizeof(message),sink,50,MACH_PORT_NULL);
@@ -168,8 +133,16 @@ jobs:
               }
               printf("{\"command\":\"%s\",\"message_id\":%d,\"size\":%u,\"complex\":%s,\"descriptors\":%u,\"recognized_service\":\"%s\"}\n",command,message.h.msgh_id,message.h.msgh_size,(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX)?"true":"false",count,service);
               if(message.h.msgh_id==0x40000324) printf("{\"command\":\"%s\",\"lookup_header_remote_type\":%u,\"voucher_present\":%s,\"expected_size\":%zu}\n",command,MACH_MSGH_BITS_REMOTE(message.h.msgh_bits),message.h.msgh_voucher_port?"true":"false",sizeof(struct identity_lookup));
+              if(mode==3 && !(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && message.h.msgh_size>sizeof(message.h) && message.h.msgh_size-sizeof(message.h)<=sizeof(lookup_template) && !strcmp(service,"com.apple.system.opendirectoryd.libinfo") && MACH_MSGH_BITS_REMOTE(message.h.msgh_bits)==MACH_MSG_TYPE_MOVE_SEND_ONCE) {
+                size_t offset=(message.h.msgh_size+3u)&~3u;mach_msg_audit_trailer_t *audit=(void*)(message.bytes+offset);
+                if(audit->msgh_trailer_type==MACH_MSG_TRAILER_FORMAT_0 && audit->msgh_trailer_size>=sizeof(*audit) && (pid_t)audit->msgh_audit.val[5]==child) {
+                  lookup_template_size=message.h.msgh_size-sizeof(message.h);lookup_template_id=message.h.msgh_id;
+                  memcpy(lookup_template,message.bytes+sizeof(message.h),lookup_template_size);
+                  printf("{\"trusted_system_uid_template_id\":%d,\"body_size\":%zu}\n",lookup_template_id,lookup_template_size);
+                }
+              }
               /* The host's public serializer has been defining the sole admitted lookup. */
-              if (message.h.msgh_id==lookup_template_id && message.h.msgh_size==sizeof(message.h)+lookup_template_size && !(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && MACH_MSGH_BITS_REMOTE(message.h.msgh_bits)==MACH_MSG_TYPE_MOVE_SEND_ONCE) {
+              if (mode==2 && message.h.msgh_id==lookup_template_id && message.h.msgh_size==sizeof(message.h)+lookup_template_size && !(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && MACH_MSGH_BITS_REMOTE(message.h.msgh_bits)==MACH_MSG_TYPE_MOVE_SEND_ONCE) {
                 size_t offset=(message.h.msgh_size+3u)&~3u;
                 mach_msg_audit_trailer_t *audit=(void*)(message.bytes+offset);
                 bool owner=audit->msgh_trailer_type==MACH_MSG_TRAILER_FORMAT_0 && audit->msgh_trailer_size>=sizeof(*audit) && (pid_t)audit->msgh_audit.val[5]==child;
@@ -209,8 +182,8 @@ jobs:
               }
               mach_msg_destroy(&message.h);
             }
-            printf("{\"command\":\"%s\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"timed_out\":%s,\"messages\":%d}\n",command,mode==0?"host":mode==1?"cleared":"identity-only",WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,timed_out?"true":"false",received);
-            if (mode==2) {
+            printf("{\"command\":\"%s\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"timed_out\":%s,\"messages\":%d}\n",command,mode==0?"host":mode==1?"cleared":mode==3?"trusted-system-emitter":"identity-only",WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,timed_out?"true":"false",received);
+            if (mode>=2) {
               mach_port_mod_refs(task,sink,MACH_PORT_RIGHT_RECEIVE,-1);
               mach_port_deallocate(task,sink);
           
@@ -238,7 +211,8 @@ jobs:
               else execl("/usr/bin/ssh","ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",(char*)NULL);
               return 132;
             }
-            capture_lookup_template();
+            witness("id",3);
+            if(!lookup_template_size)return 142;
             for(int mode=0;mode<3;mode++) { witness("id",mode); witness("ssh",mode); }
             return 0;
           }
