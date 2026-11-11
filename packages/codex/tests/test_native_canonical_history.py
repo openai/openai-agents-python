@@ -17,13 +17,13 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.native_storage_fixtures import MemorySessionStore
 
 
-async def test_provider_item_references_survive_native_history_restore(responses, tmp_path):
+async def test_provider_item_references_survive_native_history_restore(responses):
     references = [
         {"type": "item_reference", "id": "msg_remote_first"},
         {"type": "item_reference", "id": "msg_remote_second"},
         {"type": "item_reference", "id": "msg_remote_first"},
     ]
-    storage = CustomStorage(SQLiteSessionStore(tmp_path / "provider-references.sqlite"))
+    storage = CustomStorage(MemorySessionStore())
     responses.respond(assistant_output("continued"))
     async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
         agent = Agent(instructions="Answer briefly.", provider=provider)
