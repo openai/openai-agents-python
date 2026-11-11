@@ -128,6 +128,7 @@ if TYPE_CHECKING:
         ModelRequestOptionsFactory as ModelRequestOptionsFactory,
         ModelResponse as ModelResponse,
         NativeModel as NativeModel,
+        NativeStreamingModel as NativeStreamingModel,
         ResponsesModel as ResponsesModel,
     )
     from .native_agents import (
@@ -235,6 +236,7 @@ _MODULES = {
     "ModelRequestOptionsFactory": ".models",
     "ModelResponse": ".models",
     "NativeModel": ".models",
+    "NativeStreamingModel": ".models",
     "DecisionError": ".decisions",
     "DecisionInput": ".decisions",
     "DecisionProvider": ".decisions",

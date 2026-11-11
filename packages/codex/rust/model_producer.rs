@@ -1,14 +1,36 @@
 //! Request-scoped application model output; Core remains the turn and tool owner.
 use super::*;
+use codex_api::{ApiError, ApplicationModelStream, ResponseEvent};
 use codex_extension_api::{
     ModelRequestContributor, ModelRequestInput, ModelResponseInterceptor, ModelResponseStream,
     ModelToolAdmission,
 };
 use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
+use tokio::sync::mpsc;
 
 const FAILURE: &str = "Native model producer failed or was cancelled";
-type Reply = std::result::Result<ModelReply, String>;
+const STREAM_CAPACITY: usize = 8;
+type StreamResult = std::result::Result<Vec<ResponseEvent>, String>;
+type Reply = std::result::Result<Response, String>;
+
+enum Response {
+    Complete(ModelReply),
+    Stream {
+        events: mpsc::Receiver<ResponseEvent>,
+        finish: oneshot::Receiver<StreamResult>,
+    },
+}
+
+enum Delivery {
+    Waiting(oneshot::Sender<Reply>),
+    Streaming {
+        events: mpsc::Sender<ResponseEvent>,
+        finish: oneshot::Sender<StreamResult>,
+        projection: ApplicationModelStream,
+    },
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModelReply {
@@ -21,7 +43,18 @@ struct ModelReply {
 pub(super) struct State {
     enabled: bool,
     retired: bool,
-    pending: HashMap<u64, (Arc<Ticket>, oneshot::Sender<Reply>)>,
+    pending: HashMap<u64, (Arc<Ticket>, Delivery)>,
+}
+impl State {
+    fn accepts(&self, id: u64) -> bool {
+        self.pending.get(&id).is_some_and(|(ticket, delivery)| {
+            ticket.valid(self)
+                && match delivery {
+                    Delivery::Waiting(reply) => !reply.is_closed(),
+                    Delivery::Streaming { events, .. } => !events.is_closed(),
+                }
+        })
+    }
 }
 struct Ticket {
     tools: Arc<PythonTools>,
@@ -37,6 +70,65 @@ impl Ticket {
             && *self.receipt.state.borrow() == AdmissionState::Pending
     }
 }
+
+struct Lease {
+    tools: Arc<PythonTools>,
+    id: u64,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.tools
+            .model_producer
+            .lock()
+            .expect("Model producer poisoned")
+            .pending
+            .remove(&self.id);
+    }
+}
+
+struct StreamCursor {
+    events: mpsc::Receiver<ResponseEvent>,
+    finish: Option<oneshot::Receiver<StreamResult>>,
+    accepted: std::vec::IntoIter<ResponseEvent>,
+    status: tokio::sync::watch::Receiver<AdmissionState>,
+    ticket: Arc<Ticket>,
+    _lease: Lease,
+}
+
+impl StreamCursor {
+    async fn next(&mut self) -> std::result::Result<Option<ResponseEvent>, String> {
+        let event = if let Some(event) = self.accepted.next() {
+            event
+        } else if self.finish.is_some() {
+            let event = tokio::select! { biased;
+                _ = self.status.wait_for(|status| *status != AdmissionState::Pending) => return Err(FAILURE.into()),
+                event = self.events.recv() => event,
+            };
+            match event {
+                Some(event) => event,
+                None => {
+                    let finish = self.finish.take().expect("unfinished model stream");
+                    self.accepted = finish.await.map_err(|_| FAILURE)??.into_iter();
+                    self.accepted.next().ok_or(FAILURE)?
+                }
+            }
+        } else {
+            return Ok(None);
+        };
+        let state = self
+            .ticket
+            .tools
+            .model_producer
+            .lock()
+            .expect("Model producer poisoned");
+        if !self.ticket.valid(&state) {
+            return Err(FAILURE.into());
+        }
+        Ok(Some(event))
+    }
+}
+
 impl PythonTools {
     pub(crate) fn enable_model_producer(&self, enabled: bool) -> Result<()> {
         let mut state = self.model_producer.lock().expect("Model producer poisoned");
@@ -49,21 +141,90 @@ impl PythonTools {
     }
     pub(crate) fn check_model_producer(&self, id: u64) -> bool {
         let state = self.model_producer.lock().expect("Model producer poisoned");
-        state
-            .pending
-            .get(&id)
-            .is_some_and(|(ticket, reply)| !reply.is_closed() && ticket.valid(&state))
+        state.accepts(id)
+    }
+    pub(crate) fn start_model_producer_stream(&self, id: u64) -> bool {
+        let mut state = self.model_producer.lock().expect("Model producer poisoned");
+        if !state.accepts(id) {
+            return false;
+        }
+        let (_, delivery) = state.pending.get_mut(&id).expect("checked model request");
+        if !matches!(delivery, Delivery::Waiting(_)) {
+            return false;
+        }
+        let (events, receive_events) = mpsc::channel(STREAM_CAPACITY);
+        let (finish, receive_finish) = oneshot::channel();
+        let Delivery::Waiting(reply) = std::mem::replace(
+            delivery,
+            Delivery::Streaming {
+                events,
+                finish,
+                projection: ApplicationModelStream::default(),
+            },
+        ) else {
+            unreachable!("model request has not started streaming")
+        };
+        reply
+            .send(Ok(Response::Stream {
+                events: receive_events,
+                finish: receive_finish,
+            }))
+            .is_ok()
+    }
+    pub(crate) async fn push_model_producer_event(&self, id: u64, data: &str) -> Result<bool> {
+        let (event, sender) = {
+            let mut state = self.model_producer.lock().expect("Model producer poisoned");
+            if !state.accepts(id) {
+                return Ok(false);
+            }
+            let (
+                _,
+                Delivery::Streaming {
+                    events, projection, ..
+                },
+            ) = state.pending.get_mut(&id).expect("checked model request")
+            else {
+                return Ok(false);
+            };
+            let Some(event) = projection
+                .push(data)
+                .map_err(|message| anyhow::anyhow!(message))?
+            else {
+                return Ok(true);
+            };
+            (event, events.clone())
+        };
+        let Ok(permit) = sender.reserve_owned().await else {
+            return Ok(false);
+        };
+        let state = self.model_producer.lock().expect("Model producer poisoned");
+        if !state.accepts(id) {
+            return Ok(false);
+        }
+        permit.send(event);
+        Ok(true)
     }
     pub(crate) fn reply_model_producer(&self, id: u64, data: Option<&str>, error: bool) -> bool {
         let mut state = self.model_producer.lock().expect("Model producer poisoned");
-        if !state
-            .pending
-            .get(&id)
-            .is_some_and(|(ticket, reply)| !reply.is_closed() && ticket.valid(&state))
-        {
+        if !state.accepts(id) {
             return false;
         }
-        let reply = if error {
+        let (_, delivery) = state.pending.remove(&id).expect("checked model request");
+        let reply = match delivery {
+            Delivery::Waiting(reply) => reply,
+            Delivery::Streaming {
+                projection, finish, ..
+            } => {
+                return finish
+                    .send(if error {
+                        Err(FAILURE.into())
+                    } else {
+                        projection.finish().map_err(str::to_owned)
+                    })
+                    .is_ok();
+            }
+        };
+        let result = if error {
             Err(FAILURE.into())
         } else {
             data.ok_or(FAILURE)
@@ -75,15 +236,10 @@ impl PythonTools {
                         Ok(reply)
                     }
                 })
+                .map(Response::Complete)
                 .map_err(str::to_owned)
         };
-        state
-            .pending
-            .remove(&id)
-            .expect("checked model request")
-            .1
-            .send(reply)
-            .is_ok()
+        reply.send(result).is_ok()
     }
     pub(super) fn retire_model_producer(&self) {
         let mut state = self.model_producer.lock().expect("Model producer poisoned");
@@ -153,23 +309,11 @@ impl ModelResponseInterceptor for Producer {
                 if !ticket.valid(&state) {
                     return Err(FAILURE.into());
                 }
-                state.pending.insert(id, (ticket.clone(), reply));
+                state
+                    .pending
+                    .insert(id, (ticket.clone(), Delivery::Waiting(reply)));
             }
-            struct Lease {
-                tools: Arc<PythonTools>,
-                id: u64,
-            }
-            impl Drop for Lease {
-                fn drop(&mut self) {
-                    self.tools
-                        .model_producer
-                        .lock()
-                        .expect("Model producer poisoned")
-                        .pending
-                        .remove(&self.id);
-                }
-            }
-            let _lease = Lease {
+            let lease = Lease {
                 tools: tools.clone(),
                 id,
             };
@@ -199,12 +343,35 @@ impl ModelResponseInterceptor for Producer {
             ) {
                 return Err(FAILURE.into());
             }
-            let events = codex_extension_api::completed_model_response(
-                reply.response_id,
-                reply.output,
-                reply.usage,
-            );
-            Ok(futures_util::stream::iter(events).boxed())
+            match reply {
+                Response::Complete(reply) => {
+                    let events = codex_extension_api::completed_model_response(
+                        reply.response_id,
+                        reply.output,
+                        reply.usage,
+                    );
+                    Ok(futures_util::stream::iter(events).boxed())
+                }
+                Response::Stream { events, finish } => {
+                    let cursor = StreamCursor {
+                        events,
+                        finish: Some(finish),
+                        accepted: Vec::new().into_iter(),
+                        status,
+                        ticket,
+                        _lease: lease,
+                    };
+                    let stream =
+                        futures_util::stream::try_unfold(cursor, |mut cursor| async move {
+                            let event = cursor
+                                .next()
+                                .await
+                                .map_err(|message| ApiError::InvalidRequest { message })?;
+                            Ok(event.map(|event| (event, cursor)))
+                        });
+                    Ok(stream.boxed())
+                }
+            }
         }))
     }
 }

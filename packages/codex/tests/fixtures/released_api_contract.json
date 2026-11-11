@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "2c0b9c1082d789ec3963b3c26587b03007c92583",
+  "baseline_commit": "99aec30c872c2819bc694823d3d1a501968e4884",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -657,6 +657,7 @@
           "ModelRequestOptionsFactory: TypeAlias = Callable[[ModelRequest], ModelRequestOptions | None | Awaitable[ModelRequestOptions | None]]",
           "@dataclass(frozen=True)\nclass ModelResponse:\n    output: list[dict[str, Any]] = field(repr=False)\n    usage: dict[str, int] | None = None\n    response_id: str = field(default_factory=lambda: 'resp_' + uuid4().hex)",
           "class NativeModel(Protocol):\n\n    def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]:\n        pass",
+          "class NativeStreamingModel(NativeModel, Protocol):\n\n    def stream(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]] | Awaitable[AsyncIterator[Mapping[str, Any]]]:\n        pass",
           "class ModelProvider(Protocol):\n\n    def get_model(self, model_name: str) -> NativeModel:\n        pass",
           "@dataclass(frozen=True)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
           "@dataclass(frozen=True)\nclass LitellmModel(ChatCompletionsModel):\n    pass",
@@ -673,10 +674,11 @@
           "ModelRequestOptionsFactory": "collections.abc.Callable",
           "ModelResponse": "agents.models.ModelResponse",
           "NativeModel": "agents.models.NativeModel",
+          "NativeStreamingModel": "agents.models.NativeStreamingModel",
           "ResponsesModel": "agents.models.ResponsesModel"
         },
         "imports": [
-          "from collections.abc import Awaitable, Callable, Mapping",
+          "from collections.abc import AsyncIterator, Awaitable, Callable, Mapping",
           "from dataclasses import dataclass, field",
           "from typing import Any, Protocol, TypeAlias",
           "from uuid import uuid4",
@@ -1882,6 +1884,7 @@
       "NativeOutput": "agents.schema.NativeOutput",
       "NativeProvider": "agents.agent.NativeProvider",
       "NativeRole": "agents.native_agents.NativeRole",
+      "NativeStreamingModel": "agents.models.NativeStreamingModel",
       "NativeToolCall": "agents.native_interception.NativeToolCall",
       "NetworkPolicy": "agents.executor.NetworkPolicy",
       "OpenAIDecisions": "agents.decisions.OpenAIDecisions",
@@ -4641,6 +4644,7 @@
       "NativeOutput",
       "NativeProvider",
       "NativeRole",
+      "NativeStreamingModel",
       "NativeToolCall",
       "NetworkPolicy",
       "OpenAIDecisions",
@@ -4716,7 +4720,7 @@
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalDecision as ApprovalDecision, ApprovalRequest as ApprovalRequest, ApprovalRequested as ApprovalRequested, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",
       "from .model_context import ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",
-      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, NativeModel as NativeModel, ResponsesModel as ResponsesModel",
+      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, NativeModel as NativeModel, NativeStreamingModel as NativeStreamingModel, ResponsesModel as ResponsesModel",
       "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
       "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",

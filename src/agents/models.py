@@ -10,5 +10,6 @@ from _agents_codex.models import (
     ModelRequestOptionsFactory as ModelRequestOptionsFactory,
     ModelResponse as ModelResponse,
     NativeModel as NativeModel,
+    NativeStreamingModel as NativeStreamingModel,
     ResponsesModel as ResponsesModel,
 )

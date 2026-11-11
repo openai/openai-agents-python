@@ -10703,6 +10703,41 @@ class Session(Generic[ContextT, OutputT]):
         ):
             state.failure.set_result(InteractionRequired("Native child requires interaction"))
 
+    async def _produce_model_stream(
+        self,
+        stream: Callable[..., Any],
+        request: Any,
+        request_id: int,
+        active: Callable[[], bool],
+    ) -> bool:
+        produced = await _call_callback(stream, active, request)
+        if produced is None and not active():
+            return False
+        iterator = aiter(produced)
+        event: Any = None
+        data: str | None = None
+        try:
+            if not active() or not self._native._start_model_producer_stream(request_id):
+                return False
+            async for event in iterator:
+                if not active():
+                    return False
+                if not isinstance(event, Mapping):
+                    raise TypeError("NativeModel.stream must yield Responses event mappings")
+                data = json.dumps(dict(event), allow_nan=False)
+                if not await self._native._push_model_producer_event(request_id, data):
+                    return False
+            return active()
+        finally:
+            try:
+                close = getattr(iterator, "aclose", None)
+                if callable(close):
+                    closed = close()
+                    if inspect.isawaitable(closed):
+                        await closed
+            finally:
+                del event, data, produced, iterator, request, stream
+
     async def _produce_model_response(self, state: _Submission, message: dict[str, Any]) -> None:
         request: Any = None
         produced: Any = None
@@ -10739,6 +10774,10 @@ class Session(Generic[ContextT, OutputT]):
                 backend = await _call_callback(backend.get_model, active, request.body["model"])
                 if not active():
                     return
+            stream = getattr(backend, "stream", None)
+            if callable(stream):
+                failed = not await self._produce_model_stream(stream, request, request_id, active)
+                return
 
             def invoke(request: ModelRequest) -> Any:
                 value: Any = None
