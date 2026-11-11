@@ -1,0 +1,74 @@
+{
+  "name": "Qualify the approved scripted-computer macOS suite",
+  "on": {
+    "push": {
+      "branches": [
+        "codex/mac-scripted-computer-full-suite-probe-20261111-a"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read",
+    "actions": "read"
+  },
+  "jobs": {
+    "full-suite": {
+      "runs-on": "macos-15",
+      "timeout-minutes": 40,
+      "env": {
+        "OPENAI_API_KEY": "fake-for-tests",
+        "UV_FROZEN": "1",
+        "RUST_MIN_STACK": "16777216"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "1a45fc28cf9d851bb29de39e52a899b3fe0fd304",
+            "persist-credentials": false
+          }
+        },
+        {
+          "uses": "astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884",
+          "with": {
+            "version": "0.11.14",
+            "python-version": "3.14",
+            "enable-cache": false
+          }
+        },
+        {
+          "uses": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+          "with": {
+            "name": "native-snapshot-macOS-ARM64-a4a08155fc69ff4fedf255b8dc4952e64e1d67d77960dea7b45a1abbc2c604b8",
+            "run-id": 43050119335,
+            "github-token": "${{ github.token }}",
+            "path": "${{ runner.temp }}/agents-native"
+          }
+        },
+        {
+          "name": "Select the exact approved-head native products",
+          "run": "python - <<'PYTHON'\nimport os, runpy\nfrom pathlib import Path\nidentity=runpy.run_path('packages/codex/scripts/source_integrity.py')['native_bundle_identity'](Path('.'))\nassert identity == 'a4a08155fc69ff4fedf255b8dc4952e64e1d67d77960dea7b45a1abbc2c604b8'\nproducts=Path(os.environ['RUNNER_TEMP'])/'agents-native'\nwheel,=products.glob('openai_agents-*.whl')\nassert wheel.with_name(wheel.name+'.pristine.json').is_file()\nfixture=products/'exec-server-fixture'\nassert fixture.is_file()\nfixture.chmod(fixture.stat().st_mode|0o111)\nwith open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as out:\n    out.write(f'OPENAI_AGENTS_NATIVE_WHEEL={wheel.resolve()}\\n')\n    out.write(f'CODEX_EXEC_SERVER_TEST_BINARY={fixture.resolve()}\\n')\nPYTHON\n"
+        },
+        {
+          "name": "Install dependencies with the reviewed wheel",
+          "run": "make sync"
+        },
+        {
+          "name": "Prepare the macOS sandbox account",
+          "if": "runner.environment == 'github-hosted'",
+          "shell": "bash",
+          "run": "# The managed shell clears its bootstrap port before running commands.\n# Give libc's local lookup the existing runner account.\nrecord=\"$(python3 - <<'PY'\nimport os\nimport pwd\nfrom pathlib import Path\n\naccount = pwd.getpwuid(os.getuid())\nif account.pw_uid == 0:\n    raise SystemExit(\"Expected a non-root runner account\")\nuid, gid = str(account.pw_uid), str(account.pw_gid)\nidentity = (account.pw_name, uid, gid, account.pw_dir, account.pw_shell)\nfields = (account.pw_name, \"*\", uid, gid, account.pw_gecos, account.pw_dir, account.pw_shell)\nif any(\":\" in value or \"\\r\" in value or \"\\n\" in value for value in fields):\n    raise SystemExit(\"Invalid runner account field in passwd record\")\nfor row in Path(\"/etc/passwd\").read_text().splitlines():\n    columns = row.split(\":\")\n    if len(columns) != 7:\n        continue\n    name, _, local_uid, local_gid, _, home, shell = columns\n    if name != account.pw_name and local_uid != uid:\n        continue\n    if (name, local_uid, local_gid, home, shell) != identity:\n        raise SystemExit(\"Runner account conflicts with an existing passwd record\")\n    raise SystemExit(0)\nprint(\":\".join(fields))\nPY\n)\"\nif [[ -n \"$record\" ]]; then\n  printf '\\n%s\\n' \"$record\" | sudo -n /usr/bin/tee -a /etc/passwd >/dev/null\nfi\n"
+        },
+        {
+          "name": "Run native SDK tests on macOS",
+          "timeout-minutes": 30,
+          "env": {
+            "PYTEST_ADDOPTS": "-rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0",
+            "PYTHONUNBUFFERED": "1"
+          },
+          "run": "make tests"
+        }
+      ]
+    }
+  }
+}
