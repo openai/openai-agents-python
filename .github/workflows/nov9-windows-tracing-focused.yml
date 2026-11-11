@@ -1,0 +1,48 @@
+name: Nov 9 Windows tracing focused diagnostic
+on:
+  push:
+    branches: [mark/nov9-a12-windows-tracing-focused-0746]
+    paths: [.github/workflows/nov9-windows-tracing-focused.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  deadline:
+    name: Windows x64 3.14.10 native_deadline_case
+    runs-on:
+      group: codex-runners
+      labels: codex-windows-x64
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - name: Checkout diagnostic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: diagnostic
+          persist-credentials: false
+      - name: Checkout exact original test tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e340601882cc8b6dad78bb75fad41310a6f706d5
+          path: sdk
+          persist-credentials: false
+      - name: Setup pinned Python and uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: "0.11.14"
+          python-version: "3.14.10"
+          enable-cache: false
+          working-directory: sdk
+      - name: Verify source and download the original official wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --no-project --python 3.14.10 python ../diagnostic/.github/diagnostics/nov9-windows-trace-media.py
+      - name: Install locked dependencies and verified wheel
+        run: |
+          uv sync --frozen --group dev --no-install-project --python 3.14.10
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip install --no-deps --python .venv/Scripts/python.exe "$env:NOV9_VERIFIED_WHEEL"
+      - name: Run original deadline case once under the 45 second cap
+        run: '& "./.venv/Scripts/python.exe" ../diagnostic/.github/diagnostics/nov9-windows-trace-probe.py'
