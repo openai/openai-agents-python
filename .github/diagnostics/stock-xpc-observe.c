@@ -13,7 +13,10 @@
 #include <unistd.h>
 #include <xpc/xpc.h>
 
+enum { canary_id = -2047655148, registered_slot_limit = 3 };
+
 struct shape {
+    unsigned canary;
     unsigned matched;
     unsigned first_size;
     bool first_complex;
@@ -41,43 +44,81 @@ static void signal_phase(int fd, char phase) {
     }
 }
 
+static bool registry_clean(const char *phase, mach_port_t replacement) {
+    mach_port_array_t registered = NULL;
+    mach_msg_type_number_t count = 0;
+    kern_return_t status = mach_ports_lookup(mach_task_self(), &registered, &count);
+    bool clean = status == KERN_SUCCESS && count <= registered_slot_limit &&
+                 (count == 0 || registered != NULL);
+    char slots[registered_slot_limit + 1] = "";
+    if (clean) {
+        for (mach_msg_type_number_t i = 0; i < count; ++i) {
+            mach_port_t name = registered[i];
+            if (name == MACH_PORT_NULL) {
+                slots[i] = 'N';
+            } else if (name == MACH_PORT_DEAD) {
+                slots[i] = 'D';
+            } else {
+                mach_port_type_t type = 0;
+                kern_return_t type_status = mach_port_type(mach_task_self(), name, &type);
+                if (type_status != KERN_SUCCESS) {
+                    slots[i] = '?';
+                } else if (type & MACH_PORT_TYPE_DEAD_NAME) {
+                    slots[i] = 'D';
+                } else if (name == replacement && (type & MACH_PORT_TYPE_SEND)) {
+                    slots[i] = 'A';
+                } else {
+                    slots[i] = 'L';
+                }
+                mach_port_deallocate(mach_task_self(), name);
+            }
+            clean &= slots[i] == 'N' || slots[i] == 'D' || slots[i] == 'A';
+        }
+        if (count != 0) {
+            vm_deallocate(mach_task_self(), (vm_address_t)registered,
+                          count * sizeof(*registered));
+        }
+    }
+    fprintf(stderr, "registered %s status=%d slots=%u values=%s\n",
+            phase, status, count, slots);
+    return clean;
+}
+
 static mach_port_t check_replacement(void) {
     mach_port_t port = MACH_PORT_NULL;
     require(task_get_bootstrap_port(mach_task_self(), &port) == KERN_SUCCESS
             && MACH_PORT_VALID(port), "post-exec task slot");
-
-    mach_port_array_t registered = NULL;
-    mach_msg_type_number_t count = 0;
-    require(mach_ports_lookup(mach_task_self(), &registered, &count) == KERN_SUCCESS,
-            "post-exec registered port readback");
-    for (mach_msg_type_number_t i = 0; i < count; ++i) {
-        require(!MACH_PORT_VALID(registered[i]), "registered ports empty");
-    }
-    if (count != 0) {
-        vm_deallocate(mach_task_self(), (vm_address_t)registered,
-                      count * sizeof(*registered));
-    }
+    require(registry_clean("post-exec", port), "no extra live registered rights");
     return port;
+}
+
+static void send_canary(mach_port_t replacement) {
+    mach_msg_header_t message = {
+        .msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+        .msgh_size = sizeof(message),
+        .msgh_remote_port = replacement,
+        .msgh_id = canary_id,
+    };
+    require(mach_msg(&message, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                     sizeof(message), 0, MACH_PORT_NULL, 500,
+                     MACH_PORT_NULL) == MACH_MSG_SUCCESS, "canary send");
 }
 
 static void stock_child(const char *mode, int report, int gate) {
     const bool baseline = strncmp(mode, "baseline-", 9) == 0;
+    const bool canary = strcmp(mode, "canary") == 0;
     mach_port_t replacement = baseline ? MACH_PORT_NULL : check_replacement();
+    if (!baseline && !canary) {
+        send_canary(replacement);
+    }
     signal_phase(report, 'R');
     char go;
     if (read(gate, &go, 1) != 1) {
         _exit(2);
     }
     signal_phase(report, 'E');
-    if (strcmp(mode, "canary") == 0) {
-        mach_msg_header_t message = {
-            .msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
-            .msgh_size = sizeof(message),
-            .msgh_remote_port = replacement,
-        };
-        require(mach_msg(&message, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
-                         sizeof(message), 0, MACH_PORT_NULL, 500,
-                         MACH_PORT_NULL) == MACH_MSG_SUCCESS, "canary send");
+    if (canary) {
+        send_canary(replacement);
         _exit(0);
     }
     if (strcmp(mode, "idle") != 0) {
@@ -133,6 +174,10 @@ static void observe(mach_port_t sink, pid_t child, struct shape *shape) {
         if (trailer.msgh_trailer_size < sizeof(trailer) ||
             audit_token_to_pid(trailer.msgh_audit) != child) {
             shape->invalid = true;
+        } else if (message.header.msgh_id == canary_id && size == sizeof(message.header) &&
+                   !(message.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+                   !MACH_PORT_VALID(message.header.msgh_remote_port)) {
+            ++shape->canary;
         } else if (shape->matched++ == 0) {
             shape->first_size = message.header.msgh_size;
             shape->first_complex = (message.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0;
@@ -199,10 +244,12 @@ static bool run(const char *binary, const char *mode) {
     const bool idle = strcmp(mode, "idle") == 0;
     // XNU inherits the bootstrap slot, but not an arbitrary parent port name.
     if (!baseline) {
-        require(mach_ports_register(mach_task_self(), NULL, 0) == KERN_SUCCESS,
-                "clear inherited registered ports");
+        kern_return_t clear = mach_ports_register(mach_task_self(), NULL, 0);
+        fprintf(stderr, "registered clear status=%d\n", clear);
+        require(clear == KERN_SUCCESS, "clear inherited registered ports");
         require(task_set_bootstrap_port(mach_task_self(), sink) == KERN_SUCCESS,
                 "assign inert task bootstrap port");
+        require(registry_clean("pre-fork", sink), "pre-fork registered rights");
     }
     pid_t child = fork();
     require(child >= 0, "fork");
@@ -220,7 +267,9 @@ static bool run(const char *binary, const char *mode) {
     receive_for(sink, child, report[0], &progress, &startup, 4000, true);
     if (progress.ready && !startup.invalid) {
         receive_for(sink, child, report[0], &progress, &startup, 200, false);
-        if (!startup.invalid && write(gate[1], "G", 1) == 1) {
+        unsigned expected_canary = baseline || canary ? 0 : 1;
+        if (!startup.invalid && startup.canary == expected_canary &&
+            write(gate[1], "G", 1) == 1) {
             receive_for(sink, child, report[0], &progress, &lookup,
                         canary || idle ? 900 : 3000, false);
         }
@@ -236,6 +285,7 @@ static bool run(const char *binary, const char *mode) {
     printf("%s ready=%d entered=%d resumed=%d unavailable=%d invalid_shape=%d", mode,
            progress.ready, progress.entered, progress.resumed, progress.unavailable,
            startup.invalid || lookup.invalid);
+    printf(" canary=%u/%u", startup.canary, lookup.canary);
     print_shape("startup", startup);
     print_shape("lookup", lookup);
     putchar('\n');
@@ -248,7 +298,8 @@ static bool run(const char *binary, const char *mode) {
         return progress.resumed && progress.unavailable && !startup.matched && !lookup.matched;
     }
     if (canary) {
-        return lookup.matched == 1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        return lookup.canary == 1 && lookup.matched == 0 &&
+               WIFEXITED(status) && WEXITSTATUS(status) == 0;
     }
     return idle ? lookup.matched == 0 : progress.resumed;
 }
@@ -260,6 +311,7 @@ int main(int argc, char *argv[]) {
     require(argc == 1 && argv[0][0] == '/' && getuid() != 0, "unprivileged launcher");
     signal(SIGPIPE, SIG_IGN);
     puts("shape=message_count/first_size/first_complex/first_reply");
+    puts("registered=N:null D:dead A:task-port-alias L:distinct-live ?:unclassified");
     const char *modes[] = {"baseline-ordinary", "baseline-privileged", "canary",
                            "idle", "ordinary", "privileged"};
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {

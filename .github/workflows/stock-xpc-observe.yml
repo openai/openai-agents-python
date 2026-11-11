@@ -6,6 +6,7 @@ on:
       - diagnostics/nov9-stock-xpc-observe-a12
     paths:
       - .github/workflows/stock-xpc-observe.yml
+      - .github/diagnostics/stock-xpc-observe.c
 
 permissions:
   contents: read
