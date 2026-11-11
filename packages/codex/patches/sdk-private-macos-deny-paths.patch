@@ -1,0 +1,277 @@
+diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
+index 03561e1c..df1ecd03 100644
+--- a/codex-rs/core/src/tools/orchestrator.rs
++++ b/codex-rs/core/src/tools/orchestrator.rs
+@@ -151,7 +151,8 @@ impl ToolOrchestrator {
+         let sandbox_manager = match environment.environment.local_runtime_paths() {
+             Some(paths) => sandbox_manager
+                 .with_restricted_macos_process_sandbox(paths.restricted_macos_process_sandbox)
+-                .with_allowed_symlinked_codex_home(paths.allowed_symlinked_codex_home.clone()),
++                .with_allowed_symlinked_codex_home(paths.allowed_symlinked_codex_home.clone())
++                .with_local_macos_deny_paths(paths.local_macos_deny_paths.clone()),
+             None => sandbox_manager,
+         };
+         let sandbox_config = environment.config();
+diff --git a/codex-rs/exec-server/src/discoverV2/capability_discoveries.rs b/codex-rs/exec-server/src/discoverV2/capability_discoveries.rs
+index bda6f20e..54d3e15a 100644
+--- a/codex-rs/exec-server/src/discoverV2/capability_discoveries.rs
++++ b/codex-rs/exec-server/src/discoverV2/capability_discoveries.rs
+@@ -53,7 +53,7 @@ pub(super) async fn load_capability_discoveries(
+     locations: &CapabilityLocations,
+     sandbox: Option<&crate::FileSystemSandboxContext>,
+ ) -> io::Result<Arc<DiscoverV2CapabilitiesResponse>> {
+-    let sandbox = sandbox.filter(|sandbox| sandbox.should_read_from_sandbox());
++    let sandbox = sandbox.filter(|sandbox| file_system.should_read_from_sandbox(sandbox));
+     let warnings = if !locations.warnings.is_empty() {
+         vec!["some capability locations could not be resolved; discovery may be incomplete".into()]
+     } else {
+diff --git a/codex-rs/exec-server/src/fs_sandbox.rs b/codex-rs/exec-server/src/fs_sandbox.rs
+index 0d88316b..396f4b34 100644
+--- a/codex-rs/exec-server/src/fs_sandbox.rs
++++ b/codex-rs/exec-server/src/fs_sandbox.rs
+@@ -154,9 +154,11 @@ impl FileSystemSandboxRunner {
+             .with_linux_sandbox_pid_namespace(self.runtime_paths.linux_sandbox_pid_namespace)
+             .with_private_read_deny(self.runtime_paths.private_read_deny.clone());
+         #[cfg(target_os = "macos")]
+-        let sandbox_manager = sandbox_manager.with_allowed_symlinked_codex_home(
+-            self.runtime_paths.allowed_symlinked_codex_home.clone(),
+-        );
++        let sandbox_manager = sandbox_manager
++            .with_allowed_symlinked_codex_home(
++                self.runtime_paths.allowed_symlinked_codex_home.clone(),
++            )
++            .with_local_macos_deny_paths(self.runtime_paths.local_macos_deny_paths.clone());
+         let (sandbox, windows_sandbox_level) = crate::sandbox_selection::select_sandbox(
+             &sandbox_manager,
+             permission_profile,
+diff --git a/codex-rs/exec-server/src/local_file_system.rs b/codex-rs/exec-server/src/local_file_system.rs
+index 32ddcfb9..aeb871e1 100644
+--- a/codex-rs/exec-server/src/local_file_system.rs
++++ b/codex-rs/exec-server/src/local_file_system.rs
+@@ -57,6 +57,8 @@ pub(crate) struct UnsandboxedFileSystem {
+ pub struct LocalFileSystem {
+     unsandboxed: UnsandboxedFileSystem,
+     sandboxed: Option<SandboxedFileSystem>,
++    #[cfg(target_os = "macos")]
++    has_local_macos_deny_paths: bool,
+ }
+
+ impl LocalFileSystem {
+@@ -64,12 +66,16 @@ impl LocalFileSystem {
+         Self {
+             unsandboxed: UnsandboxedFileSystem::default(),
+             sandboxed: None,
++            #[cfg(target_os = "macos")]
++            has_local_macos_deny_paths: false,
+         }
+     }
+
+     pub fn with_runtime_paths(runtime_paths: ExecServerRuntimeOptions) -> Self {
+         Self {
+             unsandboxed: UnsandboxedFileSystem::default(),
++            #[cfg(target_os = "macos")]
++            has_local_macos_deny_paths: !runtime_paths.local_macos_deny_paths.is_empty(),
+             sandboxed: Some(SandboxedFileSystem::new(runtime_paths)),
+         }
+     }
+@@ -83,6 +89,14 @@ impl LocalFileSystem {
+         })
+     }
+
++    pub(crate) fn should_read_from_sandbox(&self, sandbox: &FileSystemSandboxContext) -> bool {
++        #[cfg(target_os = "macos")]
++        if self.has_local_macos_deny_paths {
++            return true;
++        }
++        sandbox.should_read_from_sandbox()
++    }
++
+     fn file_system_for_reads<'a>(
+         &'a self,
+         sandbox: Option<&'a FileSystemSandboxContext>,
+@@ -93,7 +107,7 @@ impl LocalFileSystem {
+         if let Some(sandbox) = sandbox {
+             sandbox.validate_file_system_paths_for_current_host()?;
+         }
+-        if sandbox.is_some_and(FileSystemSandboxContext::should_read_from_sandbox) {
++        if sandbox.is_some_and(|sandbox| self.should_read_from_sandbox(sandbox)) {
+             Ok((self.sandboxed()?, sandbox))
+         } else {
+             Ok((&self.unsandboxed, None))
+@@ -128,7 +142,7 @@ impl LocalFileSystem {
+         if let Some(sandbox) = sandbox {
+             sandbox.validate_file_system_paths_for_current_host()?;
+             let needs_sandbox = match mode {
+-                FsOpenMode::Read => sandbox.should_read_from_sandbox(),
++                FsOpenMode::Read => self.should_read_from_sandbox(sandbox),
+                 FsOpenMode::Replace => sandbox.should_write_into_sandbox(),
+             };
+             if needs_sandbox {
+@@ -150,7 +164,7 @@ impl LocalFileSystem {
+     #[tracing::instrument(
+         name = "fs.read_file",
+         skip_all,
+-        fields(sandboxed = sandbox.is_some_and(FileSystemSandboxContext::should_read_from_sandbox))
++        fields(sandboxed = sandbox.is_some_and(|sandbox| self.should_read_from_sandbox(sandbox)))
+     )]
+     async fn read_file(
+         &self,
+@@ -197,7 +211,7 @@ impl LocalFileSystem {
+     #[tracing::instrument(
+         name = "fs.get_metadata",
+         skip_all,
+-        fields(sandboxed = sandbox.is_some_and(FileSystemSandboxContext::should_read_from_sandbox))
++        fields(sandboxed = sandbox.is_some_and(|sandbox| self.should_read_from_sandbox(sandbox)))
+     )]
+     async fn get_metadata(
+         &self,
+diff --git a/codex-rs/exec-server/src/process_sandbox.rs b/codex-rs/exec-server/src/process_sandbox.rs
+index 3a183ac5..33acadf5 100644
+--- a/codex-rs/exec-server/src/process_sandbox.rs
++++ b/codex-rs/exec-server/src/process_sandbox.rs
+@@ -215,7 +215,8 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
+     #[cfg(target_os = "macos")]
+     let sandbox_manager = sandbox_manager
+         .with_restricted_macos_process_sandbox(runtime_paths.restricted_macos_process_sandbox)
+-        .with_allowed_symlinked_codex_home(runtime_paths.allowed_symlinked_codex_home.clone());
++        .with_allowed_symlinked_codex_home(runtime_paths.allowed_symlinked_codex_home.clone())
++        .with_local_macos_deny_paths(runtime_paths.local_macos_deny_paths.clone());
+     let (sandbox, windows_sandbox_level) = select_sandbox(
+         &sandbox_manager,
+         &permissions,
+diff --git a/codex-rs/exec-server/src/runtime_options.rs b/codex-rs/exec-server/src/runtime_options.rs
+index c8d76dba..ef17e5a1 100644
+--- a/codex-rs/exec-server/src/runtime_options.rs
++++ b/codex-rs/exec-server/src/runtime_options.rs
+@@ -1,12 +1,15 @@
+ //! Executor-local paths and trusted startup settings used when preparing execution.
+
++#[cfg(target_os = "macos")]
++use std::fmt;
+ use std::path::PathBuf;
+
+ use codex_sandboxing::LinuxSandboxPidNamespace;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+
+ /// Paths and sandbox settings initialized when creating an executor.
+-#[derive(Clone, Debug, Eq, PartialEq)]
++#[derive(Clone, Eq, PartialEq)]
++#[cfg_attr(not(target_os = "macos"), derive(Debug))]
+ pub struct ExecServerRuntimeOptions {
+     /// Stable path to the Codex executable used to launch hidden helper modes.
+     pub codex_self_exe: AbsolutePathBuf,
+@@ -27,6 +30,42 @@ pub struct ExecServerRuntimeOptions {
+     /// User-config opt-out of writable-root symlink checks beneath this host's home.
+     #[cfg(target_os = "macos")]
+     pub allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
++    /// Deny paths owned by the local host, outside the serialized permission profile.
++    #[cfg(target_os = "macos")]
++    pub local_macos_deny_paths: Vec<AbsolutePathBuf>,
++}
++
++#[cfg(target_os = "macos")]
++impl fmt::Debug for ExecServerRuntimeOptions {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        let mut debug = f.debug_struct("ExecServerRuntimeOptions");
++        debug
++            .field("codex_self_exe", &self.codex_self_exe)
++            .field("codex_linux_sandbox_exe", &self.codex_linux_sandbox_exe)
++            .field(
++                "linux_sandbox_pid_namespace",
++                &self.linux_sandbox_pid_namespace,
++            )
++            .field(
++                "proxy_private_ips_via_upstream",
++                &self.proxy_private_ips_via_upstream,
++            )
++            .field(
++                "join_unreturned_local_exec_on_interrupt",
++                &self.join_unreturned_local_exec_on_interrupt,
++            );
++        #[cfg(target_os = "macos")]
++        debug
++            .field(
++                "restricted_macos_process_sandbox",
++                &self.restricted_macos_process_sandbox,
++            )
++            .field(
++                "allowed_symlinked_codex_home",
++                &self.allowed_symlinked_codex_home,
++            );
++        debug.finish_non_exhaustive()
++    }
+ }
+
+ impl ExecServerRuntimeOptions {
+@@ -58,6 +97,8 @@ impl ExecServerRuntimeOptions {
+             restricted_macos_process_sandbox: false,
+             #[cfg(target_os = "macos")]
+             allowed_symlinked_codex_home: None,
++            #[cfg(target_os = "macos")]
++            local_macos_deny_paths: Vec::new(),
+         })
+     }
+
+diff --git a/codex-rs/sandboxing/src/manager.rs b/codex-rs/sandboxing/src/manager.rs
+index d6d91139..cc902299 100644
+--- a/codex-rs/sandboxing/src/manager.rs
++++ b/codex-rs/sandboxing/src/manager.rs
+@@ -281,6 +281,8 @@ pub struct SandboxManager {
+     seatbelt_profile: MacosSeatbeltProfile,
+     #[cfg(target_os = "macos")]
+     allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
++    #[cfg(target_os = "macos")]
++    local_macos_deny_paths: Vec<AbsolutePathBuf>,
+ }
+
+ impl SandboxManager {
+@@ -297,6 +299,8 @@ impl SandboxManager {
+             seatbelt_profile: MacosSeatbeltProfile::FileSystemHelper,
+             #[cfg(target_os = "macos")]
+             allowed_symlinked_codex_home: None,
++            #[cfg(target_os = "macos")]
++            local_macos_deny_paths: Vec::new(),
+         }
+     }
+
+@@ -332,6 +336,13 @@ impl SandboxManager {
+         self
+     }
+
++    /// Apply host-owned paths only when compiling the local Seatbelt policy.
++    #[cfg(target_os = "macos")]
++    pub fn with_local_macos_deny_paths(mut self, paths: Vec<AbsolutePathBuf>) -> Self {
++        self.local_macos_deny_paths = paths;
++        self
++    }
++
+     pub fn select_initial(
+         &self,
+         permission_profile: &PermissionProfile,
+@@ -462,10 +473,25 @@ impl SandboxManager {
+                 use crate::seatbelt::SeatbeltPreparationError;
+                 use crate::seatbelt::create_seatbelt_command_args_with_profile;
+
++                use codex_protocol::permissions::FileSystemAccessMode;
++                use codex_protocol::permissions::FileSystemPath;
++                use codex_protocol::permissions::FileSystemSandboxEntry;
++
+                 let pending = pending_sandboxed_request?;
+-                let (file_system_sandbox_policy, network_sandbox_policy) = pending
++                let (mut file_system_sandbox_policy, network_sandbox_policy) = pending
+                     .effective_permission_profile
+                     .to_runtime_permissions();
++                // Keep private paths out of the request's effective permission profile.
++                file_system_sandbox_policy
++                    .entries
++                    .extend(self.local_macos_deny_paths.iter().map(|path| {
++                        FileSystemSandboxEntry::new(
++                            FileSystemPath::Path {
++                                path: PathUri::from_abs_path(path),
++                            },
++                            FileSystemAccessMode::Deny,
++                        )
++                    }));
+                 let mut args = create_seatbelt_command_args_with_profile(
+                     CreateSeatbeltCommandArgsParams {
+                         command: argv,

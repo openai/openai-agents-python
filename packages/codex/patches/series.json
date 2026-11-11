@@ -607,7 +607,11 @@
     {
       "path": "sdk-native-web-search-images.patch",
       "sha256": "87c4c6eda5d7d3086c434c0227fab9301c847c94c97eae32eabba7598f4e67bf"
+    },
+    {
+      "path": "sdk-private-macos-deny-paths.patch",
+      "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
     }
   ],
-  "result_tree": "f3d7735089db99009b21c118cb97cbc1dae373d0"
+  "result_tree": "13b14299628af557417468e2a8f31346fa61d64e"
 }

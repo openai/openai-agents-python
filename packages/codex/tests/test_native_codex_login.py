@@ -93,8 +93,7 @@ def split_saved_login(tmp_path: Path) -> tuple[Path, Path]:
     return home, credential_directory
 
 
-@pytest.fixture(autouse=True)
-def uncompressed_model_requests(monkeypatch):
+def disable_model_request_compression(monkeypatch: pytest.MonkeyPatch) -> None:
     # The shared aiohttp peer can read JSON without an optional Zstandard decoder.
     def without_compression(native_create):
         def create(config, *args, **kwargs):
@@ -107,6 +106,11 @@ def uncompressed_model_requests(monkeypatch):
     native = importlib.import_module("agents._native")
     for name in ("create_engine", "create_checkpoint_engine"):
         monkeypatch.setattr(native, name, without_compression(getattr(native, name)))
+
+
+@pytest.fixture(autouse=True)
+def uncompressed_model_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    disable_model_request_compression(monkeypatch)
 
 
 @pytest.fixture
@@ -247,6 +251,28 @@ async def test_trusted_local_executor_denies_selected_saved_login_reads(
         headers["authorization"] == "Bearer saved-token"
         for headers in codex_endpoint.request_headers
     )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS")
+@pytest.mark.requires_native_macos_sandbox
+async def test_trusted_macos_requires_saved_login_directory(
+    codex_endpoint: ResponsesFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home = saved_login(tmp_path / "mixed")
+    (home / "ordinary").write_text("readable")
+    agent = codex_agent(home)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"on macOS requires CodexLogin\.credential_directory or strict write policy",
+    ):
+        async with agent.session(
+            environment=Environment.local(cwd=workspace, write_policy="trusted_workspace_write")
+        ):
+            pytest.fail("Trusted execution opened a mixed credential directory")
+    assert codex_endpoint.requests == []
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux")

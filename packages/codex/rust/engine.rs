@@ -555,7 +555,11 @@ impl EngineState {
             ),
             (None, None) => {
                 crate::environment::for_unattached_threads(
-                    &config, /*sdk_local*/ false, /*private_read_deny*/ None,
+                    &config,
+                    /*sdk_local*/ false,
+                    /*private_read_deny*/ None,
+                    #[cfg(target_os = "macos")]
+                    Vec::new(),
                 )
                 .await?
             }
