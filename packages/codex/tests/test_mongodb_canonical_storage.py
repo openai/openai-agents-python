@@ -1,11 +1,13 @@
 """MongoDB adapter checks use a real local server when mongod is available."""
 
+import asyncio
 import json
 import shutil
 import subprocess
 import sys
 import time
 import warnings
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +23,7 @@ from tests.native_fixtures import assistant_output, responses as responses
 pytestmark = pytest.mark.serial if sys.platform == "win32" else []
 
 
-def test_mongodb_adapter_accepts_sync_client_without_connecting_and_rejects_async() -> None:
+async def test_mongodb_adapter_accepts_sync_and_async_clients_without_connecting() -> None:
     client = MongoClient("mongodb://127.0.0.1:1", connect=False)
     asynchronous = AsyncMongoClient("mongodb://127.0.0.1:1", connect=False)
     try:
@@ -29,12 +31,16 @@ def test_mongodb_adapter_accepts_sync_client_without_connecting_and_rejects_asyn
         assert CustomStorage(store).backend is store
         assert store.collection.write_concern.document == {"j": True, "w": "majority"}
         assert store.collection.read_concern.document == {"level": "majority"}
-        with pytest.raises(TypeError, match="synchronous"):
-            MongoDBSessionStore(asynchronous, database="synthetic")
+        async_store = MongoDBSessionStore(asynchronous, database="synthetic")
+        assert CustomStorage(async_store).backend is async_store
+        with pytest.raises(RuntimeError, match="off the client's event loop"):
+            async_store.acquire("thread")
+        await async_store.aclose()
         store.close()
         with pytest.raises(RuntimeError, match="closed"):
             store.acquire("thread")
     finally:
+        await asynchronous.close()
         client.close()
 
 
@@ -155,27 +161,51 @@ def test_mongodb_expired_lease_fences_old_writer_and_retains_snapshot(mongodb_cl
         second.release("thread", successor)
 
 
-async def test_mongodb_native_session_restores_canonical_context(mongodb_client, responses) -> None:
+@pytest.mark.parametrize("restore_with_async_client", [False, True], ids=["sync", "async"])
+async def test_mongodb_native_session_restores_canonical_context(
+    mongodb_client, responses, restore_with_async_client
+) -> None:
     store = MongoDBSessionStore(mongodb_client, database="synthetic_native")
     responses.respond(assistant_output("first answer"))
     responses.respond(assistant_output("second answer"))
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-native-store")
-    try:
+    async with AsyncExitStack() as stack:
+        stack.callback(store.close)
+        restore_store = store
+        if restore_with_async_client:
+            address = mongodb_client.address
+            assert address is not None
+            client = await stack.enter_async_context(
+                AsyncMongoClient(
+                    *address,
+                    serverSelectionTimeoutMS=5000,
+                    socketTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                )
+            )
+            restore_store = MongoDBSessionStore(client, database="synthetic_native", ttl=300)
+            stack.push_async_callback(restore_store.aclose)
         async with provider:
             agent = Agent(instructions="Answer.", provider=provider)
             async with agent.session(storage=CustomStorage(store)) as session:
                 identity = session.id
                 result = await (await session.submit("remember this input")).get_result()
                 assert result.final_output == "first answer"
-            async with agent.session(storage=CustomStorage(store), resume=identity) as restored:
+            async with agent.session(
+                storage=CustomStorage(restore_store), resume=identity
+            ) as restored:
                 assert restored.id == identity
+                if restore_with_async_client:
+                    with pytest.raises(RuntimeError, match="already has a writer"):
+                        await asyncio.to_thread(store.acquire, identity)
                 result = await (await restored.submit("Continue.")).get_result()
                 assert result.final_output == "second answer"
         assert len(responses.requests) == 2
         assert "remember this input" in json.dumps(responses.requests[1])
         assert "first answer" in json.dumps(responses.requests[1])
-    finally:
-        store.close()
+        if restore_with_async_client:
+            await restore_store.aclose()
+            assert (await client.admin.command("ping"))["ok"] == 1
 
 
 def test_mongodb_commit_without_ttl_clears_previous_expiry(mongodb_client) -> None:
