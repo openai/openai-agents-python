@@ -137,12 +137,20 @@ def test_sdk_metadata_separates_native_classic_and_a2a_dependencies(
                 "extra": extra,
             }
             selected_expected = expected | (classic if extra == "classic" else set())
-            # Hatch expands each integration's local classic dependency into its requirements.
+            # Hatch's expansion of local extra dependencies into wheel requirements.
             for value in extra_dependencies.get(extra, []):
                 requirement = Requirement(value)
                 if requirement.name == "openai-agents":
-                    assert requirement == Requirement("openai-agents[classic]")
-                    selected_expected |= classic
+                    assert requirement == Requirement(
+                        "openai-agents[classic,dapr]"
+                        if extra == "classic-dapr"
+                        else "openai-agents[classic]"
+                    )
+                    selected_expected.update(
+                        Requirement(value)
+                        for dependency_extra in requirement.extras
+                        for value in extra_dependencies[dependency_extra]
+                    )
                 else:
                     selected_expected.add(requirement)
             assert {
