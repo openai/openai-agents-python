@@ -4,4 +4,4 @@ try:
     __version__ = importlib.metadata.version("openai-agents")
 except importlib.metadata.PackageNotFoundError:
     # Fallback if running from source without being installed
-    __version__ = "0.24.0-alpha.7"  # x-release-please-version
+    __version__ = "0.24.0-alpha.8"  # x-release-please-version

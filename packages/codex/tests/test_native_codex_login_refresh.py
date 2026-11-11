@@ -187,6 +187,8 @@ async def test_sessions_share_one_refresh_of_a_copied_login_and_restart(
         proxy, connects = await peers.enter_async_context(
             connect_proxy(str(auth.make_url("/")), authority=authority)
         )
+        # Exercise the synthetic loopback proxy path, as in the transport tests.
+        monkeypatch.delenv("CODEX_SANDBOX", raising=False)
         for variable in ("HTTPS_PROXY", "https_proxy"):
             monkeypatch.setenv(variable, proxy)
         for variable in ("NO_PROXY", "no_proxy"):
@@ -525,6 +527,7 @@ async def test_saved_login_survives_cancelled_rotation(
             monkeypatch.setenv(variable, "127.0.0.1")
         for variable in ("OPENAI_API_KEY", "CODEX_API_KEY"):
             monkeypatch.setenv(variable, api_key)
+        monkeypatch.delenv("CODEX_SANDBOX", raising=False)
         monkeypatch.setenv("CODEX_CA_CERTIFICATE", str(ca_file))
         endpoint = str(model.make_url("/v1"))
         monkeypatch.setenv("OPENAI_BASE_URL", endpoint)

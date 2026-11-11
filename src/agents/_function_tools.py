@@ -58,6 +58,7 @@ from _agents_codex._function_tools import (
     _policy_hints as _policy_hints,
     _PythonTool as _PythonTool,
     _requires_context as _requires_context,
+    _RunErrorFormatterInheritance as _RunErrorFormatterInheritance,
     _ToolDecorator as _ToolDecorator,
     cast as cast,
     dataclass as dataclass,
