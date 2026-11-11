@@ -318,6 +318,8 @@ class DockerSandboxSession(BaseSandboxSession):
         self._docker_client = docker_client
         self._container = container
         self.state = state
+        # A later manifest can omit a volume that remains attached to this container.
+        self._git_copy_data_roots = _docker_git_copy_data_roots(state.manifest)
         self._workspace_root_ready = state.workspace_root_ready
         self._resume_workspace_probe_pending = False
         self._pty_lock = asyncio.Lock()
@@ -735,6 +737,8 @@ class DockerSandboxSession(BaseSandboxSession):
         return await self._exec_internal_for_user(*command, timeout=timeout, user=None)
 
     async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
+        if self._dependencies is not None and self._dependencies.git_repo_copy_launcher is not None:
+            return await self._dependencies.git_repo_copy_launcher(self, script, arguments)
         environment = await run_blocking_workspace_io(self._git_copy_environment)
         if environment is None:
             return ExecResult(
@@ -747,6 +751,7 @@ class DockerSandboxSession(BaseSandboxSession):
         )
 
     def _git_copy_environment(self) -> list[str] | None:
+        self._container.reload()
         image = self._container.image
         if image is None:
             return None
@@ -760,16 +765,38 @@ class DockerSandboxSession(BaseSandboxSession):
         # settings can change meaning when the copy runs from another directory.
         image_workdir = image_config.get("WorkingDir") or "/"
         read_link = cache(self._git_copy_link_target)
-        if read_link(PurePosixPath("/")) is None:
+        if (
+            read_link(PurePosixPath("/")) is None
+            or _resolve_git_copy_path(coerce_posix_path(self.state.manifest.root), read_link)
+            is None
+        ):
             return None
-        workspace = _resolve_git_copy_path(PurePosixPath(self.state.manifest.root), read_link)
-        if workspace is None:
+        mounts = self._container.attrs.get("Mounts")
+        if not isinstance(mounts, list):
             return None
+        data_roots = _docker_git_copy_data_roots(self.state.manifest)
+        for mount in mounts:
+            destination = mount.get("Destination") if isinstance(mount, dict) else None
+            if not isinstance(destination, str) or not PurePosixPath(destination).is_absolute():
+                return None
+            data_roots.add(PurePosixPath(destination))
+        self._git_copy_data_roots.update(data_roots)
+
+        # A declared mount can follow GitRepo in the manifest. Reserve its path even
+        # when the leaf does not exist yet, resolving links in its existing parents.
+        def read_data_link(path: PurePosixPath) -> str:
+            return read_link(path) or ""
+
+        for root in self._git_copy_data_roots.copy():
+            physical = _resolve_git_copy_path(root, read_data_link)
+            if physical is None:
+                return None
+            self._git_copy_data_roots.add(physical)
         directories = (
             PurePosixPath(posixpath.join(image_workdir, entry))
             for entry in f"{image_path}:/usr/bin:/bin".split(":")
         )
-        copy_path = _git_copy_tool_path(directories, workspace, read_link)
+        copy_path = _git_copy_tool_path(directories, self._git_copy_data_roots, read_link)
         if not copy_path:
             return None
 
@@ -2108,6 +2135,14 @@ def _build_docker_volume_mounts(
         )
 
     return mounts
+
+
+def _docker_git_copy_data_roots(manifest: Manifest) -> set[PurePosixPath]:
+    return {
+        coerce_posix_path(manifest.root),
+        *(coerce_posix_path(target) for _, target in manifest.mount_targets()),
+        *(coerce_posix_path(grant.path) for grant in manifest.extra_path_grants),
+    }
 
 
 def _docker_mount_path_identity(path: str | PurePath) -> PurePosixPath:

@@ -416,7 +416,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         workspace = PurePosixPath(os.path.realpath(cwd))
         root = PurePosixPath(os.getcwd())
         directories = (root / (entry or ".") for entry in configured_path.split(os.pathsep))
-        return _git_copy_tool_path(directories, workspace, read_link)
+        return _git_copy_tool_path(directories, (workspace,), read_link)
 
     async def _exec_in_context(
         self,

@@ -4,7 +4,7 @@ import os
 import posixpath
 import re
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
@@ -33,11 +33,11 @@ def _resolve_git_copy_path(
     path: PurePosixPath,
     read_link: Callable[[PurePosixPath], str | None],
     *,
-    workspace: PurePosixPath | None = None,
+    excluded_roots: Collection[PurePosixPath] = (),
 ) -> PurePosixPath | None:
-    """Resolve path components without traversing the writable workspace."""
+    """Resolve a path without entering any workspace or mount that can supply code."""
     resolved = PurePosixPath("/")
-    if not path.is_absolute() or resolved == workspace:
+    if not path.is_absolute() or resolved in excluded_roots:
         return None
     pending = deque(path.parts[1:])
     links = 0
@@ -47,7 +47,7 @@ def _resolve_git_copy_path(
             resolved = resolved.parent
             continue
         candidate = resolved / component
-        if workspace is not None and candidate.is_relative_to(workspace):
+        if candidate in excluded_roots:
             return None
         target = read_link(candidate)
         if target is None:
@@ -69,20 +69,23 @@ def _resolve_git_copy_path(
 
 def _git_copy_tool_path(
     directories: Iterable[PurePosixPath],
-    workspace: PurePosixPath,
+    excluded_roots: Collection[PurePosixPath],
     read_link: Callable[[PurePosixPath], str | None],
 ) -> str:
     copy_path: list[str] = []
     for directory in directories:
         if not directory.is_absolute() or ":" in str(directory):
             continue
-        physical = _resolve_git_copy_path(directory, read_link, workspace=workspace)
+        physical = _resolve_git_copy_path(directory, read_link, excluded_roots=excluded_roots)
         if physical is None:
             continue
         if any(
-            _resolve_git_copy_path(tool, read_link, workspace=workspace) is None
+            tool in excluded_roots
+            or (
+                read_link(tool) is not None
+                and _resolve_git_copy_path(tool, read_link, excluded_roots=excluded_roots) is None
+            )
             for tool in (physical / "sh", physical / "cp")
-            if read_link(tool) is not None
         ):
             continue
         # Keep tool aliases such as BusyBox's sh and cp in the lookup path.
