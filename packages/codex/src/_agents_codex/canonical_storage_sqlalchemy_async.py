@@ -129,6 +129,8 @@ class AsyncSQLAlchemySessionStore:
         messages_table: str = "agent_messages",
         schema: str | None = None,
         order_by: Literal["created_at", "id"] = "created_at",
+        max_items: int = 10_000,
+        max_bytes: int = 16 * 1024 * 1024,
     ) -> list[dict[str, Any]]:
         """Read one v0 session's items in the order used by its source.
 
@@ -138,9 +140,14 @@ class AsyncSQLAlchemySessionStore:
         By default, items follow Classic's timestamp order with ID as the tie
         breaker. Pass `order_by="id"` if the source orders items by append ID.
         Plain v0 messages are converted to typed messages with text parts.
+        Item count and encoded bytes are checked in the database before any
+        message text is returned. Exceeding either limit raises ValueError.
         """
-        from sqlalchemy import column, select, table
+        from sqlalchemy import LargeBinary, and_, case, cast, column, func, select, table
 
+        for name, value in (("max_items", max_items), ("max_bytes", max_bytes)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         if order_by not in ("created_at", "id"):
             raise ValueError('order_by must be "created_at" or "id"')
         messages = table(
@@ -154,17 +161,42 @@ class AsyncSQLAlchemySessionStore:
         order_columns = (
             (messages.c.created_at, messages.c.id) if order_by == "created_at" else (messages.c.id,)
         )
-        query = (
-            select(messages.c.message_data)
+        bounded = (
+            select(messages.c.id, messages.c.created_at, messages.c.message_data)
             .where(messages.c.session_id == session_id)
             .order_by(*order_columns)
+            .limit(max_items + 1)
+            .cte("legacy_bounded")
+        )
+        encoded_bytes = (
+            func.length(cast(bounded.c.message_data, LargeBinary))
+            if self.engine.dialect.name == "sqlite"
+            else func.octet_length(bounded.c.message_data)
+        )
+        item_count = func.count().over()
+        byte_count = func.coalesce(func.sum(encoded_bytes).over(), 0)
+        query = select(
+            item_count,
+            byte_count,
+            case(
+                (
+                    and_(item_count <= max_items, byte_count <= max_bytes),
+                    bounded.c.message_data,
+                )
+            ),
+        ).order_by(
+            *((bounded.c.created_at, bounded.c.id) if order_by == "created_at" else (bounded.c.id,))
         )
 
         async def fetch() -> list[dict[str, Any]]:
             async with self._database_lock, self.engine.connect() as connection:
-                rows = (await connection.scalars(query)).all()
+                rows = (await connection.execute(query)).all()
+            if rows and rows[0][0] > max_items:
+                raise ValueError("Legacy SQLAlchemy history exceeds the item limit")
+            if rows and rows[0][1] > max_bytes:
+                raise ValueError("Legacy SQLAlchemy history exceeds the byte limit")
             items = []
-            for row in rows:
+            for _, _, row in rows:
                 item = json.loads(row)
                 if not isinstance(item, dict):
                     raise ValueError("A v0 SQLAlchemy session item must be a JSON object")
