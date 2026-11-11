@@ -1381,6 +1381,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1409,6 +1410,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1437,6 +1439,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1465,6 +1468,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1489,6 +1493,8 @@ class Agent(Generic[ContextT, OutputT]):
         this Session lifetime, including for late readers. Memory grows with
         emitted payloads until Session references are released. The default "bounded"
         retains a limited suffix and reports gaps. This policy is not checkpointed.
+        include_model_output_items=True records ordinary assistant messages and
+        provider reasoning summaries in the Session's observation stream.
 
         max_function_concurrency bounds automatic Python callbacks per turn owner,
         including validation and hooks through reply settlement. None adds no
@@ -1613,6 +1619,7 @@ class Agent(Generic[ContextT, OutputT]):
                 on_interaction=on_interaction,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                include_model_output_items=include_model_output_items,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
@@ -1646,6 +1653,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         discover_agents_md: bool = False,
@@ -1684,6 +1692,7 @@ class Agent(Generic[ContextT, OutputT]):
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                include_model_output_items=include_model_output_items,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
@@ -1745,6 +1754,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
+        return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1772,6 +1782,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
+        return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1799,6 +1810,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
+        return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1830,6 +1842,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
+        return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1881,6 +1894,9 @@ class Agent(Generic[ContextT, OutputT]):
         manual checkpoint, input=None resumes the existing turn. Idle state
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
+        return_history=True captures conversation records before close for replay
+        through another Session's transact_history. That Session supplies its own instructions.
+        History above 4,096 original records or 8 MiB raises NativeError after completion.
         """
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(
@@ -2051,11 +2067,11 @@ class Agent(Generic[ContextT, OutputT]):
                 # instruction receipt to the first ordinary submission.
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
-                if _private_text_run_eligible(
+                if not return_history and _private_text_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_private_text_run"] = True
-                if _completed_run_eligible(
+                if not return_history and _completed_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_completed_input"] = input
@@ -2212,11 +2228,14 @@ class Agent(Generic[ContextT, OutputT]):
                         submission,
                         on_interaction,
                         return_state=return_state,
+                        return_history=return_history,
                         pause_manual=pause_manual,
                     )
                 result = await submission.get_result()
                 if return_state:
                     result = replace(result, state=await session.save_state())
+                if return_history:
+                    result = replace(result, history=await session._run_history())
                 return result
         finally:
             options.pop("trace_options", None)
@@ -2239,6 +2258,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
+        return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2266,6 +2286,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
+        return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2293,6 +2314,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
+        return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2324,6 +2346,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
+        return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2335,7 +2358,7 @@ class Agent(Generic[ContextT, OutputT]):
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
-        on_interaction and state follow run(). A sync or async handler
+        on_interaction, state, and return_history follow run(). A sync or async handler
         returns request.reply(value); the SDK delivers it before closing.
 
         If opening with a managed Environment fails and automatic cleanup leaves
@@ -2362,6 +2385,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["initial_messages"] = initial_messages
                 if return_state is not False:
                     options["return_state"] = return_state
+                if return_history is not False:
+                    options["return_history"] = return_history
                 if on_interaction is not None:
                     options["on_interaction"] = on_interaction
                 if provider is not None:

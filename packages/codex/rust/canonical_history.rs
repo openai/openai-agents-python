@@ -28,14 +28,22 @@ async fn idle(state: &ThreadState) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn snapshot(state: &ThreadState, limit: Option<usize>) -> anyhow::Result<Value> {
+pub async fn snapshot(
+    state: &ThreadState,
+    limit: Option<usize>,
+    for_replay: bool,
+) -> anyhow::Result<Value> {
     let _operation = state.engine.operation(false)?;
     let _mutation = state
         .mutations
         .try_lock()
         .context("native mutation is in progress")?;
     idle(&state).await?;
-    let (revision, total, items) = state.thread.sdk_history_snapshot(limit).await?;
+    let (revision, total, items) = if for_replay {
+        state.thread.sdk_replay_history_snapshot().await?
+    } else {
+        state.thread.sdk_history_snapshot(limit).await?
+    };
     Ok(json!({"revision": revision, "total": total, "items": items}))
 }
 

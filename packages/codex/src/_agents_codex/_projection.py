@@ -246,6 +246,16 @@ def project_model_output_item(
             }
             raw["type"] = "image_generation_call"
         return project_hosted_response_item(raw, turn_id)
+    if native["type"] == "Reasoning":
+        return {
+            "id": native["id"],
+            "turn_id": turn_id,
+            "type": "reasoning",
+            "summary": [
+                {"type": "summary_text", "text": text} for text in native.get("summary_text", [])
+            ],
+            "status": "completed" if done else "in_progress",
+        }
     if native["type"] != "AgentMessage":
         return project_web_search_item(native, done, turn_id)
     content = []
@@ -463,16 +473,6 @@ class EventProjector:
     ) -> dict[str, Any] | None:
         kind, item_id = native["type"], native["id"]
         common = {"id": item_id, "turn_id": turn_id}
-        if kind == "Reasoning":
-            return {
-                **common,
-                "type": "reasoning",
-                "summary": [
-                    {"type": "summary_text", "text": text}
-                    for text in native.get("summary_text", [])
-                ],
-                "status": "completed" if done else "in_progress",
-            }
         if kind == "DynamicToolCall":
             return {
                 **common,
