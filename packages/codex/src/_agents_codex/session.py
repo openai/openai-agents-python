@@ -1696,8 +1696,23 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
         await asyncio.sleep(0.01)
 
 
+class _FunctionBodyFailure(Exception):
+    def __init__(self, original: Exception) -> None:
+        super().__init__("Function callback failed")
+        self.original = original
+
+
+@dataclass(frozen=True)
+class _RecoverableFunctionCallback:
+    callback: Callable[..., Any]
+
+
 async def _call_callback(
-    callback: Callable[..., Any], admit: Callable[[], bool], /, *args: Any, **kwargs: Any
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
+    admit: Callable[[], bool],
+    /,
+    *args: Any,
+    **kwargs: Any,
 ) -> Any:
     try:
         with _owned_span("callback", "callback"):
@@ -1708,18 +1723,26 @@ async def _call_callback(
 
 
 async def _call_callback_body(
-    callback: Callable[..., Any],
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
     admit: Callable[[], bool],
     /,
     *args: Any,
     **kwargs: Any,
 ) -> Any:
     """Run Python in its appropriate executor and retain ownership until exit."""
+    capture_error = isinstance(callback, _RecoverableFunctionCallback)
+    if isinstance(callback, _RecoverableFunctionCallback):
+        callback = callback.callback
     worker: asyncio.Future[Any] | None = None
     value: Any = None
     try:
         if inspect.iscoroutinefunction(callback):
-            return await callback(*args, **kwargs)
+            try:
+                return await callback(*args, **kwargs)
+            except Exception as error:
+                if capture_error:
+                    raise _FunctionBodyFailure(error) from error
+                raise
         loop = asyncio.get_running_loop()
 
         async def admission() -> bool:
@@ -1728,7 +1751,12 @@ async def _call_callback_body(
 
         def invoke_if_admitted() -> Any:
             if asyncio.run_coroutine_threadsafe(admission(), loop).result():
-                return callback(*args, **kwargs)
+                try:
+                    return callback(*args, **kwargs)
+                except Exception as error:
+                    if capture_error:
+                        raise _FunctionBodyFailure(error) from error
+                    raise
             return None
 
         worker = loop.run_in_executor(None, copy_context().run, invoke_if_admitted)
@@ -1759,7 +1787,12 @@ async def _call_callback_body(
                 if inspect.iscoroutine(value):
                     value.close()
                 return None
-            return await value
+            try:
+                return await value
+            except Exception as error:
+                if capture_error:
+                    raise _FunctionBodyFailure(error) from error
+                raise
         return value
     finally:
         # Release SDK-owned callback arguments only after the admitted body exits.
@@ -10787,7 +10820,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         state: _CallbackState,
         message: dict[str, Any],
-        callback: Callable[..., Any],
+        callback: Callable[..., Any] | _RecoverableFunctionCallback,
         active: Callable[[], bool],
         /,
         *args: Any,
@@ -13055,6 +13088,7 @@ class Session(Generic[ContextT, OutputT]):
             context = None
             if (
                 entry.context_parameter is not None
+                or entry.error_function is not None
                 or entry.before is not None
                 or entry.after is not None
                 or (
@@ -13178,164 +13212,187 @@ class Session(Generic[ContextT, OutputT]):
                                 return
             if not self._admit_tool(state, request):
                 return
-            timeout_output: ToolOutput | None = None
+            failure_output: ToolOutput | None = None
             duration = entry.callback_timeout
-            if isinstance(entry, _CapturedComputer):
-                assert context is not None and isinstance(parsed, _ComputerCall)
-                value = await self._call_decision_callback(
-                    state,
-                    message,
-                    partial(
-                        entry.invoke,
-                        self._computer_resources,
-                        lambda: self._admit_tool(state, request),
-                    ),
-                    lambda: self._admit_tool(state, request),
-                    context,
-                    parsed,
-                )
-            elif duration is None:
-                value = await self._call_decision_callback(
-                    state,
-                    message,
-                    entry.callback,
-                    lambda: self._admit_tool(state, request),
-                    *args,
-                    **kwargs,
-                )
-            elif entry.timeout_behavior == "error_as_result":
-                loop = asyncio.get_running_loop()
-                cutoff = loop.time() + duration
-                expired = False
-                timeout_error = ToolTimeoutError(entry.name, duration)
-
-                def admit_body() -> bool:
-                    return not expired and self._admit_tool(state, request)
-
-                def expire_body(cancel_body: bool = True) -> None:
-                    nonlocal expired
-                    if self._closing or state.stopping or state.failure.done():
-                        return
-                    expired = True
-                    if cancel_body:
-                        cancel_once(body)
-
-                timer = loop.call_at(cutoff, expire_body)
-
-                value = None
-                body_error: BaseException | None = None
-
-                async def invoke_body() -> None:
-                    nonlocal value, body_error
-                    try:
-                        if admit_body():
-                            value = await self._call_decision_callback(
-                                state, message, entry.callback, admit_body, *args, **kwargs
-                            )
-                    except BaseException as error:
-                        # Transport every exit to the owner without letting
-                        # process-control exceptions escape this child task.
-                        body_error = error
-                    finally:
-                        timer.cancel()
-                        # Settle at body exit, before unrelated ready work can
-                        # delay the parent. Busy callbacks may outlast the timer.
-                        if loop.time() >= cutoff:
-                            expire_body(cancel_body=False)
-
-                try:
-                    body = asyncio.create_task(invoke_body())
-                    try:
-                        # Do not let parent cancellation cancel an already
-                        # unwinding body a second time and cut cleanup short.
-                        await asyncio.wait((body,))
-                    except BaseException as error:
-                        cancel_once(body)
-
-                        async def join_body() -> None:
-                            try:
-                                await _join(body)
-                            finally:
-                                if body_error is not None and not isinstance(
-                                    body_error, asyncio.CancelledError
-                                ):
-                                    state.retain_cleanup_error(body_error)
-
-                        await _close_after_error(error, join_body)
-                        raise
-                finally:
-                    timer.cancel()
-                if not self._admit_tool(state, request):
-                    if body_error is not None and not isinstance(
-                        body_error, asyncio.CancelledError
-                    ):
-                        state.retain_cleanup_error(body_error)
-                    return
-                if isinstance(body_error, (SystemExit, KeyboardInterrupt)):
-                    raise body_error
-                if expired:
-                    # Discard late output before a formatter can fail. The child
-                    # task itself never owns a return value.
-                    value = None
-                    if body_error is not None:
-                        timeout_error.__cause__ = body_error
-                    # No late value is validated or serialized. Format only
-                    # under the still-live parent's native admission.
-                    text = str(timeout_error)
-                    if entry.timeout_error_function is not None:
-                        assert context is not None
-                        text = await self._call_decision_callback(
-                            state,
-                            message,
-                            entry.timeout_error_function,
-                            lambda: self._admit_tool(state, request),
-                            context,
-                            timeout_error,
-                        )
-                        if not self._admit_tool(state, request):
-                            return
-                        if not isinstance(text, str):
-                            raise TypeError("Function timeout_error_function must return str")
-                    timeout_output = ToolOutput.error(text)
-                    timeout_output._validate()
-                    value = None
-                elif body_error is not None:
-                    raise body_error
-            else:
-                loop = asyncio.get_running_loop()
-                cutoff = loop.time() + duration
-                callback_task = asyncio.current_task()
-                assert callback_task is not None
-                timeout_error = ToolTimeoutError(entry.name, duration)
-
-                def expire_callback(cancel_body: bool = True) -> None:
-                    if self._closing or state.stopping or state.failure.done():
-                        return
-                    # Every stop owner joins this same failure and cancellation.
-                    state.failure.set_result(timeout_error)
-                    if cancel_body:
-                        cancel_once(callback_task)
-
-                timer = loop.call_at(cutoff, expire_callback)
-                try:
+            callback = (
+                _RecoverableFunctionCallback(entry.callback)
+                if entry.error_function is not None
+                else entry.callback
+            )
+            try:
+                if isinstance(entry, _CapturedComputer):
+                    assert context is not None and isinstance(parsed, _ComputerCall)
                     value = await self._call_decision_callback(
                         state,
                         message,
-                        entry.callback,
+                        partial(
+                            entry.invoke,
+                            self._computer_resources,
+                            lambda: self._admit_tool(state, request),
+                        ),
+                        lambda: self._admit_tool(state, request),
+                        context,
+                        parsed,
+                    )
+                elif duration is None:
+                    value = await self._call_decision_callback(
+                        state,
+                        message,
+                        callback,
                         lambda: self._admit_tool(state, request),
                         *args,
                         **kwargs,
                     )
-                finally:
-                    timer.cancel()
-                    # A busy callback can cross the cutoff before timer dispatch.
-                    if loop.time() >= cutoff:
-                        expire_callback(cancel_body=False)
+                elif entry.timeout_behavior == "error_as_result":
+                    loop = asyncio.get_running_loop()
+                    cutoff = loop.time() + duration
+                    expired = False
+                    timeout_error = ToolTimeoutError(entry.name, duration)
+
+                    def admit_body() -> bool:
+                        return not expired and self._admit_tool(state, request)
+
+                    def expire_body(cancel_body: bool = True) -> None:
+                        nonlocal expired
+                        if self._closing or state.stopping or state.failure.done():
+                            return
+                        expired = True
+                        if cancel_body:
+                            cancel_once(body)
+
+                    timer = loop.call_at(cutoff, expire_body)
+
+                    value = None
+                    body_error: BaseException | None = None
+
+                    async def invoke_body() -> None:
+                        nonlocal value, body_error
+                        try:
+                            if admit_body():
+                                value = await self._call_decision_callback(
+                                    state, message, callback, admit_body, *args, **kwargs
+                                )
+                        except BaseException as error:
+                            # Transport every exit to the owner without letting
+                            # process-control exceptions escape this child task.
+                            body_error = error
+                        finally:
+                            timer.cancel()
+                            # Settle at body exit, before unrelated ready work can
+                            # delay the parent. Busy callbacks may outlast the timer.
+                            if loop.time() >= cutoff:
+                                expire_body(cancel_body=False)
+
+                    try:
+                        body = asyncio.create_task(invoke_body())
+                        try:
+                            # Do not let parent cancellation cancel an already
+                            # unwinding body a second time and cut cleanup short.
+                            await asyncio.wait((body,))
+                        except BaseException as error:
+                            cancel_once(body)
+
+                            async def join_body() -> None:
+                                try:
+                                    await _join(body)
+                                finally:
+                                    if body_error is not None and not isinstance(
+                                        body_error, asyncio.CancelledError
+                                    ):
+                                        state.retain_cleanup_error(body_error)
+
+                            await _close_after_error(error, join_body)
+                            raise
+                    finally:
+                        timer.cancel()
+                    if not self._admit_tool(state, request):
+                        if body_error is not None and not isinstance(
+                            body_error, asyncio.CancelledError
+                        ):
+                            state.retain_cleanup_error(body_error)
+                        return
+                    if isinstance(body_error, (SystemExit, KeyboardInterrupt)):
+                        raise body_error
+                    if expired:
+                        # Discard late output before a formatter can fail. The child
+                        # task itself never owns a return value.
+                        value = None
+                        if body_error is not None:
+                            timeout_error.__cause__ = body_error
+                        # No late value is validated or serialized. Format only
+                        # under the still-live parent's native admission.
+                        text = str(timeout_error)
+                        if entry.timeout_error_function is not None:
+                            assert context is not None
+                            text = await self._call_decision_callback(
+                                state,
+                                message,
+                                entry.timeout_error_function,
+                                lambda: self._admit_tool(state, request),
+                                context,
+                                timeout_error,
+                            )
+                            if not self._admit_tool(state, request):
+                                return
+                            if not isinstance(text, str):
+                                raise TypeError("Function timeout_error_function must return str")
+                        failure_output = ToolOutput.error(text)
+                        failure_output._validate()
+                        value = None
+                    elif body_error is not None:
+                        raise body_error
+                else:
+                    loop = asyncio.get_running_loop()
+                    cutoff = loop.time() + duration
+                    callback_task = asyncio.current_task()
+                    assert callback_task is not None
+                    timeout_error = ToolTimeoutError(entry.name, duration)
+
+                    def expire_callback(cancel_body: bool = True) -> None:
+                        if self._closing or state.stopping or state.failure.done():
+                            return
+                        # Every stop owner joins this same failure and cancellation.
+                        state.failure.set_result(timeout_error)
+                        if cancel_body:
+                            cancel_once(callback_task)
+
+                    timer = loop.call_at(cutoff, expire_callback)
+                    try:
+                        value = await self._call_decision_callback(
+                            state,
+                            message,
+                            callback,
+                            lambda: self._admit_tool(state, request),
+                            *args,
+                            **kwargs,
+                        )
+                    finally:
+                        timer.cancel()
+                        # A busy callback can cross the cutoff before timer dispatch.
+                        if loop.time() >= cutoff:
+                            expire_callback(cancel_body=False)
+            except _FunctionBodyFailure as failure:
+                if not self._admit_tool(state, request):
+                    return
+                assert context is not None and entry.error_function is not None
+                text = await self._call_decision_callback(
+                    state,
+                    message,
+                    entry.error_function,
+                    lambda: self._admit_tool(state, request),
+                    context,
+                    failure.original,
+                )
+                if not self._admit_tool(state, request):
+                    return
+                if not isinstance(text, str):
+                    raise TypeError("Function error_function must return str") from None
+                failure_output = ToolOutput.error(text)
             if not self._admit_tool(state, request):
                 return
-            output: ToolOutput | None = timeout_output
+            output: ToolOutput | None = failure_output
             background = False
-            if timeout_output is None:
+            if failure_output is None:
                 background = isinstance(value, BackgroundResult)
                 content: Any = None
                 try:
@@ -13363,7 +13420,7 @@ class Session(Generic[ContextT, OutputT]):
                     # invocation data reference without altering caller-owned objects.
                     del request, message, raw_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
-            if entry.after is not None and timeout_output is None:
+            if entry.after is not None and failure_output is None:
                 assert context is not None
                 original_output = output
                 replacement = await self._call_decision_callback(

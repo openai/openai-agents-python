@@ -500,6 +500,10 @@ class _CapturedFunction:
     namespace: str | None = None
     finish_turn: bool = False
 
+    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
+        default=None, repr=False
+    )
+
     @property
     def _requires_live_manual_session(self) -> bool:
         return False

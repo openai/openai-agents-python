@@ -278,7 +278,13 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]
     ) = True
 
+    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
+        default=None, repr=False
+    )
+
     def __post_init__(self) -> None:
+        if self.error_function is not None and not callable(self.error_function):
+            raise TypeError("FunctionTool error_function must be callable or None")
         if not isinstance(self.is_enabled, bool) and not callable(self.is_enabled):
             raise TypeError("FunctionTool is_enabled must be a bool or callable")
         if self.namespace is not None and (
@@ -506,6 +512,10 @@ _TimeoutFormatter: TypeAlias = Callable[
 ]
 
 
+_BodyErrorFormatter: TypeAlias = Callable[
+    [ToolContext[PolicyContextT], Exception], str | Awaitable[str]
+]
+
 _InputErrorFormatter: TypeAlias = Callable[
     [ToolInputErrorContext[PolicyContextT], Exception, Any], str | Awaitable[str]
 ]
@@ -524,6 +534,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[PolicyContextT],
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _PythonTool[ToolContextT, PolicyContextT]: ...
 
 
@@ -540,6 +551,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[ToolContextT] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[ToolContextT] | None = None,
 ) -> _PythonTool[ToolContextT, ToolContextT]: ...
 
 
@@ -556,6 +568,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[PolicyContextT],
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
 
 
@@ -572,6 +585,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | None = None,
 ) -> _PythonTool[object, object]: ...
 
 
@@ -594,6 +608,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | None = None,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -618,6 +633,7 @@ def function_tool(
     | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -640,6 +656,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | None = None,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -664,6 +681,7 @@ def function_tool(
     | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -686,6 +704,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | None = None,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -712,6 +731,7 @@ def function_tool(
     | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -746,6 +766,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[Any] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[Any] | None = None,
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -860,6 +881,7 @@ def function_tool(
                 timeout_behavior=declaration.timeout_behavior,
                 timeout_error_function=declaration.timeout_error_function,
                 input_error_function=declaration.input_error_function,
+                error_function=declaration.error_function,
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,
@@ -884,6 +906,7 @@ def function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             input_error_function=input_error_function,
+            error_function=error_function,
             namespace=namespace,
             namespace_description=namespace_description,
         )
