@@ -217,6 +217,7 @@ from .observation import (
     HostedToolCallProgress,
     ModelOutputItemCompleted,
     OutputTextDelta as OutputTextDelta,
+    RawProviderEvent as RawProviderEvent,
     ResponseFactReceived as ResponseFactReceived,
     SubagentLifecycle as SubagentLifecycle,
     ToolFinished as ToolFinished,
@@ -1259,7 +1260,18 @@ def _project_progress(
 ) -> None:
     message = event["msg"]
     kind = message["type"]
-    if kind == "hosted_tool_call_progress" and event["id"] == turn_id:
+    if kind == "sdk_raw_provider_event" and event["id"] == turn_id:
+        buffer.append(
+            RawProviderEvent(
+                session_id=buffer.session_id,
+                turn_id=turn_id,
+                submission_id=submission_id,
+                source=message["source"],
+                transport=message["transport"],
+                payload=message["payload"],
+            )
+        )
+    elif kind == "hosted_tool_call_progress" and event["id"] == turn_id:
         buffer.append(
             HostedToolCallProgress(
                 session_id=buffer.session_id,
@@ -1439,6 +1451,7 @@ def _project_run_prefix(
             and kind
             in {
                 "_sdk_request_metadata",
+                "sdk_raw_provider_event",
                 "token_count",
                 "hosted_tool_call_progress",
                 "agent_message_content_delta",
@@ -3347,6 +3360,7 @@ class Session(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         discover_agents_md: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
@@ -3360,6 +3374,8 @@ class Session(Generic[ContextT, OutputT]):
         _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
+        if not isinstance(include_raw_provider_events, bool):
+            raise TypeError("include_raw_provider_events must be a bool")
         managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
         if isinstance(state, ManagedWorkspaceCheckpoint):
             if managed_source is None:
@@ -4241,6 +4257,7 @@ class Session(Generic[ContextT, OutputT]):
                     max_function_concurrency=max_function_concurrency,
                     observation_retention=observation_retention,
                     include_model_output_items=include_model_output_items,
+                    include_raw_provider_events=include_raw_provider_events,
                 )
                 session._input_guardrails = input_guardrails
                 session._output_guardrails = output_guardrails
@@ -4640,6 +4657,7 @@ class Session(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
     ) -> None:
         self._trace_context: str | None = None
         self._provider_lease: Any = None
@@ -4670,6 +4688,9 @@ class Session(Generic[ContextT, OutputT]):
         self._uses_siwc = False
         self._native_options: str | None = None
         self._websockets_enabled = False
+        self._include_raw_provider_events = include_raw_provider_events
+        if include_raw_provider_events:
+            thread._enable_raw_provider_events()
         self._engine = engine
         self._native = thread
         # Issued snapshots belong to this Session's current native thread.
@@ -7554,6 +7575,8 @@ class Session(Generic[ContextT, OutputT]):
                     candidate=thread,
                 )
                 _check_mcp_receipt(receipt, self._mcp_tools, allowed_mcp, self._catalog.generation)
+            if self._include_raw_provider_events:
+                thread._enable_raw_provider_events()
             # From this point, retirement cannot roll back. Keep the old reader
             # attached until its own native EOF; do not end the Session stream.
             retiring = True
@@ -10158,6 +10181,7 @@ class Session(Generic[ContextT, OutputT]):
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
             include_model_output_items=self._observations.include_model_output_items,
+            include_raw_provider_events=self._include_raw_provider_events,
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
@@ -10640,6 +10664,7 @@ class Session(Generic[ContextT, OutputT]):
             "raw_response_completed",
             "hosted_tool_call_progress",
             "raw_response_item",
+            "sdk_raw_provider_event",
         }:
             turn_id = turn_id or event["id"]
         if not turn_id and kind == "elicitation_request":
@@ -10684,6 +10709,7 @@ class Session(Generic[ContextT, OutputT]):
             "hosted_tool_call_progress",
             "raw_response_item",
             "raw_response_completed",
+            "sdk_raw_provider_event",
         }:
             # Passive progress must not create a never-settling owner without
             # native admission.
@@ -10693,6 +10719,18 @@ class Session(Generic[ContextT, OutputT]):
             state = current
         else:
             state = self._child_callback_state(event["subagent_id"], incarnation, turn_id)
+        if kind == "sdk_raw_provider_event":
+            if (
+                state.stopping
+                or state.completion.done()
+                or (
+                    state.native_instance is not None
+                    and state.native_instance != event.get("subagent_instance_id")
+                )
+            ):
+                return
+            self._observe_progress(event, state.handle, event["subagent_id"])
+            return
         if state.completion.done():
             if kind == "item_completed":
                 self._observe_execution(
@@ -12527,7 +12565,12 @@ class Session(Generic[ContextT, OutputT]):
                         # Unknown-phase blank tails keep the previous final answer.
                         if not blank or item.get("phase") == "final_answer":
                             state.last_assistant_had_blank_final = blank
-                elif kind in {"agent_message_content_delta", "item_completed", "response_fact"}:
+                elif kind in {
+                    "agent_message_content_delta",
+                    "item_completed",
+                    "response_fact",
+                    "sdk_raw_provider_event",
+                }:
                     if not projected:
                         self._observe_progress(event, handle, self.id)
                 elif kind == "dynamic_tool_call_request" and not state.stopping:

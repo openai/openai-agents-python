@@ -1,0 +1,661 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index a8232d2a3e5b3192547bbe006ccd7c70fd0c04b0..a5a65a334d79a7976d90471a233209638257e00d 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -7,6 +7,7 @@ use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+ use codex_protocol::protocol::ApiRateLimits;
+ use codex_protocol::protocol::ModelVerification;
+ use codex_protocol::protocol::RateLimitSnapshot;
++use codex_protocol::protocol::SdkRawProviderEvent;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TurnModerationMetadataEvent;
+ use codex_protocol::protocol::W3cTraceContext;
+@@ -80,6 +81,7 @@ pub struct ResponseId(pub String);
+ 
+ #[derive(Debug)]
+ pub enum ResponseEvent {
++    RawProvider(SdkRawProviderEvent),
+     ResponseFact(codex_protocol::response_facts::ReceivedResponseFact),
+     ResponseObserved(codex_protocol::protocol::ResponseObservation),
+     Created {
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index e582645ee0419440aa554fea9f1a5c0515aa66d8..b52d33a28d00ad2f620116d0d1c2e8402793788c 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -39,6 +39,7 @@ pub struct ResponsesOptions {
+     pub compression: Compression,
+     pub turn_state: Option<Arc<OnceLock<String>>>,
+     pub terminal_limit_errors: bool,
++    pub observe_raw_provider_events: bool,
+ }
+ 
+ impl<T: HttpTransport> ResponsesClient<T> {
+@@ -82,6 +83,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             options.compression,
+             options.turn_state,
+             options.terminal_limit_errors,
++            options.observe_raw_provider_events,
+         )
+         .await
+     }
+@@ -124,6 +126,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             response,
+             self.session.provider().stream_idle_timeout,
+             options.turn_state,
++            options.observe_raw_provider_events,
+         ))
+     }
+ 
+@@ -175,6 +178,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             compression,
+             turn_state,
+             /*terminal_limit_errors*/ false,
++            /*observe_raw_provider_events*/ false,
+         )
+         .await
+     }
+@@ -186,6 +190,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         compression: Compression,
+         turn_state: Option<Arc<OnceLock<String>>>,
+         terminal_limit_errors: bool,
++        observe_raw_provider_events: bool,
+     ) -> Result<ResponseStream, ApiError> {
+         let stream_response = self
+             .send_encoded(
+@@ -204,6 +209,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             self.sse_telemetry.clone(),
+             turn_state,
+             terminal_limit_errors,
++            observe_raw_provider_events,
+         ))
+     }
+     async fn send_encoded(
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json.rs b/codex-rs/codex-api/src/endpoint/responses_json.rs
+index 4ec156d1f083612f8fc1b0cf27eb9b520aec277f..decbfeb6530ca1043f12f719e7285a256205391f 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_json.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_json.rs
+@@ -12,6 +12,8 @@ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::ReasoningItemContent;
+ use codex_protocol::models::ReasoningItemReasoningSummary;
+ use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::ResponsesEventTransport;
++use codex_protocol::protocol::SdkRawProviderEvent;
+ use futures::StreamExt;
+ use futures::stream::BoxStream;
+ use serde_json::Value;
+@@ -25,6 +27,7 @@ pub(super) fn response_stream(
+     response: StreamResponse,
+     idle_timeout: Duration,
+     turn_state: Option<Arc<OnceLock<String>>>,
++    observe_raw_provider_events: bool,
+ ) -> (
+     Option<String>,
+     BoxStream<'static, Result<ResponseEvent, ApiError>>,
+@@ -78,6 +81,12 @@ pub(super) fn response_stream(
+         let mut response: Value = serde_json::from_slice(&body)
+             .map_err(|error| ApiError::Stream(format!("failed to decode Responses JSON: {error}")))?;
+         drop(body);
++        if observe_raw_provider_events && response.is_object() {
++            yield ResponseEvent::RawProvider(SdkRawProviderEvent {
++                transport: ResponsesEventTransport::Json,
++                payload: response.clone(),
++            });
++        }
+         // Move output aside without validating it or cloning the large body.
+         let output = response
+             .as_object_mut()
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index bdba7398e143dd2c60d46c7be09976924ce4d2d6..0129fbd4c14d45549aa4767a0a732874de35ed82 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -16,6 +16,8 @@ use codex_protocol::ResponseUsageMetadata;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::ApiRateLimits;
+ use codex_protocol::protocol::ModelVerification;
++use codex_protocol::protocol::ResponsesEventTransport;
++use codex_protocol::protocol::SdkRawProviderEvent;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TurnModerationMetadataEvent;
+ use eventsource_stream::Eventsource;
+@@ -43,6 +45,7 @@ pub fn spawn_response_stream(
+     telemetry: Option<Arc<dyn SseTelemetry>>,
+     turn_state: Option<Arc<OnceLock<String>>>,
+     terminal_limit_errors: bool,
++    observe_raw_provider_events: bool,
+ ) -> ResponseStream {
+     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
+     let api_rate_limits = parse_api_rate_limits(&stream_response.headers);
+@@ -108,6 +111,7 @@ pub fn spawn_response_stream(
+             telemetry,
+             safety_buffering_treatment,
+             terminal_limit_errors,
++            observe_raw_provider_events,
+         )
+         .await;
+             } => {},
+@@ -193,12 +197,8 @@ pub struct ResponsesStreamEvent {
+     pub(crate) raw: Value,
+ }
+ 
+-impl<'de> Deserialize<'de> for ResponsesStreamEvent {
+-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+-    where
+-        D: serde::Deserializer<'de>,
+-    {
+-        // Parse typed fields as before, while retaining the original progress envelope.
++impl ResponsesStreamEvent {
++    pub(crate) fn from_wire(raw: Value) -> serde_json::Result<Self> {
+         #[derive(Deserialize)]
+         struct Fields {
+             #[serde(rename = "type")]
+@@ -217,9 +217,7 @@ impl<'de> Deserialize<'de> for ResponsesStreamEvent {
+             #[serde(default, deserialize_with = "deserialize_present_value")]
+             safety_buffering: Option<Value>,
+         }
+-        let raw = Value::deserialize(deserializer)?;
+-        let fields: Fields =
+-            serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
++        let fields = Fields::deserialize(&raw)?;
+         Ok(Self {
+             kind: fields.kind,
+             headers: fields.headers,
+@@ -239,6 +237,15 @@ impl<'de> Deserialize<'de> for ResponsesStreamEvent {
+     }
+ }
+ 
++impl<'de> Deserialize<'de> for ResponsesStreamEvent {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: serde::Deserializer<'de>,
++    {
++        Self::from_wire(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
++    }
++}
++
+ fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+ where
+     D: serde::Deserializer<'de>,
+@@ -698,6 +705,7 @@ pub async fn process_sse(
+         telemetry,
+         SafetyBufferingTreatment::default(),
+         /*terminal_limit_errors*/ false,
++        /*observe_raw_provider_events*/ false,
+     )
+     .await;
+ }
+@@ -709,6 +717,7 @@ async fn process_sse_with_treatment(
+     telemetry: Option<Arc<dyn SseTelemetry>>,
+     safety_buffering_treatment: SafetyBufferingTreatment,
+     terminal_limit_errors: bool,
++    observe_raw_provider_events: bool,
+ ) {
+     let mut stream = stream.eventsource();
+     let mut response_error: Option<ApiError> = None;
+@@ -754,7 +763,21 @@ async fn process_sse_with_treatment(
+ 
+         trace!("SSE event: {}", &sse.data);
+ 
+-        let event: ResponsesStreamEvent = match serde_json::from_str(&sse.data) {
++        let raw = serde_json::from_str::<Value>(&sse.data);
++        if observe_raw_provider_events
++            && let Ok(payload) = &raw
++            && payload.is_object()
++            && tx_event
++                .send(Ok(ResponseEvent::RawProvider(SdkRawProviderEvent {
++                    transport: ResponsesEventTransport::Sse,
++                    payload: payload.clone(),
++                })))
++                .await
++                .is_err()
++        {
++            return;
++        }
++        let event = match raw.and_then(ResponsesStreamEvent::from_wire) {
+             Ok(event) => event,
+             Err(e) => {
+                 debug!(
+@@ -2004,6 +2027,7 @@ mod tests {
+             /*telemetry*/ None,
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
++            /*observe_raw_provider_events*/ false,
+         );
+         assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
+         let event = stream
+@@ -2045,6 +2069,7 @@ mod tests {
+             /*telemetry*/ None,
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
++            /*observe_raw_provider_events*/ false,
+         );
+         let mut events = Vec::new();
+         while let Some(event) = stream.rx_event.recv().await {
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index dd81df0523227f6ae81adf75f5ed78dbca6b284c..96ddb9b147037e13dc96d9163c51fa387d738181 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -43,6 +43,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+             /*telemetry*/ None,
+             /*turn_state*/ None,
+             /*terminal_limit_errors*/ false,
++            /*observe_raw_provider_events*/ false,
+         );
+         let mut observed_failures = 0;
+         let error = loop {
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index bb8977906a03a67ae9b81240bab4a906b08776de..fd179b451751088f1c2b1efaae4697df048e0f93 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -678,6 +678,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
+                 compression: Compression::None,
+                 turn_state: None,
+                 terminal_limit_errors: false,
++                observe_raw_provider_events: false,
+             },
+         )
+         .await?;
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 832d20f7504ea891147cf7454a62e506ca36a740..9c4df15e3abd8000a5fd7323736bc95176fec643 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1713,6 +1713,7 @@ impl ModelClientSession {
+         responses_metadata: &CodexResponsesMetadata,
+         compression: Compression,
+         use_responses_lite: bool,
++        observe_raw_provider_events: bool,
+     ) -> ApiResponsesOptions {
+         ApiResponsesOptions {
+             session_id: Some(self.client.responses_session_id(responses_metadata)),
+@@ -1737,6 +1738,7 @@ impl ModelClientSession {
+             compression,
+             turn_state: Some(Arc::clone(&self.turn_state)),
+             terminal_limit_errors: self.terminal_limit_errors(responses_metadata.request_kind),
++            observe_raw_provider_events,
+         }
+     }
+ 
+@@ -2074,6 +2076,7 @@ impl ModelClientSession {
+                     responses_metadata,
+                     compression,
+                     model_info.use_responses_lite,
++                    prompt.observe_raw_provider_events,
+                 )
+                 .await;
+ 
+@@ -2553,6 +2556,7 @@ impl ModelClientSession {
+                     ws_request,
+                     self.websocket_session.connection_reused(),
+                     Some(Arc::clone(&self.turn_state)),
++                    prompt.observe_raw_provider_events,
+                 )
+                 .await;
+             if let Some(original_item_ids) = original_item_ids {
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index a16635cb92e8f3003e76296affe69d40cf719114..a29a753393c7a3de8564279ecaff94b38821369e 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -24,6 +24,9 @@ use tokio_util::sync::CancellationToken;
+ #[derive(Clone, Copy, Debug, Default)]
+ pub struct BufferedResponsesPreference(pub bool);
+ 
++/// Opts an owned SDK thread into live Responses provider frames.
++pub struct ObserveRawProviderEvents;
++
+ /// API request payload for a single model turn
+ #[derive(Debug, Clone)]
+ pub struct Prompt {
+@@ -31,6 +34,7 @@ pub struct Prompt {
+     pub input: Vec<ResponseItem>,
+ 
+     pub(crate) prefer_buffered_response: bool,
++    pub(crate) observe_raw_provider_events: bool,
+ 
+     /// Tool definitions to inject into this request, empty when supplied by history.
+     pub(crate) tools: Arc<[ToolSpec]>,
+@@ -68,6 +72,7 @@ impl Default for Prompt {
+         Self {
+             input: Vec::new(),
+             prefer_buffered_response: false,
++            observe_raw_provider_events: false,
+             tools: Arc::default(),
+             tool_admission: None,
+             sampling_stop: None,
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 03c6bdd50715c6eaa0a4494d5c780ee98b80996d..3b1bdfe94c1fe9100e50c28d3e865b914ea78d60 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -111,6 +111,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         output_schema_strict: true,
+         provider_image_reference_policy: sess
+             .request_image_reference_policy(&step_context.turn, &step_context.settings.model_info),
++        observe_raw_provider_events: false,
+         cyber_access_program: turn_context.cyber_access_program,
+     };
+ 
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 8573cb7f4b923bfeb0a8c872e8acfbfabdd00a8b..1121e68a0459fd4fc2b956a27f8aa1a795bf4d90 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -244,6 +244,7 @@ pub use client::X_CODEX_INSTALLATION_ID_HEADER;
+ pub use client::X_CODEX_ROUTING_HINT_HEADER;
+ pub use client::X_CODEX_TURN_METADATA_HEADER;
+ pub use client_common::BufferedResponsesPreference;
++pub use client_common::ObserveRawProviderEvents;
+ pub use client_common::Prompt;
+ pub use client_common::ResponseEvent;
+ pub use client_common::ResponseStream;
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 81744ecc7b7429fa50a5c8bf7a469712afc74c62..62cf987e378240bd50f918b439c58746ea3c1fa3 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1902,6 +1902,46 @@ pub struct Event {
+     pub msg: EventMsg,
+ }
+ 
++impl Event {
++    /// Project a live SDK event, including observations excluded from stored protocols.
++    pub fn sdk_json(&self) -> serde_json::Result<serde_json::Value> {
++        if let EventMsg::SdkRawProviderEvent(event) = &self.msg {
++            return Ok(serde_json::json!({
++                "id": &self.id,
++                "msg": {
++                    "type": "sdk_raw_provider_event",
++                    "source": "responses",
++                    "transport": event.transport,
++                    "payload": &event.payload,
++                },
++            }));
++        }
++        serde_json::to_value(self)
++    }
++}
++
++#[derive(Clone, Copy, Debug, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum ResponsesEventTransport {
++    Sse,
++    Websocket,
++    Json,
++}
++
++#[derive(Clone)]
++pub struct SdkRawProviderEvent {
++    pub transport: ResponsesEventTransport,
++    pub payload: serde_json::Value,
++}
++
++impl std::fmt::Debug for SdkRawProviderEvent {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("SdkRawProviderEvent")
++            .field("transport", &self.transport)
++            .finish_non_exhaustive()
++    }
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct EnvironmentConnectionEvent {
+     pub environment_id: String,
+@@ -1916,6 +1956,11 @@ pub struct EnvironmentConnectionEvent {
+ pub enum EventMsg {
+     /// Typed received facts, distinct from model-visible/replayable messages.
+     ResponseFact(crate::response_facts::ResponseFactRecord),
++    /// Opt-in provider data for a live SDK subscriber only.
++    #[serde(skip)]
++    #[schemars(skip)]
++    #[ts(skip)]
++    SdkRawProviderEvent(SdkRawProviderEvent),
+     /// Error while executing a submission
+     Error(ErrorEvent),
+ 
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index 6117ec6e31939738d15d248b31561fd4a09f95cf..020ae004c7232bf3685babd342a0b1530eff12d2 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -394,7 +394,8 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
+         | ResponseEvent::ReasoningSummaryDelta { .. }
+         | ResponseEvent::ReasoningSummaryDone { .. }
+         | ResponseEvent::ReasoningContentDelta { .. } => true,
+-        ResponseEvent::ResponseFact(_)
++        ResponseEvent::RawProvider(_)
++        | ResponseEvent::ResponseFact(_)
+         | ResponseEvent::ResponseObserved(_)
+         | ResponseEvent::Created { .. }
+         | ResponseEvent::ServerModel(_)
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index cf4cd07a65c39d2ea0d4196567734474fdde073e..574668169c2ac2905077b69593de75258759e4bd 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -608,7 +608,10 @@ impl SessionTelemetry {
+     }
+ 
+     pub fn record_responses(&self, handle_responses_span: &Span, event: &ResponseEvent) {
+-        handle_responses_span.record("otel.name", SessionTelemetry::responses_type(event));
++        let Some(event_type) = SessionTelemetry::responses_type(event) else {
++            return;
++        };
++        handle_responses_span.record("otel.name", event_type);
+ 
+         match event {
+             ResponseEvent::OutputItemDone(item) => {
+@@ -1370,8 +1373,9 @@ impl SessionTelemetry {
+         }
+     }
+ 
+-    fn responses_type(event: &ResponseEvent) -> String {
+-        match event {
++    fn responses_type(event: &ResponseEvent) -> Option<String> {
++        Some(match event {
++            ResponseEvent::RawProvider(_) => return None,
+             ResponseEvent::ResponseFact(_) => "response_fact".into(),
+             ResponseEvent::ResponseObserved(_) => "response_observed".into(),
+             ResponseEvent::Created { .. } => "created".into(),
+@@ -1396,8 +1400,7 @@ impl SessionTelemetry {
+             ResponseEvent::ApiRateLimits(_) => "api_rate_limits".into(),
+             ResponseEvent::HostedToolCallProgress(_) => "hosted_tool_call_progress".into(),
+             ResponseEvent::ModelsEtag(_) => "models_etag".into(),
+-            ResponseEvent::ResponseFact(_) => "response_fact".into(),
+-        }
++        })
+     }
+ 
+     fn responses_item_type(item: &ResponseItem) -> String {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 339a905576815c58bb46b08a5c54490839248fe2..3bdc5458ed72f807e3b4630be207e5de3c644249 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -103,6 +103,7 @@ use codex_protocol::protocol::AgentMessageContentDeltaEvent;
+ use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
+ use codex_protocol::protocol::CodexErrorInfo;
+ use codex_protocol::protocol::ErrorEvent;
++use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::InternalSessionSource;
+ use codex_protocol::protocol::PlanDeltaEvent;
+@@ -1914,6 +1915,7 @@ pub(crate) fn build_prompt(
+     }
+     Prompt {
+         prefer_buffered_response: false,
++        observe_raw_provider_events: false,
+         input,
+         tools: if step_context.uses_incremental_tools() {
+             Arc::default()
+@@ -2044,6 +2046,11 @@ async fn run_sampling_request(
+                 .thread_extension_data
+                 .get::<crate::BufferedResponsesPreference>()
+                 .is_some_and(|mode| mode.0);
++            prompt.observe_raw_provider_events = sess
++                .services
++                .thread_extension_data
++                .get::<crate::ObserveRawProviderEvents>()
++                .is_some();
+             prompt.tool_admission = Some(crate::model_request::tool_admission_for_step(
+                 sess.thread_id.to_string(),
+                 Arc::clone(&step_context),
+@@ -2925,7 +2932,7 @@ pub(super) enum RealtimeEventText {
+ 
+ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventText> {
+     match msg {
+-        EventMsg::ResponseFact(_) => None,
++        EventMsg::ResponseFact(_) | EventMsg::SdkRawProviderEvent(_) => None,
+         EventMsg::ElicitationRequest(request)
+             if matches!(
+                 &request.request,
+@@ -3972,6 +3979,13 @@ async fn try_run_sampling_request(
+                         .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
+                         .await;
+                 }
++                ResponseEvent::RawProvider(event) => {
++                    sess.deliver_event_raw(Event {
++                        id: turn_context.sub_id.clone(),
++                        msg: EventMsg::SdkRawProviderEvent(event),
++                    })
++                    .await;
++                }
+                 ResponseEvent::ResponseObserved(observation) => {
+                     let result = sess
+                         .record_response_observation(&turn_context, observation)
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index c6e954a0b6f36ac353fd9566e390913cb7bc94f1..f6a634c3100a0792ce61ea7ebac7471b8f4ccda3 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -267,7 +267,7 @@ impl<'a> From<&'a ExecCommandEndEvent> for ExecCommandEndTracePayload<'a> {
+ 
+ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTraceEvent<'_>> {
+     match event {
+-        EventMsg::ResponseFact(_) => None,
++        EventMsg::ResponseFact(_) | EventMsg::SdkRawProviderEvent(_) => None,
+         EventMsg::ExecCommandBegin(event) if event.source != ExecCommandSource::UserShell => {
+             Some(ToolRuntimeTraceEvent::Started {
+                 tool_call_id: &event.call_id,
+@@ -431,7 +431,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+ 
+ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static str> {
+     match event {
+-        EventMsg::ResponseFact(_) => None,
++        EventMsg::ResponseFact(_) | EventMsg::SdkRawProviderEvent(_) => None,
+         EventMsg::SessionConfigured(_) => Some("session_configured"),
+         EventMsg::TurnStarted(_) => Some("turn_started"),
+         EventMsg::TurnComplete(_) => Some("turn_complete"),
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 4412e42123821a1015a65519d45a84f2d5e41630..4708b7e641c7553ae8e4a7271ceef1ebd6ca9d71 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -226,6 +226,7 @@ pub fn persisted_event_msg(
+         | EventMsg::HookStarted(_)
+         | EventMsg::HookCompleted(_)
+         | EventMsg::ResponseFact(_)
++        | EventMsg::SdkRawProviderEvent(_)
+         | EventMsg::AgentMessageContentDelta(_)
+         | EventMsg::PlanDelta(_)
+         | EventMsg::ReasoningContentDelta(_)
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 535b93663461fca8f6ec610ed19e25888ae9c1bf..a944a900cc534daed93252e1462bac479f744a70 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -17,6 +17,8 @@ use codex_client::TransportError;
+ use codex_http_client::HttpClientFactory;
+ use codex_http_client::RetryAfter;
+ use codex_protocol::protocol::ApiRateLimits;
++use codex_protocol::protocol::ResponsesEventTransport;
++use codex_protocol::protocol::SdkRawProviderEvent;
+ use codex_websocket_client::WebSocketConnection;
+ use codex_websocket_client::WebSocketConnector;
+ use codex_websocket_client::WebSocketTlsMode;
+@@ -247,6 +249,7 @@ impl ResponsesWebsocketConnection {
+         request: ResponsesWsRequest<'_>,
+         connection_reused: bool,
+         turn_state: Option<Arc<OnceLock<String>>>,
++        observe_raw_provider_events: bool,
+     ) -> Result<ResponseStream, ApiError> {
+         let (tx_event, rx_event) =
+             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
+@@ -337,6 +340,7 @@ impl ResponsesWebsocketConnection {
+                             turn_state.as_deref(),
+                             &timing_log_context,
+                             rx_interrupt,
++                            observe_raw_provider_events && !timing_log_context.warmup,
+                         ) => result,
+                         _ = &mut stopped => Err(ApiError::Stream("local response invocation stopped".into())),
+                         _ = tx_event.closed() => Err(ApiError::Stream(
+@@ -705,6 +709,7 @@ async fn run_websocket_response_stream(
+     turn_state: Option<&OnceLock<String>>,
+     timing_log_context: &ResponsesWebsocketTimingLogContext,
+     interrupt: oneshot::Receiver<()>,
++    observe_raw_provider_events: bool,
+ ) -> Result<(), ApiError> {
+     let mut last_server_model: Option<String> = None;
+     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
+@@ -762,6 +767,20 @@ async fn run_websocket_response_stream(
+ 
+         match message {
+             Message::Text(text) => {
++                let raw = serde_json::from_str::<Value>(&text);
++                if observe_raw_provider_events
++                    && let Ok(payload) = &raw
++                    && payload.is_object()
++                    && tx_event
++                        .send(Ok(ResponseEvent::RawProvider(SdkRawProviderEvent {
++                            transport: ResponsesEventTransport::Websocket,
++                            payload: payload.clone(),
++                        })))
++                        .await
++                        .is_err()
++                {
++                    return Err(ApiError::Stream("response event consumer dropped".into()));
++                }
+                 if let Some(wrapped_error) = parse_wrapped_websocket_error_event(&text)
+                     && let Some(error) =
+                         map_wrapped_websocket_error_event(wrapped_error, text.to_string())
+@@ -769,10 +788,14 @@ async fn run_websocket_response_stream(
+                     return Err(error);
+                 }
+ 
+-                let event = match serde_json::from_str::<ResponsesStreamEvent>(&text) {
++                let event = match raw.and_then(ResponsesStreamEvent::from_wire) {
+                     Ok(event) => event,
+                     Err(err) => {
+-                        debug!("failed to parse websocket event: {err}, data: {text}");
++                        debug!(
++                            error_category = ?err.classify(),
++                            payload_bytes = text.len(),
++                            "Failed to parse WebSocket event"
++                        );
+                         continue;
+                     }
+                 };
+@@ -1105,6 +1128,7 @@ mod tests {
+                 ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest::from(&request)),
+                 false,
+                 None,
++                /*observe_raw_provider_events*/ false,
+             )
+             .await
+             .expect("invocation returns before the socket lock is acquired");
+@@ -1169,6 +1193,7 @@ mod tests {
+             None,
+             &context,
+             rx_interrupt,
++            /*observe_raw_provider_events*/ false,
+         )
+         .await
+         .unwrap_err();
+@@ -1582,6 +1607,7 @@ mod tests {
+                 None,
+                 &context,
+                 rx_interrupt,
++                /*observe_raw_provider_events*/ false,
+             )
+             .await
+             .unwrap_err();
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
+index 70817b00cd8bf148a06b9b5caf18d4c75ac818a6..cf5d463e60b94116675768d7e19519d0bfa36dc2 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
+@@ -472,6 +472,7 @@ impl ConnectionLease {
+                         ResponsesWsRequest::ResponseCreate(request.into()),
+                         /*connection_reused*/ true,
+                         /*turn_state*/ None,
++                        /*observe_raw_provider_events*/ false,
+                     )
+                     .await
+             }
