@@ -650,7 +650,7 @@
     },
     {
       "path": "sdk-native-model-response-stream.patch",
-      "sha256": "043d40e59af9ce390c8cb8e3eedd9d5104b413a14e943cfa0c09241b8a57f533"
+      "sha256": "0c23bbf1515d26979e84697b7e457dfaf4507cb489dd593927b073b7a5142ae6"
     },
     {
       "path": "sdk-provider-item-references.patch",
@@ -659,7 +659,11 @@
     {
       "path": "sdk-reset-tool-choice-after-use.patch",
       "sha256": "b2381c223988ede75ad31b30a4e67a40d230963d5608838713f32935e0ef134f"
+    },
+    {
+      "path": "sdk-function-provider-schemas.patch",
+      "sha256": "2dc9df2134da65d9f7ebf158260a6a3504d370c22d906f213b38abceeafec55f"
     }
   ],
-  "result_tree": "179a2491a9369198a29d303e465bd04478d42c79"
+  "result_tree": "24c4171cd581103e66ce135051c82365d163fc7d"
 }
