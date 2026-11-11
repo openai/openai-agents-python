@@ -237,7 +237,30 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
                 identity = session.id
                 result = await (await session.submit("Lookup.")).get_result()
                 if mode == "compact":
-                    await session.compact(summary="The provider approval was processed.")
+                    snapshot = await session.model_context()
+                    request = next(
+                        i
+                        for i, item in enumerate(snapshot.items)
+                        if item["type"] == "mcp_approval_request"
+                    )
+                    response = next(
+                        i
+                        for i, item in enumerate(snapshot.items)
+                        if item["type"] == "mcp_approval_response"
+                    )
+                    for retain in ([request], [response]):
+                        with pytest.raises(
+                            RuntimeError, match="retain both original tool call and result"
+                        ):
+                            await session.compact(
+                                summary="Do not publish.", snapshot=snapshot, retain=retain
+                            )
+                        assert (await session.model_context()).items == snapshot.items
+                    await session.compact(
+                        summary="The provider approval was processed.",
+                        snapshot=snapshot,
+                        retain=[request, response] if approve else [],
+                    )
                     responses.respond(assistant_output("Ready."))
                     continuation = await (await session.submit("Continue.")).get_result()
                     assert continuation.final_output == "Ready."

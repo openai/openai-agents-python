@@ -464,6 +464,11 @@ pub(crate) fn check_pairs(
             ResponseItem::ComputerCallOutput { call_id, .. } => ("computer", Some(call_id), false),
             ResponseItem::CustomToolCall { call_id, .. } => ("custom", Some(call_id), true),
             ResponseItem::CustomToolCallOutput { call_id, .. } => ("custom", Some(call_id), false),
+            ResponseItem::McpApprovalRequest { id, .. } => ("mcp-approval", id.as_ref(), true),
+            ResponseItem::McpApprovalResponse {
+                approval_request_id,
+                ..
+            } => ("mcp-approval", Some(approval_request_id), false),
             ResponseItem::ToolSearchCall {
                 call_id, execution, ..
             } if execution != "server" => ("search", call_id.as_ref(), true),
