@@ -2323,8 +2323,12 @@ class RealtimeSession:
         def keep_delegation(value: _Delegation) -> bool:
             return any(value is kept for kept in preserved_delegations)
 
+        # Core can admit a batch while interrupt() awaits its receipt. Resolve
+        # preserved IDs against live owners before retiring response work.
         preserved_functions = tuple(
-            value for value in functions if any(call_id in preserved for call_id in value.names)
+            value
+            for value in self._functions.values()
+            if any(call_id in preserved for call_id in value.names)
         )
 
         def keep_function(function: _FunctionCall) -> bool:

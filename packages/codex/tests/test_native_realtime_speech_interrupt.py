@@ -315,8 +315,9 @@ async def test_speech_only_interrupt_does_not_start_an_unowned_legacy_request(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("late_admission", [False, True], ids=["existing-owner", "late-owner"])
 async def test_speech_only_interrupt_keeps_exact_handoff_target_acknowledgement(
-    realtime_peer: RealtimePeer,
+    realtime_peer: RealtimePeer, late_admission: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from agents.realtime import realtime_handoff
 
@@ -346,11 +347,32 @@ async def test_speech_only_interrupt_keeps_exact_handoff_target_acknowledgement(
         ).session() as session,
         session.realtime(config=RealtimeConfig(model="fixture-realtime")) as owner,
     ):
+        dispatch_entered, release_dispatch = asyncio.Event(), asyncio.Event()
+        native_call = owner._call
+
+        async def delayed_interrupt(kind: str, **kwargs: Any) -> Any:
+            if kind == "interrupt":
+                dispatch_entered.set()
+                await release_dispatch.wait()
+            return await native_call(kind, **kwargs)
+
+        stopping: asyncio.Task[None] | None = None
         try:
+            if late_admission:
+                # Admission follows the SDK snapshot but precedes Core's receipt.
+                monkeypatch.setattr(owner, "_call", delayed_interrupt)
+                stopping = asyncio.create_task(
+                    owner.interrupt("response-transfer-call", cancel_tools=False)
+                )
+                await dispatch_entered.wait()
             await peer.function("transfer", {}, "transfer-call")
             await entered.wait()
             start = len(peer.frames)
-            await owner.interrupt("response-transfer-call", cancel_tools=False)
+            if stopping is None:
+                await owner.interrupt("response-transfer-call", cancel_tools=False)
+            else:
+                release_dispatch.set()
+                await stopping
             peer.auto_ack_updates = False
             assert effects == ["entered"]
             release.set()
@@ -376,7 +398,10 @@ async def test_speech_only_interrupt_keeps_exact_handoff_target_acknowledgement(
                 == 1
             )
         finally:
+            release_dispatch.set()
             release.set()
+            if stopping is not None:
+                await asyncio.gather(stopping, return_exceptions=True)
             peer.auto_ack_updates = True
             while not peer.pending_updates.empty():
                 await peer.ack_next_update()
