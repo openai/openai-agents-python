@@ -525,9 +525,13 @@
       "sha256": "61a544805338b79ec8bb0cec3e177389b47c9fa3fee4e4790cd7a83d3ede2d76"
     },
     {
+      "path": "0158-sdk-private-disposable-run.patch",
+      "sha256": "7798a788f8c67eca899ec42f5d72bc8432a9817ed1a3549a468a29fd075311bc"
+    },
+    {
       "path": "sdk-private-macos-deny-paths.patch",
       "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
     }
   ],
-  "result_tree": "b093838664d82cecfd01b005d506ddf0ba564e68"
+  "result_tree": "afffc7140fd662f1a3e30c8f5cfb092d10d22295"
 }

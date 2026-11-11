@@ -10,12 +10,12 @@ use std::time::Duration;
 use codex_http_client::{HttpClientFactory, OutboundProxyPolicy, SdkModelHttpPool};
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 
-const CA_A: &[u8] = include_bytes!("../tests/fixtures/private-http-tls/ca-A.pem");
-const CA_B: &[u8] = include_bytes!("../tests/fixtures/private-http-tls/ca-B.pem");
-const CERT_A: &[u8] = include_bytes!("../tests/fixtures/private-http-tls/server-A.pem");
-const KEY_A: &[u8] = include_bytes!("../tests/fixtures/private-http-tls/server-A.key");
-const CERT_B: &[u8] = include_bytes!("../tests/fixtures/private-http-tls/server-B.pem");
-const KEY_B: &[u8] = include_bytes!("../tests/fixtures/private-http-tls/server-B.key");
+const CA_A: &[u8] = include_bytes!("fixtures/private-http-tls/ca-A.pem");
+const CA_B: &[u8] = include_bytes!("fixtures/private-http-tls/ca-B.pem");
+const CERT_A: &[u8] = include_bytes!("fixtures/private-http-tls/server-A.pem");
+const KEY_A: &[u8] = include_bytes!("fixtures/private-http-tls/server-A.key");
+const CERT_B: &[u8] = include_bytes!("fixtures/private-http-tls/server-B.pem");
+const KEY_B: &[u8] = include_bytes!("fixtures/private-http-tls/server-B.key");
 
 fn isolated(name: &str, selector: Option<&str>) -> bool {
     if std::env::var("SDK_PRIVATE_HTTP_TEST").as_deref() == Ok(name) {

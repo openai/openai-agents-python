@@ -705,6 +705,11 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let private_http = options.private_http;
+        let private_disposable = options.private_disposable
+            && options.permits_private_disposable()
+            && initial_messages.is_none()
+            && history.is_none()
+            && python_specs.as_ref().is_some_and(Vec::is_empty);
         if initial_messages.is_some() {
             ensure!(
                 history.is_none() && python_specs.is_some() && options.permits_initial_config(),
@@ -742,6 +747,16 @@ impl EngineState {
             && let Some(profile) = &self.managed_execution
         {
             startup.thread_extension_init.insert(profile.clone());
+        }
+        if private_disposable
+            && initial_config.is_some()
+            && self.managed_execution.is_some()
+            && self.goals.is_none()
+        {
+            startup.config.ephemeral = true;
+            startup
+                .thread_extension_init
+                .insert(codex_core::PrivateDisposableRun::default());
         }
         if let Some(id) = resume {
             ensure!(

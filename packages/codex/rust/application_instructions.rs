@@ -477,26 +477,37 @@ async fn confirm_publication(
         accepted_envelope(&envelope)?.context("missing application instructions publication")?;
     let live = thread.conversation_history_snapshot().await;
     receipt(live.items(), &envelope.item)?;
-    let stored = thread.load_history(true).await?;
-    let mut stored_items = stored.items.iter().filter_map(|row| match row {
-        RolloutItem::ResponseItem(item) => Some(item),
-        _ => None,
-    });
-    receipt(stored_items.clone().map(|item| &item.item), &envelope.item)?;
-    let recorded = stored_items
-        .find(|item| item.item.id() == envelope.item.id())
-        .context("missing native application instruction receipt")?;
-    ensure!(
-        recorded
-            .metadata
-            .as_ref()
-            .and_then(|value| value.sdk_instruction_files.as_ref())
-            == envelope
+    if thread
+        .thread_extension_data()
+        .get::<codex_core::PrivateDisposableRun>()
+        .is_some()
+    {
+        ensure!(
+            accepted.files.is_empty() && current_files.as_ref().is_none_or(Vec::is_empty),
+            "private instruction receipt cannot contain files"
+        );
+    } else {
+        let stored = thread.load_history(true).await?;
+        let mut stored_items = stored.items.iter().filter_map(|row| match row {
+            RolloutItem::ResponseItem(item) => Some(item),
+            _ => None,
+        });
+        receipt(stored_items.clone().map(|item| &item.item), &envelope.item)?;
+        let recorded = stored_items
+            .find(|item| item.item.id() == envelope.item.id())
+            .context("missing native application instruction receipt")?;
+        ensure!(
+            recorded
                 .metadata
                 .as_ref()
-                .and_then(|value| value.sdk_instruction_files.as_ref()),
-        "native application instruction file receipt was not confirmed"
-    );
+                .and_then(|value| value.sdk_instruction_files.as_ref())
+                == envelope
+                    .metadata
+                    .as_ref()
+                    .and_then(|value| value.sdk_instruction_files.as_ref()),
+            "native application instruction file receipt was not confirmed"
+        );
+    }
     *owner.0.lock().unwrap_or_else(PoisonError::into_inner) =
         Some(accepted.with_current_files(current_files));
     Ok(())

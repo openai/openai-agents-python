@@ -2217,10 +2217,9 @@ def _completed_run_eligible(
     parent_trace: TraceContext | Mapping[str, str | None] | None,
     trace_options: TraceOptions | Mapping[str, Any] | None,
 ) -> bool:
-    """Additional one-shot ceiling; disabling it preserves atomic opening."""
-    return (
-        _private_text_run_eligible(agent, input, context, return_state, parent_trace, trace_options)
-        and len(cast(str, input)) <= 16 * 1024
+    """Private completion profile; native archive and output bounds remain unchanged."""
+    return _private_text_run_eligible(
+        agent, input, context, return_state, parent_trace, trace_options
     )
 
 

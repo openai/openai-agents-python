@@ -4394,6 +4394,22 @@ impl TurnLifecycleContributor for PythonContributor {
         })
     }
 
+    fn on_user_input_recorded<'a>(
+        &'a self,
+        thread_store: &'a ExtensionData,
+        turn_store: &'a ExtensionData,
+        client_id: Option<&'a str>,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(tools) = thread_store.get::<PythonTools>()
+                && let Some(receipt) = tools.admitted_turn(turn_store)
+            {
+                receipt.input_recorded.store(true, Ordering::Release);
+                receipt.record_steering(client_id);
+            }
+        })
+    }
+
     fn on_item_completed<'a>(
         &'a self,
         thread_store: &'a ExtensionData,

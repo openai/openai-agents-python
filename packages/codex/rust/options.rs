@@ -55,6 +55,8 @@ pub struct ThreadOptions {
     // Set only by private one-shot constructors, never by JSON options.
     #[serde(skip)]
     pub(crate) private_http: bool,
+    #[serde(skip)]
+    pub(crate) private_disposable: bool,
     // Private Agents SDK entry path; never used for portable checkpoint import.
     #[serde(rename = "_sdk_resume_thread_id")]
     pub sdk_resume_thread_id: Option<ThreadId>,
@@ -136,6 +138,42 @@ struct InstructionText {
 }
 
 impl ThreadOptions {
+    pub(crate) fn permits_private_disposable(&self) -> bool {
+        self.permits_initial_config()
+            && self.application_instructions.is_some()
+            && self
+                .sdk_instruction_files
+                .as_ref()
+                .is_none_or(Vec::is_empty)
+            && self.agent_profiles.is_none()
+            && self.native_agent_roles.is_none()
+            && self.native_agent_max_depth.is_none()
+            && !self.canonical_rules
+            && self.instructions.is_none()
+            && !self.share_instructions_with_subagents
+            && !self.allow_provider_model_fallback
+            && self.history_mode.is_none()
+            && self.session_source.is_none()
+            && self.thread_source.is_none()
+            && self.dynamic_tools.is_empty()
+            && self.manual_tool_slots.is_empty()
+            && self.terminal_tool_slots.is_empty()
+            && self.hosted_tools.is_empty()
+            && self.metrics_service_name.is_none()
+            && self.parent_trace.is_none()
+            && self.environments.is_none()
+            && self.disabled_plugin_ids.is_none()
+            && self.hosted_verification.is_none()
+            && self.chatgpt_apps.is_none()
+            && self.user_instructions.is_none()
+            && self.tool_policy.as_ref().is_some_and(|p| {
+                p.allowed_tools.as_ref().is_some_and(Vec::is_empty)
+                    && !p.require_managed_sandbox
+                    && !p.require_unified_exec
+                    && p.expose_additional_permissions != Some(true)
+            })
+    }
+
     pub fn permits_initial_config(&self) -> bool {
         self.sdk_resume_thread_id.is_none()
             && self.sdk_history.is_none()
