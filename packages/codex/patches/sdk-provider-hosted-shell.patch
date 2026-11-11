@@ -193,6 +193,19 @@ index 10728bcf4f1e0407231e368e00e10d230480ce29..b1cb1cbe028f85cc972a93b2cd4cd4dc
              | ResponseItem::ImageGenerationCall { .. }
              | ResponseItem::Compaction { .. }
              | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/core/src/session/sdk_produced_items.rs b/codex-rs/core/src/session/sdk_produced_items.rs
+index 5366d7ca8f760387a0f2ae7760c1130ca2978b35..2359c0ba2b02f85a285cfe72aaeed23b13e2bf6f 100644
+--- a/codex-rs/core/src/session/sdk_produced_items.rs
++++ b/codex-rs/core/src/session/sdk_produced_items.rs
+@@ -157,6 +157,8 @@ fn is_produced_response(item: &ResponseItem) -> bool {
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ShellCall { .. }
++        | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. } => true,
+         _ => false,
+     }
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
 index 712c80ebd929b548ddc3196a86aea276138a6b40..adfe48bef4cd52bb629d8b23d3559eb678dcb1ac 100644
 --- a/codex-rs/core/src/session/turn.rs

@@ -17,6 +17,54 @@ from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
 
 
+@pytest.mark.parametrize("include_text", [False, True])
+async def test_native_hosted_shell_returns_produced_call_and_output(
+    responses: ResponsesFixture, include_text: bool
+) -> None:
+    call = {
+        "id": "sh_produced_call",
+        "type": "shell_call",
+        "call_id": "shell-produced",
+        "status": "completed",
+        "action": {"commands": ["printf provider"]},
+    }
+    output = {
+        "id": "sh_produced_output",
+        "type": "shell_call_output",
+        "call_id": "shell-produced",
+        "status": "completed",
+        "output": [
+            {"stdout": "provider", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+        ],
+    }
+    frames = [
+        {"type": "response.output_item.done", "output_index": 0, "item": call},
+        {"type": "response.output_item.done", "output_index": 1, "item": output},
+    ]
+    if include_text:
+        frames.append(assistant_output("provider complete"))
+    responses.respond(*frames)
+    agent = Agent(
+        model="gpt-5.5",
+        tools=[HostedShell(environment={"type": "container_auto"})],
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-produced-shell"),
+    )
+    async with timeout(30):
+        completed = await agent.run("run in the provider container", return_items=True)
+    assert completed.items is not None
+    assert [entry.item["type"] for entry in completed.items] == [
+        "shell_call",
+        "shell_call_output",
+        *(["message"] if include_text else []),
+    ]
+    assert all(entry.agent is agent for entry in completed.items)
+    assert completed.items[0].item["call_id"] == "shell-produced"
+    assert completed.items[0].item["action"] == call["action"]
+    assert completed.items[1].item["call_id"] == "shell-produced"
+    assert completed.items[1].item["output"] == output["output"]
+    assert len(responses.requests) == 1
+
+
 @pytest.mark.parametrize(
     "environment",
     [

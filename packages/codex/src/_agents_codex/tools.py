@@ -553,6 +553,13 @@ class _CapturedFunction:
     namespace: str | None = None
     finish_turn: bool = False
 
+    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
+        default=None, repr=False
+    )
+
+    _allow_run_error_formatter: bool = field(default=False, repr=False)
+    _reparse_error_arguments: bool = field(default=False, repr=False)
+
     @property
     def _requires_live_manual_session(self) -> bool:
         return False

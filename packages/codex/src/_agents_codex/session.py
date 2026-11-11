@@ -106,6 +106,7 @@ from ._stored_history import (
     _options as _stored_options,
     _turn_page as _stored_turn_page,
 )
+from ._tool_errors import ToolErrorContext, ToolErrorFormatter
 from ._trace_context import (
     TraceContext as TraceContext,
     _native_trace_context as _native_trace_context,
@@ -1762,8 +1763,23 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
         await asyncio.sleep(0.01)
 
 
+class _FunctionBodyFailure(Exception):
+    def __init__(self, original: Exception) -> None:
+        super().__init__("Function callback failed")
+        self.original = original
+
+
+@dataclass(frozen=True)
+class _RecoverableFunctionCallback:
+    callback: Callable[..., Any]
+
+
 async def _call_callback(
-    callback: Callable[..., Any], admit: Callable[[], bool], /, *args: Any, **kwargs: Any
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
+    admit: Callable[[], bool],
+    /,
+    *args: Any,
+    **kwargs: Any,
 ) -> Any:
     try:
         return await _call_callback_entered(callback, admit, args, kwargs)
@@ -1772,7 +1788,7 @@ async def _call_callback(
 
 
 async def _call_callback_entered(
-    callback: Callable[..., Any],
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
     admit: Callable[[], bool],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -1787,22 +1803,33 @@ async def _call_callback_entered(
 
 
 async def _call_callback_body(
-    callback: Callable[..., Any],
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
     admit: Callable[[], bool],
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     enter: Callable[[], None] | None = None,
 ) -> Any:
     """Run Python in its appropriate executor and retain ownership until exit."""
+    if isinstance(callback, _RecoverableFunctionCallback):
+        function = callback.callback
+        capture_error = True
+    else:
+        function = callback
+        capture_error = False
     worker: asyncio.Future[Any] | None = None
     value: Any = None
     try:
-        if inspect.iscoroutinefunction(callback):
+        if inspect.iscoroutinefunction(function):
             if enter is not None:
                 if not admit():
                     return None
                 enter()
-            return await callback(*args, **kwargs)
+            try:
+                return await function(*args, **kwargs)
+            except Exception as error:
+                if capture_error:
+                    raise _FunctionBodyFailure(error) from error
+                raise
         loop = asyncio.get_running_loop()
 
         async def admission() -> bool:
@@ -1814,7 +1841,12 @@ async def _call_callback_body(
 
         def invoke_if_admitted() -> Any:
             if asyncio.run_coroutine_threadsafe(admission(), loop).result():
-                return callback(*args, **kwargs)
+                try:
+                    return function(*args, **kwargs)
+                except Exception as error:
+                    if capture_error:
+                        raise _FunctionBodyFailure(error) from error
+                    raise
             return None
 
         worker = loop.run_in_executor(None, copy_context().run, invoke_if_admitted)
@@ -1845,14 +1877,19 @@ async def _call_callback_body(
                 if inspect.iscoroutine(value):
                     value.close()
                 return None
-            return await value
+            try:
+                return await value
+            except Exception as error:
+                if capture_error:
+                    raise _FunctionBodyFailure(error) from error
+                raise
         return value
     finally:
         # Release SDK-owned callback arguments only after the admitted body exits.
         args = ()
         kwargs = {}
         enter = None
-        callback = admit = cast(Any, None)
+        callback = function = admit = cast(Any, None)
         del worker, value
 
 
@@ -3378,6 +3415,7 @@ class Session(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
         include_raw_provider_events: bool = False,
@@ -4275,6 +4313,7 @@ class Session(Generic[ContextT, OutputT]):
                     _start_readers=False,
                     _start_event_reader=handoff is None,
                     max_function_concurrency=max_function_concurrency,
+                    tool_error_formatter=tool_error_formatter,
                     observation_retention=observation_retention,
                     include_model_output_items=include_model_output_items,
                     include_raw_provider_events=include_raw_provider_events,
@@ -4683,10 +4722,14 @@ class Session(Generic[ContextT, OutputT]):
         _start_readers: bool = True,
         _start_event_reader: bool = True,
         max_function_concurrency: int | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
         include_raw_provider_events: bool = False,
     ) -> None:
+        if tool_error_formatter is not None and not callable(tool_error_formatter):
+            raise TypeError("tool_error_formatter must be callable or None")
+        self._tool_error_formatter = tool_error_formatter
         self._trace_context: str | None = None
         self._provider_lease: Any = None
         self._storage: LocalStorage | CustomStorage | None = None
@@ -6647,6 +6690,39 @@ class Session(Generic[ContextT, OutputT]):
             self._realtime._mark_tool_unavailable(message["callId"])
         return enabled
 
+    async def _format_run_tool_error(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        entry: _CapturedFunction,
+        error: Exception,
+        phase: Literal["arguments", "execution"],
+        call: ToolCallInfo,
+        admit: Callable[[], bool],
+    ) -> str | None:
+        formatter = self._tool_error_formatter
+        if formatter is None or not entry._allow_run_error_formatter:
+            raise error
+        if not admit():
+            return None
+        default = (
+            f"Invalid arguments for function {entry.name!r}."
+            if phase == "arguments"
+            else f"Function {entry.name!r} failed."
+        )
+        context = ToolErrorContext(
+            context=entry.context, call=call, phase=phase, default_message=default, error=error
+        )
+        try:
+            text = await self._call_decision_callback(state, message, formatter, admit, context)
+        except Exception:
+            if not admit():
+                raise
+            text = None
+        if not admit():
+            return None
+        return text if isinstance(text, str) else default
+
     async def _recover_tool_input(
         self,
         state: _CallbackState,
@@ -6659,7 +6735,9 @@ class Session(Generic[ContextT, OutputT]):
     ) -> str | None:
         callback = entry.input_error_function
         if callback is None:
-            raise error
+            return await self._format_run_tool_error(
+                state, message, entry, error, "arguments", call, admit
+            )
         if not admit():
             return None
         assert state.handle is not None
@@ -6731,7 +6809,13 @@ class Session(Generic[ContextT, OutputT]):
                         )
                 except ValidationError as error:
                     if (
-                        entry.function.input_error_function is None
+                        (
+                            entry.function.input_error_function is None
+                            and not (
+                                self._tool_error_formatter is not None
+                                and entry.function._allow_run_error_formatter
+                            )
+                        )
                         or message.get("_sdk_restored_approval")
                         or "_sdk_effective_arguments" in message
                     ):
@@ -11095,7 +11179,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         state: _CallbackState,
         message: dict[str, Any],
-        callback: Callable[..., Any],
+        callback: Callable[..., Any] | _RecoverableFunctionCallback,
         active: Callable[[], bool],
         /,
         *args: Any,
@@ -11109,7 +11193,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         state: _CallbackState,
         message: dict[str, Any],
-        callback: Callable[..., Any],
+        callback: Callable[..., Any] | _RecoverableFunctionCallback,
         active: Callable[[], bool],
         enter: Callable[[], None] | None,
         args: tuple[Any, ...],
@@ -13455,7 +13539,7 @@ class Session(Generic[ContextT, OutputT]):
                         message.get("_sdk_effective_arguments", message["arguments"])
                     )
                 except (ValidationError, json.JSONDecodeError) as error:
-                    if entry.input_error_function is None or "_sdk_effective_arguments" in message:
+                    if "_sdk_effective_arguments" in message:
                         raise
                     call = ToolCallInfo(
                         tool=ref,
@@ -13494,9 +13578,49 @@ class Session(Generic[ContextT, OutputT]):
             approved_kwargs = (
                 _snapshot_function_arguments(kwargs, ref) if approved is not None else None
             )
-            raw_arguments = message["arguments"]
-            if isinstance(raw_arguments, str):
-                raw_arguments = json.loads(raw_arguments)
+            call = ToolCallInfo(
+                tool=ref,
+                session_id=self.id,
+                turn_id=state.handle.turn_id,
+                call_id=message["callId"] if code_origin is None else None,
+                child_id=state.handle.child_id if isinstance(state, _ChildCallbacks) else None,
+                child_incarnation=(
+                    state.handle.instance_id if isinstance(state, _ChildCallbacks) else None
+                ),
+                role=None,
+                model=message.get("_sdk_model"),
+                route="direct" if code_origin is None else "code",
+                cell_id=code_origin["cell_id"] if code_origin is not None else None,
+                nested_call_id=(code_origin["nested_call_id"] if code_origin is not None else None),
+            )
+
+            def make_context(
+                effective_arguments: Mapping[str, Any],
+            ) -> ToolContext[ContextT | None]:
+                raw_arguments = message["arguments"]
+                original_arguments = (
+                    json.loads(raw_arguments)
+                    if isinstance(raw_arguments, str)
+                    else deepcopy(raw_arguments)
+                )
+                assert state.handle is not None
+                tool_context = ToolContext(
+                    entry.context,
+                    state.handle,
+                    message["callId"],
+                    MappingProxyType(original_arguments),
+                    effective_arguments,
+                    trace_context=_native_trace_context(message.get("_sdk_trace")),
+                    realtime_usage=self.realtime_usage,
+                    call=call,
+                )
+                object.__setattr__(
+                    tool_context,
+                    "_usage_reporter",
+                    self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
+                )
+                return tool_context
+
             context = None
             if (
                 entry.context_parameter is not None
@@ -13508,40 +13632,7 @@ class Session(Generic[ContextT, OutputT]):
                     and entry.timeout_error_function is not None
                 )
             ):
-                context = ToolContext(
-                    entry.context,
-                    state.handle,
-                    message["callId"],
-                    MappingProxyType(deepcopy(raw_arguments)),
-                    _snapshot_function_arguments(kwargs, ref),
-                    trace_context=_native_trace_context(message.get("_sdk_trace")),
-                    realtime_usage=self.realtime_usage,
-                    call=ToolCallInfo(
-                        tool=ref,
-                        session_id=self.id,
-                        turn_id=state.handle.turn_id,
-                        call_id=message["callId"] if code_origin is None else None,
-                        child_id=state.handle.child_id
-                        if isinstance(state, _ChildCallbacks)
-                        else None,
-                        child_incarnation=(
-                            state.handle.instance_id if isinstance(state, _ChildCallbacks) else None
-                        ),
-                        role=None,
-                        model=message.get("_sdk_model"),
-                        route="direct" if code_origin is None else "code",
-                        cell_id=code_origin["cell_id"] if code_origin is not None else None,
-                        nested_call_id=(
-                            code_origin["nested_call_id"] if code_origin is not None else None
-                        ),
-                    ),
-                )
-            if context is not None:
-                object.__setattr__(
-                    context,
-                    "_usage_reporter",
-                    self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
-                )
+                context = make_context(_snapshot_function_arguments(kwargs, ref))
             arguments_replaced = False
             if entry.before is not None:
                 assert context is not None
@@ -13623,7 +13714,24 @@ class Session(Generic[ContextT, OutputT]):
                                 return
             if not self._admit_tool(state, request):
                 return
-            timeout_output: ToolOutput | None = None
+            # The body can mutate validated arguments before raising. The original
+            # wire arguments are already isolated from validation and callback code.
+            formatter_arguments = approved_kwargs
+            if (
+                entry.error_function is not None
+                and context is None
+                and formatter_arguments is None
+                and not entry._reparse_error_arguments
+            ):
+                formatter_arguments = _snapshot_function_arguments(kwargs, ref)
+            failure_output: ToolOutput | None = None
+            duration = entry.callback_timeout
+            callback = (
+                _RecoverableFunctionCallback(entry.callback)
+                if entry.error_function is not None
+                or (self._tool_error_formatter is not None and entry._allow_run_error_formatter)
+                else entry.callback
+            )
 
             def enter_body() -> None:
                 if self._realtime is None:
@@ -13649,150 +13757,201 @@ class Session(Generic[ContextT, OutputT]):
 
             async def invoke_body_callback(active: Callable[[], bool]) -> Any:
                 return await self._call_decision_callback_entered(
-                    state, message, entry.callback, active, enter_body, args, kwargs
+                    state, message, callback, active, enter_body, args, kwargs
                 )
 
-            duration = entry.callback_timeout
-            if isinstance(entry, _CapturedComputer):
-                assert context is not None and isinstance(parsed, _ComputerCall)
-                value = await self._call_decision_callback(
-                    state,
-                    message,
-                    partial(
-                        entry.invoke,
-                        self._computer_resources,
+            try:
+                if isinstance(entry, _CapturedComputer):
+                    assert context is not None and isinstance(parsed, _ComputerCall)
+                    value = await self._call_decision_callback(
+                        state,
+                        message,
+                        partial(
+                            entry.invoke,
+                            self._computer_resources,
+                            lambda: self._admit_tool(state, request),
+                        ),
                         lambda: self._admit_tool(state, request),
-                    ),
-                    lambda: self._admit_tool(state, request),
-                    context,
-                    parsed,
-                )
-            elif duration is None:
-                value = await invoke_body_callback(lambda: self._admit_tool(state, request))
-            elif entry.timeout_behavior == "error_as_result":
-                loop = asyncio.get_running_loop()
-                cutoff = loop.time() + duration
-                expired = False
-                timeout_error = ToolTimeoutError(entry.name, duration)
+                        context,
+                        parsed,
+                    )
+                elif duration is None:
+                    value = await invoke_body_callback(lambda: self._admit_tool(state, request))
+                elif entry.timeout_behavior == "error_as_result":
+                    loop = asyncio.get_running_loop()
+                    cutoff = loop.time() + duration
+                    expired = False
+                    timeout_error = ToolTimeoutError(entry.name, duration)
 
-                def admit_body() -> bool:
-                    return not expired and self._admit_tool(state, request)
+                    def admit_body() -> bool:
+                        return not expired and self._admit_tool(state, request)
 
-                def expire_body(cancel_body: bool = True) -> None:
-                    nonlocal expired
-                    if self._closing or state.stopping or state.failure.done():
-                        return
-                    expired = True
-                    if cancel_body:
-                        cancel_once(body)
+                    def expire_body(cancel_body: bool = True) -> None:
+                        nonlocal expired
+                        if self._closing or state.stopping or state.failure.done():
+                            return
+                        expired = True
+                        if cancel_body:
+                            cancel_once(body)
 
-                timer = loop.call_at(cutoff, expire_body)
+                    timer = loop.call_at(cutoff, expire_body)
 
-                value = None
-                body_error: BaseException | None = None
+                    value = None
+                    body_error: BaseException | None = None
 
-                async def invoke_body() -> None:
-                    nonlocal value, body_error
+                    async def invoke_body() -> None:
+                        nonlocal value, body_error
+                        try:
+                            if admit_body():
+                                value = await invoke_body_callback(admit_body)
+                        except BaseException as error:
+                            # Transport every exit to the owner without letting
+                            # process-control exceptions escape this child task.
+                            body_error = error
+                        finally:
+                            timer.cancel()
+                            # Settle at body exit, before unrelated ready work can
+                            # delay the parent. Busy callbacks may outlast the timer.
+                            if loop.time() >= cutoff:
+                                expire_body(cancel_body=False)
+
                     try:
-                        if admit_body():
-                            value = await invoke_body_callback(admit_body)
-                    except BaseException as error:
-                        # Transport every exit to the owner without letting
-                        # process-control exceptions escape this child task.
-                        body_error = error
+                        body = asyncio.create_task(invoke_body())
+                        try:
+                            # Do not let parent cancellation cancel an already
+                            # unwinding body a second time and cut cleanup short.
+                            await asyncio.wait((body,))
+                        except BaseException as error:
+                            cancel_once(body)
+
+                            async def join_body() -> None:
+                                try:
+                                    await _join(body)
+                                finally:
+                                    if body_error is not None and not isinstance(
+                                        body_error, asyncio.CancelledError
+                                    ):
+                                        state.retain_cleanup_error(
+                                            body_error.original
+                                            if isinstance(body_error, _FunctionBodyFailure)
+                                            else body_error
+                                        )
+
+                            await _close_after_error(error, join_body)
+                            raise
                     finally:
                         timer.cancel()
-                        # Settle at body exit, before unrelated ready work can
-                        # delay the parent. Busy callbacks may outlast the timer.
-                        if loop.time() >= cutoff:
-                            expire_body(cancel_body=False)
-
-                try:
-                    body = asyncio.create_task(invoke_body())
-                    try:
-                        # Do not let parent cancellation cancel an already
-                        # unwinding body a second time and cut cleanup short.
-                        await asyncio.wait((body,))
-                    except BaseException as error:
-                        cancel_once(body)
-
-                        async def join_body() -> None:
-                            try:
-                                await _join(body)
-                            finally:
-                                if body_error is not None and not isinstance(
-                                    body_error, asyncio.CancelledError
-                                ):
-                                    state.retain_cleanup_error(body_error)
-
-                        await _close_after_error(error, join_body)
-                        raise
-                finally:
-                    timer.cancel()
-                if not self._admit_tool(state, request):
-                    if body_error is not None and not isinstance(
-                        body_error, asyncio.CancelledError
-                    ):
-                        state.retain_cleanup_error(body_error)
-                    return
-                if isinstance(body_error, (SystemExit, KeyboardInterrupt)):
-                    raise body_error
-                if expired:
-                    # Discard late output before a formatter can fail. The child
-                    # task itself never owns a return value.
-                    value = None
-                    if body_error is not None:
-                        timeout_error.__cause__ = body_error
-                    # No late value is validated or serialized. Format only
-                    # under the still-live parent's native admission.
-                    text = str(timeout_error)
-                    if entry.timeout_error_function is not None:
-                        assert context is not None
-                        text = await self._call_decision_callback(
-                            state,
-                            message,
-                            entry.timeout_error_function,
-                            lambda: self._admit_tool(state, request),
-                            context,
-                            timeout_error,
-                        )
-                        if not self._admit_tool(state, request):
-                            return
-                        if not isinstance(text, str):
-                            raise TypeError("Function timeout_error_function must return str")
-                    timeout_output = ToolOutput.error(text)
-                    timeout_output._validate()
-                    value = None
-                elif body_error is not None:
-                    raise body_error
-            else:
-                loop = asyncio.get_running_loop()
-                cutoff = loop.time() + duration
-                callback_task = asyncio.current_task()
-                assert callback_task is not None
-                timeout_error = ToolTimeoutError(entry.name, duration)
-
-                def expire_callback(cancel_body: bool = True) -> None:
-                    if self._closing or state.stopping or state.failure.done():
+                    if not self._admit_tool(state, request):
+                        if body_error is not None and not isinstance(
+                            body_error, asyncio.CancelledError
+                        ):
+                            state.retain_cleanup_error(
+                                body_error.original
+                                if isinstance(body_error, _FunctionBodyFailure)
+                                else body_error
+                            )
                         return
-                    # Every stop owner joins this same failure and cancellation.
-                    state.failure.set_result(timeout_error)
-                    if cancel_body:
-                        cancel_once(callback_task)
+                    if isinstance(body_error, (SystemExit, KeyboardInterrupt)):
+                        raise body_error
+                    if expired:
+                        # Discard late output before a formatter can fail. The child
+                        # task itself never owns a return value.
+                        value = None
+                        if body_error is not None:
+                            timeout_error.__cause__ = (
+                                body_error.original
+                                if isinstance(body_error, _FunctionBodyFailure)
+                                else body_error
+                            )
+                        # No late value is validated or serialized. Format only
+                        # under the still-live parent's native admission.
+                        text = str(timeout_error)
+                        if entry.timeout_error_function is not None:
+                            assert context is not None
+                            text = await self._call_decision_callback(
+                                state,
+                                message,
+                                entry.timeout_error_function,
+                                lambda: self._admit_tool(state, request),
+                                context,
+                                timeout_error,
+                            )
+                            if not self._admit_tool(state, request):
+                                return
+                            if not isinstance(text, str):
+                                raise TypeError("Function timeout_error_function must return str")
+                        failure_output = ToolOutput.error(text)
+                        failure_output._validate()
+                        value = None
+                    elif body_error is not None:
+                        raise body_error
+                else:
+                    loop = asyncio.get_running_loop()
+                    cutoff = loop.time() + duration
+                    callback_task = asyncio.current_task()
+                    assert callback_task is not None
+                    timeout_error = ToolTimeoutError(entry.name, duration)
 
-                timer = loop.call_at(cutoff, expire_callback)
-                try:
-                    value = await invoke_body_callback(lambda: self._admit_tool(state, request))
-                finally:
-                    timer.cancel()
-                    # A busy callback can cross the cutoff before timer dispatch.
-                    if loop.time() >= cutoff:
-                        expire_callback(cancel_body=False)
+                    def expire_callback(cancel_body: bool = True) -> None:
+                        if self._closing or state.stopping or state.failure.done():
+                            return
+                        # Every stop owner joins this same failure and cancellation.
+                        state.failure.set_result(timeout_error)
+                        if cancel_body:
+                            cancel_once(callback_task)
+
+                    timer = loop.call_at(cutoff, expire_callback)
+                    try:
+                        value = await invoke_body_callback(lambda: self._admit_tool(state, request))
+                    finally:
+                        timer.cancel()
+                        # A busy callback can cross the cutoff before timer dispatch.
+                        if loop.time() >= cutoff:
+                            expire_callback(cancel_body=False)
+            except _FunctionBodyFailure as failure:
+                if not self._admit_tool(state, request):
+                    state.retain_cleanup_error(failure.original)
+                    return
+                if entry.error_function is None:
+                    text = await self._format_run_tool_error(
+                        state,
+                        message,
+                        entry,
+                        failure.original,
+                        "execution",
+                        call,
+                        lambda: self._admit_tool(state, request),
+                    )
+                else:
+                    if context is None:
+                        if formatter_arguments is None:
+                            assert entry._reparse_error_arguments
+                            original_parsed = entry._parse_arguments(
+                                message.get("_sdk_effective_arguments", message["arguments"])
+                            )
+                            formatter_arguments = MappingProxyType(
+                                entry._arguments(original_parsed)
+                            )
+                            del original_parsed
+                        context = make_context(formatter_arguments)
+                    text = await self._call_decision_callback(
+                        state,
+                        message,
+                        entry.error_function,
+                        lambda: self._admit_tool(state, request),
+                        context,
+                        failure.original,
+                    )
+                if not self._admit_tool(state, request):
+                    return
+                if not isinstance(text, str):
+                    raise TypeError("Function error_function must return str") from None
+                failure_output = ToolOutput.error(text)
             if not self._admit_tool(state, request):
                 return
-            output: ToolOutput | None = timeout_output
+            output: ToolOutput | None = failure_output
             background = False
-            if timeout_output is None:
+            if failure_output is None:
                 background = isinstance(value, BackgroundResult)
                 content: Any = None
                 try:
@@ -13818,9 +13977,9 @@ class Session(Generic[ContextT, OutputT]):
                 if output is None:
                     # End ownership of the original admission request and every
                     # invocation data reference without altering caller-owned objects.
-                    del request, message, raw_arguments, parsed, kwargs, context, args, value
+                    del request, message, formatter_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
-            if entry.after is not None and timeout_output is None:
+            if entry.after is not None and failure_output is None:
                 assert context is not None
                 original_output = output
                 replacement = await self._call_decision_callback(
@@ -13851,7 +14010,7 @@ class Session(Generic[ContextT, OutputT]):
                     output = None
                 if output is None:
                     # The hook may have mutated the original callback result.
-                    del request, message, raw_arguments, parsed, kwargs, context, args, value
+                    del request, message, formatter_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
             assert output is not None
             response_output = deepcopy(output.to_native())
