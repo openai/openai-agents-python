@@ -8280,16 +8280,16 @@ class Session(Generic[ContextT, OutputT]):
             if return_items:
                 result = replace(result, items=self._take_produced_items(result.turn))
         except BaseException as error:
-            failure = error
+            run_error = error
             if capture_error_details and isinstance(error, Exception):
                 details = await self._capture_run_error_details(
                     submission, error_input, settled=waiter.done() and not waiter.cancelled()
                 )
                 if details is not None:
-                    failure = RunDiagnosticError(details)
-            await _close_after_error(failure, close)
-            if failure is not error:
-                raise failure from error
+                    run_error = RunDiagnosticError(details)
+            await _close_after_error(run_error, close)
+            if run_error is not error:
+                raise run_error from error
             raise
         else:
             await _join(asyncio.create_task(close()))

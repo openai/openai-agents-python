@@ -211,7 +211,8 @@ async def test_one_shot_items_bound_original_tool_output_after_the_turn(response
 
 
 @pytest.mark.parametrize("capture", [False, True])
-async def test_failed_native_run_details_outlive_its_session(responses, capture):
+@pytest.mark.parametrize("manual", [False, True])
+async def test_failed_native_run_details_outlive_its_session(responses, capture, manual):
     error = ValueError("synthetic callback failure")
 
     @function_tool
@@ -225,6 +226,18 @@ async def test_failed_native_run_details_outlive_its_session(responses, capture)
     def policy(turn, context, source, value):
         return GuardrailResult(False)
 
+    manual_tools = (
+        [
+            FunctionTool(
+                name="manual_lookup",
+                description="Look up a record manually.",
+                input_type=LookupArgs,
+                output_type=str,
+            )
+        ]
+        if manual
+        else []
+    )
     responses.respond(function_call("lookup", {}, "accepted-call"))
     responses.respond(function_call("fail", {}, "failing-call"))
     async with NativeProvider(
@@ -232,13 +245,15 @@ async def test_failed_native_run_details_outlive_its_session(responses, capture)
     ) as provider:
         agent = Agent(
             instructions="Call both tools.",
-            tools=[lookup, fail],
+            tools=[lookup, fail, *manual_tools],
             provider=provider,
             input_guardrails=[InputGuardrail("allow-lookup", policy, run_in_parallel=False)],
         )
         with pytest.raises(RunDiagnosticError if capture else ValueError) as caught:
             await agent.run("original request", capture_error_details=capture)
 
+    assert not isinstance(caught.value.__context__, AttributeError)
+    assert not isinstance(error.__context__, AttributeError)
     if not capture:
         assert caught.value is error
         return
