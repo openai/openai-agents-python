@@ -14,9 +14,11 @@ from agents import (
     NativeProvider,
     PromptedOutput,
     ToolRef,
+    ToolSearch,
     Turn,
     function_tool,
 )
+from agents.realtime import realtime_handoff
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -96,6 +98,19 @@ async def test_only_current_schemas_and_effects_are_discoverable(responses, defe
             with pytest.raises(CapabilityError, match="captured"):
                 await session.submit("new schema", tools=[changed])
             assert calls == ["A1"] and len(responses.requests) == 3
+
+
+async def test_client_tool_search_can_open_with_a_callback_handoff(responses):
+    search = ToolSearch(execution="client")
+    destination = Agent(name="Destination", instructions="Continue here.", tools=[search])
+    source = Agent(
+        instructions="Transfer to Destination.",
+        provider=provider(responses),
+        tools=[search],
+        handoffs=[realtime_handoff(destination, on_handoff=lambda _context: None)],
+    )
+    async with timeout(30), source.session() as session:
+        assert await session.get_active_agent() is source
 
 
 async def test_one_shot_return_items_include_deferred_tool_search(responses):
