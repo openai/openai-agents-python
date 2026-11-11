@@ -259,19 +259,46 @@ def sandbox_environment(
                         **({"snapshot": snapshot} if snapshot is not None else {}),
                     )
                 )
-                owners.push_async_callback(client.delete, selected)
 
-                async def retire_selected() -> None:
+                async def retire_selected(
+                    exc_type: object, _exc: object, _traceback: object
+                ) -> None:
                     assert selected is not None
-                    await selected.aclose()
-                    if managed_source is not None and managed_source.capture_requested:
-                        if not isinstance(selected.state.snapshot, (LocalSnapshot, RemoteSnapshot)):
-                            raise ValueError(
-                                "Managed retirement produced no supported durable snapshot"
-                            )
-                        managed_source.publish(client.serialize_session_state(selected.state))
+                    fresh_local_path = None
+                    completed = False
+                    try:
+                        try:
+                            if managed_source is not None:
+                                current_snapshot = selected.state.snapshot
+                                if isinstance(current_snapshot, LocalSnapshot):
+                                    path = current_snapshot._path()
+                                    if not path.exists() and not path.is_symlink():
+                                        fresh_local_path = path
+                                if not managed_source.capture_requested:
+                                    selected.state.snapshot = NoopSnapshot(id=current_snapshot.id)
+                            await selected.aclose()
+                            if managed_source is not None and managed_source.capture_requested:
+                                if not isinstance(
+                                    selected.state.snapshot, (LocalSnapshot, RemoteSnapshot)
+                                ):
+                                    raise ValueError(
+                                        "Managed retirement produced no supported durable snapshot"
+                                    )
+                                managed_source.publish(
+                                    client.serialize_session_state(selected.state)
+                                )
+                        finally:
+                            await client.delete(selected)
+                        completed = exc_type is None
+                    finally:
+                        if managed_source is not None and (
+                            not completed or managed_source.receipt is None
+                        ):
+                            managed_source.receipt = None
+                            if fresh_local_path is not None:
+                                fresh_local_path.unlink(missing_ok=True)
 
-                owners.push_async_callback(retire_selected)
+                owners.push_async_exit(retire_selected)
                 if concurrency_limits is not None:
                     selected._set_concurrency_limits(concurrency_limits)
                 if archive_limits is not None:

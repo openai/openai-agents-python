@@ -200,6 +200,8 @@ class SnapshotClient(Client):
             if self.fail == "stop":
                 raise RuntimeError("snapshot failed")
             await selected.state.snapshot.persist(io.BytesIO((self.root / "value").read_bytes()))
+            if self.fail == "after_persist":
+                raise RuntimeError("retirement failed after persistence")
 
         selected.aclose = close
         return selected
@@ -252,11 +254,18 @@ def source(client, *, state=None, expected=None):
     )
 
 
-@pytest.mark.parametrize("failure", ["", "stop", "serialize"])
+@pytest.mark.parametrize("failure", ["", "stop", "serialize", "after_persist", "delete"])
 async def test_resource_retirement_serializes_after_snapshot_and_always_deletes(tmp_path, failure):
     (tmp_path / "value").write_text("A")
     events = []
     client = SnapshotClient(events, tmp_path, fail=failure)
+    if failure == "delete":
+
+        async def fail_delete(selected):
+            events.append("delete")
+            raise RuntimeError("provider deletion failed")
+
+        client.delete = fail_delete
     managed = source(client)
     managed.capture_requested = True
 
@@ -273,7 +282,95 @@ async def test_resource_retirement_serializes_after_snapshot_and_always_deletes(
         assert json.loads(managed.receipt)["provider_state"]
     assert events[:4] == ["create", "start", "body", "stop"]
     assert events[-1] == "delete"
-    assert ("serialize" in events) == (failure != "stop")
+    assert ("serialize" in events) == (failure not in {"stop", "after_persist"})
+    assert len(list((tmp_path / "archives").glob("*.tar"))) == (not failure)
+
+
+@pytest.mark.parametrize("implicit_snapshot", [False, True])
+async def test_managed_ordinary_exit_does_not_accumulate_snapshots(
+    tmp_path, monkeypatch, implicit_snapshot
+):
+    import _agents_codex.sandbox as owner
+
+    (tmp_path / "value").write_text("unpublished workspace")
+    client = SnapshotClient([], tmp_path)
+    archives = tmp_path / "archives"
+    monkeypatch.setattr(
+        owner, "resolve_default_local_snapshot_spec", lambda: LocalSnapshotSpec(base_path=archives)
+    )
+    for _ in range(3):
+        managed = (
+            sandbox_environment(
+                client,
+                manifest=Manifest(root=str(tmp_path)),
+                options=Options(),
+                connect=gateway,
+                managed_workspace=True,
+            )
+            if implicit_snapshot
+            else source(client)
+        )
+        async with managed:
+            pass
+        assert managed.receipt is None
+        assert list(archives.glob("*.tar")) == []
+    assert client.events.count("delete") == 3
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("failure", ["", "serialize"])
+async def test_managed_resume_preserves_predecessor_snapshot(tmp_path, capture, failure):
+    (tmp_path / "value").write_text("previous checkpoint")
+    client = SnapshotClient([], tmp_path)
+    original = source(client)
+    original.capture_requested = True
+    async with original:
+        pass
+    state = client.saved_state.model_copy(deep=True)
+    old_path = state.snapshot._path()
+    old_bytes = old_path.read_bytes()
+    resumed = source(client, state=state)
+    client.fail = failure
+    resumed.capture_requested = capture
+
+    async def close_resumed():
+        async with resumed:
+            (tmp_path / "value").write_text("new workspace")
+
+    if capture and failure:
+        with pytest.raises(RuntimeError, match="serialization"):
+            await close_resumed()
+    else:
+        await close_resumed()
+    assert old_path.read_bytes() == old_bytes
+    assert len(list(old_path.parent.glob("*.tar"))) == 1 + (capture and not failure)
+
+
+async def test_unmanaged_explicit_snapshot_still_persists(tmp_path):
+    (tmp_path / "value").write_text("explicit unmanaged snapshot")
+    client = SnapshotClient([], tmp_path)
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(root=str(tmp_path)),
+        options=Options(),
+        connect=gateway,
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "archives"),
+    ):
+        pass
+    assert len(list((tmp_path / "archives").glob("*.tar"))) == 1
+
+
+async def test_managed_failed_body_does_not_publish_or_retain_fresh_snapshot(tmp_path):
+    (tmp_path / "value").write_text("abandoned capture")
+    client = SnapshotClient([], tmp_path)
+    managed = source(client)
+    managed.capture_requested = True
+    with pytest.raises(RuntimeError, match="abandoned"):
+        async with managed:
+            raise RuntimeError("abandoned capture")
+    assert managed.receipt is None
+    assert list((tmp_path / "archives").glob("*.tar")) == []
+    assert client.events[-1] == "delete"
 
 
 async def test_wrong_pair_authority_fails_before_resource_or_native_opening(tmp_path):
@@ -343,6 +440,30 @@ async def test_native_pair_a_survives_resumed_workspace_b(responses, native_mana
     assert original_path.read_bytes() == original_bytes
     async with agent.session(state=pair_a, environment=source(client, state=authorized_a)):
         assert (root / "value").read_text() == "A"
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="strict executor write isolation requires Linux or macOS",
+)
+async def test_native_failed_capture_export_does_not_persist_workspace(
+    responses, native_managed_client, monkeypatch
+):
+    client = native_managed_client
+    managed = source(client)
+    async with Agent(instructions="Capture.", provider=provider(responses)).session(
+        environment=managed
+    ) as native:
+
+        async def fail_export(*args, **kwargs):
+            raise RuntimeError("conversation export failed")
+
+        monkeypatch.setattr(type(native), "_capture_checkpoint", fail_export)
+        with pytest.raises(RuntimeError, match="conversation export failed"):
+            await native.suspend_workspace()
+    assert managed.receipt is None
+    assert list((client.root / "archives").glob("*.tar")) == []
+    assert client.events[-1] == "delete"
 
 
 @pytest.mark.parametrize("cancel_waiter", [False, True])

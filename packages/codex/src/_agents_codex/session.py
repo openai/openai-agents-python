@@ -13656,6 +13656,7 @@ class Session(Generic[ContextT, OutputT]):
             try:
                 state = await self._checkpoint(active, managed_retire=True)
             except BaseException as error:
+                managed.capture_requested = False
                 await _close_after_error(error, self.aclose)
                 raise
             await self.aclose()
