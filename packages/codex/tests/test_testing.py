@@ -161,6 +161,7 @@ async def test_http_response_order_and_request_snapshots(capsys):
         "ScriptedResponses",
         "text",
         "tool_call",
+        "computer_call",
         "RealtimeConnectCall",
         "RealtimeStep",
         "ScriptedRealtimeAdapter",

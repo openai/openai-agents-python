@@ -35,6 +35,7 @@ from typing import (
 from pydantic import (
     BaseModel as BaseModel,
     PydanticSchemaGenerationError as PydanticSchemaGenerationError,
+    RootModel,
     TypeAdapter as TypeAdapter,
 )
 from typing_extensions import ParamSpec as ParamSpec, TypeVar as TypeVar
@@ -71,9 +72,12 @@ from .tools import (
     ToolCallInfo as ToolCallInfo,
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
+    ToolSearch,
+    ToolSearchResult,
     WebSearch as WebSearch,
     _CapturedFunction as _CapturedFunction,
     _function_parameters as _function_parameters,
+    _hosted_tool_spec,
 )
 from .turn import Turn as Turn
 
@@ -617,6 +621,49 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                             )
 
 
+class _ClientToolSearch(FunctionTool[Any, ToolSearchResult, None]):
+    def __init__(self, declaration: ToolSearch) -> None:
+        super().__init__(
+            name="tool_search",
+            description=declaration.description or "Select deferred tools.",
+            input_type=RootModel[Any],
+            output_type=ToolSearchResult,
+        )
+        object.__setattr__(
+            self,
+            "_provider_fields",
+            {
+                "execution": "client",
+                "description": declaration.description,
+                "parameters": declaration.parameters,
+            },
+        )
+        object.__setattr__(self, "_provider_data", declaration.provider_data)
+
+    _provider_fields: dict[str, Any]
+    _provider_data: dict[str, Any] | None
+
+    def _spec_json(self) -> str:
+        return json.dumps(
+            {
+                "type": "toolSearch",
+                "declaration": _hosted_tool_spec(
+                    "tool_search", self._provider_fields, self._provider_data
+                ),
+            },
+            allow_nan=False,
+        )
+
+    def _capture(self, context: object) -> _CapturedManual:
+        return _CapturedManual(
+            self.name,
+            self._spec_json(),
+            self,
+            TypeAdapter(Any),
+            TypeAdapter(ToolSearchResult),
+        )
+
+
 # The frozen binder consumes application context. Keeping its callable type
 # preserves that requirement when type checkers join mixed tool lists.
 _PythonTool: TypeAlias = FunctionTool[
@@ -639,6 +686,7 @@ Tool: TypeAlias = (
     | FileSearch
     | CodeInterpreter
     | ImageGeneration
+    | ToolSearch
     | NativeAgents[ToolContextT]
 )
 

@@ -64,7 +64,7 @@ The script prints a greeting for Ada, such as `Hello, Ada!`. When the model requ
 | Continue a conversation or stream its answer | [Sessions](sessions.md) and [streaming](sessions.md#stream-observations) |
 | Save a conversation and resume later | [Save and restore state](state.md) |
 | Return a validated Python value | [Structured output](configuration.md#structured-output) |
-| Input/output checks and function enablement | [Guardrails and enabled functions](guardrails.md) |
+| Check inputs and outputs or control which functions the model sees | [Guardrails and function enablement in development builds](guardrails.md) |
 | Run commands in a workspace | [Command execution](execution.md) |
 | Ask for approval or supply a tool result | [Approvals and manual results](approvals.md) |
 | Delegate work to child agents | [Delegation](delegation.md) |

@@ -681,9 +681,13 @@
       "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
     },
     {
+      "path": "sdk-provider-tool-search.patch",
+      "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
+    },
+    {
       "path": "sdk-tracing-id-annotations.patch",
       "sha256": "fd80731e8375804f80ea4134ce539f2b27aa1fc605b2eb31a6c3e2574577cfc4"
     }
   ],
-  "result_tree": "e59fcc623af01e2f104ae92d79cae3001375d75a"
+  "result_tree": "a3bab178e3c65ebae710d9d912e26fd4b43dbae3"
 }
