@@ -1,0 +1,152 @@
+name: macOS UID lookup capture probe
+on:
+  push:
+    branches: [codex/macos-uid-lookup-probe-20261111-1023]
+permissions:
+  contents: read
+jobs:
+  capture-deny:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - name: Compile bounded local witness
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/probe.c" <<'PROBE_SOURCE'
+          #include <mach/mach.h>
+          #include <mach/mig_errors.h>
+          #include <mach/ndr.h>
+          #include <mach/task_special_ports.h>
+          #include <errno.h>
+          #include <fcntl.h>
+          #include <signal.h>
+          #include <stdbool.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/wait.h>
+          #include <time.h>
+          #include <unistd.h>
+          
+          static const char *names[] = {
+            "com.apple.system.opendirectoryd.libinfo_debug",
+            "com.apple.system.opendirectoryd.libinfo",
+            "com.apple.system.DirectoryService.libinfo_v1",
+            "com.apple.system.opendirectoryd.membership",
+            "com.apple.xpc.launchd"
+          };
+          static const char *identity(const void *data, size_t size) {
+            const unsigned char *p = data;
+            for (size_t n=0; n<sizeof(names)/sizeof(names[0]); n++) {
+              size_t len=strlen(names[n]);
+              for (size_t i=0; i+len<size; i++)
+                if (!memcmp(p+i,names[n],len) && p[i+len]==0) return names[n];
+            }
+            return "unidentified";
+          }
+          static int64_t millis(void) {
+            struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+            return (int64_t)t.tv_sec*1000+t.tv_nsec/1000000;
+          }
+          static void witness(const char *command, int mode) {
+            mach_port_t task=mach_task_self(), sink=MACH_PORT_NULL;
+            mach_port_array_t old=NULL; mach_msg_type_number_t old_count=0;
+            if (mode==2) {
+              if (mach_port_allocate(task,MACH_PORT_RIGHT_RECEIVE,&sink)!=KERN_SUCCESS ||
+                  mach_port_insert_right(task,sink,sink,MACH_MSG_TYPE_MAKE_SEND)!=KERN_SUCCESS ||
+                  mach_ports_lookup(task,&old,&old_count)!=KERN_SUCCESS) exit(120);
+              mach_port_t registered[3]={sink,MACH_PORT_NULL,MACH_PORT_NULL};
+              if (mach_ports_register(task,registered,3)!=KERN_SUCCESS) exit(121);
+            }
+            fflush(stdout);
+            pid_t child=fork();
+            if (child==0) {
+              setpgid(0,0);
+              mach_port_t endpoint=MACH_PORT_NULL;
+              if (mode==2) {
+                mach_port_array_t inherited=NULL; mach_msg_type_number_t count=0;
+                if (mach_ports_lookup(mach_task_self(),&inherited,&count)!=KERN_SUCCESS ||
+                    count<1 || inherited[0]==MACH_PORT_NULL) _exit(122);
+                endpoint=inherited[0];
+                /* Keep this copied send right while clearing all registered slots. */
+              }
+              if (mode!=0) {
+                mach_port_t empty[3]={MACH_PORT_NULL,MACH_PORT_NULL,MACH_PORT_NULL};
+                if (mach_ports_register(mach_task_self(),empty,3)!=KERN_SUCCESS ||
+                    task_set_special_port(mach_task_self(),TASK_BOOTSTRAP_PORT,endpoint)!=KERN_SUCCESS) _exit(123);
+              }
+              int null=open("/dev/null",O_RDWR);
+              if (null<0 || dup2(null,STDOUT_FILENO)<0 || dup2(null,STDERR_FILENO)<0) _exit(124);
+              if (null>2) close(null);
+              if (!strcmp(command,"id")) execl("/usr/bin/id","id","-F",(char*)NULL);
+              else execl("/usr/bin/ssh","ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",(char*)NULL);
+              _exit(125);
+            }
+            if (mode==2 && mach_ports_register(task,old,old_count)!=KERN_SUCCESS) exit(126);
+            if (child<0) exit(127);
+            int status=0, received=0; bool timed_out=false;
+            int64_t deadline=millis()+3000;
+            while (waitpid(child,&status,WNOHANG)==0) {
+              if (millis()>deadline) { timed_out=true; kill(-child,SIGKILL); kill(child,SIGKILL); waitpid(child,&status,0); break; }
+              if (mode!=2) { usleep(10000); continue; }
+              union { mach_msg_header_t h; unsigned char bytes[65536]; } message;
+              memset(&message,0,sizeof(message));
+              kern_return_t kr=mach_msg(&message.h,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(message),sink,50,MACH_PORT_NULL);
+              if (kr==MACH_RCV_TIMED_OUT) continue;
+              if (kr!=KERN_SUCCESS) { printf("{\"receive_error\":%d}\n",kr); break; }
+              received++;
+              unsigned count=0; const char *service=identity(message.bytes,message.h.msgh_size);
+              if ((message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && message.h.msgh_size>=sizeof(mach_msg_header_t)+sizeof(mach_msg_body_t)) {
+                mach_msg_body_t *body=(void*)(message.bytes+sizeof(mach_msg_header_t));
+                count=body->msgh_descriptor_count;
+                unsigned char *p=(unsigned char*)(body+1), *end=message.bytes+message.h.msgh_size;
+                for (unsigned i=0;i<count && i<8 && p+sizeof(mach_msg_type_descriptor_t)<=end;i++) {
+                  mach_msg_descriptor_t *d=(void*)p; size_t size=0;
+                  switch(d->type.type) {
+                    case MACH_MSG_PORT_DESCRIPTOR: size=sizeof(mach_msg_port_descriptor_t); break;
+                    case MACH_MSG_OOL_DESCRIPTOR:
+                    case MACH_MSG_OOL_VOLATILE_DESCRIPTOR:
+                      size=sizeof(mach_msg_ool_descriptor_t);
+                      if (p+size<=end && d->out_of_line.address && d->out_of_line.size<=65536) {
+                        const char *found=identity(d->out_of_line.address,d->out_of_line.size);
+                        if (strcmp(found,"unidentified")) service=found;
+                      }
+                      break;
+                    case MACH_MSG_OOL_PORTS_DESCRIPTOR: size=sizeof(mach_msg_ool_ports_descriptor_t); break;
+                    default: size=0; break;
+                  }
+                  if (!size || p+size>end) break;
+                  p+=size;
+                }
+              }
+              printf("{\"command\":\"%s\",\"message_id\":%d,\"size\":%u,\"complex\":%s,\"descriptors\":%u,\"recognized_service\":\"%s\"}\n",command,message.h.msgh_id,message.h.msgh_size,(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX)?"true":"false",count,service);
+              /* No request is forwarded. Only a conventional denial is sent, if a reply right exists. */
+              if (message.h.msgh_remote_port!=MACH_PORT_NULL) {
+                mig_reply_error_t reply={0};
+                reply.Head.msgh_bits=MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(message.h.msgh_bits),0);
+                reply.Head.msgh_size=sizeof(reply); reply.Head.msgh_remote_port=message.h.msgh_remote_port;
+                reply.Head.msgh_id=message.h.msgh_id+100; reply.NDR=NDR_record; reply.RetCode=MIG_BAD_ID;
+                message.h.msgh_remote_port=MACH_PORT_NULL;
+                kr=mach_msg(&reply.Head,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(reply),0,MACH_PORT_NULL,100,MACH_PORT_NULL);
+                if (kr!=KERN_SUCCESS) mach_msg_destroy(&reply.Head);
+              }
+              mach_msg_destroy(&message.h);
+            }
+            printf("{\"command\":\"%s\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"timed_out\":%s,\"messages\":%d}\n",command,mode==0?"host":mode==1?"cleared":"capture-deny",WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,timed_out?"true":"false",received);
+            if (mode==2) {
+              mach_port_destroy(task,sink);
+              for (mach_msg_type_number_t i=0;i<old_count;i++) if(old[i]) mach_port_deallocate(task,old[i]);
+              if(old) vm_deallocate(task,(vm_address_t)old,old_count*sizeof(mach_port_t));
+            }
+          }
+          int main(void) {
+            for(int mode=0;mode<3;mode++) { witness("id",mode); witness("ssh",mode); }
+            return 0;
+          }
+          PROBE_SOURCE
+          clang -Wall -Wextra -Werror "$RUNNER_TEMP/probe.c" -o "$RUNNER_TEMP/probe"
+      - name: Observe lookup shape without forwarding
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/probe"
