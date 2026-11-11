@@ -1,0 +1,854 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index a8232d2a..3a884ffe 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -283,6 +283,10 @@ impl Serialize for ResponsesApiTools {
+ /// Effective wire values. Cleared and omitted SDK settings emit no member here.
+ #[derive(Debug, Default, Serialize, Clone, PartialEq)]
+ pub struct ResponsesRequestControls {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub prompt: Option<codex_protocol::model_request_controls::HostedPromptReference>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub instructions: Option<String>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub truncation: Option<String>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -315,17 +319,21 @@ pub struct PromptCacheOptions {
+ pub struct ResponsesApiRequest {
+     // Keep routing fields first: serde serializes struct fields in declaration order, and
+     // gateways may inspect request bodies incrementally before potentially multi-megabyte input.
+-    pub model: String,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub model: Option<String>,
+     pub stream: bool,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub service_tier: Option<String>,
+     pub input: Vec<ResponseItem>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub tools: Option<ResponsesApiTools>,
+-    pub tool_choice: String,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub tool_choice: Option<String>,
+     #[serde(flatten)]
+     pub request_controls: ResponsesRequestControls,
+-    pub parallel_tool_calls: bool,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub parallel_tool_calls: Option<bool>,
++    #[serde(skip_serializing_if = "Option::is_none")]
+     pub reasoning: Option<Reasoning>,
+     pub store: bool,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -344,11 +352,11 @@ pub struct ResponsesApiRequest {
+ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
+     fn from(request: &'a ResponsesApiRequest) -> Self {
+         Self {
+-            model: &request.model,
++            model: request.model.as_deref(),
+             previous_response_id: None,
+             input: &request.input,
+             tools: request.tools.as_ref().map(ResponsesApiTools::as_raw_value),
+-            tool_choice: &request.tool_choice,
++            tool_choice: request.tool_choice.as_deref(),
+             request_controls: request.request_controls.clone(),
+             parallel_tool_calls: request.parallel_tool_calls,
+             reasoning: request.reasoning.as_ref(),
+@@ -370,7 +378,8 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
+ pub struct ResponseCreateWsRequest<'a> {
+     // Keep routing fields first: serde serializes struct fields in declaration order, and
+     // gateways may inspect request bodies incrementally before potentially multi-megabyte input.
+-    pub model: &'a str,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub model: Option<&'a str>,
+     pub stream: bool,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub service_tier: Option<&'a str>,
+@@ -379,10 +388,13 @@ pub struct ResponseCreateWsRequest<'a> {
+     pub input: &'a [ResponseItem],
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub tools: Option<&'a RawValue>,
+-    pub tool_choice: &'a str,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub tool_choice: Option<&'a str>,
+     #[serde(flatten)]
+     pub request_controls: ResponsesRequestControls,
+-    pub parallel_tool_calls: bool,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub parallel_tool_calls: Option<bool>,
++    #[serde(skip_serializing_if = "Option::is_none")]
+     pub reasoning: Option<&'a Reasoning>,
+     pub store: bool,
+     #[serde(skip_serializing_if = "Option::is_none")]
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+index acf03a3a..c931ed5b 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+@@ -395,13 +395,13 @@ fn client(url: String) -> anyhow::Result<crate::ResponsesClient<codex_client::Re
+ fn request() -> crate::ResponsesApiRequest {
+     crate::ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "synthetic-json-model".into(),
++        model: Some("synthetic-json-model".into()),
+         stream: false,
+         service_tier: None,
+         input: Vec::new(),
+         tools: None,
+-        tool_choice: "auto".into(),
+-        parallel_tool_calls: false,
++        tool_choice: Some("auto".into()),
++        parallel_tool_calls: Some(false),
+         reasoning: None,
+         store: false,
+         stream_options: None,
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 535b9366..51df9bdf 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -259,7 +259,7 @@ impl ResponsesWebsocketConnection {
+         let ResponsesWsRequest::ResponseCreate(ws_request) = &request;
+         let client_metadata = ws_request.client_metadata.as_ref();
+         let timing_log_context = ResponsesWebsocketTimingLogContext {
+-            model: ws_request.model.to_string(),
++            model: ws_request.model.unwrap_or("hosted-prompt").to_string(),
+             session_id: client_metadata
+                 .and_then(|metadata| metadata.get(SESSION_ID_CLIENT_METADATA_KEY))
+                 .cloned(),
+@@ -1084,11 +1084,11 @@ mod tests {
+         let held = connection.stream.lock().await;
+         let request = ResponsesApiRequest {
+             request_controls: Default::default(),
+-            model: "test-model".into(),
++            model: Some("test-model".into()),
+             input: Vec::new(),
+             tools: None,
+-            tool_choice: "auto".into(),
+-            parallel_tool_calls: false,
++            tool_choice: Some("auto".into()),
++            parallel_tool_calls: Some(false),
+             reasoning: None,
+             store: false,
+             stream: true,
+@@ -1197,7 +1197,7 @@ mod tests {
+     fn direct_serialization_preserves_websocket_request_payload() {
+         let api_request = ResponsesApiRequest {
+             request_controls: Default::default(),
+-            model: "gpt-test".to_string(),
++            model: Some("gpt-test".to_string()),
+             input: vec![ResponseItem::Message {
+                 id: Some(ResponseItemId::with_suffix("msg", "1")),
+                 role: "user".to_string(),
+@@ -1218,8 +1218,8 @@ mod tests {
+                 )
+                 .into(),
+             ),
+-            tool_choice: "auto".to_string(),
+-            parallel_tool_calls: true,
++            tool_choice: Some("auto".to_string()),
++            parallel_tool_calls: Some(true),
+             reasoning: None,
+             store: false,
+             stream: true,
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index bb897790..83337a8f 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -375,7 +375,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
+     let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth));
+     let request = ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "gpt-test".into(),
++        model: Some("gpt-test".into()),
+         input: vec![ResponseItem::Message {
+             id: Some(ResponseItemId::with_suffix("msg", "1")),
+             role: "user".into(),
+@@ -384,8 +384,8 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
+             internal_chat_message_metadata_passthrough: None,
+         }],
+         tools: Some(empty_tools().into()),
+-        tool_choice: "auto".into(),
+-        parallel_tool_calls: false,
++        tool_choice: Some("auto".into()),
++        parallel_tool_calls: Some(false),
+         reasoning: None,
+         store: false,
+         stream: true,
+@@ -430,7 +430,7 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
+     let large_input = "x".repeat(2 * 1024 * 1024);
+     let request = ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "gpt-test".into(),
++        model: Some("gpt-test".into()),
+         input: vec![ResponseItem::Message {
+             id: None,
+             role: "user".into(),
+@@ -439,8 +439,8 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
+             internal_chat_message_metadata_passthrough: None,
+         }],
+         tools: None,
+-        tool_choice: "auto".into(),
+-        parallel_tool_calls: false,
++        tool_choice: Some("auto".into()),
++        parallel_tool_calls: Some(false),
+         reasoning: None,
+         store: false,
+         stream: true,
+@@ -527,11 +527,11 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
+ 
+     let request = ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "gpt-test".into(),
++        model: Some("gpt-test".into()),
+         input: Vec::new(),
+         tools: Some(empty_tools().into()),
+-        tool_choice: "auto".into(),
+-        parallel_tool_calls: false,
++        tool_choice: Some("auto".into()),
++        parallel_tool_calls: Some(false),
+         reasoning: None,
+         store: false,
+         stream: true,
+@@ -642,7 +642,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
+ 
+     let request = ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "gpt-test".into(),
++        model: Some("gpt-test".into()),
+         input: vec![ResponseItem::Message {
+             id: Some(ResponseItemId::with_suffix("msg", "1")),
+             role: "user".into(),
+@@ -651,8 +651,8 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
+             internal_chat_message_metadata_passthrough: None,
+         }],
+         tools: Some(empty_tools().into()),
+-        tool_choice: "auto".into(),
+-        parallel_tool_calls: false,
++        tool_choice: Some("auto".into()),
++        parallel_tool_calls: Some(false),
+         reasoning: None,
+         store: true,
+         stream: true,
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 70409360..73dfa15e 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1084,6 +1084,19 @@ impl ModelClient {
+         include_internal: bool,
+     ) -> Result<ResponsesApiRequest> {
+         let controls = &prompt.request_controls;
++        let projected_model = request_model_info(prompt, model_info);
++        let model_info = projected_model.as_ref();
++        let hosted_prompt = controls.hosted_prompt.as_ref().and_then(Option::as_ref);
++        let prompt_owns_model = hosted_prompt.is_some_and(|prompt| prompt.omit_model);
++        let prompt_reference = hosted_prompt
++            .map(|prompt| {
++                prompt.reference.clone().ok_or_else(|| {
++                    CodexErr::InvalidRequest(
++                        "Hosted prompt factory did not resolve a reference".into(),
++                    )
++                })
++            })
++            .transpose()?;
+         controls
+             .validate_profile(model_info)
+             .map_err(CodexErr::InvalidRequest)?;
+@@ -1139,7 +1152,7 @@ impl ModelClient {
+         } else {
+             Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into())
+         };
+-        if !prompt.base_instructions.text.is_empty() {
++        if hosted_prompt.is_none() && !prompt.base_instructions.text.is_empty() {
+             let mut instructions = ContextualUserFragment::into(BaseInstructionsFragment(
+                 prompt.base_instructions.text.clone(),
+             ));
+@@ -1162,7 +1175,15 @@ impl ModelClient {
+                 }
+             }
+         }
+-        let reasoning = self.build_reasoning(model_info, effort, summary);
++        let reasoning = if prompt_owns_model {
++            Reasoning {
++                effort,
++                summary: (summary != ReasoningSummaryConfig::None).then_some(summary),
++                context: None,
++            }
++        } else {
++            self.build_reasoning(model_info, effort, summary)
++        };
+         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
+             && is_openai
+             && reasoning.summary.is_some())
+@@ -1208,6 +1229,8 @@ impl ModelClient {
+         }
+         let verbosity = if let Some(explicit) = controls.verbosity.flatten() {
+             Some(explicit)
++        } else if prompt_owns_model {
++            self.state.model_verbosity
+         } else if model_info.support_verbosity {
+             self.state.model_verbosity.or(model_info.default_verbosity)
+         } else {
+@@ -1225,17 +1248,20 @@ impl ModelClient {
+             prompt.output_schema_strict,
+         );
+         let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
+-        let service_tier = model_info
+-            .service_tier_for_request(service_tier)
+-            .filter(|tier| {
+-                // Bedrock requires an advertised tier, including for flex, which the
+-                // generic OpenAI resolver permits without catalog support.
+-                !self.state.provider.info().is_amazon_bedrock()
+-                    || model_info
+-                        .service_tiers
+-                        .iter()
+-                        .any(|supported| supported.id == *tier)
+-            });
++        let service_tier = if prompt_owns_model {
++            service_tier
++        } else {
++            model_info.service_tier_for_request(service_tier)
++        }
++        .filter(|tier| {
++            // Bedrock requires an advertised tier, including for flex, which the
++            // generic OpenAI resolver permits without catalog support.
++            !self.state.provider.info().is_amazon_bedrock()
++                || model_info
++                    .service_tiers
++                    .iter()
++                    .any(|supported| supported.id == *tier)
++        });
+         if !include_internal {
+             for item in &mut input {
+                 item.clear_tool_result_metadata();
+@@ -1243,19 +1269,35 @@ impl ModelClient {
+         }
+         let client_metadata = responses_metadata.client_metadata(include_internal);
+         let request = ResponsesApiRequest {
+-            model: model_info.slug.clone(),
++            model: (!prompt_owns_model).then(|| model_info.slug.clone()),
+             input,
+-            tools,
+-            tool_choice: if controls
+-                .named_tool_choice
+-                .as_ref()
+-                .is_some_and(Option::is_some)
+-            {
+-                "required".to_string()
+-            } else {
+-                prompt.tool_choice.to_string()
+-            },
++            tools: tools.filter(|_| {
++                !hosted_prompt.is_some_and(|hosted| hosted.omit_tools && prompt.tools.is_empty())
++            }),
++            tool_choice: (!(hosted_prompt.is_some() && controls.named_tool_choice.is_none()))
++            .then(|| {
++                if controls
++                    .named_tool_choice
++                    .as_ref()
++                    .is_some_and(Option::is_some)
++                {
++                    "required".to_string()
++                } else {
++                    prompt.tool_choice.to_string()
++                }
++            }),
+             request_controls: codex_api::ResponsesRequestControls {
++                prompt: prompt_reference,
++                instructions: hosted_prompt
++                    .filter(|prompt| !prompt.omit_instructions)
++                    .map(|prompt| {
++                        prompt.resolved_instructions.clone().ok_or_else(|| {
++                            CodexErr::InvalidRequest(
++                                "Missing captured hosted prompt instructions".into(),
++                            )
++                        })
++                    })
++                    .transpose()?,
+                 truncation: controls.truncation.clone().flatten(),
+                 context_management: controls.context_management.clone().flatten(),
+                 extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
+@@ -1270,12 +1312,19 @@ impl ModelClient {
+                     .flatten()
+                     .map(|ttl| codex_api::PromptCacheOptions { ttl }),
+             },
+-            parallel_tool_calls: controls
+-                .parallel_tool_calls
+-                .flatten()
+-                .unwrap_or(prompt.parallel_tool_calls)
+-                && !model_info.use_responses_lite,
+-            reasoning: Some(reasoning),
++            parallel_tool_calls: (!(hosted_prompt.is_some()
++                && controls.parallel_tool_calls.is_none()))
++            .then(|| {
++                controls
++                    .parallel_tool_calls
++                    .flatten()
++                    .unwrap_or(prompt.parallel_tool_calls)
++                    && !model_info.use_responses_lite
++            }),
++            reasoning: (!prompt_owns_model
++                || reasoning.effort.is_some()
++                || reasoning.summary.is_some())
++            .then_some(reasoning),
+             store: controls.store.flatten().unwrap_or(false),
+             stream: true,
+             stream_options,
+@@ -2102,7 +2151,7 @@ impl ModelClientSession {
+             if let Some(header_value) = self.client.build_routing_hint_header(
+                 client_setup.auth.as_ref(),
+                 &responses_headers,
+-                &request.model,
++                request.model.as_deref().unwrap_or(&model_info.slug),
+                 request.service_tier.as_deref(),
+             ) {
+                 options
+@@ -2159,7 +2208,7 @@ impl ModelClientSession {
+             } else {
+                 crate::request_observation::dispatching(
+                     prompt.tool_admission.as_ref(),
+-                    &request.model,
++                    request.model.as_deref().unwrap_or(&model_info.slug),
+                     request.reasoning.as_ref(),
+                     request.service_tier.as_deref(),
+                     if model_info.use_responses_lite {
+@@ -2342,7 +2391,7 @@ impl ModelClientSession {
+             websocket_metadata.routing_hint = self.client.build_routing_hint_header(
+                 client_setup.auth.as_ref(),
+                 &responses_headers,
+-                &request.model,
++                request.model.as_deref().unwrap_or(&model_info.slug),
+                 request.service_tier.as_deref(),
+             );
+             let request_session_telemetry = if warmup {
+@@ -2537,7 +2586,7 @@ impl ModelClientSession {
+                 let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
+                 crate::request_observation::dispatching(
+                     prompt.tool_admission.as_ref(),
+-                    payload.model,
++                    payload.model.unwrap_or(&model_info.slug),
+                     payload.reasoning,
+                     payload.service_tier,
+                     if model_info.use_responses_lite {
+@@ -2720,6 +2769,8 @@ impl ModelClientSession {
+         responses_metadata: &CodexResponsesMetadata,
+         inference_trace: &InferenceTraceContext,
+     ) -> Result<ResponseStream> {
++        let projected_model = request_model_info(prompt, model_info);
++        let model_info = projected_model.as_ref();
+         if prompt.prefer_buffered_response
+             && (model_info.use_responses_lite || self.client.responses_websocket_enabled())
+         {
+@@ -2740,6 +2791,7 @@ impl ModelClientSession {
+             let projected = transformed.get_or_insert_with(|| prompt.clone());
+             contributor
+                 .transform_context(codex_extension_api::ModelContextInput {
++                    turn_store: prompt.tool_admission.as_ref().map(|admission| admission.turn_store()),
+                     step_store: prompt
+                         .tool_admission
+                         .as_ref()
+@@ -2751,6 +2803,11 @@ impl ModelClientSession {
+                         responses_metadata.request_kind,
+                         Some(crate::responses_metadata::CodexResponsesRequestKind::Compaction(_))
+                     ),
++                    hosted_prompt: projected
++                        .request_controls
++                        .hosted_prompt
++                        .as_mut()
++                        .and_then(Option::as_mut),
+                     items: &mut projected.input,
+                 })
+                 .await
+@@ -2873,6 +2930,25 @@ fn build_responses_headers(
+     headers
+ }
+ 
++fn request_model_info<'a>(
++    prompt: &Prompt,
++    model: &'a ModelInfo,
++) -> std::borrow::Cow<'a, ModelInfo> {
++    if model.use_responses_lite
++        && prompt
++            .request_controls
++            .hosted_prompt
++            .as_ref()
++            .is_some_and(Option::is_some)
++    {
++        let mut standard = model.clone();
++        standard.use_responses_lite = false;
++        std::borrow::Cow::Owned(standard)
++    } else {
++        std::borrow::Cow::Borrowed(model)
++    }
++}
++
+ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: bool) {
+     if use_responses_lite {
+         headers.insert(
+diff --git a/codex-rs/core/src/client_common_tests.rs b/codex-rs/core/src/client_common_tests.rs
+index ca24c02c..ab8708e4 100644
+--- a/codex-rs/core/src/client_common_tests.rs
++++ b/codex-rs/core/src/client_common_tests.rs
+@@ -113,11 +113,11 @@ fn serializes_text_verbosity_when_set() {
+     let input: Vec<ResponseItem> = vec![];
+     let req = ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "gpt-5.4".to_string(),
++        model: Some("gpt-5.4".to_string()),
+         input,
+         tools: Some(empty_tools().into()),
+-        tool_choice: "auto".to_string(),
+-        parallel_tool_calls: true,
++        tool_choice: Some("auto".to_string()),
++        parallel_tool_calls: Some(true),
+         reasoning: None,
+         store: false,
+         stream: true,
+@@ -161,11 +161,11 @@ fn serializes_text_schema_with_strict_format() {
+ 
+     let req = ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "gpt-5.4".to_string(),
++        model: Some("gpt-5.4".to_string()),
+         input,
+         tools: Some(empty_tools().into()),
+-        tool_choice: "auto".to_string(),
+-        parallel_tool_calls: true,
++        tool_choice: Some("auto".to_string()),
++        parallel_tool_calls: Some(true),
+         reasoning: None,
+         store: false,
+         stream: true,
+@@ -223,11 +223,11 @@ fn omits_text_when_not_set() {
+     let input: Vec<ResponseItem> = vec![];
+     let req = ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "gpt-5.4".to_string(),
++        model: Some("gpt-5.4".to_string()),
+         input,
+         tools: Some(empty_tools().into()),
+-        tool_choice: "auto".to_string(),
+-        parallel_tool_calls: true,
++        tool_choice: Some("auto".to_string()),
++        parallel_tool_calls: Some(true),
+         reasoning: None,
+         store: false,
+         stream: true,
+@@ -248,11 +248,11 @@ fn omits_text_when_not_set() {
+ fn serializes_flex_service_tier_when_set() {
+     let req = ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "gpt-5.4".to_string(),
++        model: Some("gpt-5.4".to_string()),
+         input: vec![],
+         tools: Some(empty_tools().into()),
+-        tool_choice: "auto".to_string(),
+-        parallel_tool_calls: true,
++        tool_choice: Some("auto".to_string()),
++        parallel_tool_calls: Some(true),
+         reasoning: None,
+         store: false,
+         stream: true,
+diff --git a/codex-rs/core/src/client_tool_metadata_tests.rs b/codex-rs/core/src/client_tool_metadata_tests.rs
+index f6ab6d0e..4c4a81fb 100644
+--- a/codex-rs/core/src/client_tool_metadata_tests.rs
++++ b/codex-rs/core/src/client_tool_metadata_tests.rs
+@@ -44,11 +44,11 @@ fn request_with_metadata_and_source(
+     output.mark_tool_calls_complete();
+     ResponsesApiRequest {
+         request_controls: Default::default(),
+-        model: "test".to_string(),
++        model: Some("test".to_string()),
+         input: vec![output],
+         tools: None,
+-        tool_choice: "auto".to_string(),
+-        parallel_tool_calls: true,
++        tool_choice: Some("auto".to_string()),
++        parallel_tool_calls: Some(true),
+         reasoning: None,
+         store: false,
+         stream: true,
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index 90ccb7a7..afe77fb7 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -69,17 +69,37 @@ impl ResolvedStepSettings {
+         fast_mode_enabled: bool,
+         context_window_override: Option<i64>,
+     ) -> Self {
++        if let Some(Some(prompt)) = &selected.request_controls.hosted_prompt {
++            let model = Arc::make_mut(&mut model_info);
++            model.use_responses_lite = false;
++            if prompt.omit_model {
++                model.default_reasoning_level = None;
++                model.default_reasoning_summary = ReasoningSummary::None;
++                model.default_verbosity = None;
++            }
++        }
+         if let Some(Some(modalities)) = &selected.request_controls.input_modalities {
+             Arc::make_mut(&mut model_info).input_modalities = modalities.clone();
+         }
+         let reasoning_summary = selected
+             .reasoning_summary
+             .unwrap_or(model_info.default_reasoning_summary);
+-        let service_tier = super::get_service_tier(
+-            selected.service_tier.clone(),
+-            fast_mode_enabled,
+-            &model_info,
+-        );
++        let service_tier = if selected.service_tier.is_none()
++            && selected
++                .request_controls
++                .hosted_prompt
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_some_and(|prompt| prompt.omit_model)
++        {
++            None
++        } else {
++            super::get_service_tier(
++                selected.service_tier.clone(),
++                fast_mode_enabled,
++                &model_info,
++            )
++        };
+         let reported_context_window =
+             if model_info.used_fallback_model_metadata && context_window_override.is_none() {
+                 None
+@@ -199,6 +219,19 @@ impl ResolvedStepSettings {
+             && selected.personality == self.selected.personality
+             && selected.request_controls.input_modalities
+                 == self.selected.request_controls.input_modalities
++            && selected
++                .request_controls
++                .hosted_prompt
++                .as_ref()
++                .and_then(Option::as_ref)
++                .map(|prompt| prompt.omit_model)
++                == self
++                    .selected
++                    .request_controls
++                    .hosted_prompt
++                    .as_ref()
++                    .and_then(Option::as_ref)
++                    .map(|prompt| prompt.omit_model)
+         {
+             Arc::clone(&self.model_info)
+         } else {
+@@ -369,6 +402,11 @@ impl StepSettings {
+             next.request_controls.named_tool_choice = Some(None);
+         }
+         next.request_controls.apply_patch(&update.request_controls);
++        if update.model.is_some() && update.request_controls.hosted_prompt.is_none() {
++            if let Some(Some(prompt)) = &mut next.request_controls.hosted_prompt {
++                prompt.omit_model = false;
++            }
++        }
+         if let Some(personality) = update.personality {
+             next.personality = Some(personality);
+         }
+diff --git a/codex-rs/core/src/session/world_state.rs b/codex-rs/core/src/session/world_state.rs
+index 109fe1ce..9533fda2 100644
+--- a/codex-rs/core/src/session/world_state.rs
++++ b/codex-rs/core/src/session/world_state.rs
+@@ -123,11 +123,15 @@ impl Session {
+             let definitions = codex_tools::create_tools_json_for_responses_lite(&specs)?;
+             world_state.add_section(TopLevelToolsState::new(definitions)?);
+         }
+-        world_state.add_section(ModelInstructionsState::new(
+-            &model_info.slug,
+-            previous_model.as_deref(),
+-            model_instructions,
+-        ));
++        if !step_context.settings.request_controls().hosted_prompt.as_ref()
++            .and_then(Option::as_ref).is_some()
++        {
++            world_state.add_section(ModelInstructionsState::new(
++                &model_info.slug,
++                previous_model.as_deref(),
++                model_instructions,
++            ));
++        }
+         let token_budget_enabled = turn_context.config.features.enabled(Feature::TokenBudget)
+             && step_context
+                 .settings
+@@ -308,6 +312,7 @@ impl Session {
+                     thread_id: self.thread_id(),
+                     turn_id: turn_context.sub_id.as_str(),
+                     model_info: &step_context.settings.model_info,
++                    request_controls: step_context.settings.request_controls(),
+                     environments: &environments,
+                     ready_selected_capability_roots: &ready_selected_capability_roots,
+                     executor_capability_discovery: step_context
+diff --git a/codex-rs/ext/extension-api/src/contributors/world_state.rs b/codex-rs/ext/extension-api/src/contributors/world_state.rs
+index f5571bb8..43caaf2d 100644
+--- a/codex-rs/ext/extension-api/src/contributors/world_state.rs
++++ b/codex-rs/ext/extension-api/src/contributors/world_state.rs
+@@ -16,6 +16,7 @@ pub struct WorldStateContributionInput<'a> {
+     pub turn_id: &'a str,
+     /// Resolved model metadata captured for this sampling step, retained across discovery.
+     pub model_info: &'a ModelInfo,
++    pub request_controls: &'a codex_protocol::model_request_controls::ModelRequestControls,
+     pub environments: &'a [TurnEnvironmentSelection],
+     /// Selected roots whose stable environments are ready in this sampling step.
+     pub ready_selected_capability_roots: &'a [SelectedCapabilityRoot],
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index f85f8279..18754dfa 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -76,12 +76,14 @@ pub struct ModelRequestInput<'a> {
+ 
+ /// A detached input projection for one model request, before transport retries.
+ pub struct ModelContextInput<'a> {
++    pub turn_store: Option<&'a ExtensionData>,
+     /// The original sampled step; absent for older/custom request owners.
+     pub step_store: Option<&'a ExtensionData>,
+     pub thread_id: &'a str,
+     pub turn_id: &'a str,
+     pub model: &'a str,
+     pub compaction: bool,
++    pub hosted_prompt: Option<&'a mut codex_protocol::model_request_controls::HostedPromptControls>,
+     pub items: &'a mut Vec<ResponseItem>,
+ }
+ 
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index ee26fcbc..95f2e191 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -227,11 +227,11 @@ impl LunaSampler {
+     ) -> execution::SamplingExecution {
+         let api_request = ResponsesApiRequest {
+             request_controls: Default::default(),
+-            model: MODEL.to_owned(),
++            model: Some(MODEL.to_owned()),
+             input,
+             tools: None,
+-            tool_choice: "none".to_owned(),
+-            parallel_tool_calls: false,
++            tool_choice: Some("none".to_owned()),
++            parallel_tool_calls: Some(false),
+             reasoning: Some(Reasoning {
+                 effort: Some(request.reasoning_effort.clone()),
+                 summary: None,
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index fb4bd92a..4b981504 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -23,11 +23,51 @@ pub enum PromptCacheTtl {
+     Hours12,
+ }
+ 
++/// Provider-owned prompt reference; resolved factories use the admitted context hook.
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct HostedPromptReference {
++    pub id: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub version: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional, type = "Record<string, unknown>")]
++    pub variables: Option<BTreeMap<String, serde_json::Value>>,
++}
++
++/// Private captured declaration presence, never a provider request object.
++#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct HostedPromptControls {
++    // References are reissued by the current admitted declaration on each request.
++    #[serde(default, skip_serializing)]
++    pub reference: Option<HostedPromptReference>,
++    #[serde(default)]
++    pub omit_model: bool,
++    #[serde(default)]
++    pub omit_instructions: bool,
++    #[serde(default)]
++    pub omit_tools: bool,
++    /// Request-local accepted application text; never persisted as declaration state.
++    #[serde(skip)]
++    #[schemars(skip)]
++    #[ts(skip)]
++    pub resolved_instructions: Option<String>,
++}
++
+ /// Retain the caller's selection, including explicit clears, across capture/restore.
+ /// This is also a sparse update: omitted members leave each owner's selection intact.
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct ModelRequestControls {
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<HostedPromptControls>")]
++    #[schemars(with = "Option<HostedPromptControls>")]
++    pub hosted_prompt: Option<Option<HostedPromptControls>>,
+     /// Declared input support for the selected model; never a provider request field.
+     #[serde(
+         default,
+@@ -163,7 +203,8 @@ pub struct ModelRequestControls {
+ 
+ impl ModelRequestControls {
+     pub fn is_empty(&self) -> bool {
+-        self.input_modalities.is_none()
++        self.hosted_prompt.is_none()
++            && self.input_modalities.is_none()
+             && self.truncation.is_none()
+             && self.include.is_none()
+             && self.context_management.is_none()
+@@ -182,6 +223,9 @@ impl ModelRequestControls {
+     }
+ 
+     pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.hosted_prompt.is_some() {
++            self.hosted_prompt = patch.hosted_prompt.clone();
++        }
+         if patch.input_modalities.is_some() {
+             self.input_modalities = patch.input_modalities.clone();
+         }
+@@ -235,6 +279,23 @@ impl ModelRequestControls {
+ 
+     /// Check wire shapes independently of uncertain model-level support.
+     pub fn validate_shape(&self) -> Result<(), String> {
++        if let Some(Some(prompt)) = &self.hosted_prompt {
++            if prompt
++                .reference
++                .as_ref()
++                .is_some_and(|reference| reference.id.trim().is_empty())
++            {
++                return Err("A hosted prompt requires a nonempty id".into());
++            }
++            if self
++                .extra_body
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_some_and(|body| body.contains_key("prompt"))
++            {
++                return Err("hosted_prompt conflicts with extra_body.prompt".into());
++            }
++        }
+         if let Some(Some(modalities)) = &self.input_modalities {
+             if modalities.is_empty()
+                 || modalities
+@@ -318,7 +379,14 @@ impl ModelRequestControls {
+     /// unknown ordinary Responses model support remains the provider's decision.
+     pub fn validate_profile(&self, model: &crate::openai_models::ModelInfo) -> Result<(), String> {
+         self.validate_shape()?;
+-        if model.use_responses_lite && self.has_wire_values() {
++        if model.use_responses_lite
++            && self
++                .hosted_prompt
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_none()
++            && self.has_wire_values()
++        {
+             return Err(
+                 "explicit request controls require standard Responses, not Responses Lite".into(),
+             );
+@@ -328,7 +396,8 @@ impl ModelRequestControls {
+ 
+     /// A known lossy formatter must reject requested wire values. A clear emits none.
+     pub fn has_wire_values(&self) -> bool {
+-        self.truncation.as_ref().is_some_and(Option::is_some)
++        self.hosted_prompt.as_ref().is_some_and(Option::is_some)
++            || self.truncation.as_ref().is_some_and(Option::is_some)
+             || self
+                 .include
+                 .as_ref()

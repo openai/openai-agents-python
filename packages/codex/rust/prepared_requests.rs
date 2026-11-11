@@ -7,22 +7,16 @@ use codex_extension_api::{
 use futures_util::future::BoxFuture;
 
 const FAILURE: &str = "Native request preparation failed or was cancelled";
-type Reply = std::result::Result<Option<PreparedRequestData>, String>;
+pub(super) type Reply = std::result::Result<Option<PreparedRequestData>, String>;
 
 #[derive(Default)]
 pub(super) struct State {
     operation: u64,
     enabled: bool,
     retired: bool,
-    pending: HashMap<u64, Pending>,
 }
 
-struct Pending {
-    ticket: Arc<Ticket>,
-    reply: oneshot::Sender<Reply>,
-}
-
-struct Ticket {
+pub(super) struct Ticket {
     tools: Arc<PythonTools>,
     receipt: Arc<TurnAdmission>,
     original: Arc<dyn ModelToolAdmission>,
@@ -39,9 +33,22 @@ impl std::fmt::Debug for Ticket {
 }
 
 impl Ticket {
+    pub(super) fn admits(&self) -> bool {
+        self.valid(
+            &self
+                .tools
+                .prepared_requests
+                .lock()
+                .expect("Model callback state poisoned"),
+        )
+    }
     fn valid(&self, state: &State) -> bool {
         state.enabled
             && !state.retired
+            && self
+                .original
+                .model_attempt()
+                .is_none_or(|attempt| !attempt.cancellation().is_cancelled())
             && state.operation == self.operation
             && self.tools.instance.is_none()
             && self.tools.admits_generation(&self.generation)
@@ -118,25 +125,49 @@ impl PythonTools {
                 .is_none_or(Vec::is_empty)
     }
 
+    fn cancel_prepared_request_callbacks(&self) {
+        let ids = {
+            let replies = self
+                .preparation_replies
+                .lock()
+                .expect("Python preparation replies poisoned");
+            replies
+                .as_ref()
+                .into_iter()
+                .flat_map(|pending| pending.iter())
+                .filter_map(|(id, slot)| {
+                    matches!(
+                        slot.reply.as_ref(),
+                        Some(PreparationReply::PreparedRequest { .. })
+                    )
+                    .then_some(*id)
+                })
+                .collect::<Vec<_>>()
+        };
+        for id in ids {
+            self.retire_preparation(id, false);
+        }
+    }
     pub(crate) fn prepare_requests(&self, enabled: bool) -> Result<()> {
-        let mut state = self
-            .prepared_requests
-            .lock()
-            .expect("Prepared requests poisoned");
-        ensure!(!state.retired, "Request preparation owner is closed");
-        ensure!(
-            !enabled || self.instance.is_none(),
-            "Request preparation requires a root thread"
-        );
-        state.operation = state
-            .operation
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("Request preparation operation exhausted"))?;
-        state.enabled = enabled;
-        state.pending.clear();
+        {
+            let mut state = self
+                .prepared_requests
+                .lock()
+                .expect("Prepared requests poisoned");
+            ensure!(!state.retired, "Request preparation owner is closed");
+            ensure!(
+                !enabled || self.instance.is_none(),
+                "Request preparation requires a root thread"
+            );
+            state.operation = state
+                .operation
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Request preparation operation exhausted"))?;
+            state.enabled = enabled;
+        }
+        self.cancel_prepared_request_callbacks();
         Ok(())
     }
-
     pub(super) fn prepared_operation(&self) -> Option<u64> {
         let state = self
             .prepared_requests
@@ -144,41 +175,58 @@ impl PythonTools {
             .expect("Prepared requests poisoned");
         (state.enabled && !state.retired).then_some(state.operation)
     }
-
     pub(super) fn retire_prepared_requests(&self) {
-        let mut state = self
-            .prepared_requests
-            .lock()
-            .expect("Prepared requests poisoned");
-        state.retired = true;
-        state.enabled = false;
-        state.pending.clear();
+        {
+            let mut state = self
+                .prepared_requests
+                .lock()
+                .expect("Prepared requests poisoned");
+            state.retired = true;
+            state.enabled = false;
+        }
+        self.cancel_prepared_request_callbacks();
     }
-
     pub(crate) fn check_prepared_request(&self, id: u64) -> bool {
-        let state = self
-            .prepared_requests
+        let replies = self
+            .preparation_replies
             .lock()
-            .expect("Prepared requests poisoned");
-        state
-            .pending
-            .get(&id)
-            .is_some_and(|pending| !pending.reply.is_closed() && pending.ticket.valid(&state))
+            .expect("Python preparation replies poisoned");
+        let Some(slot) = replies.as_ref().and_then(|pending| pending.get(&id)) else {
+            return false;
+        };
+        let Some(PreparationReply::PreparedRequest { ticket, reply }) = &slot.reply else {
+            return false;
+        };
+        !slot.is_closed()
+            && !reply.is_closed()
+            && ticket.valid(
+                &self
+                    .prepared_requests
+                    .lock()
+                    .expect("Prepared requests poisoned"),
+            )
     }
-
     pub(crate) fn reply_prepared_request(&self, id: u64, data: Option<&str>, error: bool) -> bool {
-        let mut state = self
-            .prepared_requests
+        let mut replies = self
+            .preparation_replies
             .lock()
-            .expect("Prepared requests poisoned");
-        let valid = state
-            .pending
-            .get(&id)
-            .is_some_and(|pending| !pending.reply.is_closed() && pending.ticket.valid(&state));
-        if !valid {
+            .expect("Python preparation replies poisoned");
+        let Some(slot) = replies.as_mut().and_then(|pending| pending.get_mut(&id)) else {
+            return false;
+        };
+        let Some(PreparationReply::PreparedRequest { ticket, .. }) = &slot.reply else {
+            return false;
+        };
+        if slot.is_closed()
+            || !ticket.valid(
+                &self
+                    .prepared_requests
+                    .lock()
+                    .expect("Prepared requests poisoned"),
+            )
+        {
             return false;
         }
-        // Decode now, before another await. Never expose payload-bearing serde errors.
         let reply = if error {
             Err(FAILURE.into())
         } else {
@@ -186,13 +234,11 @@ impl PythonTools {
                 .transpose()
                 .map_err(|_| FAILURE.to_owned())
         };
-        state
-            .pending
-            .remove(&id)
-            .expect("checked pending request")
-            .reply
-            .send(reply)
-            .is_ok()
+        let Some(PreparationReply::PreparedRequest { reply: sender, .. }) = slot.reply.take()
+        else {
+            unreachable!("checked prepared request");
+        };
+        sender.send(reply).is_ok()
     }
 }
 
@@ -235,67 +281,36 @@ impl ModelRequestContributor for Contributor {
                     .map_err(|_| FAILURE)?,
                 tools: tools.clone(),
                 receipt: receipt.clone(),
-                original: input.admission,
+                original: input.admission.clone(),
                 operation,
             });
-            let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
-            let (reply, receive) = oneshot::channel();
-            {
-                let mut state = tools
-                    .prepared_requests
-                    .lock()
-                    .expect("Prepared requests poisoned");
-                if !ticket.valid(&state) {
-                    return Err(FAILURE.into());
-                }
-                state.pending.insert(
-                    id,
-                    Pending {
-                        ticket: ticket.clone(),
-                        reply,
-                    },
-                );
-            }
-            struct Lease {
-                tools: Arc<PythonTools>,
-                id: u64,
-            }
-            impl Drop for Lease {
-                fn drop(&mut self) {
-                    self.tools
-                        .prepared_requests
-                        .lock()
-                        .expect("Prepared requests poisoned")
-                        .pending
-                        .remove(&self.id);
-                }
-            }
-            let _lease = Lease {
-                tools: tools.clone(),
-                id,
-            };
-            let mut request = json!({
-                "id": receipt.turn_id,
-                "msg": {"type":"_sdk_prepare_request", "turn_id":receipt.turn_id,
-                    "thread":thread, "instance":tools.instance, "request_id":id,
-                    "generation":ticket.generation.id, "recovery_attempt":input.recovery_attempt,
-                    "data":input.data}
-            });
-            if let Some(profile) = &ticket.profile {
-                request["msg"]["profile_id"] = json!(profile.profile_id);
-                request["msg"]["profile_epoch"] = json!(profile.epoch);
-            }
-            tools
-                .family
-                .requests
-                .send(QueuedRequest::Prepared(request))
-                .map_err(|_| FAILURE)?;
-            let mut status = receipt.state.subscribe();
-            let data = tokio::select! {
-                biased;
-                _ = status.wait_for(|status| *status != AdmissionState::Pending) => return Err(FAILURE.into()),
-                reply = receive => reply.map_err(|_| FAILURE)??,
-            };
+            let attempt = ticket.original.model_attempt();
+            let cancellation = attempt.as_ref().map(|attempt| attempt.cancellation());
+            let data = tools.exchange_preparation(
+                receipt.clone(), attempt.clone(), cancellation,
+                [FAILURE, FAILURE, FAILURE],
+                |reply| PreparationReply::PreparedRequest { ticket: ticket.clone(), reply },
+                |id| {
+                    let mut request = json!({
+                        "id": receipt.turn_id,
+                        "msg": {"type":"_sdk_prepare_request", "turn_id":receipt.turn_id,
+                            "thread":thread, "instance":tools.instance, "request_id":id,
+                            "generation":ticket.generation.id, "recovery_attempt":input.recovery_attempt,
+                            "data":input.data}
+                    });
+                    if let Some(profile) = &ticket.profile {
+                        request["msg"]["profile_id"] = json!(profile.profile_id);
+                        request["msg"]["profile_epoch"] = json!(profile.epoch);
+                    }
+                    request["msg"]["root_turn_id"] = json!(input.admission.root_turn_id());
+                    if let Some(attempt) = &attempt {
+                        request["msg"]["attempt_id"] = json!(attempt.id());
+                        request["msg"]["attempt"] = json!(attempt.attempt());
+                    }
+                    request
+                },
+                |reply: Reply| reply.map_err(anyhow::Error::msg),
+            ).await.map_err(|_| FAILURE)?;
             ticket.admit_request()?;
             Ok(PreparedRequestOutput {
                 data,

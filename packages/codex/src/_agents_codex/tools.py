@@ -539,6 +539,22 @@ class _ToolCatalog:
             )
         ]
 
+    def input_error_slots(self) -> list[int]:
+        from ._function_tools import _CapturedApproval
+
+        return [
+            slot
+            for slot, tool in enumerate(self.tools)
+            if (
+                tool.function.input_error_function
+                if isinstance(tool, _CapturedApproval)
+                else tool.input_error_function
+                if isinstance(tool, _CapturedFunction)
+                else None
+            )
+            is not None
+        ]
+
     def native_specs(self) -> str:
         return json.dumps([json.loads(tool.spec_json) for tool in self.tools])
 

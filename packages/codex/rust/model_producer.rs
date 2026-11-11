@@ -8,27 +8,47 @@ use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 
 const FAILURE: &str = "Native model producer failed or was cancelled";
-type Reply = std::result::Result<ModelReply, String>;
+pub(super) type Reply = std::result::Result<ModelReply, String>;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ModelReply {
+pub(super) struct ModelReply {
     response_id: String,
     output: Vec<Value>,
     #[serde(default)]
     usage: Option<codex_protocol::protocol::TokenUsage>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailedModelReply {
+    failed: bool,
+    failure: codex_protocol::model_retry::ModelProducerFailure,
+}
 #[derive(Default)]
 pub(super) struct State {
     enabled: bool,
     retired: bool,
-    pending: HashMap<u64, (Arc<Ticket>, oneshot::Sender<Reply>)>,
 }
-struct Ticket {
+pub(super) struct Ticket {
     tools: Arc<PythonTools>,
     receipt: Arc<TurnAdmission>,
     generation: Arc<Generation>,
 }
+impl State {
+    pub(super) fn enabled_for_retry(&self) -> bool {
+        self.enabled && !self.retired
+    }
+}
+
 impl Ticket {
+    pub(super) fn admits(&self) -> bool {
+        self.valid(
+            &self
+                .tools
+                .model_producer
+                .lock()
+                .expect("Model callback state poisoned"),
+        )
+    }
     fn valid(&self, state: &State) -> bool {
         state.enabled
             && !state.retired
@@ -38,35 +58,87 @@ impl Ticket {
     }
 }
 impl PythonTools {
+    fn cancel_model_producer_preparations(&self) {
+        let ids = {
+            let replies = self
+                .preparation_replies
+                .lock()
+                .expect("Python preparation replies poisoned");
+            replies
+                .as_ref()
+                .into_iter()
+                .flat_map(|pending| pending.iter())
+                .filter_map(|(id, slot)| {
+                    matches!(
+                        slot.reply.as_ref(),
+                        Some(PreparationReply::ModelProducer { .. })
+                    )
+                    .then_some(*id)
+                })
+                .collect::<Vec<_>>()
+        };
+        for id in ids {
+            self.retire_preparation(id, false);
+        }
+    }
     pub(crate) fn enable_model_producer(&self, enabled: bool) -> Result<()> {
-        let mut state = self.model_producer.lock().expect("Model producer poisoned");
-        ensure!(!state.retired, "Model producer owner is retired");
-        state.enabled = enabled;
+        {
+            let mut state = self.model_producer.lock().expect("Model producer poisoned");
+            ensure!(!state.retired, "Model producer owner is retired");
+            state.enabled = enabled;
+        }
         if !enabled {
-            state.pending.clear();
+            self.cancel_model_producer_preparations();
         }
         Ok(())
     }
     pub(crate) fn check_model_producer(&self, id: u64) -> bool {
-        let state = self.model_producer.lock().expect("Model producer poisoned");
-        state
-            .pending
-            .get(&id)
-            .is_some_and(|(ticket, reply)| !reply.is_closed() && ticket.valid(&state))
+        let replies = self
+            .preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned");
+        let Some(slot) = replies.as_ref().and_then(|pending| pending.get(&id)) else {
+            return false;
+        };
+        let Some(PreparationReply::ModelProducer { ticket, reply }) = &slot.reply else {
+            return false;
+        };
+        !slot.is_closed()
+            && !reply.is_closed()
+            && ticket.valid(&self.model_producer.lock().expect("Model producer poisoned"))
     }
     pub(crate) fn reply_model_producer(&self, id: u64, data: Option<&str>, error: bool) -> bool {
-        let mut state = self.model_producer.lock().expect("Model producer poisoned");
-        if !state
-            .pending
-            .get(&id)
-            .is_some_and(|(ticket, reply)| !reply.is_closed() && ticket.valid(&state))
+        let mut replies = self
+            .preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned");
+        let Some(slot) = replies.as_mut().and_then(|pending| pending.get_mut(&id)) else {
+            return false;
+        };
+        let Some(PreparationReply::ModelProducer { ticket, .. }) = &slot.reply else {
+            return false;
+        };
+        if slot.is_closed()
+            || !ticket.valid(&self.model_producer.lock().expect("Model producer poisoned"))
         {
             return false;
         }
-        let reply = if error {
+        let parsed = if error {
+            if let (Some(attempt), Some(data)) = (&slot.callback.model_attempt, data) {
+                let Some(data) = Some(data).filter(|data| data.len() <= 65_536) else {
+                    return false;
+                };
+                let Ok(failure) = serde_json::from_str::<FailedModelReply>(data) else {
+                    return false;
+                };
+                if !failure.failed || attempt.report_failure(failure.failure).is_err() {
+                    return false;
+                }
+            }
             Err(FAILURE.into())
         } else {
-            data.ok_or(FAILURE)
+            let parsed = data
+                .ok_or(FAILURE)
                 .and_then(|data| serde_json::from_str::<ModelReply>(data).map_err(|_| FAILURE))
                 .and_then(|reply| {
                     if reply.response_id.trim().is_empty() {
@@ -74,21 +146,32 @@ impl PythonTools {
                     } else {
                         Ok(reply)
                     }
-                })
-                .map_err(str::to_owned)
+                });
+            match parsed {
+                Ok(reply) => {
+                    if let (Some(attempt), Some(usage)) =
+                        (&slot.callback.model_attempt, &reply.usage)
+                    {
+                        if attempt.report_usage(usage.clone()).is_err() {
+                            return false;
+                        }
+                    }
+                    Ok(reply)
+                }
+                Err(error) => Err(error.to_owned()),
+            }
         };
-        state
-            .pending
-            .remove(&id)
-            .expect("checked model request")
-            .1
-            .send(reply)
-            .is_ok()
+        let Some(PreparationReply::ModelProducer { reply, .. }) = slot.reply.take() else {
+            unreachable!("checked model request");
+        };
+        reply.send(parsed).is_ok()
     }
     pub(super) fn retire_model_producer(&self) {
-        let mut state = self.model_producer.lock().expect("Model producer poisoned");
-        state.retired = true;
-        state.pending.clear();
+        self.model_producer
+            .lock()
+            .expect("Model producer poisoned")
+            .retired = true;
+        self.cancel_model_producer_preparations();
     }
 }
 #[derive(Debug)]
@@ -104,10 +187,10 @@ impl ModelRequestContributor for Contributor {
         {
             return None;
         }
-        Some(Box::new(Producer(tools)))
+        Some(Box::new(Producer(tools, input.model.to_owned())))
     }
 }
-struct Producer(Arc<PythonTools>);
+struct Producer(Arc<PythonTools>, String);
 impl ModelResponseInterceptor for Producer {
     fn produces_response(&self) -> bool {
         true
@@ -121,6 +204,7 @@ impl ModelResponseInterceptor for Producer {
         admission: Option<Arc<dyn ModelToolAdmission>>,
     ) -> Option<BoxFuture<'a, std::result::Result<ModelResponseStream, String>>> {
         let tools = self.0.clone();
+        let model = self.1.clone();
         Some(Box::pin(async move {
             let admission = admission.ok_or(FAILURE)?;
             let receipt = admission
@@ -143,54 +227,40 @@ impl ModelResponseInterceptor for Producer {
                 tools: tools.clone(),
                 receipt: receipt.clone(),
             });
-            let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
-            let (reply, receive) = oneshot::channel();
-            {
-                let mut state = tools
+            if !ticket.valid(
+                &tools
                     .model_producer
                     .lock()
-                    .expect("Model producer poisoned");
-                if !ticket.valid(&state) {
-                    return Err(FAILURE.into());
-                }
-                state.pending.insert(id, (ticket.clone(), reply));
+                    .expect("Model producer poisoned"),
+            ) {
+                return Err(FAILURE.into());
             }
-            struct Lease {
-                tools: Arc<PythonTools>,
-                id: u64,
-            }
-            impl Drop for Lease {
-                fn drop(&mut self) {
-                    self.tools
-                        .model_producer
-                        .lock()
-                        .expect("Model producer poisoned")
-                        .pending
-                        .remove(&self.id);
-                }
-            }
-            let _lease = Lease {
-                tools: tools.clone(),
-                id,
-            };
-            let mut event = json!({"id":receipt.turn_id,"msg":{"type":"_sdk_model_produce","turn_id":receipt.turn_id,"thread":admission.thread_id(),"instance":tools.instance,"request_id":id,"generation":ticket.generation.id,"data":request}});
-            if let Some(profile) = tools
+            let profile = tools
                 .source_profile(admission.step_store())
-                .map_err(|_| FAILURE)?
-            {
-                event["msg"]["profile_id"] = json!(profile.profile_id);
-                event["msg"]["profile_epoch"] = json!(profile.epoch);
-            }
-            tools
-                .family
-                .requests
-                .send(QueuedRequest::Prepared(event))
                 .map_err(|_| FAILURE)?;
-            let mut status = receipt.state.subscribe();
-            let reply = tokio::select! { biased;
-                _ = status.wait_for(|status| *status != AdmissionState::Pending) => return Err(FAILURE.into()),
-                reply = receive => reply.map_err(|_| FAILURE)??,
-            };
+            let attempt = admission.model_attempt();
+            let cancellation = attempt.as_ref().map(|attempt| attempt.cancellation());
+            let reply: ModelReply = tools.exchange_preparation(
+                receipt.clone(), attempt.clone(), cancellation,
+                [FAILURE, FAILURE, FAILURE],
+                |reply| PreparationReply::ModelProducer { ticket: ticket.clone(), reply },
+                |id| {
+                    let mut event = json!({"id":receipt.turn_id,"msg":{"type":"_sdk_model_produce","turn_id":receipt.turn_id,"thread":admission.thread_id(),"instance":tools.instance,"request_id":id,"generation":ticket.generation.id,"model":model,"data":request}});
+                    if let Some(profile) = profile {
+                        event["msg"]["profile_id"] = json!(profile.profile_id);
+                        event["msg"]["profile_epoch"] = json!(profile.epoch);
+                    }
+                    event["msg"]["root_turn_id"] = json!(admission.root_turn_id());
+                    if let Some(attempt) = &attempt {
+                        event["msg"]["attempt_id"] = json!(attempt.id());
+                        event["msg"]["attempt"] = json!(attempt.attempt());
+                        event["msg"]["retry_configured"] = json!(attempt.retry_configured());
+                        event["msg"]["disable_provider_retries"] = json!(attempt.disable_provider_retries());
+                    }
+                    event
+                },
+                |reply: Reply| reply.map_err(anyhow::Error::msg),
+            ).await.map_err(|_| FAILURE)?;
             if !ticket.valid(
                 &tools
                     .model_producer

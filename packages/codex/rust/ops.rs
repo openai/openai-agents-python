@@ -1660,6 +1660,8 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                     response_id: p.response_id,
                     playback: p.playback,
                     feedback: p.feedback,
+                    cancel_tools: p.cancel_tools.unwrap_or(true),
+                    owned_handoffs: p.owned_handoffs.unwrap_or_default(),
                     reply,
                 })
                 .await?;
@@ -2028,7 +2030,9 @@ params!(RealtimeSdkInterrupt {
     generation: String,
     response_id: Option<String>,
     playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
-    feedback: Option<String>
+    feedback: Option<String>,
+    cancel_tools: Option<bool>,
+    owned_handoffs: Option<Vec<(String, Option<String>, String)>>
 });
 params!(RealtimeSpeech { text: String });
 params!(RealtimeText {

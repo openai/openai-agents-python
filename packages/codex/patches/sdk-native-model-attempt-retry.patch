@@ -1,0 +1,3160 @@
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/shared.rs b/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
+index 60e872e7..b657e8e8 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
+@@ -77,6 +77,7 @@ pub enum CodexErrorInfo {
+     ContextWindowExceeded,
+     SessionBudgetExceeded,
+     ModelInvocationDeadlineExceeded,
++    ModelAttemptDeadlineExceeded,
+     UsageLimitExceeded,
+     RateLimitExceeded,
+     FlexUnavailable,
+@@ -152,7 +153,12 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
+         match value {
+             CoreCodexErrorInfo::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
+             CoreCodexErrorInfo::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+-            CoreCodexErrorInfo::ModelInvocationDeadlineExceeded => CodexErrorInfo::ModelInvocationDeadlineExceeded,
++            CoreCodexErrorInfo::ModelInvocationDeadlineExceeded => {
++                CodexErrorInfo::ModelInvocationDeadlineExceeded
++            }
++            CoreCodexErrorInfo::ModelAttemptDeadlineExceeded => {
++                CodexErrorInfo::ModelAttemptDeadlineExceeded
++            }
+             CoreCodexErrorInfo::UsageLimitExceeded => CodexErrorInfo::UsageLimitExceeded,
+             CoreCodexErrorInfo::RateLimitExceeded => CodexErrorInfo::RateLimitExceeded,
+             CoreCodexErrorInfo::FlexUnavailable => CodexErrorInfo::FlexUnavailable,
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 3a884ffe..9662ba67 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -483,11 +483,15 @@ impl Stream for ResponseStream {
+     }
+ }
+ 
+-
+ /// One captured invocation clock shared by Core acceptance and native admission.
+ /// The mutex protects only synchronous status/entry bookkeeping, never user code.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-enum InvocationDeadlineOutcome { Active, Accepted, Cancelled, Expired }
++enum InvocationDeadlineOutcome {
++    Active,
++    Accepted,
++    Cancelled,
++    Expired,
++}
+ 
+ #[derive(Debug)]
+ pub struct ModelInvocationDeadlineState {
+@@ -499,21 +503,41 @@ pub struct ModelInvocationDeadlineState {
+ }
+ 
+ impl ModelInvocationDeadlineState {
+-    pub fn new(expires_at: tokio::time::Instant, request_cancel: tokio_util::sync::CancellationToken) -> Self {
+-        Self { expires_at, outcome: std::sync::Mutex::new(InvocationDeadlineOutcome::Active),
+-            request_cancel, settled: tokio_util::sync::CancellationToken::new(),
+-            requested: std::sync::OnceLock::new() }
++    pub fn new(
++        expires_at: tokio::time::Instant,
++        request_cancel: tokio_util::sync::CancellationToken,
++    ) -> Self {
++        Self {
++            expires_at,
++            outcome: std::sync::Mutex::new(InvocationDeadlineOutcome::Active),
++            request_cancel,
++            settled: tokio_util::sync::CancellationToken::new(),
++            requested: std::sync::OnceLock::new(),
++        }
+     }
+     pub fn bind_stop_flag(&self, requested: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+-        assert!(self.requested.set(requested).is_ok(), "deadline stop flag bound twice");
++        assert!(
++            self.requested.set(requested).is_ok(),
++            "deadline stop flag bound twice"
++        );
++    }
++    pub fn expires_at(&self) -> tokio::time::Instant {
++        self.expires_at
++    }
++    pub fn settled(&self) -> tokio_util::sync::CancellationToken {
++        self.settled.clone()
+     }
+-    pub fn expires_at(&self) -> tokio::time::Instant { self.expires_at }
+-    pub fn settled(&self) -> tokio_util::sync::CancellationToken { self.settled.clone() }
+     pub fn expired(&self) -> bool {
+-        *self.outcome.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == InvocationDeadlineOutcome::Expired
++        *self
++            .outcome
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            == InvocationDeadlineOutcome::Expired
+     }
+     fn refresh(&self, outcome: &mut InvocationDeadlineOutcome) {
+-        if *outcome != InvocationDeadlineOutcome::Active { return; }
++        if *outcome != InvocationDeadlineOutcome::Active {
++            return;
++        }
+         // An external cancellation already observed before expiry stays cancellation.
+         // Expiry reserves its status before it cancels this same request token.
+         if self.request_cancel.is_cancelled() {
+@@ -527,29 +551,46 @@ impl ModelInvocationDeadlineState {
+     }
+     fn notify(&self, outcome: InvocationDeadlineOutcome) {
+         // Wake other owners only after releasing the status mutex.
+-        if outcome == InvocationDeadlineOutcome::Expired { self.request_cancel.cancel(); }
+-        if outcome != InvocationDeadlineOutcome::Active { self.settled.cancel(); }
++        if outcome == InvocationDeadlineOutcome::Expired {
++            self.request_cancel.cancel();
++        }
++        if outcome != InvocationDeadlineOutcome::Active {
++            self.settled.cancel();
++        }
+     }
+     fn observe(&self) -> InvocationDeadlineOutcome {
+         let current = {
+-            let mut outcome = self.outcome.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++            let mut outcome = self
++                .outcome
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
+             self.refresh(&mut outcome);
+             *outcome
+         };
+         self.notify(current);
+         current
+     }
+-    pub fn expire_if_due(&self) -> bool { self.observe() == InvocationDeadlineOutcome::Expired }
++    pub fn expire_if_due(&self) -> bool {
++        self.observe() == InvocationDeadlineOutcome::Expired
++    }
+     pub fn denies_admission(&self) -> bool {
+-        matches!(self.observe(), InvocationDeadlineOutcome::Cancelled | InvocationDeadlineOutcome::Expired)
++        matches!(
++            self.observe(),
++            InvocationDeadlineOutcome::Cancelled | InvocationDeadlineOutcome::Expired
++        )
+     }
+     /// Run only native synchronous entry bookkeeping under this gate.
+     pub fn admit<T>(&self, enter: impl FnOnce() -> T) -> Option<T> {
+         let (result, current) = {
+-            let mut outcome = self.outcome.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++            let mut outcome = self
++                .outcome
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
+             self.refresh(&mut outcome);
+             let result = match *outcome {
+-                InvocationDeadlineOutcome::Active | InvocationDeadlineOutcome::Accepted => Some(enter()),
++                InvocationDeadlineOutcome::Active | InvocationDeadlineOutcome::Accepted => {
++                    Some(enter())
++                }
+                 InvocationDeadlineOutcome::Cancelled | InvocationDeadlineOutcome::Expired => None,
+             };
+             (result, *outcome)
+@@ -559,9 +600,14 @@ impl ModelInvocationDeadlineState {
+     }
+     pub fn accept_outcome(&self) -> bool {
+         let current = {
+-            let mut outcome = self.outcome.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++            let mut outcome = self
++                .outcome
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
+             self.refresh(&mut outcome);
+-            if *outcome == InvocationDeadlineOutcome::Active { *outcome = InvocationDeadlineOutcome::Accepted; }
++            if *outcome == InvocationDeadlineOutcome::Active {
++                *outcome = InvocationDeadlineOutcome::Accepted;
++            }
+             *outcome
+         };
+         self.notify(current);
+@@ -569,8 +615,13 @@ impl ModelInvocationDeadlineState {
+     }
+     pub fn cancel(&self) {
+         let current = {
+-            let mut outcome = self.outcome.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+-            if *outcome == InvocationDeadlineOutcome::Active { *outcome = InvocationDeadlineOutcome::Cancelled; }
++            let mut outcome = self
++                .outcome
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            if *outcome == InvocationDeadlineOutcome::Active {
++                *outcome = InvocationDeadlineOutcome::Cancelled;
++            }
+             *outcome
+         };
+         self.notify(current);
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 540c4370..bc038c40 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -2222,6 +2222,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
+             None,
+             Some(&child_usage),
+             /*usage_metadata*/ None,
++            /*model_attempt_id*/ None,
+         )
+         .await;
+     child_thread
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 4f79369d..719bfae9 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2077,10 +2077,32 @@ impl ModelClientSession {
+         auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<ResponseStream> {
+         loop {
+-            let client_setup = self
++            let mut client_setup = self
+                 .client
+                 .current_client_setup(ClientRouting::Workspace)
+                 .await?;
++            if let Some(attempt) = prompt
++                .tool_admission
++                .as_ref()
++                .and_then(|admission| admission.model_attempt())
++            {
++                if attempt.disable_provider_retries() {
++                    // This provider belongs to this request, including its HTTP fallback.
++                    client_setup.api_provider.retry.max_attempts = 0;
++                }
++                attempt
++                    .observe_request(
++                        if prompt.prefer_buffered_response {
++                            "responses_json"
++                        } else {
++                            "responses_sse"
++                        },
++                        None,
++                        None,
++                    )
++                    .map_err(CodexErr::Fatal)?;
++            }
++
+             if prompt.prefer_buffered_response
+                 && !client_setup
+                     .auth
+@@ -2352,10 +2374,21 @@ impl ModelClientSession {
+         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
+         let provider = Arc::clone(&self.client.state.provider);
+         loop {
+-            let client_setup = self
++            let mut client_setup = self
+                 .client
+                 .current_client_setup(ClientRouting::Workspace)
+                 .await?;
++            if let Some(attempt) = prompt
++                .tool_admission
++                .as_ref()
++                .and_then(|admission| admission.model_attempt())
++            {
++                if attempt.disable_provider_retries() {
++                    // This provider belongs to this request, including its HTTP fallback.
++                    client_setup.api_provider.retry.max_attempts = 0;
++                }
++            }
++
+             let include_internal = self
+                 .client
+                 .state
+@@ -2527,6 +2560,21 @@ impl ModelClientSession {
+                 ),
+                 ..ResponseCreateWsRequest::from(&request)
+             };
++            if !warmup {
++                if let Some(attempt) = prompt
++                    .tool_admission
++                    .as_ref()
++                    .and_then(|admission| admission.model_attempt())
++                {
++                    attempt
++                        .observe_request(
++                            "responses_ws",
++                            ws_payload.previous_response_id.as_deref(),
++                            None,
++                        )
++                        .map_err(CodexErr::Fatal)?;
++                }
++            }
+             self.client.set_guardian_metadata(
+                 &mut ws_payload.client_metadata,
+                 responses_metadata.parent_response_id.as_deref(),
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 3a06a85c..0686d3dc 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -1012,6 +1012,7 @@ async fn drain_to_completed(
+                     response_observation_id.take(),
+                     token_usage.as_ref(),
+                     usage_metadata.as_ref(),
++                    None,
+                 )
+                 .await;
+                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 2102d4c7..20b75494 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -535,6 +535,7 @@ async fn collect_compaction_output(
+                     response_observation_id.take(),
+                     token_usage.as_ref(),
+                     usage_metadata.as_ref(),
++                    None,
+                 )
+                 .await;
+                 completed_response_id = Some(response_id);
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index fa144767..7c94afcd 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -89,12 +89,25 @@ struct BoundInterceptor {
+     admission: Option<Arc<dyn ModelToolAdmission>>,
+ }
+ impl ModelResponseInterceptor for BoundInterceptor {
+-    fn produces_response(&self) -> bool { self.inner.produces_response() }
++    fn produces_response(&self) -> bool {
++        self.inner.produces_response()
++    }
+     fn produce_response<'a>(
+         &'a self,
+         request: serde_json::Value,
+         _: Option<Arc<dyn ModelToolAdmission>>,
+     ) -> Option<futures::future::BoxFuture<'a, Result<ModelResponseStream, String>>> {
++        if let Some(attempt) = self
++            .admission
++            .as_ref()
++            .and_then(|admission| admission.model_attempt())
++        {
++            // This bridge returns a complete producer result, not a native SSE stream.
++            // Preserve any earlier trusted lineage facts; opaque SDK transport hops stay unknown.
++            if let Err(error) = attempt.observe_request("model_producer", None, None) {
++                return Some(Box::pin(async move { Err(error) }));
++            }
++        }
+         self.inner.produce_response(request, self.admission.clone())
+     }
+ 
+@@ -108,6 +121,8 @@ impl ModelResponseInterceptor for BoundInterceptor {
+ }
+ 
+ struct StepToolAdmission {
++    root_turn_id: Option<String>,
++    attempt: Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
+     step: Option<Arc<crate::session::step_context::StepContext>>,
+     thread_id: String,
+     turn_store: Arc<ExtensionData>,
+@@ -122,12 +137,18 @@ impl ModelToolAdmission for StepToolAdmission {
+     fn thread_id(&self) -> &str {
+         &self.thread_id
+     }
++    fn root_turn_id(&self) -> Option<&str> {
++        self.root_turn_id.as_deref()
++    }
+     fn turn_store(&self) -> &ExtensionData {
+         &self.turn_store
+     }
+     fn step_store(&self) -> Option<&ExtensionData> {
+         self.step.as_ref().map(|step| &step.extension_data)
+     }
++    fn model_attempt(&self) -> Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>> {
++        self.attempt.clone()
++    }
+     fn admits(&self, item: &ResponseItem) -> bool {
+         self.router
+             .as_ref()
+@@ -141,10 +162,12 @@ pub(crate) fn tool_admission(
+     router: Arc<ToolRouter>,
+ ) -> Arc<dyn ModelToolAdmission> {
+     Arc::new(StepToolAdmission {
++        root_turn_id: None,
+         thread_id,
+         turn_store,
+         router: Some(router),
+         step: None,
++        attempt: None,
+     })
+ }
+ 
+@@ -153,7 +176,13 @@ pub(crate) fn tool_admission_for_step(
+     thread_id: String,
+     step: Arc<crate::session::step_context::StepContext>,
+ ) -> Arc<dyn ModelToolAdmission> {
++    let attempt = step
++        .extension_data
++        .get::<codex_extension_api::CapturedModelAttempt>()
++        .map(|captured| captured.0.clone());
+     Arc::new(StepToolAdmission {
++        root_turn_id: step.turn.turn_metadata_state.root_turn_id(),
++        attempt,
+         thread_id,
+         turn_store: Arc::clone(&step.turn.extension_data),
+         router: Some(Arc::clone(&step.tool_router)),
+@@ -167,6 +196,8 @@ pub(crate) fn compaction_source_admission(
+     step: Arc<crate::session::step_context::StepContext>,
+ ) -> Arc<dyn ModelToolAdmission> {
+     Arc::new(StepToolAdmission {
++        root_turn_id: step.turn.turn_metadata_state.root_turn_id(),
++        attempt: None,
+         thread_id,
+         turn_store: Arc::clone(&step.turn.extension_data),
+         router: None,
+@@ -203,10 +234,19 @@ pub(crate) async fn produce_response(
+     interceptors: &[Box<dyn ModelResponseInterceptor>],
+     request: &impl serde::Serialize,
+ ) -> Result<Option<ModelResponseStream>, String> {
+-    let mut producers = interceptors.iter().filter(|interceptor| interceptor.produces_response());
+-    let Some(selected) = producers.next() else { return Ok(None); };
+-    if producers.next().is_some() { return Err("Multiple native model producers selected".into()); }
+-    let request = serde_json::to_value(request).map_err(|_| "Native model request serialization failed")?;
+-    let producer = selected.produce_response(request, None).ok_or("Selected native model producer is unavailable")?;
++    let mut producers = interceptors
++        .iter()
++        .filter(|interceptor| interceptor.produces_response());
++    let Some(selected) = producers.next() else {
++        return Ok(None);
++    };
++    if producers.next().is_some() {
++        return Err("Multiple native model producers selected".into());
++    }
++    let request =
++        serde_json::to_value(request).map_err(|_| "Native model request serialization failed")?;
++    let producer = selected
++        .produce_response(request, None)
++        .ok_or("Selected native model producer is unavailable")?;
+     producer.await.map(Some)
+ }
+diff --git a/codex-rs/core/src/realtime_conversation/transcript_tail.rs b/codex-rs/core/src/realtime_conversation/transcript_tail.rs
+index 787a9192..089c9987 100644
+--- a/codex-rs/core/src/realtime_conversation/transcript_tail.rs
++++ b/codex-rs/core/src/realtime_conversation/transcript_tail.rs
+@@ -69,6 +69,7 @@ pub(super) async fn record(session: &Session, text: String) -> std::io::Result<(
+     events.extend(legacy);
+     if recording_turn {
+         events.push(EventMsg::TurnComplete(TurnCompleteEvent {
++            model_attempt: None,
+             tool_completion: None,
+             turn_id: turn.sub_id.clone(),
+             last_agent_message: None,
+diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
+index cb87601b..95c7103d 100644
+--- a/codex-rs/core/src/responses_retry.rs
++++ b/codex-rs/core/src/responses_retry.rs
+@@ -63,7 +63,10 @@ pub(crate) async fn handle_response_stream_error(
+     step_context: &StepContext,
+     request: ResponsesStreamRequest,
+ ) -> Result<(), CodexErr> {
+-    if matches!(err.details(), CodexErrorDetails::ModelInvocationDeadlineExceeded(_)) {
++    if matches!(
++        err.details(),
++        CodexErrorDetails::ModelInvocationDeadlineExceeded(_)
++    ) {
+         return Err(err);
+     }
+     let turn_context = &step_context.turn;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 54bdeda7..3161f7e4 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -256,6 +256,7 @@ mod mcp_prewarm;
+ mod mcp_refresh;
+ mod mcp_runtime;
+ pub(crate) use mcp_runtime::RealtimeSourceInputs;
++pub(crate) mod model_attempts;
+ pub(crate) mod model_invocation_deadline;
+ pub(crate) mod multi_agents;
+ mod plugin_selection;
+@@ -888,7 +889,8 @@ impl Session {
+                 tool_choice: config.sdk_tool_choice.or_else(|| {
+                     persisted_thread_settings.and_then(|settings| settings.tool_choice)
+                 }),
+-                invocation_timeout_ms: persisted_thread_settings.and_then(|settings| settings.invocation_timeout_ms),
++                invocation_timeout_ms: persisted_thread_settings
++                    .and_then(|settings| settings.invocation_timeout_ms),
+                 request_controls: {
+                     let mut selected = persisted_thread_settings
+                         .map(|settings| settings.request_controls.clone())
+@@ -5446,10 +5448,12 @@ impl Session {
+         response_observation_id: Option<String>,
+         usage: Option<&TokenUsage>,
+         usage_metadata: Option<&ResponseUsageMetadata>,
++        model_attempt_id: Option<&str>,
+     ) {
+         self.send_event(
+             turn_context,
+             EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
++                model_attempt_id: model_attempt_id.map(str::to_owned),
+                 response_id: response_id.to_string(),
+                 token_usage: usage.cloned(),
+                 usage_metadata: usage_metadata.cloned(),
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+new file mode 100644
+index 00000000..1f1efe52
+--- /dev/null
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -0,0 +1,902 @@
++//! Logical-generation identity and accounting in the existing native turn store.
++//! No transport or retry executor lives here; the sampling loop owns both.
++use codex_extension_api::{ModelAttemptAdmission, TurnSamplingStop};
++use codex_protocol::model_retry::{ModelAttemptSnapshot, ModelProducerFailure, ModelRetryBackoff};
++use codex_protocol::protocol::TokenUsage;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Mutex, Weak};
++use std::time::Duration;
++use tokio_util::sync::CancellationToken;
++
++#[derive(Debug, Default)]
++pub(crate) struct AttemptLedger(Mutex<LedgerState>);
++
++#[derive(Debug, Default)]
++struct LedgerState {
++    snapshot: ModelAttemptSnapshot,
++    current: Option<Weak<Attempt>>,
++    last_settled: Option<String>,
++}
++
++#[derive(Debug)]
++pub(crate) struct Attempt {
++    ledger: Arc<AttemptLedger>,
++    id: String,
++    ordinal: u64,
++    retry_configured: bool,
++    disable_provider_retries: bool,
++    stop: Arc<TurnSamplingStop>,
++    cancellation: CancellationToken,
++    measurement: Mutex<Measurement>,
++    request: Mutex<RequestState>,
++    pub(crate) response_started: AtomicBool,
++    pub(crate) unsafe_output: AtomicBool,
++    pub(crate) local_effects: AtomicBool,
++}
++
++#[derive(Debug, Clone)]
++pub(crate) struct RequestState {
++    pub(crate) transport: String,
++    pub(crate) previous_response_id: Option<String>,
++    pub(crate) conversation_id: Option<String>,
++}
++
++#[derive(Debug, Default)]
++struct Measurement {
++    settled: bool,
++    usage: Option<TokenUsage>,
++    failure: Option<ModelProducerFailure>,
++}
++
++impl AttemptLedger {
++    pub(crate) fn begin(
++        self: &Arc<Self>,
++        attempt_ordinal: u64,
++        parent: &Arc<TurnSamplingStop>,
++        cancellation: &CancellationToken,
++        retry_configured: bool,
++        disable_provider_retries: bool,
++    ) -> Result<Arc<Attempt>, String> {
++        let mut state = self
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if state.current.is_some() {
++            return Err("Previous native model attempt has not settled".into());
++        }
++        if parent.requested() || cancellation.is_cancelled() {
++            return Err("Native model turn is cancelled".into());
++        }
++        let ordinal = state
++            .snapshot
++            .usage
++            .requests
++            .checked_add(1)
++            .ok_or("Native model attempt counter overflow")?;
++        let missing = state
++            .snapshot
++            .usage
++            .requests_without_token_usage
++            .checked_add(1)
++            .ok_or("Native model missing-usage counter overflow")?;
++        let attempt = Arc::new(Attempt {
++            ledger: self.clone(),
++            id: uuid::Uuid::new_v4().to_string(),
++            ordinal: attempt_ordinal,
++            retry_configured,
++            disable_provider_retries,
++            stop: Arc::new(parent.for_turn()),
++            cancellation: cancellation.child_token(),
++            measurement: Mutex::default(),
++            request: Mutex::new(RequestState {
++                transport: "responses_sse".into(),
++                previous_response_id: None,
++                conversation_id: None,
++            }),
++            response_started: AtomicBool::new(false),
++            unsafe_output: AtomicBool::new(false),
++            local_effects: AtomicBool::new(false),
++        });
++        state
++            .snapshot
++            .owner_attempt_id
++            .get_or_insert_with(|| attempt.id.clone());
++        state.snapshot.usage.requests = ordinal;
++        state.snapshot.usage.requests_without_token_usage = missing;
++        state.snapshot.terminal_attempt_id = None;
++        state.current = Some(Arc::downgrade(&attempt));
++        Ok(attempt)
++    }
++
++    /// Called only after the sampler, stream tasks and application callback joined.
++    pub(crate) fn settle(&self, attempt: &Arc<Attempt>) -> Result<(), String> {
++        let mut state = self
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if !state
++            .current
++            .as_ref()
++            .and_then(Weak::upgrade)
++            .is_some_and(|current| Arc::ptr_eq(&current, attempt))
++        {
++            return Err("Native attempt accounting owner mismatch".into());
++        }
++        let mut measurement = attempt
++            .measurement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if measurement.settled {
++            return Err("Native model attempt already settled".into());
++        }
++        if let Some(usage) = &measurement.usage {
++            let combined = add_usage(&state.snapshot.usage.token_usage, usage)?;
++            state.snapshot.usage.token_usage = combined;
++            state.snapshot.usage.requests_without_token_usage -= 1;
++        }
++        measurement.settled = true;
++        state.last_settled = Some(attempt.id.clone());
++        state.current = None;
++        Ok(())
++    }
++
++    pub(crate) fn terminal(&self, attempt: &Attempt) -> Result<(), String> {
++        let mut state = self
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if state.last_settled.as_deref() != Some(attempt.id.as_str()) || state.current.is_some() {
++            return Err("Native terminal model attempt owner mismatch".into());
++        }
++        state.snapshot.terminal_attempt_id = Some(attempt.id.clone());
++        Ok(())
++    }
++
++    pub(crate) fn snapshot(&self) -> ModelAttemptSnapshot {
++        let state = self
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let mut snapshot = state.snapshot.clone();
++        if let Some(attempt) = state.current.as_ref().and_then(Weak::upgrade) {
++            let measurement = attempt
++                .measurement
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            if let Some(usage) = &measurement.usage {
++                // Reporting validated this sum under the same ledger lock. The
++                // projection remains identical after physical settlement commits it.
++                snapshot.usage.token_usage = add_usage(&snapshot.usage.token_usage, usage)
++                    .expect("validated current native attempt usage");
++                snapshot.usage.requests_without_token_usage -= 1;
++            }
++        }
++        snapshot
++    }
++}
++
++impl Attempt {
++    pub(crate) fn request_state(&self) -> RequestState {
++        self.request
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone()
++    }
++
++    fn with_measurement<T>(
++        &self,
++        update: impl FnOnce(&LedgerState, &mut Measurement) -> Result<T, String>,
++    ) -> Result<T, String> {
++        let ledger = &self.ledger;
++        let state = ledger
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if !state
++            .current
++            .as_ref()
++            .and_then(Weak::upgrade)
++            .is_some_and(|current| current.id == self.id)
++        {
++            return Err("Native model usage owner is settled".into());
++        }
++        let mut measurement = self
++            .measurement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if measurement.settled {
++            return Err("Native model usage owner is settled".into());
++        }
++        update(&state, &mut measurement)
++    }
++
++    pub(crate) fn failure(&self) -> Option<ModelProducerFailure> {
++        self.measurement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .failure
++            .clone()
++    }
++
++    pub(crate) fn usage(&self) -> Option<TokenUsage> {
++        self.measurement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .usage
++            .clone()
++    }
++
++    pub(crate) fn release_failure(&self) {
++        self.measurement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .failure = None;
++    }
++}
++
++impl ModelAttemptAdmission for Attempt {
++    fn mark_response_started(&self) {
++        self.response_started.store(true, Ordering::Release);
++    }
++    fn mark_unsafe_output(&self) {
++        self.unsafe_output.store(true, Ordering::Release);
++    }
++    fn mark_local_effect(&self) {
++        self.local_effects.store(true, Ordering::Release);
++    }
++
++    fn id(&self) -> &str {
++        &self.id
++    }
++    fn attempt(&self) -> u64 {
++        self.ordinal
++    }
++    fn retry_configured(&self) -> bool {
++        self.retry_configured
++    }
++    fn disable_provider_retries(&self) -> bool {
++        self.disable_provider_retries
++    }
++    fn cancellation(&self) -> CancellationToken {
++        self.cancellation.clone()
++    }
++    fn sampling_stop(&self) -> Arc<TurnSamplingStop> {
++        self.stop.clone()
++    }
++
++    fn snapshot(&self) -> Result<ModelAttemptSnapshot, String> {
++        Ok(self.ledger.snapshot())
++    }
++    fn observe_request(
++        &self,
++        transport: &str,
++        previous_response_id: Option<&str>,
++        conversation_id: Option<&str>,
++    ) -> Result<(), String> {
++        self.with_measurement(|_, _| {
++            let mut request = self
++                .request
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            request.transport = transport.to_owned();
++            // A fallback does not erase earlier observed stateful request uncertainty.
++            if let Some(id) = previous_response_id {
++                request.previous_response_id = Some(id.to_owned());
++            }
++            if let Some(id) = conversation_id {
++                request.conversation_id = Some(id.to_owned());
++            }
++            Ok(())
++        })
++    }
++
++    fn report_failure(&self, failure: ModelProducerFailure) -> Result<(), String> {
++        if failure.attempt_id != self.id {
++            return Err("Native model failure attempt mismatch".into());
++        }
++        if let Some(delay) = failure.normalized.retry_after_ms {
++            if !delay.is_finite() || delay < 0.0 {
++                return Err("Invalid model failure retry-after".into());
++            }
++        }
++        if let Some(usage) = &failure.usage {
++            validate_usage(usage)?;
++        }
++        self.with_measurement(|state, measurement| {
++            if measurement.failure.is_some() {
++                return Err("Native model failure already recorded".into());
++            }
++            if let Some(usage) = &failure.usage {
++                add_usage(&state.snapshot.usage.token_usage, usage)?;
++                measurement.usage = Some(usage.clone());
++            }
++            measurement.failure = Some(failure);
++            Ok(())
++        })
++    }
++
++    fn report_usage(&self, usage: TokenUsage) -> Result<(), String> {
++        validate_usage(&usage)?;
++        self.with_measurement(|state, measurement| {
++            add_usage(&state.snapshot.usage.token_usage, &usage)?;
++            // Replaces only this attempt's measurement. Snapshot projection and
++            // final settlement never add repeated reports a second time.
++            measurement.usage = Some(usage);
++            Ok(())
++        })
++    }
++}
++
++fn validate_usage(usage: &TokenUsage) -> Result<(), String> {
++    if [
++        usage.input_tokens,
++        usage.cached_input_tokens,
++        usage.cache_write_input_tokens,
++        usage.output_tokens,
++        usage.reasoning_output_tokens,
++        usage.total_tokens,
++    ]
++    .iter()
++    .any(|count| *count < 0)
++    {
++        return Err("Native model usage must be nonnegative".into());
++    }
++    Ok(())
++}
++
++fn add_usage(left: &TokenUsage, right: &TokenUsage) -> Result<TokenUsage, String> {
++    let add = |a: i64, b: i64| {
++        a.checked_add(b)
++            .ok_or_else(|| "Native token usage overflow".to_owned())
++    };
++    Ok(TokenUsage {
++        input_tokens: add(left.input_tokens, right.input_tokens)?,
++        cached_input_tokens: add(left.cached_input_tokens, right.cached_input_tokens)?,
++        cache_write_input_tokens: add(
++            left.cache_write_input_tokens,
++            right.cache_write_input_tokens,
++        )?,
++        output_tokens: add(left.output_tokens, right.output_tokens)?,
++        reasoning_output_tokens: add(left.reasoning_output_tokens, right.reasoning_output_tokens)?,
++        total_tokens: add(left.total_tokens, right.total_tokens)?,
++        // Rollout currency remains with the existing native budget observer.
++        codex_rollout_budget_units: None,
++    })
++}
++
++/// Delay quotation only; the sampling loop performs its cancellation-aware wait.
++pub(crate) fn backoff_delay(
++    settings: &ModelRetryBackoff,
++    failed_attempt: u64,
++    jitter_sample: f64,
++) -> Result<Duration, String> {
++    let base = if settings.initial_delay_ms == 0.0 {
++        0.0
++    } else {
++        (settings.initial_delay_ms
++            * settings
++                .multiplier
++                .powf(failed_attempt.saturating_sub(1) as f64))
++        .min(settings.max_delay_ms)
++    };
++    let millis = if settings.jitter {
++        (base * (0.875 + jitter_sample.clamp(0.0, 1.0) * 0.25)).min(settings.max_delay_ms)
++    } else {
++        base
++    };
++    Duration::try_from_secs_f64(millis / 1_000.0)
++        .map_err(|_| "Retry delay exceeds native timer range".to_owned())
++}
++
++/// Native replay fences remain authoritative after the captured policy returns.
++/// `native_retryable` retains the existing transport default when no policy is selected.
++pub(crate) fn select_retry_delay(
++    context: &codex_protocol::model_retry::ModelRetryContext,
++    resolution: Option<&codex_protocol::model_retry::ModelRetryResolution>,
++    native_retryable: bool,
++    streamed: bool,
++    backoff: &ModelRetryBackoff,
++    jitter_sample: f64,
++) -> Result<Option<Duration>, String> {
++    use codex_protocol::model_retry::ModelReplaySafety;
++    let advice = resolution
++        .and_then(|reply| reply.provider_advice.as_ref())
++        .unwrap_or(&context.provider_advice);
++    if context.normalized.is_abort
++        || context.retry_unsafe_output
++        || context.local_effects
++        || (streamed && advice.replay_safety == ModelReplaySafety::Unsafe)
++        || context.attempt == 0
++        || context.attempt > u64::from(context.max_retries)
++    {
++        return Ok(None);
++    }
++    let decision = resolution.and_then(|reply| reply.decision.as_ref());
++    if !context.policy_enabled && decision.is_some() {
++        return Err("Retry policy reply has no selected callback".into());
++    }
++    if let Some(decision) = decision {
++        decision.validate()?;
++    }
++    if !decision.map_or(advice.suggested.unwrap_or(native_retryable), |decision| decision.retry) {
++        return Ok(None);
++    }
++    let approves_unsafe = decision.is_some_and(|decision| decision.approve_unsafe_replay);
++    let safe = advice.replay_safety == ModelReplaySafety::Safe;
++    let unsafe_provider = advice.replay_safety == ModelReplaySafety::Unsafe;
++    // Approval is scoped to provider-marked unsafety; unknown state is not approval.
++    if (context.stateful && !(safe || (unsafe_provider && approves_unsafe)))
++        || (unsafe_provider && !approves_unsafe)
++    {
++        return Ok(None);
++    }
++    let selected_ms = decision
++        .and_then(|decision| decision.delay_ms)
++        .or(advice.retry_after_ms)
++        .or(context.normalized.retry_after_ms);
++    match selected_ms {
++        Some(ms) if ms.is_finite() && ms >= 0.0 => Duration::try_from_secs_f64(ms / 1_000.0)
++            .map(Some)
++            .map_err(|_| "Retry delay exceeds native timer range".to_owned()),
++        Some(_) => Err("Retry delay must be finite and nonnegative".into()),
++        None => backoff_delay(backoff, context.attempt, jitter_sample).map(Some),
++    }
++}
++
++/// Preserve only native fields actually retained by the transport error owner.
++pub(crate) fn normalize_error(
++    error: &codex_protocol::error::CodexErr,
++) -> codex_protocol::model_retry::ModelRetryError {
++    use codex_protocol::error::CodexErrorDetails;
++    let mut result = codex_protocol::model_retry::ModelRetryError {
++        message: error.to_string().chars().take(8_192).collect(),
++        status_code: error.http_status_code_value(),
++        retry_after_ms: error
++            .server_retry_delay()
++            .map(|delay| delay.as_secs_f64() * 1_000.0),
++        is_abort: matches!(
++            error.details(),
++            CodexErrorDetails::TurnAborted | CodexErrorDetails::Interrupted
++        ),
++        is_network_error: matches!(
++            error.details(),
++            CodexErrorDetails::ConnectionFailed(_)
++                | CodexErrorDetails::ResponseStreamFailed(_)
++                | CodexErrorDetails::Stream(_)
++        ),
++        is_timeout: matches!(
++            error.details(),
++            CodexErrorDetails::RequestTimeout
++                | CodexErrorDetails::ModelAttemptDeadlineExceeded(_)
++                | CodexErrorDetails::ModelInvocationDeadlineExceeded(_)
++        ),
++        ..Default::default()
++    };
++    match error.details() {
++        CodexErrorDetails::UnexpectedStatus(status) => {
++            result.request_id = status.request_id.clone();
++            if status.body.len() <= 16_384 {
++                if let Ok(body) = serde_json::from_str::<serde_json::Value>(&status.body) {
++                    result.error_code = body
++                        .get("error")
++                        .and_then(|error| error.get("code"))
++                        .and_then(serde_json::Value::as_str)
++                        .map(|code| code.chars().take(256).collect());
++                }
++            }
++        }
++        CodexErrorDetails::ResponseStreamFailed(error) => {
++            result.request_id = error.request_id.clone()
++        }
++        CodexErrorDetails::RetryLimit(error) => result.request_id = error.request_id.clone(),
++        _ => {}
++    }
++    result
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn begin(ledger: &Arc<AttemptLedger>, parent: &Arc<TurnSamplingStop>) -> Arc<Attempt> {
++        ledger
++            .begin(1, parent, &CancellationToken::new(), true, false)
++            .unwrap()
++    }
++
++    #[test]
++    fn retained_attempt_keeps_exact_usage_after_turn_store_release_without_a_cycle() {
++        let ledger = Arc::new(AttemptLedger::default());
++        let ledger_weak = Arc::downgrade(&ledger);
++        let parent = Arc::new(TurnSamplingStop::default());
++        let attempt = begin(&ledger, &parent);
++        attempt
++            .report_usage(TokenUsage {
++                input_tokens: 7,
++                total_tokens: 7,
++                ..Default::default()
++            })
++            .unwrap();
++        drop(ledger);
++        assert_eq!(
++            attempt.snapshot().unwrap().usage.token_usage.input_tokens,
++            7
++        );
++        assert_eq!(
++            attempt
++                .snapshot()
++                .unwrap()
++                .usage
++                .requests_without_token_usage,
++            0
++        );
++        drop(attempt);
++        assert!(ledger_weak.upgrade().is_none());
++    }
++
++    #[test]
++    fn joined_old_usage_is_attributed_once_before_next_attempt() {
++        let ledger = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let first = begin(&ledger, &parent);
++        first.stop.request();
++        first
++            .report_usage(TokenUsage {
++                input_tokens: 2,
++                total_tokens: 2,
++                ..Default::default()
++            })
++            .unwrap();
++        assert!(
++            ledger
++                .begin(2, &parent, &CancellationToken::new(), true, true)
++                .is_err()
++        );
++        let before_join = ledger.snapshot();
++        assert_eq!(before_join.owner_attempt_id.as_deref(), Some(first.id()));
++        assert_eq!(before_join.usage.token_usage.total_tokens, 2);
++        assert_eq!(before_join.usage.requests_without_token_usage, 0);
++        ledger.settle(&first).unwrap();
++        assert_eq!(ledger.snapshot(), before_join);
++        assert!(first.report_usage(TokenUsage::default()).is_err());
++        assert!(!parent.requested());
++        let retry = begin(&ledger, &parent);
++        retry
++            .report_usage(TokenUsage {
++                output_tokens: 3,
++                total_tokens: 3,
++                ..Default::default()
++            })
++            .unwrap();
++        ledger.settle(&retry).unwrap();
++        assert!(ledger.settle(&retry).is_err());
++        assert_eq!(
++            ledger.snapshot().owner_attempt_id,
++            before_join.owner_attempt_id
++        );
++        let usage = ledger.snapshot().usage;
++        assert_eq!(usage.requests, 2);
++        assert_eq!(usage.token_usage.total_tokens, 5);
++        assert_eq!(usage.requests_without_token_usage, 0);
++    }
++
++    #[test]
++    fn fresh_restored_owner_does_not_recount_the_historical_attempt() {
++        let ledger = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let first = begin(&ledger, &parent);
++        ledger.settle(&first).unwrap();
++        ledger.terminal(&first).unwrap();
++        let snapshot = ledger.snapshot();
++        assert_eq!(snapshot.usage.requests_without_token_usage, 1);
++        // The detached snapshot belongs only to the host historical offset.
++        // Fresh runtime attachment data cannot contain the old held attempt.
++        let restored = Arc::new(AttemptLedger::default());
++        let retry = begin(&restored, &parent);
++        assert_eq!(retry.attempt(), 1);
++        assert_eq!(restored.snapshot().usage.requests, 1);
++        assert_ne!(first.id(), retry.id());
++        assert_ne!(
++            snapshot.owner_attempt_id,
++            restored.snapshot().owner_attempt_id
++        );
++        assert!(restored.snapshot().terminal_attempt_id.is_none());
++    }
++
++    #[test]
++    fn held_measured_attempt_settles_only_into_its_original_owner() {
++        let original = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let old = begin(&original, &parent);
++        old.report_usage(TokenUsage {
++            total_tokens: 2,
++            ..Default::default()
++        })
++        .unwrap();
++        let historical = original.snapshot();
++        let restored = Arc::new(AttemptLedger::default());
++        let current = begin(&restored, &parent);
++        current
++            .report_usage(TokenUsage {
++                total_tokens: 3,
++                ..Default::default()
++            })
++            .unwrap();
++        let fresh_projection = restored.snapshot();
++        assert!(restored.settle(&old).is_err());
++        original.settle(&old).unwrap();
++        assert_eq!(original.snapshot(), historical);
++        assert_eq!(restored.snapshot(), fresh_projection);
++        restored.settle(&current).unwrap();
++        assert_eq!(
++            historical.usage.requests + restored.snapshot().usage.requests,
++            2
++        );
++        assert_eq!(
++            historical.usage.token_usage.total_tokens
++                + restored.snapshot().usage.token_usage.total_tokens,
++            5
++        );
++        assert_ne!(
++            historical.owner_attempt_id,
++            restored.snapshot().owner_attempt_id
++        );
++    }
++
++    fn retry_context() -> codex_protocol::model_retry::ModelRetryContext {
++        use codex_protocol::model_retry::*;
++        ModelRetryContext {
++            attempt_id: "attempt".into(),
++            original_error_attempt_id: None,
++            attempt: 1,
++            request_attempt: 1,
++            max_retries: 1,
++            policy_enabled: true,
++            thread_id: "thread".into(),
++            turn_id: "turn".into(),
++            model: "selected".into(),
++            transport: "model_producer".into(),
++            normalized: ModelRetryError::default(),
++            provider_advice: ModelRetryAdvice::default(),
++            response_started: false,
++            retry_unsafe_output: false,
++            local_effects: false,
++            stateful: false,
++            previous_response_id: None,
++            conversation_id: None,
++            usage: None,
++        }
++    }
++
++    #[test]
++    fn policy_cannot_override_output_abort_local_effects_or_budget() {
++        use codex_protocol::model_retry::*;
++        let reply = ModelRetryResolution {
++            decision: Some(ModelRetryDecision {
++                retry: true,
++                approve_unsafe_replay: true,
++                ..Default::default()
++            }),
++            provider_advice: Some(ModelRetryAdvice {
++                replay_safety: ModelReplaySafety::Safe,
++                ..Default::default()
++            }),
++        };
++        for veto in 0..4 {
++            let mut context = retry_context();
++            match veto {
++                0 => context.normalized.is_abort = true,
++                1 => context.retry_unsafe_output = true,
++                2 => context.local_effects = true,
++                _ => context.attempt = 2,
++            }
++            assert_eq!(
++                select_retry_delay(
++                    &context,
++                    Some(&reply),
++                    true,
++                    false,
++                    &ModelRetryBackoff::default(),
++                    0.5
++                )
++                .unwrap(),
++                None
++            );
++        }
++    }
++
++    #[test]
++    fn unknown_stateful_replay_stays_blocked_and_streamed_unsafe_is_absolute() {
++        use codex_protocol::model_retry::*;
++        let mut context = retry_context();
++        context.stateful = true;
++        let mut reply = ModelRetryResolution {
++            decision: Some(ModelRetryDecision {
++                retry: true,
++                approve_unsafe_replay: true,
++                ..Default::default()
++            }),
++            ..Default::default()
++        };
++        assert_eq!(
++            select_retry_delay(
++                &context,
++                Some(&reply),
++                true,
++                false,
++                &ModelRetryBackoff::default(),
++                0.5
++            )
++            .unwrap(),
++            None
++        );
++        reply.provider_advice = Some(ModelRetryAdvice {
++            replay_safety: ModelReplaySafety::Unsafe,
++            ..Default::default()
++        });
++        assert!(
++            select_retry_delay(
++                &context,
++                Some(&reply),
++                true,
++                false,
++                &ModelRetryBackoff::default(),
++                0.5
++            )
++            .unwrap()
++            .is_some()
++        );
++        assert_eq!(
++            select_retry_delay(
++                &context,
++                Some(&reply),
++                true,
++                true,
++                &ModelRetryBackoff::default(),
++                0.5
++            )
++            .unwrap(),
++            None
++        );
++    }
++
++    #[test]
++    fn policy_delay_then_provider_hint_then_native_hint_then_backoff() {
++        use codex_protocol::model_retry::*;
++        let mut context = retry_context();
++        context.normalized.retry_after_ms = Some(300.0);
++        let mut reply = ModelRetryResolution {
++            decision: Some(ModelRetryDecision {
++                retry: true,
++                delay_ms: Some(100.0),
++                ..Default::default()
++            }),
++            provider_advice: Some(ModelRetryAdvice {
++                retry_after_ms: Some(200.0),
++                ..Default::default()
++            }),
++        };
++        assert_eq!(
++            select_retry_delay(
++                &context,
++                Some(&reply),
++                true,
++                false,
++                &ModelRetryBackoff::default(),
++                0.5
++            )
++            .unwrap(),
++            Some(Duration::from_millis(100))
++        );
++        reply.decision.as_mut().unwrap().delay_ms = None;
++        assert_eq!(
++            select_retry_delay(
++                &context,
++                Some(&reply),
++                true,
++                false,
++                &ModelRetryBackoff::default(),
++                0.5
++            )
++            .unwrap(),
++            Some(Duration::from_millis(200))
++        );
++        reply.provider_advice = None;
++        assert_eq!(
++            select_retry_delay(
++                &context,
++                Some(&reply),
++                true,
++                false,
++                &ModelRetryBackoff::default(),
++                0.5
++            )
++            .unwrap(),
++            Some(Duration::from_millis(300))
++        );
++        context.normalized.retry_after_ms = None;
++        assert_eq!(
++            select_retry_delay(
++                &context,
++                Some(&reply),
++                true,
++                false,
++                &ModelRetryBackoff::default(),
++                0.5
++            )
++            .unwrap(),
++            Some(Duration::from_millis(250))
++        );
++    }
++
++    #[test]
++    fn zero_backoff_does_not_become_nan_after_many_retries() {
++        let settings = ModelRetryBackoff {
++            initial_delay_ms: 0.0,
++            ..Default::default()
++        };
++        assert_eq!(
++            backoff_delay(&settings, u64::MAX, 0.5).unwrap(),
++            Duration::ZERO
++        );
++    }
++    #[test]
++    fn advice_selects_default_retry_without_a_policy() {
++        use codex_protocol::model_retry::*;
++        for (suggested, native_retryable, expected) in [
++            (Some(true), false, true), (Some(false), true, false),
++            (None, true, true), (None, false, false),
++        ] {
++            let mut context = retry_context();
++            context.policy_enabled = false;
++            let reply = ModelRetryResolution {
++                decision: None,
++                provider_advice: Some(ModelRetryAdvice {
++                    suggested, replay_safety: ModelReplaySafety::Safe,
++                    ..Default::default()
++                }),
++            };
++            assert_eq!(select_retry_delay(&context, Some(&reply), native_retryable,
++                false, &ModelRetryBackoff::default(), 0.5).unwrap().is_some(), expected);
++        }
++    }
++
++    #[test]
++    fn explicit_policy_overrides_opposite_provider_suggestion() {
++        use codex_protocol::model_retry::*;
++        for retry in [false, true] {
++            let reply = ModelRetryResolution {
++                decision: Some(ModelRetryDecision { retry, ..Default::default() }),
++                provider_advice: Some(ModelRetryAdvice {
++                    suggested: Some(!retry), replay_safety: ModelReplaySafety::Safe,
++                    ..Default::default()
++                }),
++            };
++            assert_eq!(select_retry_delay(&retry_context(), Some(&reply), !retry,
++                false, &ModelRetryBackoff::default(), 0.5).unwrap().is_some(), retry);
++        }
++    }
++
++    #[test]
++    fn provider_suggestion_cannot_bypass_native_replay_fences() {
++        use codex_protocol::model_retry::*;
++        for veto in 0..6 {
++            let mut context = retry_context();
++            context.policy_enabled = false;
++            let mut advice = ModelRetryAdvice { suggested: Some(true),
++                replay_safety: ModelReplaySafety::Safe, ..Default::default() };
++            match veto {
++                0 => context.normalized.is_abort = true,
++                1 => context.retry_unsafe_output = true,
++                2 => context.local_effects = true,
++                3 => context.attempt = 2,
++                4 => advice.replay_safety = ModelReplaySafety::Unsafe,
++                _ => { context.stateful = true; advice.replay_safety = ModelReplaySafety::Unknown; }
++            }
++            let reply = ModelRetryResolution { decision: None, provider_advice: Some(advice) };
++            assert_eq!(select_retry_delay(&context, Some(&reply), false,
++                false, &ModelRetryBackoff::default(), 0.5).unwrap(), None);
++        }
++    }
++
++}
+diff --git a/codex-rs/core/src/session/model_invocation_deadline.rs b/codex-rs/core/src/session/model_invocation_deadline.rs
+index 4e794f69..0a81c87d 100644
+--- a/codex-rs/core/src/session/model_invocation_deadline.rs
++++ b/codex-rs/core/src/session/model_invocation_deadline.rs
+@@ -33,6 +33,7 @@ pub(crate) struct ModelInvocationDeadline {
+     tasks: std::sync::OnceLock<tokio::sync::Mutex<RequestTasks>>,
+     state: std::sync::OnceLock<Arc<codex_extension_api::ModelInvocationDeadlineState>>,
+     timeout_ms: Option<u32>,
++    stop_turn_on_expiry: bool,
+     turn_stop: Option<Arc<TurnSamplingStop>>,
+     started: CancellationToken,
+     accepted: CancellationToken,
+@@ -61,6 +62,7 @@ impl ModelInvocationDeadline {
+             tasks: std::sync::OnceLock::new(),
+             state: std::sync::OnceLock::new(),
+             timeout_ms,
++            stop_turn_on_expiry: true,
+             turn_stop,
+             started: CancellationToken::new(),
+             accepted: CancellationToken::new(),
+@@ -70,6 +72,18 @@ impl ModelInvocationDeadline {
+         }
+     }
+ 
++    /// An attempt owns request tasks and a child stop, never the turn's permanent stop.
++    /// Construction is inside the retry loop; policy callbacks and backoff run outside it.
++    pub(crate) fn new_attempt(
++        timeout_ms: Option<u32>,
++        request_cancel: CancellationToken,
++        attempt_stop: Arc<TurnSamplingStop>,
++    ) -> Self {
++        let mut owner = Self::new_deferred(timeout_ms, request_cancel, Some(attempt_stop));
++        owner.stop_turn_on_expiry = false;
++        owner
++    }
++
+     /// The first factory starts the only clock. Retry preparation uses this same state.
+     pub(crate) fn start(&self) {
+         if let Some(ms) = self.timeout_ms {
+@@ -176,8 +190,12 @@ impl ModelInvocationDeadline {
+                 format!("; {}", causes.join("; "))
+             };
+             return Some(
+-                codex_protocol::error::CodexErr::ModelInvocationDeadlineExceeded(suffix)
+-                    .to_error_event(None),
++                if self.stop_turn_on_expiry {
++                    codex_protocol::error::CodexErr::ModelInvocationDeadlineExceeded(suffix)
++                } else {
++                    codex_protocol::error::CodexErr::ModelAttemptDeadlineExceeded(suffix)
++                }
++                .to_error_event(None),
+             );
+         }
+         if errors.is_empty() {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 339a9055..7305d816 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1,3 +1,4 @@
++use codex_extension_api::ModelAttemptAdmission as _;
+ use std::borrow::Cow;
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+@@ -1561,7 +1562,10 @@ async fn pre_sampling_compaction_or_report(
+         // Preserve the original prompt above, then leave an admitted writer
+         // failure to the exact task's terminal owner.
+         if matches!(err.details(), CodexErrorDetails::Fatal(_))
+-            && turn_context.extension_data.get::<PendingCompactionFatal>().is_some()
++            && turn_context
++                .extension_data
++                .get::<PendingCompactionFatal>()
++                .is_some()
+         {
+             return Err(err);
+         }
+@@ -2011,13 +2015,42 @@ async fn run_sampling_request(
+                 Some(stop),
+             ),
+         );
+-        turn_store.insert(owner.clone());
+         owner
+     });
+     let cancellation_token = invocation_deadline.as_ref().map_or_else(
+         || cancellation_token.clone(),
+         |owner| owner.cancellation_token(),
+     );
++    let ledger = turn_store.get_or_init(super::model_attempts::AttemptLedger::default);
++    let parent_stop = turn_context
++        .extension_data
++        .get_or_init(codex_extension_api::TurnSamplingStop::default);
++    let controls = step_context.settings.request_controls();
++    let supported_scope = super::model_invocation_deadline::selected_timeout_ms(
++        Some(1),
++        &turn_context.session_source,
++    )
++    .is_some();
++    let retry_settings = supported_scope
++        .then(|| controls.retry.as_ref().and_then(Option::as_ref))
++        .flatten();
++    let retry_configured = retry_settings.is_some_and(|settings| {
++        settings.configured == Some(true)
++            || settings.has_policy == Some(true)
++            || settings.max_retries.is_some()
++            || settings.backoff.is_some()
++    });
++    let attempt_timeout = supported_scope
++        .then(|| controls.attempt_timeout_ms.flatten())
++        .flatten();
++    if (retry_configured || attempt_timeout.is_some())
++        && let Some(owner) = &invocation_deadline
++    {
++        owner.start();
++    }
++    let mut request_attempt = 1_u64;
++    let mut policy_attempt = 1_u64;
++    let mut locked_retries = 0_u32;
+     let invocation = async {
+         loop {
+             // Running code-mode cells can request review while this response is in flight.
+@@ -2100,54 +2133,140 @@ async fn run_sampling_request(
+                 )
+                 .await?;
+             }
+-            // The original prompt remains authoritative for history and retry bookkeeping.
+-            let mut sampling_prompt = Cow::Borrowed(&prompt);
+-            if !editors.is_empty() {
+-                let data = crate::prepared_request::snapshot(&prompt).map_err(CodexErr::Fatal)?;
+-                let admission = prompt.tool_admission.clone().ok_or_else(|| {
+-                    CodexErr::Fatal("prepared request has no selected tool admission".into())
+-                })?;
+-                let output = editors[0]
+-                    .prepare_request(codex_extension_api::PreparedRequestInput {
+-                        admission,
+-                        recovery_attempt,
+-                        data,
+-                    })
+-                    .or_cancel(&preempt)
+-                    .or_cancel(&cancellation_token)
+-                    .await??
+-                    .map_err(CodexErr::Fatal)?;
+-                if cancellation_token.is_cancelled() || preempt.is_cancelled() {
+-                    return Err(CodexErr::TurnAborted);
++            let attempt = ledger
++                .begin(
++                    request_attempt,
++                    &parent_stop,
++                    &cancellation_token,
++                    retry_configured,
++                    retry_configured
++                        && (request_attempt > 1
++                            || retry_settings.and_then(|settings| settings.max_retries) == Some(0)),
++                )
++                .map_err(CodexErr::Fatal)?;
++            step_context.extension_data.insert(
++                codex_extension_api::CapturedModelAttempt(attempt.clone()),
++            );
++            let admission = crate::model_request::tool_admission_for_step(
++                sess.thread_id.to_string(),
++                step_context.clone(),
++            );
++            prompt.tool_admission = Some(admission.clone());
++            prompt.sampling_stop = Some(attempt.sampling_stop());
++            let attempt_deadline = Arc::new(
++                super::model_invocation_deadline::ModelInvocationDeadline::new_attempt(
++                    attempt_timeout,
++                    attempt.cancellation(),
++                    attempt.sampling_stop(),
++                ),
++            );
++            // Root abort must retain the actual stream owner even without a timeout.
++            // The invocation clock stays local and continues across all attempts.
++            turn_store.insert(attempt_deadline.clone());
++            attempt_deadline.start();
++            let invocation_attempt = async {
++                publish_model_attempt(
++                    &sess,
++                    &step_context,
++                    &attempt,
++                    codex_protocol::model_retry::ModelAttemptPhase::Started,
++                    admission.clone(),
++                    &ledger,
++                )
++                .await?;
++                // The original prompt remains authoritative for history and retry bookkeeping.
++                let mut sampling_prompt = Cow::Borrowed(&prompt);
++                if !editors.is_empty() {
++                    let data =
++                        crate::prepared_request::snapshot(&prompt).map_err(CodexErr::Fatal)?;
++                    let admission = prompt.tool_admission.clone().ok_or_else(|| {
++                        CodexErr::Fatal("prepared request has no selected tool admission".into())
++                    })?;
++                    let output = editors[0]
++                        .prepare_request(codex_extension_api::PreparedRequestInput {
++                            admission,
++                            recovery_attempt,
++                            data,
++                        })
++                        .or_cancel(&preempt)
++                        .or_cancel(&attempt.cancellation())
++                        .await??
++                        .map_err(CodexErr::Fatal)?;
++                    if attempt.cancellation().is_cancelled() || preempt.is_cancelled() {
++                        return Err(CodexErr::TurnAborted);
++                    }
++                    output.admission.admit_request().map_err(CodexErr::Fatal)?;
++                    if let Some(data) = output.data {
++                        sampling_prompt = Cow::Owned(
++                            crate::prepared_request::apply(&prompt, data)
++                                .map_err(CodexErr::Fatal)?,
++                        );
++                    }
++                    sampling_prompt.to_mut().prepared_request_admission = Some(output.admission);
+                 }
+-                output.admission.admit_request().map_err(CodexErr::Fatal)?;
+-                if let Some(data) = output.data {
+-                    sampling_prompt = Cow::Owned(
+-                        crate::prepared_request::apply(&prompt, data).map_err(CodexErr::Fatal)?,
+-                    );
++                crate::file_admission::validate_response_items(
++                    sess.captured_provider_image_reference_policy(),
++                    &step_context.settings.model_info,
++                    &sampling_prompt.input,
++                )
++                .map_err(CodexErr::Fatal)?;
++                if let Some(owner) = &invocation_deadline {
++                    owner.start();
++                }
++                try_run_sampling_request(
++                    tool_runtime.clone(),
++                    Arc::clone(&sess),
++                    Arc::clone(&step_context),
++                    Arc::clone(&turn_store),
++                    client_session,
++                    &responses_metadata,
++                    Arc::clone(&turn_diff_tracker),
++                    &sampling_prompt,
++                    attempt.cancellation(),
++                    Some(attempt_deadline.clone()),
++                )
++                .await
++            };
++            let mut outcome = attempt_deadline.run(Box::pin(invocation_attempt)).await;
++            attempt_deadline.accept_outcome();
++            attempt.cancellation().cancel();
++            // Join physical streams before the exact attempt's admitted host callbacks.
++            // Preparation may have been dropped before its normal release wait.
++            let mut retirement = attempt_deadline.retire_tasks().await;
++            for contributor in sess.services.extensions.model_request_contributors() {
++                if let Err(error) = contributor.retire_model_attempt(admission.clone()).await {
++                    retirement.push(format!("model callback retirement failed: {error}"));
+                 }
+-                sampling_prompt.to_mut().prepared_request_admission = Some(output.admission);
+             }
+-            crate::file_admission::validate_response_items(
+-                sess.captured_provider_image_reference_policy(),
+-                &step_context.settings.model_info,
+-                &sampling_prompt.input,
+-            )
+-            .map_err(CodexErr::Fatal)?;
+-            let err = match try_run_sampling_request(
+-                tool_runtime.clone(),
+-                Arc::clone(&sess),
+-                Arc::clone(&step_context),
+-                Arc::clone(&turn_store),
+-                client_session,
+-                &responses_metadata,
+-                Arc::clone(&turn_diff_tracker),
+-                &sampling_prompt,
+-                cancellation_token.child_token(),
+-                invocation_deadline.clone(),
++            let retirement_failed = !retirement.is_empty();
++            if retirement_failed && !attempt_deadline.expired() {
++                outcome = Err(CodexErr::Fatal(retirement.join("; ")));
++            }
++            if attempt_deadline.expired() {
++                let suffix = if retirement.is_empty() {
++                    String::new()
++                } else {
++                    format!("; {}", retirement.join("; "))
++                };
++                outcome = Err(CodexErr::ModelAttemptDeadlineExceeded(suffix));
++            }
++            ledger.settle(&attempt).map_err(CodexErr::Fatal)?;
++            // Joins have completed; a later abort during policy/backoff must not
++            // inherit this retired attempt's timeout classification.
++            turn_store.remove::<Arc<super::model_invocation_deadline::ModelInvocationDeadline>>();
++            step_context
++                .extension_data
++                .remove::<codex_extension_api::CapturedModelAttempt>();
++            publish_model_attempt(
++                &sess,
++                &step_context,
++                &attempt,
++                codex_protocol::model_retry::ModelAttemptPhase::Finished,
++                admission.clone(),
++                &ledger,
+             )
+-            .await
+-            {
++            .await?;
++            let err = match outcome {
+                 Ok(output) => {
+                     return Ok((output, original_input.unwrap_or(prompt.input)));
+                 }
+@@ -2186,6 +2305,185 @@ async fn run_sampling_request(
+ 
+             let original_input = original_input.get_or_insert(prompt.input);
+ 
++            let failure = attempt.failure();
++            let normalized = if attempt_deadline.expired() || retirement_failed {
++                super::model_attempts::normalize_error(&err)
++            } else {
++                failure
++                    .as_ref()
++                    .map(|failure| failure.normalized.clone())
++                    .unwrap_or_else(|| super::model_attempts::normalize_error(&err))
++            };
++            let state = attempt.request_state();
++            let mut context = codex_protocol::model_retry::ModelRetryContext {
++                attempt_id: attempt.id().to_owned(),
++                original_error_attempt_id: (failure.is_some()
++                    && !attempt_deadline.expired()
++                    && !retirement_failed)
++                    .then(|| attempt.id().to_owned()),
++                attempt: policy_attempt,
++                request_attempt,
++                max_retries: retry_settings
++                    .and_then(|settings| settings.max_retries)
++                    .unwrap_or(0),
++                policy_enabled: false,
++                thread_id: sess.thread_id.to_string(),
++                turn_id: turn_context.sub_id.clone(),
++                model: step_context.settings.model_info.slug.clone(),
++                transport: state.transport.clone(),
++                normalized,
++                provider_advice: Default::default(),
++                response_started: attempt
++                    .response_started
++                    .load(std::sync::atomic::Ordering::Acquire),
++                retry_unsafe_output: attempt
++                    .unsafe_output
++                    .load(std::sync::atomic::Ordering::Acquire),
++                local_effects: attempt
++                    .local_effects
++                    .load(std::sync::atomic::Ordering::Acquire),
++                stateful: state.previous_response_id.is_some() || state.conversation_id.is_some(),
++                previous_response_id: state.previous_response_id,
++                conversation_id: state.conversation_id,
++                usage: attempt.usage(),
++            };
++            let permanently_stopped = cancellation_token.is_cancelled()
++                || preempt.is_cancelled()
++                || parent_stop.requested();
++            let hard_veto = permanently_stopped
++                || retirement_failed
++                || context.normalized.is_abort
++                || context.retry_unsafe_output
++                || context.local_effects
++                || err.response_integrity_reason().is_some()
++                || (failure.is_none()
++                    && matches!(
++                        err.details(),
++                        CodexErrorDetails::Fatal(_)
++                            | CodexErrorDetails::InvalidRequest(_)
++                            | CodexErrorDetails::InvalidPrompt { .. }
++                            | CodexErrorDetails::SessionBudgetExceeded
++                            | CodexErrorDetails::ModelInvocationDeadlineExceeded(_)
++                    ));
++            context.policy_enabled = !hard_veto
++                && retry_settings.is_some_and(|settings| settings.has_policy == Some(true))
++                && policy_attempt <= u64::from(context.max_retries);
++            let compatibility_retry = !hard_veto
++                && context.normalized.error_code.as_deref() == Some("conversation_locked")
++                && retry_settings.and_then(|settings| settings.max_retries) != Some(0)
++                && locked_retries < 3;
++            let mut resolution = None;
++            if !permanently_stopped
++                && !retirement_failed
++                && !compatibility_retry
++                && (retry_configured || failure.is_some() || attempt_timeout.is_some())
++            {
++                for contributor in sess.services.extensions.model_request_contributors() {
++                    if let Some(decision) =
++                        contributor.decide_model_retry(codex_extension_api::ModelRetryInput {
++                            context: context.clone(),
++                            admission: admission.clone(),
++                            cancellation: cancellation_token.clone(),
++                        })
++                    {
++                        if resolution.is_some() {
++                            return Err(CodexErr::Fatal(
++                                "Multiple native retry decision owners".into(),
++                            ));
++                        }
++                        resolution = Some(
++                            decision
++                                .or_cancel(&preempt)
++                                .or_cancel(&cancellation_token)
++                                .await??
++                                .map_err(CodexErr::Fatal)?,
++                        );
++                    }
++                }
++            }
++            let use_configured_retry = retry_configured
++                || failure.is_some()
++                || compatibility_retry
++                || attempt_deadline.expired();
++            if hard_veto || use_configured_retry {
++                let delay = if hard_veto {
++                    None
++                } else if compatibility_retry {
++                    let delay = std::time::Duration::from_secs(1_u64 << locked_retries);
++                    locked_retries += 1;
++                    Some(delay)
++                } else {
++                    super::model_attempts::select_retry_delay(
++                        &context,
++                        resolution.as_ref(),
++                        err.retry_delay(0).is_some() || attempt_deadline.expired(),
++                        state.transport != "responses_json" && state.transport != "model_producer",
++                        &retry_settings
++                            .and_then(|settings| settings.backoff.clone())
++                            .unwrap_or_default(),
++                        rand::random::<f64>(),
++                    )
++                    .map_err(CodexErr::Fatal)?
++                };
++                let Some(delay) = delay else {
++                    // Native deadlines/cancellation and callback failures retain precedence.
++                    if failure.is_some()
++                        && !permanently_stopped
++                        && !attempt_deadline.expired()
++                        && !retirement_failed
++                    {
++                        ledger.terminal(&attempt).map_err(CodexErr::Fatal)?;
++                    }
++                    publish_model_attempt(
++                        &sess,
++                        &step_context,
++                        &attempt,
++                        codex_protocol::model_retry::ModelAttemptPhase::Terminal,
++                        admission.clone(),
++                        &ledger,
++                    )
++                    .await?;
++                    attempt.release_failure();
++                    return Err(err);
++                };
++                let retry_at = tokio::time::Instant::now()
++                    .checked_add(delay)
++                    .ok_or_else(|| {
++                        CodexErr::Fatal("Retry delay exceeds native timer range".into())
++                    })?;
++                if request_attempt > max_retries {
++                    client_session.try_switch_fallback_transport(
++                        &step_context.session_telemetry,
++                        &step_context.settings.model_info,
++                    );
++                }
++                publish_model_attempt(
++                    &sess,
++                    &step_context,
++                    &attempt,
++                    codex_protocol::model_retry::ModelAttemptPhase::Retry,
++                    admission.clone(),
++                    &ledger,
++                )
++                .await?;
++                attempt.release_failure();
++                tokio::select! {
++                    _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
++                    _ = preempt.cancelled() => return Err(CodexErr::TurnAborted),
++                    _ = tokio::time::sleep_until(retry_at) => {},
++                }
++                request_attempt = request_attempt
++                    .checked_add(1)
++                    .ok_or_else(|| CodexErr::Fatal("Native request attempt overflow".into()))?;
++                if !compatibility_retry {
++                    policy_attempt = policy_attempt
++                        .checked_add(1)
++                        .ok_or_else(|| CodexErr::Fatal("Native retry budget overflow".into()))?;
++                }
++                recovery_attempt += 1;
++                turn_context.turn_timing_state.record_sampling_retry();
++                continue;
++            }
+             let retry = handle_response_stream_error(
+                 &mut retry_state,
+                 max_retries,
+@@ -2213,6 +2511,12 @@ async fn run_sampling_request(
+                 ));
+             }
+             retry??;
++            request_attempt = request_attempt
++                .checked_add(1)
++                .ok_or_else(|| CodexErr::Fatal("Native request attempt overflow".into()))?;
++            policy_attempt = policy_attempt
++                .checked_add(1)
++                .ok_or_else(|| CodexErr::Fatal("Native retry budget overflow".into()))?;
+             recovery_attempt += 1;
+             turn_context.turn_timing_state.record_sampling_retry();
+         }
+@@ -2242,6 +2546,41 @@ async fn run_sampling_request(
+     outcome
+ }
+ 
++async fn publish_model_attempt(
++    sess: &Session,
++    step: &StepContext,
++    attempt: &Arc<super::model_attempts::Attempt>,
++    phase: codex_protocol::model_retry::ModelAttemptPhase,
++    admission: Arc<dyn codex_extension_api::ModelToolAdmission>,
++    ledger: &super::model_attempts::AttemptLedger,
++) -> CodexResult<()> {
++    let snapshot = ledger.snapshot();
++    for contributor in sess.services.extensions.model_request_contributors() {
++        contributor
++            .model_attempt(codex_extension_api::ModelAttemptInput {
++                attempt_id: attempt.id().to_owned(),
++                phase,
++                admission: admission.clone(),
++                snapshot: snapshot.clone(),
++            })
++            .map_err(CodexErr::Fatal)?;
++    }
++    sess.send_event(
++        &step.turn,
++        EventMsg::SdkModelAttempt(codex_protocol::protocol::ModelAttemptEvent {
++            thread: sess.thread_id.to_string(),
++            turn_id: step.turn.sub_id.clone(),
++            data: codex_protocol::protocol::ModelAttemptFact {
++                attempt_id: attempt.id().to_owned(),
++                phase,
++                snapshot,
++            },
++        }),
++    )
++    .await;
++    Ok(())
++}
++
+ pub(crate) struct PreparedToolRecommendations {
+     auth: Option<CodexAuth>,
+     endpoint_candidates: Option<Vec<DiscoverableTool>>,
+@@ -2736,7 +3075,10 @@ async fn propose_tool_completion(
+                     return Ok(None);
+                 }
+                 Some(codex_extension_api::ToolCompletionDecision::Accept { .. })
+-                    if !tools.all_succeeded => continue,
++                    if !tools.all_succeeded =>
++                {
++                    continue;
++                }
+                 Some(codex_extension_api::ToolCompletionDecision::Accept { final_output }) => {
+                     return Ok(Some(codex_protocol::protocol::ToolTurnCompletion {
+                         call_id: call_id.clone(),
+@@ -2925,7 +3267,7 @@ pub(super) enum RealtimeEventText {
+ 
+ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventText> {
+     match msg {
+-        EventMsg::ResponseFact(_) => None,
++        EventMsg::ResponseFact(_) | EventMsg::SdkModelAttempt(_) => None,
+         EventMsg::ElicitationRequest(request)
+             if matches!(
+                 &request.request,
+@@ -3500,6 +3842,10 @@ async fn try_run_sampling_request(
+     }
+     // Every request, including a stream retry, depends on accepted durable history.
+     sess.ensure_rollout_durable().await?;
++    let model_attempt = prompt
++        .tool_admission
++        .as_ref()
++        .and_then(|admission| admission.model_attempt());
+     let sample_cancel = cancellation_token.child_token();
+     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
+     let tool_cancellation = sample_cancel.child_token();
+@@ -3572,7 +3918,12 @@ async fn try_run_sampling_request(
+             .await??;
+         // Publish owned handles synchronously before checking raced cancellation.
+         deadline.attach_stream_stop(stream.consumer_dropped.clone(), stream.producer_stop.take());
+-        if timeout_ms.is_some() {
++        if timeout_ms.is_some()
++            || prompt
++                .tool_admission
++                .as_ref()
++                .is_some_and(|admission| admission.model_attempt().is_some())
++        {
+             deadline.attach_tasks([stream.mapper_task.take(), stream.producer_task.take()]);
+         }
+         if sample_cancel.is_cancelled() {
+@@ -3680,6 +4031,10 @@ async fn try_run_sampling_request(
+                     }
+                 }
+                 ResponseEvent::Created { response_id } => {
++                    if let Some(attempt) = &model_attempt {
++                        attempt.mark_response_started();
++                    }
++
+                     response_fact_response_id.clone_from(&response_id);
+                     if let Some(response_id) = response_id {
+                         turn_context
+@@ -3688,6 +4043,13 @@ async fn try_run_sampling_request(
+                     }
+                 }
+                 ResponseEvent::OutputItemDone(mut item) => {
++                    if matches!(&item, ResponseItem::Message { role, content, .. } if role == "assistant" && !content.is_empty())
++                    {
++                        if let Some(attempt) = &model_attempt {
++                            attempt.mark_unsafe_output();
++                        }
++                    }
++
+                     assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                     sess.reserve_assistant_message_order(&turn_context, &item)
+                         .await;
+@@ -4008,6 +4370,12 @@ async fn try_run_sampling_request(
+                     usage_metadata,
+                     end_turn,
+                 } => {
++                    if let (Some(attempt), Some(usage)) = (&model_attempt, &token_usage) {
++                        attempt
++                            .report_usage(usage.clone())
++                            .map_err(CodexErr::Fatal)?;
++                    }
++
+                     sess.services
+                         .analytics_events_client
+                         .track_code_mode_tool_call(
+@@ -4031,6 +4399,7 @@ async fn try_run_sampling_request(
+                         response_observation_id.take(),
+                         token_usage.as_ref(),
+                         usage_metadata.as_ref(),
++                        model_attempt.as_ref().map(|attempt| attempt.id()),
+                     )
+                     .await;
+                     let budget_result = sess
+@@ -4062,6 +4431,11 @@ async fn try_run_sampling_request(
+                         if !active_item_is_streaming_to_client {
+                             continue;
+                         }
++                        if !delta.is_empty() {
++                            if let Some(attempt) = &model_attempt {
++                                attempt.mark_unsafe_output();
++                            }
++                        }
+                         let item_id = active.id();
+                         if matches!(active, TurnItem::AgentMessage(_)) {
+                             let parsed =
+@@ -4219,7 +4593,8 @@ async fn try_run_sampling_request(
+     };
+     // A final success (including preemption) or nonretryable error owns its
+     // outcome before cleanup. Only a retryable failure retains the logical clock.
+-    if outcome.is_ok()
++    if model_attempt.is_some()
++        || outcome.is_ok()
+         || outcome
+             .as_ref()
+             .err()
+@@ -4246,7 +4621,7 @@ async fn try_run_sampling_request(
+             }
+         }
+     }
+-    if timeout_ms.is_some() {
++    if timeout_ms.is_some() || model_attempt.is_some() {
+         deadline_cleanup_errors.extend(deadline.retire_tasks().await);
+     }
+     let mut tool_cleanup = if !in_flight.is_empty() {
+@@ -4303,7 +4678,17 @@ async fn try_run_sampling_request(
+         } else {
+             format!("; {}", deadline_cleanup_errors.join("; "))
+         };
+-        return Err(CodexErr::ModelInvocationDeadlineExceeded(cleanup));
++        return Err(
++            if prompt
++                .tool_admission
++                .as_ref()
++                .is_some_and(|admission| admission.model_attempt().is_some())
++            {
++                CodexErr::ModelAttemptDeadlineExceeded(cleanup)
++            } else {
++                CodexErr::ModelInvocationDeadlineExceeded(cleanup)
++            },
++        );
+     }
+     if !deadline_cleanup_errors.is_empty() {
+         let message = deadline_cleanup_errors.join("; ");
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 7911f4ee..27b26334 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -1039,6 +1039,10 @@ impl Session {
+             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
+                 .await;
+             EventMsg::TurnAborted(TurnAbortedEvent {
++                model_attempt: turn_context
++                    .extension_data
++                    .get::<crate::session::model_attempts::AttemptLedger>()
++                    .map(|ledger| ledger.snapshot()),
+                 turn_id: Some(turn_context.sub_id.clone()),
+                 reason,
+                 error: None,
+@@ -1055,6 +1059,10 @@ impl Session {
+             self.emit_turn_stop_lifecycle(turn_context.extension_data.as_ref())
+                 .await;
+             EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: turn_context
++                    .extension_data
++                    .get::<crate::session::model_attempts::AttemptLedger>()
++                    .map(|ledger| ledger.snapshot()),
+                 turn_id: turn_context.sub_id.clone(),
+                 last_agent_message,
+                 tool_completion: if error.is_none() {
+@@ -1327,17 +1335,25 @@ impl Session {
+         if was_cancelled && error.is_none() {
+             if join_realtime_tools {
+                 let _ = task.handle.await;
++                if let Some(owner) = task.turn_context.extension_data
++                    .get::<Arc<crate::session::model_invocation_deadline::ModelInvocationDeadline>>() {
++                    owner.cancel_for_retirement();
++                    let errors = owner.retire_tasks().await;
++                    if let Some(event) = Self::model_request_abort_error(
++                        &task.turn_context, Some(owner.as_ref().as_ref()), error.take(), errors,
++                    ) { self.send_event(&task.turn_context, EventMsg::Error(event)).await; }
++                }
+                 task.task
+                     .abort(Arc::clone(self), Arc::clone(&task.turn_context))
+                     .await;
+-            } else if let Some(owner) = &request_owner {
+-                let errors = self.join_deadline_request_tasks(task.handle, &task.turn_context, join_local_commands, owner).await;
+-                if let Some(error) = owner.abort_error(error.take(), errors) {
+-                    self.send_event(&task.turn_context, EventMsg::Error(error)).await;
++            } else {
++                if let Some(event) = self.join_deadline_request_tasks(
++                    task.handle, &task.turn_context, join_local_commands,
++                    request_owner.as_ref().map(|owner| owner.as_ref().as_ref()),
++                    error.take(), None,
++                ).await {
++                    self.send_event(&task.turn_context, EventMsg::Error(event)).await;
+                 }
+-            } else if join_local_commands {
+-                self.join_interrupted_local_commands(task.handle, &task.turn_context)
+-                    .await;
+             }
+             if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
+                 warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
+@@ -1372,6 +1388,14 @@ impl Session {
+ 
+         if join_realtime_tools {
+             let _ = task.handle.await;
++            if let Some(owner) = task.turn_context.extension_data
++                .get::<Arc<crate::session::model_invocation_deadline::ModelInvocationDeadline>>() {
++                owner.cancel_for_retirement();
++                let errors = owner.retire_tasks().await;
++                error = Self::model_request_abort_error(
++                    &task.turn_context, Some(owner.as_ref().as_ref()), error.take(), errors,
++                );
++            }
+         } else {
+             select! {
+                 _ = task.done.notified() => {
+@@ -1381,15 +1405,11 @@ impl Session {
+                 }
+             }
+ 
+-            if let Some(owner) = &request_owner {
+-                let errors = self.join_deadline_request_tasks(task.handle, &task.turn_context, join_local_commands, owner).await;
+-                error = owner.abort_error(error.take(), errors);
+-            } else if join_local_commands {
+-                self.join_interrupted_local_commands(task.handle, &task.turn_context)
+-                    .await;
+-            } else {
+-                task.handle.abort();
+-            }
++            error = self.join_deadline_request_tasks(
++                task.handle, &task.turn_context, join_local_commands,
++                request_owner.as_ref().map(|owner| owner.as_ref().as_ref()),
++                error.take(), None,
++            ).await;
+         }
+ 
+         if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
+@@ -1444,6 +1464,11 @@ impl Session {
+         self.emit_turn_abort_lifecycle(reason.clone(), task.turn_context.extension_data.as_ref())
+             .await;
+         let event = EventMsg::TurnAborted(TurnAbortedEvent {
++            model_attempt: task
++                .turn_context
++                .extension_data
++                .get::<crate::session::model_attempts::AttemptLedger>()
++                .map(|ledger| ledger.snapshot()),
+             turn_id: Some(task.turn_context.sub_id.clone()),
+             reason,
+             error,
+@@ -1462,19 +1487,28 @@ impl Session {
+         }
+     }
+ 
+-    // Enabled only when this turn captured a deadline-owned invocation.
++    // Sampler shutdown must precede the final lookup: a first/new attempt may
++    // publish its physical owner after abort's initial snapshot.
+     async fn join_deadline_request_tasks(
+         &self, mut task: AbortOnDropHandle<()>, turn: &TurnContext, join_local_commands: bool,
+-        owner: &crate::session::model_invocation_deadline::ModelInvocationDeadline,
+-    ) -> Vec<String> {
+-        owner.cancel_for_retirement();
++        initial: Option<&crate::session::model_invocation_deadline::ModelInvocationDeadline>,
++        primary: Option<ErrorEvent>, cleanup_errors: Option<&mut Vec<String>>,
++    ) -> Option<ErrorEvent> {
++        if let Some(owner) = initial { owner.cancel_for_retirement(); }
+         task.abort();
+         let mut errors = Vec::new();
+         if let Err(error) = (&mut task).await {
+             if !error.is_cancelled() { errors.push(format!("sampler retirement failed: {error}")); }
+         }
+-        // Actual sampler retirement prevents a late factory/task registration.
+-        errors.extend(owner.retire_tasks().await);
++        let latest = turn.extension_data
++            .get::<Arc<crate::session::model_invocation_deadline::ModelInvocationDeadline>>();
++        let latest_owner = latest.as_ref().map(|owner| owner.as_ref().as_ref());
++        if let Some(owner) = latest_owner { owner.cancel_for_retirement(); }
++        if let Some(owner) = initial
++            && !latest_owner.is_some_and(|latest| std::ptr::eq(latest, owner)) {
++            errors.extend(owner.retire_tasks().await);
++        }
++        if let Some(owner) = latest_owner { errors.extend(owner.retire_tasks().await); }
+         if join_local_commands && !self.services.unified_exec_manager
+             .join_unreturned_local_commands(&turn.extension_data).await {
+             let failure = ManagedLocalExecCancelFailure(turn.sub_id.clone());
+@@ -1482,33 +1516,34 @@ impl Session {
+             self.services.thread_extension_data.insert(failure);
+             errors.push("Native local command cleanup could not confirm exit".to_owned());
+         }
+-        errors
++        if let Some(cleanup) = cleanup_errors { cleanup.extend(errors.iter().cloned()); }
++        Self::model_request_abort_error(turn, latest_owner, primary, errors)
+     }
+ 
+-    async fn join_interrupted_local_commands(
+-        &self,
+-        task: AbortOnDropHandle<()>,
++    fn model_request_abort_error(
+         turn: &TurnContext,
+-    ) {
+-        // Stop the root task before fencing new managed launches and joining
+-        // unreturned commands. A detached tool may still be finishing its spawn.
+-        task.abort();
+-        let task_joined = match tokio::time::timeout(Duration::from_secs(5), task).await {
+-            Ok(Ok(())) => true,
+-            Ok(Err(error)) => error.is_cancelled(),
+-            Err(_) => false,
+-        };
+-        let commands_joined = self
+-            .services
+-            .unified_exec_manager
+-            .join_unreturned_local_commands(&turn.extension_data)
+-            .await;
+-        if !task_joined || !commands_joined {
+-            let failure = ManagedLocalExecCancelFailure(turn.sub_id.clone());
+-            turn.extension_data.insert(failure.clone());
+-            self.services.thread_extension_data.insert(failure);
++        owner: Option<&crate::session::model_invocation_deadline::ModelInvocationDeadline>,
++        primary: Option<ErrorEvent>, errors: Vec<String>,
++    ) -> Option<ErrorEvent> {
++        // A forced abort must preserve a winning invocation deadline even though
++        // the physical owner now points at its independently timed attempt.
++        if turn.extension_data.get::<codex_extension_api::TurnSamplingStop>()
++            .is_some_and(|stop| stop.model_deadline_expired()) {
++            let mut causes = errors;
++            if let Some(primary) = primary { causes.push(primary.message); }
++            let suffix = if causes.is_empty() { String::new() }
++                else { format!("; {}", causes.join("; ")) };
++            return Some(CodexErr::ModelInvocationDeadlineExceeded(suffix).to_error_event(None));
++        }
++        if let Some(owner) = owner { return owner.abort_error(primary, errors); }
++        if errors.is_empty() { return primary; }
++        let details = format!("model request retirement failed: {}", errors.join("; "));
++        match primary {
++            Some(mut primary) => { primary.message.push_str(&format!("; {details}")); Some(primary) }
++            None => Some(CodexErr::Fatal(details).to_error_event(None)),
+         }
+     }
++
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 33154fb4..fa05c8b2 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -2752,6 +2752,7 @@ fn append_interrupted_boundary(
+     interrupted_marker: InterruptedTurnHistoryMarker,
+ ) -> InitialHistory {
+     let aborted_event = RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
++        model_attempt: None,
+         turn_id,
+         reason: TurnAbortReason::Interrupted,
+         error: None,
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index f69668a1..6a0122da 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -385,6 +385,9 @@ impl ToolCallRuntime {
+                     let _ = execution_started_at.set(Instant::now());
+                 }
+ 
++                if let Some(captured) = step_context.extension_data.get::<codex_extension_api::CapturedModelAttempt>() {
++                    captured.0.mark_local_effect();
++                }
+                 let result = router
+                     .dispatch_tool_call_with_state(
+                         session,
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 2de77689..3c17eede 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -156,6 +156,9 @@ pub use model_request::ResponseEvent;
+ pub use model_request::ToolsOnlyCallInput;
+ pub use model_request::ToolsOnlyWorkCancellation;
+ pub use model_request::TurnSamplingStop;
++pub use model_request::{
++    CapturedModelAttempt, ModelAttemptAdmission, ModelAttemptInput, ModelRetryInput,
++};
+ 
+ mod model_request_observation;
+ pub use model_request::PreparedRequestAdmission;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index dedec722..4fc7b9d0 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -15,38 +15,98 @@ use std::sync::atomic::Ordering;
+ 
+ /// Stops admission to model requests while the host interrupts this turn.
+ /// Install in the turn store and retain that same receipt when requesting stop.
+-#[derive(Debug, Default)]
++#[derive(Debug, Clone, Default)]
+ pub struct TurnSamplingStop {
+     requested: Arc<AtomicBool>,
+     model_deadline: Arc<std::sync::Mutex<Option<Arc<codex_api::ModelInvocationDeadlineState>>>>,
++    parent: Option<Arc<TurnSamplingStop>>,
++    commit: Arc<std::sync::Mutex<()>>,
+ }
+ 
+ impl TurnSamplingStop {
++    /// Create an independent sampling scope that follows the complete parent chain.
++    /// An attempt can stop without clearing or stopping its logical turn or graph.
++    pub fn for_turn(&self) -> Self {
++        Self {
++            requested: Arc::default(),
++            model_deadline: Arc::default(),
++            parent: Some(Arc::new(self.clone())),
++            commit: Arc::clone(&self.commit),
++        }
++    }
++
+     pub fn request(&self) {
++        let _commit = self
++            .commit
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
+         self.requested.store(true, Ordering::Release);
+     }
+ 
+     pub fn install_model_deadline(&self, state: Arc<codex_api::ModelInvocationDeadlineState>) {
+         state.bind_stop_flag(self.requested.clone());
+-        *self.model_deadline.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
++        *self
++            .model_deadline
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
+     }
+     pub fn capture_model_deadline(&self) -> Option<Arc<codex_api::ModelInvocationDeadlineState>> {
+-        self.model_deadline.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
++        let own = self
++            .model_deadline
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone()
++            .filter(|state| state.denies_admission() || !state.settled().is_cancelled());
++        let parent = self
++            .parent
++            .as_ref()
++            .and_then(|parent| parent.capture_model_deadline());
++        match (own, parent) {
++            (Some(own), Some(parent)) => Some(if own.expires_at() <= parent.expires_at() {
++                own
++            } else {
++                parent
++            }),
++            (own, parent) => own.or(parent),
++        }
+     }
+     pub fn model_deadline_expired(&self) -> bool {
+-        self.capture_model_deadline().is_some_and(|state| state.expired())
++        self.capture_model_deadline()
++            .is_some_and(|state| state.expired())
+     }
+-    /// Capture once for a pending invocation; never hold this gate across an await.
++    /// Reserve each parent deadline before this scope; never await under either gate.
+     pub fn with_model_deadline_admission<T>(&self, enter: impl FnOnce() -> T) -> Option<T> {
+-        match self.capture_model_deadline() {
++        let own = self
++            .model_deadline
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone();
++        let enter = || match own {
+             Some(state) => state.admit(enter),
+             None => Some(enter()),
++        };
++        match &self.parent {
++            Some(parent) => parent.with_model_deadline_admission(enter).flatten(),
++            None => enter(),
+         }
+     }
+ 
+     pub fn requested(&self) -> bool {
+         self.requested.load(Ordering::Acquire)
+-            || self.capture_model_deadline().is_some_and(|state| state.denies_admission())
++            || self
++                .capture_model_deadline()
++                .is_some_and(|state| state.denies_admission())
++            || self.parent.as_ref().is_some_and(|stop| stop.requested())
++    }
++
++    /// Serialize a synchronous context commit with stop reservation.
++    /// The callback must not block, await, or call back into the host.
++    pub fn try_commit<T>(&self, commit: impl FnOnce() -> T) -> Option<T> {
++        let _commit = self
++            .commit
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        (!self.requested()).then(commit)
+     }
+ }
+ 
+@@ -117,6 +177,37 @@ pub struct ToolsOnlyCallInput {
+ 
+ /// Contributes request-scoped preparation, compaction, and response interception.
+ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
++    /// Reliable native bookkeeping only, never an application callback or passive observer.
++    /// Hosts mirror the exact turn snapshot before enqueueing its live notification.
++    fn model_attempt(&self, _input: ModelAttemptInput) -> Result<(), String> {
++        Ok(())
++    }
++
++    /// Retire only callbacks issued by this immutable model-attempt admission.
++    /// Executable replies stop before this hook; measured usage remains admissible
++    /// until every physical callback release has joined and Core settles its ledger.
++    fn retire_model_attempt(
++        &self,
++        _admission: Arc<dyn ModelToolAdmission>,
++    ) -> BoxFuture<'_, Result<(), String>> {
++        Box::pin(async { Ok(()) })
++    }
++
++    /// A decision follows failed-attempt cancellation and its physical callback joins.
++    /// The supplied cancellation belongs to the logical turn, not the expired attempt.
++    fn decide_model_retry(
++        &self,
++        _input: ModelRetryInput,
++    ) -> Option<BoxFuture<'_, Result<codex_protocol::model_retry::ModelRetryResolution, String>>>
++    {
++        None
++    }
++
++    /// Identifies an SDK-owned Responses route that requires a genuine completion.
++    fn uses_chatgpt_plan(&self) -> bool {
++        false
++    }
++
+     fn customizes_compaction(&self, _thread_id: &str) -> bool {
+         false
+     }
+@@ -176,22 +267,78 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+     /// Thread that owns the captured routing plan.
+     fn thread_id(&self) -> &str;
++    /// Native originating-root identity captured with this admission, never a current-root lookup.
++    fn root_turn_id(&self) -> Option<&str> {
++        None
++    }
+     /// Original turn store, allowing hosts to compare their retained owner by object identity.
+     fn turn_store(&self) -> &ExtensionData;
+     /// Immutable source inputs captured with this request's routing plan.
+     fn step_store(&self) -> Option<&ExtensionData> {
+         None
+     }
++    /// Immutable original attempt; never resolve a later step's mutable current slot.
++    fn model_attempt(&self) -> Option<Arc<dyn ModelAttemptAdmission>> {
++        None
++    }
+     /// Whether the exact selected runtime accepts this model item's payload kind.
+     fn admits(&self, item: &ResponseItem) -> bool;
+ }
+ 
++/// Measurement can settle during joined cleanup after executable reply authority expires.
++/// Implementations reject mismatched identity and reports after physical settlement.
++pub trait ModelAttemptAdmission: Send + Sync + std::fmt::Debug {
++    fn id(&self) -> &str;
++    fn attempt(&self) -> u64;
++    fn retry_configured(&self) -> bool;
++    fn disable_provider_retries(&self) -> bool;
++    fn cancellation(&self) -> tokio_util::sync::CancellationToken;
++    fn sampling_stop(&self) -> Arc<TurnSamplingStop>;
++    fn snapshot(&self) -> Result<codex_protocol::model_retry::ModelAttemptSnapshot, String>;
++    /// Only trusted request construction supplies these small native request facts.
++    fn observe_request(
++        &self,
++        transport: &str,
++        previous_response_id: Option<&str>,
++        conversation_id: Option<&str>,
++    ) -> Result<(), String>;
++    fn report_failure(
++        &self,
++        failure: codex_protocol::model_retry::ModelProducerFailure,
++    ) -> Result<(), String>;
++    fn report_usage(&self, usage: codex_protocol::protocol::TokenUsage) -> Result<(), String>;
++    /// Only the native stream and admitted tool dispatcher publish these fences.
++    fn mark_response_started(&self);
++    fn mark_unsafe_output(&self);
++    fn mark_local_effect(&self);
++}
++
++#[derive(Clone, Debug)]
++pub struct CapturedModelAttempt(pub Arc<dyn ModelAttemptAdmission>);
++
++#[derive(Clone)]
++pub struct ModelRetryInput {
++    pub context: codex_protocol::model_retry::ModelRetryContext,
++    pub admission: Arc<dyn ModelToolAdmission>,
++    pub cancellation: tokio_util::sync::CancellationToken,
++}
++
++#[derive(Clone)]
++pub struct ModelAttemptInput {
++    pub attempt_id: String,
++    pub phase: codex_protocol::model_retry::ModelAttemptPhase,
++    pub admission: Arc<dyn ModelToolAdmission>,
++    pub snapshot: codex_protocol::model_retry::ModelAttemptSnapshot,
++}
++
+ /// Owns request state until consumed by the response stream or dropped on failure.
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
+     /// Select a model producer before materializing the detached request JSON.
+-    fn produces_response(&self) -> bool { false }
++    fn produces_response(&self) -> bool {
++        false
++    }
+     /// Optional native model producer. Core retains canonical history, tools, and
+     /// response processing. A producer must join its application work on cancellation.
+     /// Returning None retains ordinary provider transport.
+@@ -263,3 +410,55 @@ pub struct PreparedRequestOutput {
+ pub trait PreparedRequestAdmission: Send + Sync + std::fmt::Debug {
+     fn admit_request(&self) -> Result<(), String>;
+ }
++
++#[cfg(test)]
++mod sampling_stop_tests {
++    use super::TurnSamplingStop;
++
++    #[test]
++    fn attempt_retirement_preserves_its_turn_and_follows_graph_cancellation() {
++        let graph = TurnSamplingStop::default();
++        let turn = graph.for_turn();
++        let first = turn.for_turn();
++        first.request();
++        assert!(first.requested());
++        assert!(!turn.requested());
++        assert!(!graph.requested());
++        let retry = turn.for_turn();
++        assert_eq!(retry.try_commit(|| 7), Some(7));
++        graph.request();
++        assert!(retry.requested());
++        assert_eq!(retry.try_commit(|| 8), None);
++    }
++
++    #[test]
++    fn attempt_follows_logical_turn_cancellation_without_stopping_its_sibling() {
++        let graph = TurnSamplingStop::default();
++        let turn = graph.for_turn();
++        let sibling = graph.for_turn();
++        let attempt = turn.for_turn();
++        turn.request();
++        assert!(attempt.requested());
++        assert!(!sibling.requested());
++    }
++
++    #[test]
++    fn context_commit_respects_turn_and_parent_stops() {
++        let parent = TurnSamplingStop::default();
++        let turn = parent.for_turn();
++        let sibling = parent.for_turn();
++        assert_eq!(turn.try_commit(|| 1), Some(1));
++        turn.clone().request();
++        assert_eq!(
++            turn.try_commit(|| panic!("stopped turn committed")),
++            None::<()>
++        );
++        assert_eq!(sibling.try_commit(|| 2), Some(2));
++        parent.request();
++        assert_eq!(
++            sibling.try_commit(|| panic!("stopped parent committed")),
++            None::<()>
++        );
++        assert_eq!(TurnSamplingStop::default().try_commit(|| 3), Some(3));
++    }
++}
+diff --git a/codex-rs/ext/guardian-reviewer/src/retry.rs b/codex-rs/ext/guardian-reviewer/src/retry.rs
+index f2133a2f..593381d1 100644
+--- a/codex-rs/ext/guardian-reviewer/src/retry.rs
++++ b/codex-rs/ext/guardian-reviewer/src/retry.rs
+@@ -124,6 +124,7 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
+             | CodexErrorInfo::ActiveTurnNotSteerable { .. }
+             | CodexErrorInfo::ThreadRollbackFailed
+             | CodexErrorInfo::ModelInvocationDeadlineExceeded
++            | CodexErrorInfo::ModelAttemptDeadlineExceeded
+             | CodexErrorInfo::Other => false,
+         },
+         GuardianReviewOutcome::Completed(_)
+diff --git a/codex-rs/protocol/src/codex_error_info.rs b/codex-rs/protocol/src/codex_error_info.rs
+index cfd24f99..33b9bd41 100644
+--- a/codex-rs/protocol/src/codex_error_info.rs
++++ b/codex-rs/protocol/src/codex_error_info.rs
+@@ -20,6 +20,7 @@ enum CodexErrorInfoWire {
+     ContextWindowExceeded,
+     SessionBudgetExceeded,
+     ModelInvocationDeadlineExceeded,
++    ModelAttemptDeadlineExceeded,
+     UsageLimitExceeded,
+     RateLimitExceeded,
+     FlexUnavailable,
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index be42aa14..2ab2b897 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -105,6 +105,8 @@ pub enum CodexErrorDetails {
+ 
+     #[error("local model invocation deadline exceeded{0}")]
+     ModelInvocationDeadlineExceeded(String),
++    #[error("local model attempt deadline exceeded{0}")]
++    ModelAttemptDeadlineExceeded(String),
+ 
+     /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
+     /// handshake has succeeded but **before** it finished emitting `response.completed`.
+@@ -377,6 +379,7 @@ impl CodexErr {
+     codex_err_tuple_constructors!(
+         Stream(message: String),
+         ModelInvocationDeadlineExceeded(cleanup: String),
++        ModelAttemptDeadlineExceeded(cleanup: String),
+         ThreadNotFound(thread_id: ThreadId),
+         UnexpectedStatus(error: UnexpectedResponseError),
+         InvalidRequest(message: String),
+@@ -425,6 +428,7 @@ impl CodexErr {
+             CodexErrorDetails::TurnAborted
+             | CodexErrorDetails::SessionBudgetExceeded
+             | CodexErrorDetails::ModelInvocationDeadlineExceeded(_)
++            | CodexErrorDetails::ModelAttemptDeadlineExceeded(_)
+             | CodexErrorDetails::Interrupted
+             | CodexErrorDetails::EnvVar(_)
+             | CodexErrorDetails::Fatal(_)
+@@ -523,6 +527,9 @@ impl CodexErr {
+             CodexErrorDetails::ModelInvocationDeadlineExceeded(_) => {
+                 CodexErrorInfo::ModelInvocationDeadlineExceeded
+             }
++            CodexErrorDetails::ModelAttemptDeadlineExceeded(_) => {
++                CodexErrorInfo::ModelAttemptDeadlineExceeded
++            }
+             CodexErrorDetails::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
+             CodexErrorDetails::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+             CodexErrorDetails::RateLimitExceeded(_) => CodexErrorInfo::RateLimitExceeded,
+diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
+index b6ec4b44..4b9c7f15 100644
+--- a/codex-rs/protocol/src/lib.rs
++++ b/codex-rs/protocol/src/lib.rs
+@@ -37,6 +37,7 @@ pub mod memory_citation;
+ mod memory_version;
+ pub use memory_version::MemoryVersion;
+ pub mod model_request_controls;
++pub mod model_retry;
+ pub mod models;
+ pub mod network_policy;
+ pub mod num_format;
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 4b981504..6789f248 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -60,6 +60,24 @@ pub struct HostedPromptControls {
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct ModelRequestControls {
++    /// Logical-generation retry preferences, never provider request-body fields.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<crate::model_retry::ModelRetrySettings>")]
++    #[schemars(with = "Option<crate::model_retry::ModelRetrySettings>")]
++    pub retry: Option<Option<crate::model_retry::ModelRetrySettings>>,
++    /// One attempt's clock; Core backoff runs outside it. Independent of invocation timeout.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<u32>")]
++    #[schemars(with = "Option<u32>")]
++    pub attempt_timeout_ms: Option<Option<u32>>,
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -203,7 +221,9 @@ pub struct ModelRequestControls {
+ 
+ impl ModelRequestControls {
+     pub fn is_empty(&self) -> bool {
+-        self.hosted_prompt.is_none()
++        self.retry.is_none()
++            && self.attempt_timeout_ms.is_none()
++            && self.hosted_prompt.is_none()
+             && self.input_modalities.is_none()
+             && self.truncation.is_none()
+             && self.include.is_none()
+@@ -223,6 +243,14 @@ impl ModelRequestControls {
+     }
+ 
+     pub fn apply_patch(&mut self, patch: &Self) {
++        match (&mut self.retry, &patch.retry) {
++            (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
++            (_, Some(update)) => self.retry = Some(update.clone()),
++            (_, None) => {}
++        }
++        if patch.attempt_timeout_ms.is_some() {
++            self.attempt_timeout_ms = patch.attempt_timeout_ms;
++        }
+         if patch.hosted_prompt.is_some() {
+             self.hosted_prompt = patch.hosted_prompt.clone();
+         }
+diff --git a/codex-rs/protocol/src/model_retry.rs b/codex-rs/protocol/src/model_retry.rs
+new file mode 100644
+index 00000000..a4d07713
+--- /dev/null
++++ b/codex-rs/protocol/src/model_retry.rs
+@@ -0,0 +1,263 @@
++//! Captured retry configuration and logical-attempt facts. Core owns execution.
++use crate::protocol::TokenUsage;
++use schemars::JsonSchema;
++use serde::{Deserialize, Serialize};
++use ts_rs::TS;
++
++#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelRetrySettings {
++    /// Distinguishes explicit empty settings from an inherited policy-disable marker.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub configured: Option<bool>,
++    /// Captured runtime declaration marker; never executable callback data.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub has_policy: Option<bool>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub max_retries: Option<u32>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub backoff: Option<ModelRetryBackoff>,
++}
++
++#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(default, deny_unknown_fields)]
++pub struct ModelRetryBackoff {
++    pub initial_delay_ms: f64,
++    pub max_delay_ms: f64,
++    pub multiplier: f64,
++    pub jitter: bool,
++}
++
++impl Default for ModelRetryBackoff {
++    fn default() -> Self {
++        Self {
++            initial_delay_ms: 250.0,
++            max_delay_ms: 2_000.0,
++            multiplier: 2.0,
++            jitter: true,
++        }
++    }
++}
++
++impl ModelRetrySettings {
++    pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.configured.is_some() {
++            self.configured = patch.configured;
++        }
++        if patch.has_policy.is_some() {
++            self.has_policy = patch.has_policy;
++        }
++        if patch.max_retries.is_some() {
++            self.max_retries = patch.max_retries;
++        }
++        if patch.backoff.is_some() {
++            self.backoff = patch.backoff.clone();
++        }
++    }
++
++    pub fn validate(&self) -> Result<(), String> {
++        if let Some(backoff) = &self.backoff {
++            for (name, value) in [
++                ("initial_delay_ms", backoff.initial_delay_ms),
++                ("max_delay_ms", backoff.max_delay_ms),
++                ("multiplier", backoff.multiplier),
++            ] {
++                if !value.is_finite() || value < 0.0 {
++                    return Err(format!(
++                        "retry.backoff.{name} must be finite and nonnegative"
++                    ));
++                }
++            }
++        }
++        Ok(())
++    }
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelRetryError {
++    pub message: String,
++    #[serde(default)]
++    pub status_code: Option<u16>,
++    #[serde(default)]
++    pub error_code: Option<String>,
++    #[serde(default)]
++    pub request_id: Option<String>,
++    #[serde(default)]
++    pub retry_after_ms: Option<f64>,
++    #[serde(default)]
++    pub is_abort: bool,
++    #[serde(default)]
++    pub is_network_error: bool,
++    #[serde(default)]
++    pub is_timeout: bool,
++}
++
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum ModelReplaySafety {
++    Safe,
++    Unsafe,
++    #[default]
++    Unknown,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelRetryAdvice {
++    #[serde(default)]
++    pub suggested: Option<bool>,
++    #[serde(default)]
++    pub retry_after_ms: Option<f64>,
++    #[serde(default)]
++    pub replay_safety: ModelReplaySafety,
++    #[serde(default)]
++    pub reason: Option<String>,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelRetryDecision {
++    pub retry: bool,
++    #[serde(default)]
++    pub delay_ms: Option<f64>,
++    #[serde(default)]
++    pub reason: Option<String>,
++    #[serde(default)]
++    pub approve_unsafe_replay: bool,
++}
++
++impl ModelRetryDecision {
++    pub fn validate(&self) -> Result<(), String> {
++        if self
++            .delay_ms
++            .is_some_and(|delay| !delay.is_finite() || delay < 0.0)
++        {
++            return Err("Retry decision delay_ms must be finite and nonnegative".into());
++        }
++        Ok(())
++    }
++}
++
++/// One Core-owned logical generation attempt, not an opaque client HTTP retry.
++#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelRetryContext {
++    pub attempt_id: String,
++    /// Exact retained provider exception selected by Core; absent for native failures.
++    pub original_error_attempt_id: Option<String>,
++    #[ts(type = "number")]
++    pub attempt: u64,
++    #[ts(type = "number")]
++    pub request_attempt: u64,
++    pub max_retries: u32,
++    pub policy_enabled: bool,
++    pub thread_id: String,
++    pub turn_id: String,
++    pub model: String,
++    pub transport: String,
++    pub normalized: ModelRetryError,
++    pub provider_advice: ModelRetryAdvice,
++    pub response_started: bool,
++    pub retry_unsafe_output: bool,
++    pub local_effects: bool,
++    pub stateful: bool,
++    pub previous_response_id: Option<String>,
++    pub conversation_id: Option<String>,
++    pub usage: Option<TokenUsage>,
++}
++
++/// Cumulative native facts for one exact turn. Explicit host reports stay separate.
++/// Live events, final results and checkpoints carry the same authoritative totals.
++#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelAttemptUsage {
++    #[ts(type = "number")]
++    pub requests: u64,
++    pub token_usage: TokenUsage,
++    #[ts(type = "number")]
++    pub requests_without_token_usage: u64,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelAttemptSnapshot {
++    /// First existing attempt UUID; stable within this ledger, fresh after restore.
++    pub owner_attempt_id: Option<String>,
++    pub usage: ModelAttemptUsage,
++    pub terminal_attempt_id: Option<String>,
++}
++
++#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelProducerFailure {
++    pub attempt_id: String,
++    pub normalized: ModelRetryError,
++    #[serde(default)]
++    pub usage: Option<TokenUsage>,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ModelRetryResolution {
++    /// None retains Core's decision while allowing captured backend advice.
++    pub decision: Option<ModelRetryDecision>,
++    #[serde(default)]
++    pub provider_advice: Option<ModelRetryAdvice>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum ModelAttemptPhase {
++    Started,
++    Finished,
++    Retry,
++    Terminal,
++    Cancelled,
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn captures_configuration_without_executable_policy() {
++        let retry: ModelRetrySettings =
++            serde_json::from_str(r#"{"max_retries":0,"backoff":{"multiplier":1.5}}"#).unwrap();
++        assert_eq!(retry.max_retries, Some(0));
++        let backoff = retry.backoff.unwrap();
++        assert_eq!(backoff.initial_delay_ms, 250.0);
++        assert_eq!(backoff.multiplier, 1.5);
++        assert!(serde_json::from_str::<ModelRetrySettings>(r#"{"policy":true}"#).is_err());
++    }
++
++    #[test]
++    fn rejects_invalid_policy_delay_and_backoff() {
++        for delay in [-1.0, f64::NAN, f64::INFINITY] {
++            assert!(
++                ModelRetryDecision {
++                    retry: true,
++                    delay_ms: Some(delay),
++                    ..Default::default()
++                }
++                .validate()
++                .is_err()
++            );
++            assert!(
++                ModelRetrySettings {
++                    backoff: Some(ModelRetryBackoff {
++                        multiplier: delay,
++                        ..Default::default()
++                    }),
++                    ..Default::default()
++                }
++                .validate()
++                .is_err()
++            );
++        }
++    }
++}
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index dda1a5cf..504f3ab6 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1971,6 +1971,10 @@ pub enum EventMsg {
+     #[serde(rename = "task_complete", alias = "turn_complete")]
+     TurnComplete(TurnCompleteEvent),
+ 
++    /// Reliable logical-attempt accounting, retained in native rollout history.
++    #[serde(rename = "_sdk_model_attempt")]
++    SdkModelAttempt(ModelAttemptEvent),
++
+     /// Usage update for the current session, including totals and last turn.
+     /// Optional means unknown — UIs should not display when `None`.
+     TokenCount(TokenCountEvent),
+@@ -2418,6 +2422,7 @@ pub enum CodexErrorInfo {
+     SessionBudgetExceeded,
+     /// Local SDK invocation allowance expired; never a provider/idle timeout.
+     ModelInvocationDeadlineExceeded,
++    ModelAttemptDeadlineExceeded,
+     UsageLimitExceeded,
+     RateLimitExceeded,
+     FlexUnavailable,
+@@ -2464,6 +2469,7 @@ impl CodexErrorInfo {
+             Self::ContextWindowExceeded
+             | Self::SessionBudgetExceeded
+             | Self::ModelInvocationDeadlineExceeded
++            | Self::ModelAttemptDeadlineExceeded
+             | Self::UsageLimitExceeded
+             | Self::RateLimitExceeded
+             | Self::FlexUnavailable
+@@ -2501,6 +2507,10 @@ pub struct RawResponseItemEvent {
+ /// Unlike TokenCountEvent, this is not accumulated, estimated, or replayed.
+ #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+ pub struct RawResponseCompletedEvent {
++    /// Native generation accounting identity; absent for compaction and legacy records.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub model_attempt_id: Option<String>,
+     pub response_id: String,
+     pub token_usage: Option<TokenUsage>,
+     pub usage_metadata: Option<crate::ResponseUsageMetadata>,
+@@ -2736,8 +2746,26 @@ pub struct ToolTurnCompletion {
+     pub final_output: serde_json::Value,
+ }
+ 
++#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
++pub struct ModelAttemptEvent {
++    pub thread: String,
++    pub turn_id: String,
++    pub data: ModelAttemptFact,
++}
++
++#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
++pub struct ModelAttemptFact {
++    pub attempt_id: String,
++    pub phase: crate::model_retry::ModelAttemptPhase,
++    #[serde(flatten)]
++    pub snapshot: crate::model_retry::ModelAttemptSnapshot,
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+ pub struct TurnCompleteEvent {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub model_attempt: Option<crate::model_retry::ModelAttemptSnapshot>,
+     /// Present only for validated tool-origin completion. The accepted call/result
+     /// remains in canonical history; this value is not an assistant message.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -4945,6 +4973,9 @@ pub struct Chunk {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+ pub struct TurnAbortedEvent {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub model_attempt: Option<crate::model_retry::ModelAttemptSnapshot>,
+     pub turn_id: Option<String>,
+     pub reason: TurnAbortReason,
+     /// Optional error describing why the turn was interrupted.
+@@ -7224,3 +7255,27 @@ mod realtime_previous_item_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod model_attempt_completion_join_tests {
++    use super::*;
++
++    #[test]
++    fn generation_join_is_exact_and_legacy_compaction_completions_remain_untagged() {
++        let legacy = serde_json::json!({"response_id":"compact-or-legacy","token_usage":null,"usage_metadata":null});
++        let event: RawResponseCompletedEvent = serde_json::from_value(legacy.clone()).unwrap();
++        assert!(event.model_attempt_id.is_none());
++        assert_eq!(serde_json::to_value(event).unwrap(), legacy);
++        let event = RawResponseCompletedEvent {
++            model_attempt_id: Some("native-generation-attempt".into()),
++            response_id: "provider-response".into(),
++            token_usage: None,
++            usage_metadata: None,
++        };
++        let encoded = serde_json::to_value(&event).unwrap();
++        assert_eq!(encoded["model_attempt_id"], "native-generation-attempt");
++        let decoded: RawResponseCompletedEvent = serde_json::from_value(encoded).unwrap();
++        assert_eq!(decoded.model_attempt_id, event.model_attempt_id);
++        assert_eq!(decoded.response_id, "provider-response");
++    }
++}
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index c6e954a0..b4a84717 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -267,7 +267,7 @@ impl<'a> From<&'a ExecCommandEndEvent> for ExecCommandEndTracePayload<'a> {
+ 
+ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTraceEvent<'_>> {
+     match event {
+-        EventMsg::ResponseFact(_) => None,
++        EventMsg::ResponseFact(_) | EventMsg::SdkModelAttempt(_) => None,
+         EventMsg::ExecCommandBegin(event) if event.source != ExecCommandSource::UserShell => {
+             Some(ToolRuntimeTraceEvent::Started {
+                 tool_call_id: &event.call_id,
+@@ -431,7 +431,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+ 
+ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static str> {
+     match event {
+-        EventMsg::ResponseFact(_) => None,
++        EventMsg::ResponseFact(_) | EventMsg::SdkModelAttempt(_) => None,
+         EventMsg::SessionConfigured(_) => Some("session_configured"),
+         EventMsg::TurnStarted(_) => Some("turn_started"),
+         EventMsg::TurnComplete(_) => Some("turn_complete"),
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 4412e421..7324b6d0 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -141,7 +141,8 @@ pub fn persisted_event_msg(
+ ) -> Option<Cow<'_, EventMsg>> {
+     match ev {
+         EventMsg::ItemCompleted(event) => persisted_item_completed_event(ev, event, history_mode),
+-        EventMsg::TokenCount(_)
++        EventMsg::SdkModelAttempt(_)
++        | EventMsg::TokenCount(_)
+         | EventMsg::ThreadGoalUpdated(_)
+         | EventMsg::ThreadRolledBack(_)
+         | EventMsg::TurnAborted(_)
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
+index a26d18d4..601db2b8 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
+@@ -376,6 +376,7 @@ impl LegacyRolloutCanonicalizer {
+             writer,
+             timestamp,
+             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id,
+                 last_agent_message: None,

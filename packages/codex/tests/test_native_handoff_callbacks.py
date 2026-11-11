@@ -1,0 +1,307 @@
+import asyncio
+
+import pytest
+from pydantic import ValidationError
+
+from agents import Agent, Allow, Deny, Handoff, ToolContext, function_tool
+from tests._asyncio import timeout
+from tests.native_fixtures import (
+    assistant_output,
+    function_call,
+    responses as responses,
+    tool_output,
+)
+from tests.test_native_agent_observation import provider
+
+
+def request_instructions(request):
+    return "\n".join(
+        part["text"]
+        for item in request["input"]
+        if item.get("role") == "developer" and item.get("type") == "message"
+        for part in item["content"]
+        if part.get("type") == "input_text"
+    )
+
+
+async def test_typed_handoff_keeps_callback_schema_context_and_acknowledgement(responses):
+    application = {"account": "captured"}
+    effects = []
+
+    @function_tool(name="route_issue", description="Issue routing")
+    def route(context: ToolContext[dict[str, str]], ticket: int) -> str:
+        assert context.context is application
+        effects.append(ticket)
+        return f"accepted-ticket-{ticket}"
+
+    target = Agent[dict[str, str], str](instructions="TARGET_ONLY resolve the ticket")
+    agent = Agent[dict[str, str], str](
+        instructions="SOURCE_ONLY route the ticket",
+        provider=provider(responses),
+        handoffs=[Handoff(target, route)],
+    )
+    responses.respond(function_call("route_issue", {"ticket": 7}, "route-7"))
+    responses.respond(assistant_output("resolved"))
+    result = await agent.run("Route ticket 7", context=application)
+    assert result.final_output == "resolved"
+    assert effects == [7]
+    assert len(responses.requests) == 2
+    native_tools = responses.requests[0].get("tools")
+    if native_tools is None:
+        native_tools = [
+            tool
+            for item in responses.requests[0]["input"]
+            if item.get("type") == "additional_tools"
+            for namespace in item["tools"]
+            for tool in namespace.get("tools", [namespace])
+        ]
+    spec = next(tool for tool in native_tools if tool["name"] == "route_issue")
+    assert spec["description"] == "Issue routing"
+    assert spec["parameters"]["properties"]["ticket"]["type"] == "integer"
+    assert "SOURCE_ONLY" in request_instructions(responses.requests[0])
+    assert "TARGET_ONLY" in request_instructions(responses.requests[1])
+    assert tool_output(responses.requests[1], "route-7") == "accepted-ticket-7"
+
+
+async def test_denied_callback_releases_same_turn_transfer_reservation(responses):
+    effects = []
+
+    def admit(context):
+        return (
+            Deny("Use the next ticket") if context.effective_arguments["ticket"] == 1 else Allow()
+        )
+
+    @function_tool(name="route_issue", before=admit)
+    def route(ticket: int) -> str:
+        effects.append(ticket)
+        return f"accepted-ticket-{ticket}"
+
+    agent = Agent(
+        instructions="SOURCE_ONLY route the ticket",
+        provider=provider(responses),
+        handoffs=[Handoff(Agent(instructions="TARGET_ONLY resolve the ticket"), route)],
+    )
+    responses.respond(function_call("route_issue", {"ticket": 1}, "denied"))
+    responses.respond(function_call("route_issue", {"ticket": 2}, "accepted"))
+    responses.respond(assistant_output("resolved"))
+    assert (await agent.run("Route the ticket")).final_output == "resolved"
+    assert effects == [2]
+    assert len(responses.requests) == 3
+    assert "SOURCE_ONLY" in request_instructions(responses.requests[1])
+    assert "TARGET_ONLY" in request_instructions(responses.requests[2])
+    assert tool_output(responses.requests[1], "denied") == "Use the next ticket"
+    assert tool_output(responses.requests[2], "accepted") == "accepted-ticket-2"
+
+
+async def test_conflicting_transfers_admit_only_one_callback_effect(responses):
+    effects = []
+
+    @function_tool
+    def route_a(ticket: int) -> str:
+        effects.append("A")
+        return f"A-{ticket}"
+
+    @function_tool
+    def route_b(ticket: int) -> str:
+        effects.append("B")
+        return f"B-{ticket}"
+
+    agent = Agent(
+        instructions="SOURCE_ONLY route once",
+        provider=provider(responses),
+        handoffs=[
+            Handoff(Agent(instructions="TARGET_A_ONLY resolve"), route_a),
+            Handoff(Agent(instructions="TARGET_B_ONLY resolve"), route_b),
+        ],
+    )
+    responses.respond(
+        function_call("route_a", {"ticket": 1}, "route-a"),
+        function_call("route_b", {"ticket": 2}, "route-b"),
+    )
+    responses.respond(assistant_output("resolved"))
+    assert (await agent.run("Choose one destination")).final_output == "resolved"
+    assert len(effects) == 1
+    assert len(responses.requests) == 2
+    assert f"TARGET_{effects[0]}_ONLY" in request_instructions(responses.requests[1])
+
+
+async def test_invalid_payload_never_enters_callback_or_target(responses):
+    effects = []
+
+    @function_tool
+    def route(ticket: int) -> str:
+        effects.append(ticket)
+        return "accepted"
+
+    agent = Agent(
+        instructions="SOURCE_ONLY route",
+        provider=provider(responses),
+        handoffs=[Handoff(Agent(instructions="TARGET_ONLY resolve"), route)],
+    )
+    responses.respond(function_call("route", {"ticket": "invalid"}, "invalid"))
+    async with timeout(30), agent.session() as session:
+        with pytest.raises(ValidationError):
+            await (await session.submit("Route")).get_result()
+    assert effects == []
+    assert len(responses.requests) == 1
+
+
+async def test_transfer_waits_for_callback_and_its_finally(responses):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cleaning = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    @function_tool
+    async def route(ticket: int) -> str:
+        entered.set()
+        try:
+            await release.wait()
+            return f"accepted-{ticket}"
+        finally:
+            cleaning.set()
+            await cleaned.wait()
+
+    target = Agent(instructions="TARGET_ONLY resolve")
+    agent = Agent(
+        instructions="SOURCE_ONLY route",
+        provider=provider(responses),
+        handoffs=[Handoff(target, route)],
+    )
+    responses.respond(function_call("route", {"ticket": 7}, "awaited"))
+    responses.respond(assistant_output("resolved"))
+    async with timeout(30), agent.session() as session:
+        turn = await session.submit("Route")
+        waiter = asyncio.create_task(turn.get_result())
+        try:
+            await entered.wait()
+            assert await session.get_active_agent() is agent
+            assert len(responses.requests) == 1
+            release.set()
+            await cleaning.wait()
+            assert not waiter.done()
+            assert await session.get_active_agent() is agent
+            assert len(responses.requests) == 1
+            cleaned.set()
+            assert (await waiter).final_output == "resolved"
+            assert await session.get_active_agent() is target
+            assert tool_output(responses.requests[1], "awaited") == "accepted-7"
+        finally:
+            release.set()
+            cleaned.set()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+
+async def test_cancellation_joins_callback_cleanup_without_transfer(responses):
+    entered = asyncio.Event()
+    cleaning = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    @function_tool
+    async def route() -> str:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+            return "unreachable"
+        finally:
+            cleaning.set()
+            await cleaned.wait()
+
+    agent = Agent(
+        instructions="SOURCE_ONLY route",
+        provider=provider(responses),
+        handoffs=[Handoff(Agent(instructions="TARGET_ONLY resolve"), route)],
+    )
+    responses.respond(function_call("route", {}, "cancelled"))
+    async with timeout(30), agent.session() as session:
+        turn = await session.submit("Route")
+        waiter = asyncio.create_task(turn.get_result())
+        stopping = None
+        try:
+            await entered.wait()
+            stopping = asyncio.create_task(turn.cancel())
+            await cleaning.wait()
+            assert not stopping.done()
+            assert not waiter.done()
+            cleaned.set()
+            await stopping
+            result = await asyncio.gather(waiter, return_exceptions=True)
+            assert isinstance(result[0], BaseException)
+            assert await session.get_active_agent() is agent
+            assert len(responses.requests) == 1
+        finally:
+            cleaned.set()
+            if stopping is None and not waiter.done():
+                stopping = asyncio.create_task(turn.cancel())
+            await asyncio.gather(*([stopping] if stopping else []), waiter, return_exceptions=True)
+
+
+@pytest.mark.parametrize("subset", [False, True])
+async def test_reordered_bindings_keep_callback_but_replacement_is_rejected(responses, subset):
+    effects = []
+
+    @function_tool
+    def helper() -> str:
+        return "ordinary"
+
+    @function_tool
+    def route() -> str:
+        effects.append("original")
+        return "original acknowledgement"
+
+    @function_tool(name="route")
+    def replacement() -> str:
+        effects.append("replacement")
+        return "wrong"
+
+    target = Agent(instructions="TARGET_ONLY resolve")
+    agent = Agent(
+        instructions="SOURCE_ONLY route",
+        tools=[helper],
+        provider=provider(responses),
+        handoffs=[Handoff(target, route)],
+    )
+    responses.respond(function_call("route", {}, "reordered"))
+    responses.respond(assistant_output("resolved"))
+    async with timeout(30), agent.session() as session:
+        with pytest.raises(ValueError, match="captured handoff callback"):
+            await session.update(tools=[replacement, helper])
+        assert not effects and not responses.requests
+        await session.update(tools=[route, helper])
+        if subset:
+            await session.update(tools=[route])
+        assert (await (await session.submit("Route")).get_result()).final_output == "resolved"
+        assert await session.get_active_agent() is target
+    assert effects == ["original"]
+    assert tool_output(responses.requests[1], "reordered") == "original acknowledgement"
+
+
+async def test_another_namespace_with_the_same_name_does_not_transfer(responses):
+    effects = []
+
+    @function_tool(name="route", namespace="other")
+    def ordinary() -> str:
+        effects.append("other")
+        return "ordinary"
+
+    @function_tool(name="route")
+    def transfer() -> str:
+        effects.append("handoff")
+        return "transferred"
+
+    agent = Agent(
+        instructions="SOURCE_ONLY route",
+        tools=[ordinary],
+        provider=provider(responses),
+        handoffs=[Handoff(Agent(instructions="TARGET_ONLY resolve"), transfer)],
+    )
+    other = function_call("route", {}, "ordinary")
+    other["item"]["namespace"] = "other"
+    responses.respond(other)
+    responses.respond(function_call("route", {}, "transfer"))
+    responses.respond(assistant_output("resolved"))
+    async with timeout(30):
+        assert (await agent.run("Route")).final_output == "resolved"
+    assert effects == ["other", "handoff"]
+    assert "SOURCE_ONLY" in request_instructions(responses.requests[1])
+    assert "TARGET_ONLY" in request_instructions(responses.requests[2])

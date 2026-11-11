@@ -243,3 +243,82 @@ async def test_options_reject_invalid_query_without_retaining_encoder_payload(ad
         if "/_agents_codex/" in trace.tb_frame.f_code.co_filename:
             assert "synthetic-private-prompt" not in repr(trace.tb_frame.f_locals)
         trace = trace.tb_next
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+async def test_native_attempt_retry_directive_overrides_factory_without_mutating_borrowed_client(
+    adapter,
+):
+    from dataclasses import replace
+
+    from openai import InternalServerError
+
+    seen = []
+    captured = []
+
+    async def handle(req):
+        seen.append(await req.json())
+        return web.json_response(
+            {"error": {"message": "retryable", "type": "server_error"}}, status=500
+        )
+
+    def options(value):
+        captured.append(
+            (
+                value.attempt_id,
+                value.attempt,
+                value.retry_configured,
+                value.disable_provider_retries,
+            )
+        )
+        return {"max_retries": 2}
+
+    app = web.Application()
+    app.router.add_post("/{tail:.*}", handle)
+    async with TestServer(app) as server:
+        async with AsyncOpenAI(
+            api_key="fixture", base_url=str(server.make_url("/v1/")), max_retries=1
+        ) as client:
+            model = adapter(client, request_options=options)
+            current = replace(
+                request(),
+                attempt_id="attempt-2",
+                attempt=2,
+                retry_configured=True,
+                disable_provider_retries=True,
+            )
+            with pytest.raises(InternalServerError):
+                await model.complete(current)
+            assert len(seen) == 1
+            assert captured == [("attempt-2", 2, True, True)]
+            assert client.max_retries == 1
+            assert (
+                not {"attempt_id", "attempt", "retry_configured", "disable_provider_retries"}
+                & seen[0].keys()
+            )
+
+
+def test_model_request_measurement_is_exact_attempt_local_and_preserves_positional_prefix():
+    from dataclasses import replace
+
+    measured = []
+    current = replace(
+        request(),
+        attempt_id="attempt-1",
+        _report_usage=lambda value: measured.append(value) or True,
+    )
+    assert current.report_usage({"input_tokens": 3, "output_tokens": 2})
+    assert measured == [
+        {
+            "input_tokens": 3,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 5,
+        }
+    ]
+    assert not request().report_usage({"input_tokens": 1})
+    with pytest.raises(ValueError):
+        current.report_usage({"total_tokens": True})
+    assert len(measured) == 1

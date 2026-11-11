@@ -392,13 +392,40 @@ pub(crate) async fn publish_with_files(
     text: String,
     files: Vec<InstructionFile>,
 ) -> Result<()> {
-    if crate::agent_profiles::update_active(thread, None, Some((&text, files.clone())), None)
-        .await?
+    publish_with_settings(thread, text, files, None).await
+}
+
+pub(crate) async fn publish_explicit_with_files(
+    thread: &CodexThread,
+    text: String,
+    files: Vec<InstructionFile>,
+) -> Result<()> {
+    let settings = crate::hosted_prompt::explicit_inputs(thread, true, false).await?;
+    publish_with_settings(thread, text, files, settings).await
+}
+
+async fn publish_with_settings(
+    thread: &CodexThread,
+    text: String,
+    files: Vec<InstructionFile>,
+    settings: Option<codex_protocol::protocol::ThreadSettingsOverrides>,
+) -> Result<()> {
+    if crate::agent_profiles::update_active(
+        thread,
+        settings.as_ref(),
+        Some((&text, files.clone())),
+        None,
+    )
+    .await?
     {
         return Ok(());
     }
     let (envelope, _) = prepare(thread, &text, files)?;
-    publish_item(thread, envelope, None).await
+    publish_item(thread, envelope, None).await?;
+    if let Some(settings) = settings {
+        thread.update_thread_settings(settings).await?;
+    }
+    Ok(())
 }
 
 /// Prepare a fresh accepted instruction envelope without publishing or changing authority.
@@ -513,6 +540,58 @@ async fn confirm_publication(
     Ok(())
 }
 
+pub(crate) fn captured_prompt_text(
+    step: Option<&codex_extension_api::ExtensionData>,
+) -> Result<String> {
+    let seed = step
+        .and_then(|step| step.get::<SdkTurnReceiptSeed>())
+        .context("Missing captured hosted prompt instruction owner")?;
+    let application = seed
+        .application
+        .as_ref()
+        .context("Missing accepted hosted prompt instructions")?;
+    Ok(decode(&application.rendered)?.1.to_owned())
+}
+
+/// Remove only SDK-owned instruction parts from the detached provider projection.
+/// Accepted canonical envelopes and unrelated parts stay with their original owners.
+pub(crate) fn remove_prompt_fragments(items: &mut Vec<ResponseItem>) -> Result<()> {
+    let mut invalid_metadata = false;
+    items.retain_mut(|item| {
+        let ResponseItem::Message {
+            content,
+            internal_chat_message_metadata_passthrough: Some(metadata),
+            ..
+        } = item
+        else {
+            return true;
+        };
+        let Some(kinds) = &mut metadata.content_item_kinds else {
+            return true;
+        };
+        if !kinds
+            .iter()
+            .any(|kind| kind.0 == ACCEPTED || kind.0 == PROJECTED)
+        {
+            return true;
+        }
+        if kinds.len() != content.len() {
+            invalid_metadata = true;
+            return true;
+        }
+        let mut index = 0;
+        content.retain(|_| {
+            let keep = !matches!(kinds[index].0.as_str(), ACCEPTED | PROJECTED);
+            index += 1;
+            keep
+        });
+        kinds.retain(|kind| !matches!(kind.0.as_str(), ACCEPTED | PROJECTED));
+        !content.is_empty()
+    });
+    ensure!(!invalid_metadata, "Invalid SDK instruction part metadata");
+    Ok(())
+}
+
 pub struct Contributor;
 
 pub(crate) fn retain_child_files(
@@ -546,6 +625,12 @@ impl ContextContributor for Contributor {
         Box::pin(async move {
             // Initial publication must become durable before this cache can
             // contribute. Otherwise Core's injection preparation emits it twice.
+            let omitted_prompt_instructions = input
+                .request_controls
+                .hosted_prompt
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_some_and(|prompt| prompt.omit_instructions);
             let captured_realtime_instructions = input
                 .step_store
                 .get::<codex_extension_api::AgentProfileInstructions>()
@@ -582,6 +667,7 @@ impl ContextContributor for Contributor {
                     .is_some(),
                 application: accepted
                     .as_ref()
+                    .filter(|_| !omitted_prompt_instructions)
                     .map(|accepted| SdkApplicationInstructions {
                         revision: Some(accepted.id.to_string()),
                         rendered: rendered(accepted),
@@ -593,7 +679,7 @@ impl ContextContributor for Contributor {
                             .collect(),
                     })
                     .or_else(|| {
-                        (!captured_realtime_instructions)
+                        (!captured_realtime_instructions && !omitted_prompt_instructions)
                             .then(|| {
                                 input
                                     .thread_store
@@ -604,7 +690,7 @@ impl ContextContributor for Contributor {
                             .flatten()
                     }),
             });
-            let Some(accepted) = accepted else {
+            let Some(accepted) = accepted.filter(|_| !omitted_prompt_instructions) else {
                 return Vec::new();
             };
             let exact = rendered(&accepted);

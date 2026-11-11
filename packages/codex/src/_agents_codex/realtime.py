@@ -752,6 +752,7 @@ class _Delegation:
     response_id: str | None = None
     task: asyncio.Task[None] | None = None
     retired: bool = False
+    sdk_ownership_id: str | None = None
 
 
 @dataclass
@@ -2171,8 +2172,14 @@ class RealtimeSession:
         *,
         playback: RealtimePlaybackPosition | None = None,
         feedback: str | None = None,
+        cancel_tools: bool = True,
     ) -> None:
         """Interrupt one response, or current speech and backend work when omitted.
+
+        cancel_tools=False: speech interruption with already admitted SDK
+        tool work retained. Unstarted background requests: ordinary retirement.
+        Default interruption, accepted interrupting user
+        speech, and close: ordinary tool cancellation.
 
         Supply actual played audio to truncate that exact conversation item.
         The application must discard unplayed local audio after receiving
@@ -2185,6 +2192,8 @@ class RealtimeSession:
         """
         self._session._check_callback_operation("interrupt its own Realtime session")
         self._check_live()
+        if not isinstance(cancel_tools, bool):
+            raise TypeError("cancel_tools must be bool")
         if response_id is not None and (not isinstance(response_id, str) or not response_id):
             raise ValueError("response_id must be a nonempty string or None")
         if feedback is not None and (
@@ -2197,24 +2206,26 @@ class RealtimeSession:
             if response_id is not None and response_id != playback.response_id:
                 raise ValueError("Playback position must match the explicit response_id")
             self.report_playback(playback)
-        owned = tuple(
-            value
-            for value in self._delegations.values()
+        owned_entries = tuple(
+            (key, value)
+            for key, value in self._delegations.items()
             if response_id is None or value.response_id == response_id
         )
+        owned = tuple(value for _, value in owned_entries)
         functions = tuple(
             value
             for value in self._functions.values()
             if response_id is None or value.response_id == response_id
         )
         self._retire_pending_functions(response_id)
-        for delegation in owned:
-            delegation.retired = True
-        for function in functions:
-            function.retired = True
-            function.stop_admission.set()
-            if function.task is not None:
-                function.task.cancel()
+        if cancel_tools:
+            for delegation in owned:
+                delegation.retired = True
+            for function in functions:
+                function.retired = True
+                function.stop_admission.set()
+                if function.task is not None:
+                    function.task.cancel()
         guardrail_tasks = tuple(
             item.task
             for item in self._guardrail_items.values()
@@ -2228,7 +2239,7 @@ class RealtimeSession:
         )
         cleanup = asyncio.create_task(
             self._cancel_work(
-                owned,
+                owned if cancel_tools else (),
                 (),
                 response_id=response_id,
                 exclude_guardrail=asyncio.current_task(),
@@ -2243,6 +2254,18 @@ class RealtimeSession:
                 response_id=response_id,
                 playback=self._playback_payload(playback),
                 feedback=feedback,
+                **(
+                    {
+                        "cancel_tools": False,
+                        "owned_handoffs": [
+                            [key, value.response_id, value.sdk_ownership_id]
+                            for key, value in owned_entries
+                            if not value.retired and value.sdk_ownership_id is not None
+                        ],
+                    }
+                    if not cancel_tools
+                    else {}
+                ),
             )
             await self._apply_interrupt_receipt(
                 receipt,
@@ -2251,6 +2274,8 @@ class RealtimeSession:
                 owned=owned,
                 functions=functions,
                 cleanup=cleanup,
+                cancel_tools=cancel_tools,
+                owned_entries=owned_entries,
             )
         except BaseException as error:
             # Local retirement precedes native acknowledgement. An uncertain
@@ -2268,12 +2293,15 @@ class RealtimeSession:
         owned: tuple[_Delegation, ...] = (),
         functions: tuple[_FunctionCall, ...] = (),
         cleanup: asyncio.Task[None] | None = None,
+        cancel_tools: bool = True,
+        owned_entries: tuple[tuple[str, _Delegation], ...] = (),
     ) -> None:
         if not isinstance(receipt, dict):
             raise RuntimeError("Realtime interrupt returned no completion receipt")
         retired = receipt.get("retired_response_ids")
         cancelled = receipt.get("cancelled_response_id")
         joined_roots = receipt.get("joined_root_turn_ids", [])
+        preserved_ids = receipt.get("preserved_call_ids", [])
         if (
             not isinstance(retired, list)
             or any(not isinstance(value, str) or not value for value in retired)
@@ -2281,8 +2309,30 @@ class RealtimeSession:
             or not isinstance(joined_roots, list)
             or any(not isinstance(value, str) or not value for value in joined_roots)
             or len(set(joined_roots)) != len(joined_roots)
+            or not isinstance(preserved_ids, list)
+            or any(not isinstance(value, str) or not value for value in preserved_ids)
+            or len(set(preserved_ids)) != len(preserved_ids)
+            or (cancel_tools and preserved_ids)
         ):
             raise RuntimeError("Realtime interrupt returned an invalid completion receipt")
+        preserved = set(preserved_ids)
+        preserved_delegations = tuple(
+            value for call_id, value in owned_entries if call_id in preserved
+        )
+
+        def keep_delegation(value: _Delegation) -> bool:
+            return any(value is kept for kept in preserved_delegations)
+
+        preserved_functions = tuple(
+            value for value in functions if any(call_id in preserved for call_id in value.names)
+        )
+
+        def keep_function(function: _FunctionCall) -> bool:
+            return any(function is kept for kept in preserved_functions)
+
+        if not cancel_tools:
+            owned = tuple(value for value in owned if not keep_delegation(value))
+            functions = tuple(value for value in functions if not keep_function(value))
         for source in retired:
             self._retire_response_output(source)
             self._discard_response_audio(source)
@@ -2292,7 +2342,7 @@ class RealtimeSession:
         for function in functions:
             function.retired_by_core.set()
         for function in self._functions.values():
-            if function.response_id in retired:
+            if function.response_id in retired and not keep_function(function):
                 function.retired_by_core.set()
         # Work can arrive while the native command is pending. Retire only
         # sources named by its completion receipt; a newer response survives.
@@ -2303,12 +2353,15 @@ class RealtimeSession:
                     tuple(
                         value
                         for value in self._delegations.values()
-                        if value.response_id == source and all(value is not old for old in owned)
+                        if value.response_id == source
+                        and not keep_delegation(value)
+                        and all(value is not old for old in owned)
                     ),
                     tuple(
                         value
                         for value in self._functions.values()
                         if value.response_id == source
+                        and not keep_function(value)
                         and all(value is not old for old in functions)
                     ),
                     response_id=source,
@@ -2773,6 +2826,14 @@ class RealtimeSession:
 
     def _finish_function_batch(self, value: dict[str, Any]) -> None:
         response_id = value.get("response_id")
+        source_work = next(
+            (
+                batch
+                for batch in self._functions.values()
+                if batch.response_id == response_id and not batch.retired
+            ),
+            None,
+        )
         for owned in {id(batch): batch for batch in self._functions.values()}.values():
             if owned.response_id == response_id and not owned.completed.done():
                 owned.completed.set_result(None)
@@ -2787,7 +2848,7 @@ class RealtimeSession:
 
         async def apply() -> None:
             async with self._agent_update_lock:
-                await self._apply_profile(response_id, target)
+                await self._apply_profile(response_id, target, source_work=source_work)
 
         task = self._context.copy().run(asyncio.create_task, apply())
         self._profile_updates.add(task)
@@ -2813,7 +2874,10 @@ class RealtimeSession:
         *,
         delegation_id: str | None = None,
         unpublished_profiles: tuple[str, ...] | None = None,
+        source_work: _FunctionCall | None = None,
     ) -> None:
+        if source_work is not None and source_work.response_id != response_id:
+            raise ValueError("Realtime work must match its response")
         source_profile = None
         source_snapshot = None
         has_new_guardrails = False
@@ -2873,7 +2937,11 @@ class RealtimeSession:
                     self._forget_voice_profiles(unpublished_profiles)
             raise
         async with self._configuration_lock:
-            if not self._live or (response_id is not None and response_id in self._guardrail_trips):
+            if not self._live or (
+                response_id is not None
+                and response_id in self._guardrail_trips
+                and (source_work is None or source_work.retired)
+            ):
                 return
             # Settings can settle while the Agent's configuration callbacks run.
             update.update(self._prompt_settings)
@@ -3240,6 +3308,7 @@ class RealtimeSession:
             owned = _Delegation(
                 NativeSessionVoiceWorkflow(self._session, tools=self._selected_tools),
                 value.get("response_id"),
+                sdk_ownership_id=value.get("sdk_ownership_id"),
             )
             self._delegations[handoff_id] = owned
             self._emit(RealtimeDelegation(handoff_id, "started"))

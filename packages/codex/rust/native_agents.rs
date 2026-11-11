@@ -1728,6 +1728,7 @@ mod steering_capture_tests {
             thread_id: &state.id.to_string(),
             client_metadata: &mut metadata,
             model: "fixture",
+            model_omitted: false,
         }));
         assert_eq!(tentative.wait().await.unwrap().0, "original answer");
         state.close().await.unwrap();

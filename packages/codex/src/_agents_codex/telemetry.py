@@ -1236,6 +1236,8 @@ class _ProcessorRoute:
         events: Sequence[TraceLifecycleEvent],
         loss_epoch: int = 0,
         credential_routes: Mapping[str, Any] | None = None,
+        *,
+        processor_id: str,
     ) -> _ProcessorBatch:
         from threading import Thread
 
@@ -1275,7 +1277,7 @@ class _ProcessorRoute:
             tuple(_ProcessorDelivery(event) for event in events), loss_epoch=loss_epoch
         )
         batch.credential_delivery = _TraceDeliveryOwner(
-            events, credential_routes or {}, batch.stopped
+            events, credential_routes or {}, batch.stopped, processor_id
         )
         work = self._invoke_batch(batch)
         try:
@@ -1400,7 +1402,10 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                             continue
                         try:
                             delivery = processor.submit(
-                                events, epoch, batch.get("credential_routes")
+                                events,
+                                epoch,
+                                batch.get("credential_routes"),
+                                processor_id=identifier,
                             )
                         except Exception:
                             continue

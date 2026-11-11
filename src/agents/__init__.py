@@ -63,6 +63,7 @@ if TYPE_CHECKING:
         InputGuardrail as InputGuardrail,
         OutputGuardrail as OutputGuardrail,
     )
+    from .handoffs import Handoff as Handoff
     from .input import (
         AssistantMessage as AssistantMessage,
         ImageDetail as ImageDetail,
@@ -115,6 +116,8 @@ if TYPE_CHECKING:
         StdioMCP as StdioMCP,
     )
     from .model_context import (
+        HostedPromptReference as HostedPromptReference,
+        HostedPromptSource as HostedPromptSource,
         ModelContextSnapshot as ModelContextSnapshot,
         ModelRequestContext as ModelRequestContext,
     )
@@ -127,6 +130,7 @@ if TYPE_CHECKING:
         ModelRequestOptions as ModelRequestOptions,
         ModelRequestOptionsFactory as ModelRequestOptionsFactory,
         ModelResponse as ModelResponse,
+        ModelRetryAdviceRequest as ModelRetryAdviceRequest,
         NativeModel as NativeModel,
         ResponsesModel as ResponsesModel,
     )
@@ -162,6 +166,16 @@ if TYPE_CHECKING:
         UncertainCall as UncertainCall,
     )
     from .repl import run_demo_loop as run_demo_loop
+    from .retry import (
+        ModelRetrySettings as ModelRetrySettings,
+        NormalizedError as NormalizedError,
+        RetryAdvice as RetryAdvice,
+        RetryBackoffSettings as RetryBackoffSettings,
+        RetryDecision as RetryDecision,
+        RetryPolicy as RetryPolicy,
+        RetryPolicyContext as RetryPolicyContext,
+        retry_policies as retry_policies,
+    )
     from .schema import (
         NativeOutput as NativeOutput,
         OutputSpec as OutputSpec,
@@ -231,6 +245,7 @@ _MODULES = {
     "AnyLLMModel": ".models",
     "ModelProvider": ".models",
     "ModelRequest": ".models",
+    "ModelRetryAdviceRequest": ".models",
     "ModelRequestOptions": ".models",
     "ModelRequestOptionsFactory": ".models",
     "ModelResponse": ".models",
@@ -251,6 +266,8 @@ _MODULES = {
     "ContinueTurn": ".completion",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
+    "HostedPromptReference": ".model_context",
+    "HostedPromptSource": ".model_context",
     "RunBudget": ".usage",
     "RunUsage": ".usage",
     "PreparedRequest": ".prepared_request",
@@ -292,9 +309,18 @@ _MODULES = {
     "VerificationProof": ".manual",
     "Interaction": ".manual",
     "Agent": ".agent",
+    "Handoff": ".handoffs",
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",
+    "ModelRetrySettings": ".retry",
+    "NormalizedError": ".retry",
+    "RetryAdvice": ".retry",
+    "RetryBackoffSettings": ".retry",
+    "RetryDecision": ".retry",
+    "RetryPolicy": ".retry",
+    "RetryPolicyContext": ".retry",
+    "retry_policies": ".retry",
     "NativeProvider": ".agent",
     "SignInWithChatGPT": ".agent",
     "SignInWithChatGPTCredentials": ".agent",

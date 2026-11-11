@@ -9,15 +9,27 @@ from dataclasses import dataclass
 from threading import Event, Lock
 from typing import Any
 
+_UNAVAILABLE_ROUTE = object()
+
 
 class _TraceDeliveryOwner:
     def __init__(
-        self, events: Sequence[Mapping[str, Any]], routes: Mapping[str, Any], stopped: Event
+        self,
+        events: Sequence[Mapping[str, Any]],
+        routes: Mapping[str, Any],
+        stopped: Event,
+        processor_id: str,
     ):
         self._stopped = stopped
         self._lock = Lock()
         self._routes = {
-            id(event): (event, event["sequence"], routes[str(event["sequence"])])
+            id(event): (
+                event,
+                event["sequence"],
+                routes[str(event["sequence"])]
+                if processor_id in routes[str(event["sequence"])]["processor_ids"]
+                else None,
+            )
             for event in events
             if event.get("credential_required") is True and str(event["sequence"]) in routes
         }
@@ -36,7 +48,7 @@ class _TraceDeliveryOwner:
                 and entry[1] == event["sequence"]
             ):
                 return entry[2]
-        return None
+        return _UNAVAILABLE_ROUTE
 
 
 @dataclass
@@ -63,14 +75,15 @@ def _trace_delivery_context(
 
 
 def _trace_credential_route(event: Mapping[str, Any]) -> Any:
-    invocation = route = None
+    invocation = None
+    route = _UNAVAILABLE_ROUTE
     try:
         if event.get("credential_required") is not True:
             return None
         invocation = _delivery.get()
         if invocation and invocation.active and invocation.owner and id(event) in invocation.events:
             route = invocation.owner.route(event)
-        if route is not None:
+        if route is not _UNAVAILABLE_ROUTE:
             return route
     finally:
         # A rejected delivery must not retain private headers in its traceback.

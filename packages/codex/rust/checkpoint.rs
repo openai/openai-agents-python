@@ -1113,6 +1113,7 @@ async fn import(
         });
         history.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
             TurnAbortedEvent {
+                model_attempt: None,
                 turn_id,
                 reason: TurnAbortReason::Interrupted,
                 error: None,

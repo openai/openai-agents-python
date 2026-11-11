@@ -623,7 +623,31 @@
     {
       "path": "0159-sdk-residual-text-guards.patch",
       "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
+    },
+    {
+      "path": "sdk-trace-credential-destination.patch",
+      "sha256": "68668e758695b7f95164852c62a310cf0fd9bc78d310145ebe81b17fa8aa1eb9"
+    },
+    {
+      "path": "sdk-native-hosted-prompts-request-ownership.patch",
+      "sha256": "7f1eeaa83bbdf79c1b152f85af4dbee7af8f942de7ca62a39d92407f1d547a0f"
+    },
+    {
+      "path": "sdk-model-response-omission-admission.patch",
+      "sha256": "fe7d2654319d946066a9730661cf267ed7b28d3d69c2e910049a8523421ddd74"
+    },
+    {
+      "path": "sdk-native-model-attempt-retry.patch",
+      "sha256": "feb1176b06c5897daa8d195ea81e75cd71b3e19501e30d8ca1bfeb8fe44cdf92"
+    },
+    {
+      "path": "sdk-realtime-incarnation-ownership.patch",
+      "sha256": "ee1896bb24052d7c1c02d73b89fe1ab245222ed82f63f5c7782fb95d75056ba4"
+    },
+    {
+      "path": "sdk-preserved-speech-tool-continuation.patch",
+      "sha256": "3cdb9146f7f0f4bc3985dedfc9eb435a350863b38cf75659b6bfb29fe2a3f8bd"
     }
   ],
-  "result_tree": "3fc07408314c0fc6d85c225c96dc1d39846c1828"
+  "result_tree": "fe87571c47cac96653fcb3ff4092ffe2e0dd3085"
 }

@@ -8,7 +8,7 @@ import json
 import math
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, TypeAlias, cast
 from uuid import uuid4
 
@@ -28,6 +28,60 @@ class ModelRequest:
     context: Any = field(repr=False)
     session_id: str
     turn_id: str
+    attempt_id: str | None = field(default=None, kw_only=True)
+    attempt: int | None = field(default=None, kw_only=True)
+    retry_configured: bool = field(default=False, kw_only=True)
+    disable_provider_retries: bool = field(default=False, kw_only=True)
+    _report_usage: Callable[[dict[str, int]], bool] | None = field(
+        default=None, repr=False, compare=False, kw_only=True
+    )
+
+    def report_usage(self, usage: Mapping[str, int]) -> bool:
+        """Report measured cumulative tokens for this exact native attempt.
+
+        Reporting replaces this attempt's measurement; it never increments request
+        counts. Cleanup can report until the admitted callback physically exits.
+        False means this request has no live native measurement owner.
+        """
+        captured = _capture_model_usage(usage)
+        assert captured is not None
+        return self._report_usage(captured) if self._report_usage is not None else False
+
+
+def _capture_model_usage(usage: Mapping[str, int] | None) -> dict[str, int] | None:
+    if usage is None:
+        return None
+    fields = (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+    if (
+        not isinstance(usage, Mapping)
+        or usage.keys() - set(fields)
+        or any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in usage.values())
+    ):
+        raise ValueError("ModelResponse usage requires nonnegative native token counters")
+    captured = {key: usage.get(key, 0) for key in fields}
+    if "total_tokens" not in usage:
+        captured["total_tokens"] = captured["input_tokens"] + captured["output_tokens"]
+        if captured["total_tokens"] > 2**63 - 1:
+            raise ValueError("ModelResponse total token count exceeds native capacity")
+    return captured
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRetryAdviceRequest:
+    """One failed producer request, with logical policy and physical request indexes."""
+
+    request: ModelRequest = field(repr=False)
+    error: BaseException = field(repr=False)
+    attempt_id: str
+    attempt: int
+    request_attempt: int
 
 
 class ModelRequestOptions(TypedDict, total=False):
@@ -115,12 +169,7 @@ async def _request_options_for(
         if callable(source):
             from .session import _call_callback
 
-            observed = ModelRequest(
-                body=deepcopy(request.body),
-                context=request.context,
-                session_id=request.session_id,
-                turn_id=request.turn_id,
-            )
+            observed = replace(request, body=deepcopy(request.body))
             value = await _call_callback(source, admit, observed)
         if task is not None and cancellation_requested(task):
             raise asyncio.CancelledError
@@ -168,24 +217,7 @@ class ModelResponse:
             if not isinstance(self.response_id, str) or not self.response_id.strip():
                 raise ValueError("ModelResponse needs a nonempty response_id")
             usage = None
-            if self.usage is not None:
-                fields = (
-                    "input_tokens",
-                    "cached_input_tokens",
-                    "cache_write_input_tokens",
-                    "output_tokens",
-                    "reasoning_output_tokens",
-                    "total_tokens",
-                )
-                if self.usage.keys() - set(fields) or any(
-                    type(value) is not int or value < 0 for value in self.usage.values()
-                ):
-                    raise ValueError(
-                        "ModelResponse usage requires nonnegative native token counters"
-                    )
-                usage = {key: self.usage.get(key, 0) for key in fields}
-                if "total_tokens" not in self.usage:
-                    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+            usage = _capture_model_usage(self.usage)
             try:
                 rendered = json.dumps(
                     {"response_id": self.response_id, "output": self.output, "usage": usage},
@@ -623,6 +655,8 @@ class ChatCompletionsModel:
                     else counter
                     for key, counter in usage.items()
                 }
+            if usage is not None:
+                request.report_usage(usage)
             return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
@@ -669,6 +703,8 @@ class ChatCompletionsModel:
         try:
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
+            if request.disable_provider_retries:
+                selected["max_retries"] = 0
             if "max_retries" in selected:
                 if not callable(getattr(client, "with_options", None)):
                     raise TypeError("Per-request retries require client.with_options")
@@ -794,6 +830,8 @@ class ResponsesModel:
         try:
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
+            if request.disable_provider_retries:
+                selected["max_retries"] = 0
             if "max_retries" in selected:
                 if not callable(getattr(client, "with_options", None)):
                     raise TypeError("Per-request retries require client.with_options")
@@ -802,7 +840,8 @@ class ResponsesModel:
             if not inspect.iscoroutinefunction(inspect.unwrap(create)):
                 raise TypeError("ResponsesModel requires an asynchronous client")
             body = dict(request.body)
-            body["model"] = self.model or body["model"]
+            if self.model:
+                body["model"] = self.model
             if self.prompt_cache_key is not None:
                 body["prompt_cache_key"] = self.prompt_cache_key
             body.pop("stream", None)
@@ -852,6 +891,8 @@ class ResponsesModel:
                     else counter
                     for key, counter in usage.items()
                 }
+            if usage is not None:
+                request.report_usage(usage)
             return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
 
         finally:

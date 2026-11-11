@@ -148,6 +148,8 @@ def native_trace_child_env() -> dict[str, str]:
         "native_deadline_case",
         "native_outcome_privacy_case",
         "native_auth_case",
+        "native_auth_destination_case",
+        "native_auth_replacement_case",
         pytest.param("native_batch_case", marks=pytest.mark.serial),
     ],
 )
@@ -780,10 +782,18 @@ async def test_original_snapshot_auth_groups_and_retired_forwarding():
             {**completed_event(), "credential_required": True, "sequence": 3, "span_id": "c" * 16}
         )
         routes = {
-            "2": {"identity": "native-A", "headers": {"authorization": "Bearer scope-A"}},
-            "3": {"identity": "native-B", "headers": {"authorization": "Bearer scope-B"}},
+            "2": {
+                "identity": "native-A",
+                "headers": {"authorization": "Bearer scope-A"},
+                "processor_ids": ["host"],
+            },
+            "3": {
+                "identity": "native-B",
+                "headers": {"authorization": "Bearer scope-B"},
+                "processor_ids": ["host"],
+            },
         }
-        owner = _TraceDeliveryOwner((a, b), routes, Event())
+        owner = _TraceDeliveryOwner((a, b), routes, Event(), "host")
         with _trace_delivery_context(owner, (a, b)):
             with pytest.raises(RuntimeError):
                 await exporter.on_trace_event({**a, "name": "copied foreign root"})
@@ -791,7 +801,7 @@ async def test_original_snapshot_auth_groups_and_retired_forwarding():
         owner.retire()
         with pytest.raises(RuntimeError):
             await exporter.on_trace_event(a)
-        owner = _TraceDeliveryOwner((a,), routes, Event())
+        owner = _TraceDeliveryOwner((a,), routes, Event(), "host")
         with _trace_delivery_context(owner, (a,)):
             await exporter.on_trace_event(a)
         owner.retire()
@@ -823,6 +833,39 @@ async def test_original_snapshot_auth_groups_and_retired_forwarding():
                 "native-B",
             )
         )
+
+
+async def test_unselected_processor_fallback_requires_original_active_snapshot():
+    from threading import Event
+    from types import MappingProxyType
+
+    from _agents_codex._trace_delivery import _trace_delivery_context, _TraceDeliveryOwner
+
+    event = MappingProxyType({**completed_event(), "credential_required": True, "sequence": 2})
+    routes = {
+        "2": {
+            "identity": "original-scope",
+            "headers": {"authorization": "Bearer original-secret"},
+            "processor_ids": ["original"],
+        }
+    }
+    owner = _TraceDeliveryOwner((event,), routes, Event(), "later")
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="later-fallback", endpoint=endpoint)
+        with _trace_delivery_context(owner, (event,)):
+            with pytest.raises(RuntimeError):
+                await exporter.on_trace_event(dict(event))
+            await exporter.on_trace_event(event)
+        with pytest.raises(RuntimeError):
+            await exporter.on_trace_event(event)
+        owner.retire()
+        with _trace_delivery_context(owner, (event,)), pytest.raises(RuntimeError):
+            await exporter.on_trace_event(event)
+        assert len(received) == 1
+        assert {key.lower(): value for key, value in received[0]["headers"].items()}[
+            "authorization"
+        ] == "Bearer later-fallback"
+        assert "original-secret" not in json.dumps(received)
 
 
 async def native_auth_case():
@@ -924,3 +967,67 @@ async def native_auth_case():
             await exporter.on_trace_event(scoped)
         assert len(received) == count
         await telemetry.shutdown()
+
+
+async def native_auth_destination_case():
+    with collector() as (otlp_endpoint, otlp_received), collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="host-fallback", endpoint=endpoint)
+        await telemetry.configure(
+            traces=telemetry.OtlpHttp(endpoint=otlp_endpoint, protocol="json"),
+            processors=[exporter],
+        )
+        try:
+            credentials = telemetry.TraceExportCredentials(
+                headers={"Authorization": "Bearer selected-otlp"}
+            )
+            with telemetry.trace(
+                "selected-destination", options={"export_credentials": credentials}
+            ):
+                pass
+            assert (await telemetry.force_flush()).status == "success"
+            assert any(
+                {key.lower(): value for key, value in item["headers"].items()}.get("authorization")
+                == "Bearer selected-otlp"
+                for item in otlp_received
+            )
+            assert received
+            assert {
+                {key.lower(): value for key, value in item["headers"].items()}["authorization"]
+                for item in received
+            } == {"Bearer host-fallback"}
+        finally:
+            await telemetry.shutdown()
+
+
+async def native_auth_replacement_case():
+    with collector() as (old_endpoint, old_received), collector() as (endpoint, received):
+        original = telemetry.OpenAITraceExporter(api_key="original-fallback", endpoint=old_endpoint)
+        replacement = telemetry.OpenAITraceExporter(
+            api_key="replacement-fallback", endpoint=endpoint
+        )
+        await telemetry.configure(processors=[original])
+        try:
+            credentials = telemetry.TraceExportCredentials(
+                headers={"Authorization": "Bearer original-scope"}
+            )
+            with telemetry.trace(
+                "original-owner", options={"export_credentials": credentials}
+            ) as root:
+                pass
+            assert (await telemetry.force_flush()).status == "success"
+            telemetry.set_trace_processors([replacement])
+            with telemetry.span("inherited-after-replacement", options={"parent": root.context}):
+                pass
+            assert (await telemetry.force_flush()).status == "success"
+            assert old_received
+            assert {
+                {key.lower(): value for key, value in item["headers"].items()}["authorization"]
+                for item in old_received
+            } == {"Bearer original-scope"}
+            assert received
+            assert {
+                {key.lower(): value for key, value in item["headers"].items()}["authorization"]
+                for item in received
+            } == {"Bearer replacement-fallback"}
+        finally:
+            await telemetry.shutdown()
