@@ -3049,36 +3049,6 @@ def _supports_atomic_first_turn(
     )
 
 
-def _supports_private_http_transport(
-    provider: NativeProvider, model_provider: str, websockets_enabled: bool
-) -> bool:
-    # Conservative subset of SdkModelHttpPool::client eligibility;
-    # explicit CA/proxy profiles keep their existing transport selection.
-    return (
-        model_provider == "native_agent"
-        and provider.supports_websockets is None
-        and websockets_enabled
-        and not provider._routing_config()
-        and sys.platform == "linux"
-        and not any(
-            name in os.environ
-            for name in (
-                "HTTP_PROXY",
-                "http_proxy",
-                "HTTPS_PROXY",
-                "https_proxy",
-                "ALL_PROXY",
-                "all_proxy",
-                "REQUEST_METHOD",
-                "CODEX_SANDBOX",
-                "CODEX_CA_CERTIFICATE",
-                "SSL_CERT_DIR",
-                "SSL_CERT_FILE",
-            )
-        )
-    )
-
-
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -3583,32 +3553,57 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
-                private_text = (
-                    _atomic_first_turn
-                    and observation_retention == "bounded"
-                    and context is None
-                    and not owned_provider
-                    and provider is not None
-                    and provider.model_backend is None
-                    and provider.auth is None
-                    and not available
-                    and not agent.handoffs
-                    and _tracing_context is None
-                    and (agent.output_type is None or agent.output_type is str)
-                    and not output.max_retries
-                )
-                use_completed_owner = private_text and _completed_input is not None
-                websockets_enabled = provider._websockets_enabled
-                private_http = False
-                if (
-                    private_text
-                    and (_private_text_run or use_completed_owner)
-                    and _supports_private_http_transport(
-                        provider, provider_config["model_provider"], websockets_enabled
+
+                def private_run_policy() -> tuple[bool, bool, bool]:
+                    private_text = (
+                        _atomic_first_turn
+                        and observation_retention == "bounded"
+                        and context is None
+                        and not owned_provider
+                        and provider is not None
+                        and provider.model_backend is None
+                        and provider.auth is None
+                        and not available
+                        and not agent.handoffs
+                        and _tracing_context is None
+                        and (agent.output_type is None or agent.output_type is str)
+                        and not output.max_retries
                     )
-                ):
-                    private_http = True
-                    websockets_enabled = False
+                    use_completed_owner = private_text and _completed_input is not None
+                    websockets_enabled = provider._websockets_enabled
+                    private_http = False
+                    # Conservative subset of SdkModelHttpPool::client eligibility;
+                    # explicit CA/proxy profiles keep their existing transport selection.
+                    if (
+                        private_text
+                        and (_private_text_run or use_completed_owner)
+                        and provider_config["model_provider"] == "native_agent"
+                        and provider.supports_websockets is None
+                        and websockets_enabled
+                        and not provider._routing_config()
+                        and sys.platform == "linux"
+                        and not any(
+                            name in os.environ
+                            for name in (
+                                "HTTP_PROXY",
+                                "http_proxy",
+                                "HTTPS_PROXY",
+                                "https_proxy",
+                                "ALL_PROXY",
+                                "all_proxy",
+                                "REQUEST_METHOD",
+                                "CODEX_SANDBOX",
+                                "CODEX_CA_CERTIFICATE",
+                                "SSL_CERT_DIR",
+                                "SSL_CERT_FILE",
+                            )
+                        )
+                    ):
+                        private_http = True
+                        websockets_enabled = False
+                    return use_completed_owner, websockets_enabled, private_http
+
+                use_completed_owner, websockets_enabled, private_http = private_run_policy()
                 config = {
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
