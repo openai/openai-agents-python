@@ -456,7 +456,8 @@ jobs:
               root = Path(root)
               info = json.loads((root / 'input.json').read_text())
               results = []
-              for profile in ('strict', 'trusted', 'trusted-unrestricted', 'trusted-minimal-mach'):
+              for profile in ('strict-filtered', 'trusted-filtered'):
+                  emit(profile=profile, operation='target-present-before', exit=run(['/bin/launchctl', 'print', info['domain'] + '/' + info['target']]))
                   prefix = [] if profile == 'trusted-unrestricted' else ['/usr/bin/sandbox-exec', '-f', str(root / (profile + '.sb'))]
                   commands = {
                       'uid': ['/usr/bin/id', '-F'],
@@ -471,6 +472,7 @@ jobs:
                       result = dict(profile=profile, operation=name, exit=run(prefix + argv))
                       results.append(result)
                       emit(**result)
+                  emit(profile=profile, escaped_submit=(root / 'escaped-submit').exists(), escaped_bootstrap=(root / 'escaped-bootstrap').exists(), escaped_target=(root / 'escaped-target').exists())
               (root / 'worker-result.json').write_text(json.dumps(results))
           
           
@@ -488,6 +490,9 @@ jobs:
               (root / 'strict.sb').write_text(base + '\n(allow file-read*)\n(allow file-write* (subpath ' + json.dumps(str(root / 'workspace')) + '))\n')
               (root / 'trusted.sb').write_text(base + '\n(allow file-read* file-write*)\n')
               (root / 'trusted-minimal-mach.sb').write_text('(version 1)(allow default)(deny mach-lookup)(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))(deny mach-register)(deny job-creation)')
+              bootstrap_filter = '(allow mach-bootstrap (apply-message-filter (deny mach-message-send (with no-report))(allow mach-message-send (message-number 804))))'
+              (root / 'strict-filtered.sb').write_text((root / 'strict.sb').read_text() + bootstrap_filter)
+              (root / 'trusted-filtered.sb').write_text((root / 'trusted-minimal-mach.sb').read_text() + bootstrap_filter)
               jobs = {
                   'target': {'Label': labels['target'], 'ProgramArguments': ['/usr/bin/touch', str(root / 'escaped-target')], 'RunAtLoad': False},
                   'new': {'Label': labels['new'], 'ProgramArguments': ['/usr/bin/touch', str(root / 'escaped-bootstrap')], 'RunAtLoad': True},
