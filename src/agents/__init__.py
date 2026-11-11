@@ -221,6 +221,8 @@ if TYPE_CHECKING:
         ToolOutputImage as ToolOutputImage,
         ToolOutputText as ToolOutputText,
         ToolRef as ToolRef,
+        ToolSearch as ToolSearch,
+        ToolSearchResult as ToolSearchResult,
         WebSearch as WebSearch,
     )
     from .turn import (
@@ -384,6 +386,8 @@ _MODULES = {
     "FunctionTool": "._function_tools",
     "Tool": "._function_tools",
     "ToolRef": ".tools",
+    "ToolSearch": ".tools",
+    "ToolSearchResult": ".tools",
     "ToolOutput": ".tools",
     "ToolOutputText": ".tools",
     "ToolOutputImage": ".tools",

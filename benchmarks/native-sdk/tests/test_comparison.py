@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import runpy
 import signal
 import sys
 import tempfile
@@ -493,6 +494,110 @@ class FullOwnerBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["full_owner_cpu_ms_per_operation"], 1.5)
 
 
+class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_omitted_provider_uses_fresh_public_runs_without_a_caller_owner(self):
+        instances = []
+
+        class Agent:
+            def __init__(self, **options):
+                self.options = options
+                self.provider = options.get("provider")
+                self.run = mock.AsyncMock(
+                    side_effect=lambda prompt: SimpleNamespace(final_output=prompt)
+                )
+                self.session = mock.Mock(
+                    side_effect=AssertionError("A retained Session has been opening")
+                )
+                instances.append(self)
+
+        for mode in ("caller-owned", "omitted"):
+            with self.subTest(mode=mode):
+                provider = SimpleNamespace(__aenter__=mock.AsyncMock(), __aexit__=mock.AsyncMock())
+                constructor = mock.Mock(return_value=provider)
+                telemetry = SimpleNamespace(configure=mock.AsyncMock(), shutdown=mock.AsyncMock())
+                with mock.patch.dict(
+                    sys.modules,
+                    {
+                        "agents": SimpleNamespace(
+                            Agent=Agent,
+                            NativeProvider=constructor,
+                            function_tool=lambda callback: callback,
+                            telemetry=telemetry,
+                        )
+                    },
+                ):
+                    adapter_type = runpy.run_path(
+                        str(Path(worker.__file__).with_name("v1_adapter.py"))
+                    )["Adapter"]
+                    options = (
+                        {"provider_mode": mode, "transport": "websocket"}
+                        if mode == "omitted"
+                        else {}
+                    )
+                    async with adapter_type("unused", default_host=True, **options) as adapter:
+                        self.assertEqual((await adapter.run("first"))["text"], "first")
+                        self.assertEqual((await adapter.run("second"))["text"], "second")
+                agent = instances[-1]
+                self.assertEqual(
+                    agent.run.await_args_list, [mock.call("first"), mock.call("second")]
+                )
+                agent.session.assert_not_called()
+                if mode == "omitted":
+                    constructor.assert_not_called()
+                    self.assertNotIn("provider", agent.options)
+                    self.assertIsNone(agent.provider)
+                    with self.assertRaisesRegex(ValueError, "fresh Agent.run"):
+                        async with adapter.conversation():
+                            self.fail("A retained Session has been opening")
+                else:
+                    constructor.assert_called_once_with(api_key="synthetic-benchmark-key")
+                    self.assertIs(agent.provider, provider)
+                    provider.__aenter__.assert_awaited_once()
+                    provider.__aexit__.assert_awaited_once()
+                telemetry.configure.assert_awaited_once()
+                telemetry.shutdown.assert_awaited_once()
+
+    def test_native_reference_requires_the_same_declared_provider_mode(self):
+        value = records()
+        for sides in value.values():
+            for rows in sides.values():
+                for item in rows:
+                    item.update(
+                        engine="v1",
+                        response_mode="streaming",
+                        wire_transport="sse",
+                        default_host=True,
+                        native_provider_mode="omitted",
+                    )
+                    item["versions"]["openai-agents"] = VERSIONS["v1"]
+                    server = item["server"]
+                    for receipt in server["receipts"]:
+                        receipt.update(stream=True, text_chunks=item["workload"]["chunks"])
+                    server["emitted_text_chunks"] = server["requests"] * item["workload"]["chunks"]
+        options = {
+            "expected_versions": {"v0": VERSIONS["v1"], "v1": VERSIONS["v1"]},
+            "reference_engine": "v1",
+            "default_host": True,
+            "native_provider_mode": "omitted",
+            "reference_transport": "websocket",
+        }
+        for item in value["oneshot_text"]["v0"]:
+            item.update(native_transport="websocket", wire_transport="websocket")
+            item["server"].update(
+                websocket_connections=item["server"]["requests"], websocket_open_connections=0
+            )
+            for receipt in item["server"]["receipts"]:
+                receipt["wire_transport"] = "websocket"
+        summary = compare.summarize(value, **options)["oneshot_text"]
+        self.assertEqual(summary["native_provider_mode"], "omitted")
+        self.assertEqual(summary["full_owner_scope"], "adapter-lifetime")
+        self.assertEqual(summary["reference_transport"], "websocket")
+        self.assertEqual(summary["native_transport"], "http")
+        value["oneshot_text"]["v0"][0]["native_provider_mode"] = "caller-owned"
+        with self.assertRaisesRegex(ValueError, "Provider mode mismatch"):
+            compare.summarize(value, **options)
+
+
 class InstrumentationTests(unittest.TestCase):
     def test_known_inherited_overrides_are_rejected_even_when_empty(self):
         for name in (
@@ -536,6 +641,73 @@ class InstrumentationTests(unittest.TestCase):
 
 
 class DefaultHostTransportTests(unittest.TestCase):
+    def test_omitted_provider_rejected_before_spawn_outside_its_profile(self):
+        controller = [
+            "compare.py",
+            "--v0-python",
+            "/unused/v0",
+            "--v1-python",
+            "/unused/v1",
+            "--v0-version",
+            "0.24.0",
+            "--v1-version",
+            "native",
+            "--server-python",
+            "/unused/peer",
+            "--output-dir",
+            "/unused/output",
+            "--native-provider-mode",
+            "omitted",
+        ]
+        cases = [
+            (compare, controller + ["--cases", "oneshot_text"]),
+            (
+                worker,
+                [
+                    "worker.py",
+                    "--engine",
+                    "v1",
+                    "--native-provider-mode",
+                    "omitted",
+                    "--output",
+                    "/unused/result.json",
+                ],
+            ),
+            (
+                worker,
+                [
+                    "worker.py",
+                    "--engine",
+                    "v0",
+                    "--native-provider-mode",
+                    "omitted",
+                    "--default-host-setup",
+                    "/unused/setup.json",
+                    "--output",
+                    "/unused/result.json",
+                ],
+            ),
+        ]
+        for case in ("conversation_text", "oneshot_tool"):
+            cases.append(
+                (
+                    compare,
+                    controller + ["--default-host-setup", "/unused/setup.json", "--cases", case],
+                )
+            )
+        for module, argv in cases:
+            with self.subTest(entrypoint=module.__name__, argv=argv):
+                with (
+                    mock.patch.dict(os.environ, {}, clear=True),
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(sys, "stderr", new_callable=io.StringIO),
+                    mock.patch.object(module.subprocess, "Popen") as spawn,
+                ):
+                    with self.assertRaises(SystemExit) as error:
+                        module.main()
+                    self.assertEqual(error.exception.code, 2)
+                    spawn.assert_not_called()
+
     def test_websocket_rejected_before_controller_or_worker_startup(self):
         previous = signal.getsignal(signal.SIGTERM)
         self.addCleanup(signal.signal, signal.SIGTERM, previous)
