@@ -19,9 +19,7 @@ runs:
     - name: Linux build tools
       if: runner.os == 'Linux'
       shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install --yes clang cmake pkg-config protobuf-compiler libssl-dev
+      run: bash "$GITHUB_ACTION_PATH/../../scripts/install-linux-native-build-tools.sh"
     - name: macOS build tools
       if: runner.os == 'macOS'
       shell: bash

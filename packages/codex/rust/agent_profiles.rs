@@ -110,10 +110,36 @@ fn handoff_defaults(
 struct OpeningFiles(Vec<InstructionFile>);
 
 impl OpeningProfiles {
+    /// A serialized pending source can only claim permissions the fresh graph
+    /// grants without running a callback.
+    pub(crate) fn validate_pending_source(&self, source: &AgentProfileReceipt) -> Result<()> {
+        let mut candidates = vec![self.root_id.as_str()];
+        let mut visited = HashSet::new();
+        while let Some(id) = candidates.pop() {
+            if id == source.profile_id {
+                return Ok(());
+            }
+            if !visited.insert(id) {
+                continue;
+            }
+            if let Some(profile) = self.roster.iter().find(|profile| profile.id == id) {
+                candidates.extend(
+                    profile
+                        .handoffs
+                        .iter()
+                        .filter(|(name, _)| !profile.handoff_callbacks.contains_key(*name))
+                        .map(|(_, target)| target.as_str()),
+                );
+            }
+        }
+        anyhow::bail!("Restored pending Agent profile requires live callback acceptance")
+    }
+
     pub(crate) fn validate_restored_handoff(
         &self,
         tool_name: &ToolName,
         receipt: &codex_protocol::agent_profile::AgentProfileHandoff,
+        pending: bool,
     ) -> Result<()> {
         let source = self
             .roster
@@ -127,6 +153,11 @@ impl OpeningProfiles {
                     && target == &receipt.target_profile_id
             }),
             "Restored handoff is outside its source declaration"
+        );
+        // Checkpoints cannot authorize a callback for the current turn.
+        ensure!(
+            !pending || !source.handoff_callbacks.contains_key(&tool_name.name),
+            "Pending callback-backed Agent handoffs require live acceptance"
         );
         Ok(())
     }
@@ -1720,6 +1751,55 @@ mod tests {
         assert!(fingerprint(&callback.to_string(), "a").is_ok());
         callback[0]["handoff_callbacks"] = json!({"transfer_to_b":0});
         assert!(fingerprint(&callback.to_string(), "a").is_err());
+    }
+
+    #[test]
+    fn pending_handoff_restore_requires_live_callback_acceptance() {
+        let open = |raw: Value| {
+            let raw = raw.to_string();
+            OpeningProfiles {
+                root_id: "a".into(),
+                roster: serde_json::from_str(&raw).unwrap(),
+                fingerprint: fingerprint(&raw, "a").unwrap(),
+            }
+        };
+        let mut raw = roster();
+        let builtin = open(raw.clone());
+        raw[0]["tools"].as_array_mut().unwrap().push(json!({
+            "type":"function", "name":"transfer_to_b", "description":"Authorize transfer",
+            "inputSchema":{"type":"object","properties":{"reason":{"type":"string"}},
+                "required":["reason"],"additionalProperties":false},
+            "deferLoading":false,
+        }));
+        raw[0]["handoff_callbacks"] = json!({"transfer_to_b":1});
+        let callback = open(raw);
+        let destination = AgentProfileReceipt {
+            profile_id: "b".into(),
+            epoch: 1,
+        };
+        builtin.validate_pending_source(&destination).unwrap();
+        let error = callback.validate_pending_source(&destination).unwrap_err();
+        assert!(error.to_string().contains("live callback acceptance"));
+        let name = ToolName::new(None, "transfer_to_b");
+        let saved = codex_protocol::agent_profile::AgentProfileHandoff {
+            source: AgentProfileReceipt {
+                profile_id: "a".into(),
+                epoch: 0,
+            },
+            target_profile_id: "b".into(),
+            call_id: "saved-call".into(),
+        };
+        callback.validate_pending_source(&saved.source).unwrap();
+        builtin
+            .validate_restored_handoff(&name, &saved, true)
+            .unwrap();
+        callback
+            .validate_restored_handoff(&name, &saved, false)
+            .unwrap();
+        let error = callback
+            .validate_restored_handoff(&name, &saved, true)
+            .unwrap_err();
+        assert!(error.to_string().contains("live acceptance"));
     }
 
     #[test]
