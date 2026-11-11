@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
-index cb4b70e0..20479a78 100644
+index 98d69fb6..d8349b5e 100644
 --- a/codex-rs/app-server/src/notification_media.rs
 +++ b/codex-rs/app-server/src/notification_media.rs
 @@ -46,8 +46,10 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
@@ -39,7 +39,7 @@ index d246c8b3..06e9593d 100644
              })
              .sum();
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index 344d2987..ff1d9316 100644
+index df8890dc..c7064934 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
 @@ -61,8 +61,10 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
@@ -55,7 +55,7 @@ index 344d2987..ff1d9316 100644
          | ResponseItem::ToolSearchOutput { .. }
          | ResponseItem::WebSearchCall { .. }
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 98c18f34..a2ea3417 100644
+index 9bfcdbb3..855c832b 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
 @@ -105,8 +105,10 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
@@ -72,7 +72,7 @@ index 98c18f34..a2ea3417 100644
              | ResponseItem::CustomToolCallOutput { .. }
              | ResponseItem::ToolSearchOutput { .. }
 diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
-index 7e55734d..3c8cb5f2 100644
+index 23a0220e..826551c6 100644
 --- a/codex-rs/core/src/client_common.rs
 +++ b/codex-rs/core/src/client_common.rs
 @@ -184,8 +184,10 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
@@ -89,7 +89,7 @@ index 7e55734d..3c8cb5f2 100644
              | ResponseItem::ToolSearchOutput { .. }
              | ResponseItem::WebSearchCall { .. }
 diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
-index 8d734cdd..28775875 100644
+index b3654ddc..97f396eb 100644
 --- a/codex-rs/core/src/context_manager/history.rs
 +++ b/codex-rs/core/src/context_manager/history.rs
 @@ -1049,7 +1049,8 @@ pub(crate) fn rollback_retained_item(
@@ -112,7 +112,7 @@ index 8d734cdd..28775875 100644
          | ResponseItem::ComputerCallOutput { .. }
          | ResponseItem::CustomToolCall { .. }
          | ResponseItem::CustomToolCallOutput { .. }
-@@ -1222,6 +1225,9 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+@@ -1224,6 +1227,9 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
              encrypted_content: Some(content),
              ..
          } => i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
@@ -122,15 +122,15 @@ index 8d734cdd..28775875 100644
          ResponseItem::ComputerCall { fields, .. } => {
              text_bytes(&serde_json::to_string(fields).unwrap_or_default())
          }
-@@ -1476,6 +1482,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
-         | ResponseItem::FileSearchCall { .. }
-         | ResponseItem::CodeInterpreterCall { .. }
+@@ -1486,6 +1492,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         | ResponseItem::ShellCall { .. }
+         | ResponseItem::ShellCallOutput { .. }
          | ResponseItem::ImageGenerationCall { .. }
 +        | ResponseItem::ApplyPatchCall { .. }
          | ResponseItem::ComputerCall { .. }
          | ResponseItem::CustomToolCall { .. }
          | ResponseItem::LocalShellCall { .. }
-@@ -1483,6 +1490,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+@@ -1493,6 +1500,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
          | ResponseItem::ContextCompaction { .. } => true,
          ResponseItem::ConfigurationUpdate { .. } | ResponseItem::CompactionTrigger { .. } => false,
          ResponseItem::AdditionalTools { .. }
@@ -180,7 +180,7 @@ index 6dd8e2e4..22702b17 100644
              remove_first_matching(items, |item| matches!(item, ResponseItem::ComputerCallOutput { call_id: existing, .. } if existing == call_id));
          }
 diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
-index 10728bcf..713f8384 100644
+index b1cb1cbe..2e8d166e 100644
 --- a/codex-rs/core/src/image_preparation.rs
 +++ b/codex-rs/core/src/image_preparation.rs
 @@ -277,8 +277,10 @@ pub(crate) async fn prepare_response_items(
@@ -197,7 +197,7 @@ index 10728bcf..713f8384 100644
              | ResponseItem::ToolSearchOutput { .. }
              | ResponseItem::WebSearchCall { .. }
 diff --git a/codex-rs/core/src/session/sdk_produced_items.rs b/codex-rs/core/src/session/sdk_produced_items.rs
-index 5366d7ca..14c01d3d 100644
+index 2359c0ba..0965eaa5 100644
 --- a/codex-rs/core/src/session/sdk_produced_items.rs
 +++ b/codex-rs/core/src/session/sdk_produced_items.rs
 @@ -149,7 +149,9 @@ fn is_produced_response(item: &ResponseItem) -> bool {
@@ -211,7 +211,7 @@ index 5366d7ca..14c01d3d 100644
          | ResponseItem::LocalShellCall { .. }
          | ResponseItem::ToolSearchCall { .. }
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 712c80eb..a0c0b3ad 100644
+index adfe48be..50e28b80 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -2554,6 +2554,7 @@ fn recovered_tools_from_history(
@@ -272,7 +272,7 @@ index 712c80eb..a0c0b3ad 100644
                          | ResponseItem::CustomToolCallOutput { .. }
                          | ResponseItem::ToolSearchOutput { .. }
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index 83c308c2..587a8124 100644
+index 729130d9..aa95815a 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -2,6 +2,8 @@ use std::pin::Pin;
@@ -392,7 +392,7 @@ index 83c308c2..587a8124 100644
          ResponseItem::ComputerCallOutput { .. } => "computer_call_output",
          ResponseItem::CustomToolCall { .. } => "custom_tool_call",
          ResponseItem::CustomToolCallOutput { .. } => "custom_tool_call_output",
-@@ -545,7 +583,7 @@ fn completed_item_defers_mailbox_delivery_to_next_turn(
+@@ -549,7 +587,7 @@ fn completed_item_defers_mailbox_delivery_to_next_turn(
  
  pub(crate) fn response_input_to_response_item(input: &ResponseInputItem) -> Option<ResponseItem> {
      match input {
@@ -529,7 +529,7 @@ index 00000000..1935fea5
 +    }
 +}
 diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
-index 57a2497e..fcda865e 100644
+index 75909cec..b9130d1a 100644
 --- a/codex-rs/core/src/tools/handlers/extension_tools.rs
 +++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
 @@ -118,13 +118,14 @@ impl CoreToolRuntime for ExtensionToolAdapter {
@@ -548,8 +548,8 @@ index 57a2497e..fcda865e 100644
              ),
              ToolPayload::Custom { .. } => match self.0.spec() {
                  ToolSpec::Freeform(_) => true,
-@@ -141,7 +142,7 @@ impl CoreToolRuntime for ExtensionToolAdapter {
-                 | ToolSpec::CodeInterpreter(_)
+@@ -142,7 +143,7 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+                 | ToolSpec::Shell(_)
                  | ToolSpec::ImageGeneration(_)
                  | ToolSpec::ProviderToolSearch(_)
 -                | ToolSpec::Computer { .. }
@@ -589,7 +589,7 @@ index 9d85cb53..e6fdb781 100644
                                  }
                                  let response = Self::aborted_response(&call, secs);
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index 85fcd41f..ff41e474 100644
+index 37472629..5c5cc06e 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
 @@ -54,7 +54,7 @@ pub use codex_tools::ToolExposure;
@@ -618,8 +618,8 @@ index 85fcd41f..ff41e474 100644
              Entry::Occupied(entry) => {
                  tracing::warn!(
                      tool_name = %entry.key(),
-@@ -523,7 +533,8 @@ impl ToolRegistry {
-                 | ToolSpec::CodeInterpreter(_)
+@@ -524,7 +534,8 @@ impl ToolRegistry {
+                 | ToolSpec::Shell(_)
                  | ToolSpec::ImageGeneration(_)
                  | ToolSpec::ProviderToolSearch(_)
 -                | ToolSpec::Computer { .. }
@@ -628,7 +628,7 @@ index 85fcd41f..ff41e474 100644
                  | ToolSpec::ComputerUsePreview { .. }
                  | ToolSpec::WebSearch { .. } => "",
              };
-@@ -853,6 +864,11 @@ impl ToolRegistry {
+@@ -854,6 +865,11 @@ impl ToolRegistry {
                              "native computer result must retain its protocol type and call ID".into(),
                          ));
                      }
@@ -711,7 +711,7 @@ index b926ebeb..0c0cdc32 100644
 +    assert!(registry.register_external(Arc::new(runtime)));
 +}
 diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
-index d327ac6b..58f63639 100644
+index 9aef45f3..a5a9ce7b 100644
 --- a/codex-rs/core/src/tools/router.rs
 +++ b/codex-rs/core/src/tools/router.rs
 @@ -202,6 +202,7 @@ impl ToolRouter {
@@ -722,7 +722,7 @@ index d327ac6b..58f63639 100644
                  ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
                      name.is_default_namespace() && name.name == "computer"
                  }
-@@ -332,6 +333,16 @@ impl ToolRouter {
+@@ -333,6 +334,16 @@ impl ToolRouter {
  
      fn parse_tool_call(item: ResponseItem) -> Result<Option<ToolCall>, FunctionCallError> {
          match item {
@@ -740,7 +740,7 @@ index d327ac6b..58f63639 100644
                  let ResponseItem::ComputerCall { call_id, .. } = &item else {
                      unreachable!()
 diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
-index 27cbbd83..41ed0d5e 100644
+index 198a5089..da2d115a 100644
 --- a/codex-rs/core/src/tools/router_tests.rs
 +++ b/codex-rs/core/src/tools/router_tests.rs
 @@ -651,7 +651,8 @@ fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<Str
@@ -754,11 +754,11 @@ index 27cbbd83..41ed0d5e 100644
              | ToolSpec::Function(_)
              | ToolSpec::Freeform(_)
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index cfc470af..5ac66e6e 100644
+index 3c3ea0b6..d8c9750a 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
-@@ -699,7 +699,8 @@ fn finalize_selected_tool_router(
-                     | ToolSpec::CodeInterpreter(_)
+@@ -700,7 +700,8 @@ fn finalize_selected_tool_router(
+                     | ToolSpec::Shell(_)
                      | ToolSpec::ImageGeneration(_)
                      | ToolSpec::ProviderToolSearch(_)
 -                    | ToolSpec::Computer { .. }
@@ -767,15 +767,15 @@ index cfc470af..5ac66e6e 100644
                      | ToolSpec::ComputerUsePreview { .. }
                      | ToolSpec::WebSearch { .. } => continue,
                  };
-@@ -1152,6 +1153,7 @@ fn register_code_mode_executors(
-             | ToolSpec::CodeInterpreter(_)
+@@ -1154,6 +1155,7 @@ fn register_code_mode_executors(
+             | ToolSpec::Shell(_)
              | ToolSpec::ImageGeneration(_)
              | ToolSpec::ProviderToolSearch(_)
 +            | ToolSpec::ApplyPatch {}
              | ToolSpec::Computer { .. }
              | ToolSpec::ComputerUsePreview { .. }
              | ToolSpec::WebSearch { .. } => {
-@@ -1748,6 +1750,9 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
+@@ -1750,6 +1752,9 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
  fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mut ToolRegistry) {
      for spec in dynamic_tools {
          match spec {
@@ -786,7 +786,7 @@ index cfc470af..5ac66e6e 100644
              DynamicToolSpec::Computer(tool) => {
                  if let Ok(handler) = super::handlers::computer::ComputerToolHandler::new(tool) {
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index 0dc7c029..c6d2451d 100644
+index c0e7252f..25c16373 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
 @@ -108,7 +108,8 @@ impl ToolPlanProbe {
@@ -813,11 +813,11 @@ index 7b64b6e9..c9976554 100644
                  arguments: arguments.clone(),
              }
 diff --git a/codex-rs/core/src/tools/tool_namespaces_info.rs b/codex-rs/core/src/tools/tool_namespaces_info.rs
-index 8114c597..49efd19c 100644
+index 32a3a4b9..4d6e793d 100644
 --- a/codex-rs/core/src/tools/tool_namespaces_info.rs
 +++ b/codex-rs/core/src/tools/tool_namespaces_info.rs
-@@ -44,6 +44,7 @@ pub(super) fn collect_tool_namespaces_info(
-             | ToolSpec::CodeInterpreter(_)
+@@ -45,6 +45,7 @@ pub(super) fn collect_tool_namespaces_info(
+             | ToolSpec::Shell(_)
              | ToolSpec::ImageGeneration(_)
              | ToolSpec::ProviderToolSearch(_)
 +            | ToolSpec::ApplyPatch {}
@@ -825,7 +825,7 @@ index 8114c597..49efd19c 100644
              | ToolSpec::ComputerUsePreview { .. }
              | ToolSpec::WebSearch { .. } => {}
 diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
-index 6b5c316b..d4ee7020 100644
+index 479145cf..ec78fe95 100644
 --- a/codex-rs/core/src/turn_timing.rs
 +++ b/codex-rs/core/src/turn_timing.rs
 @@ -438,6 +438,7 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
@@ -836,7 +836,7 @@ index 6b5c316b..d4ee7020 100644
          | ResponseItem::ComputerCall { .. }
          | ResponseItem::CustomToolCall { .. }
          | ResponseItem::ToolSearchCall { .. }
-@@ -449,6 +450,7 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+@@ -451,6 +452,7 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
          | ResponseItem::ContextCompaction { .. } => true,
          ResponseItem::ConfigurationUpdate { .. } | ResponseItem::CompactionTrigger { .. } => false,
          ResponseItem::AdditionalTools { .. }
@@ -858,7 +858,7 @@ index abd8d42c..17867185 100644
              }
              ToolPayload::Custom { input } => serde_json::Value::String(input),
 diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
-index 4d5b5579..8c5f2164 100644
+index 062aff92..df5b3401 100644
 --- a/codex-rs/ext/image-generation/src/tool.rs
 +++ b/codex-rs/ext/image-generation/src/tool.rs
 @@ -518,8 +518,10 @@ fn recent_images(
@@ -875,7 +875,7 @@ index 4d5b5579..8c5f2164 100644
              | ResponseItem::ToolSearchOutput { .. }
              | ResponseItem::WebSearchCall { .. }
 diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
-index 82f1e9f7..e69b8068 100644
+index 15596277..b26066ec 100644
 --- a/codex-rs/guardian-context/src/transcript.rs
 +++ b/codex-rs/guardian-context/src/transcript.rs
 @@ -202,6 +202,14 @@ pub fn collect_transcript(
@@ -909,7 +909,7 @@ index dcc172b3..31e88ee4 100644
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub realtime_tool_call: Option<serde_json::Value>,
 diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
-index ab7be519..eda2523b 100644
+index 85546fdb..2049a739 100644
 --- a/codex-rs/otel/src/events/session_telemetry.rs
 +++ b/codex-rs/otel/src/events/session_telemetry.rs
 @@ -1414,6 +1414,8 @@ impl SessionTelemetry {
@@ -934,7 +934,7 @@ index 48d65f8e..0edcbeb1 100644
      ToolSearch(DynamicToolSearchSpec),
      Function(DynamicToolFunctionSpec),
 diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
-index ee9d2e06..1d3715c3 100644
+index fed04103..14180c50 100644
 --- a/codex-rs/protocol/src/models.rs
 +++ b/codex-rs/protocol/src/models.rs
 @@ -836,9 +836,40 @@ impl From<&FileSystemPermissions> for FileSystemSandboxPolicy {
@@ -1005,7 +1005,7 @@ index ee9d2e06..1d3715c3 100644
      /// Opaque Responses provider pointer, not a local occurrence ID.
      ItemReference {
          id: String,
-@@ -1349,7 +1400,7 @@ impl ResponseItem {
+@@ -1371,7 +1422,7 @@ impl ResponseItem {
              | Self::FunctionCall { id, .. }
              | Self::ToolSearchCall { id, .. }
              | Self::FunctionCallOutput { id, .. }
@@ -1014,7 +1014,7 @@ index ee9d2e06..1d3715c3 100644
              | Self::ComputerCallOutput { id, .. }
              | Self::CustomToolCall { id, .. }
              | Self::CustomToolCallOutput { id, .. }
-@@ -1378,7 +1429,7 @@ impl ResponseItem {
+@@ -1402,7 +1453,7 @@ impl ResponseItem {
              | Self::FunctionCall { id, .. }
              | Self::ToolSearchCall { id, .. }
              | Self::FunctionCallOutput { id, .. }
@@ -1023,7 +1023,7 @@ index ee9d2e06..1d3715c3 100644
              | Self::ComputerCallOutput { id, .. }
              | Self::CustomToolCall { id, .. }
              | Self::CustomToolCallOutput { id, .. }
-@@ -1408,6 +1459,8 @@ impl ResponseItem {
+@@ -1434,6 +1485,8 @@ impl ResponseItem {
              Self::FunctionCall { .. } => Some("fc"),
              Self::ToolSearchCall { .. } => Some("tsc"),
              Self::FunctionCallOutput { .. } => Some("fco"),
@@ -1032,7 +1032,7 @@ index ee9d2e06..1d3715c3 100644
              Self::ComputerCall { .. } => Some("cc"),
              Self::ComputerCallOutput { .. } => Some("cco"),
              Self::CustomToolCall { .. } => Some("ctc"),
-@@ -1452,6 +1505,10 @@ impl ResponseItem {
+@@ -1480,6 +1533,10 @@ impl ResponseItem {
                  internal_chat_message_metadata_passthrough: metadata,
                  ..
              }
@@ -1043,7 +1043,7 @@ index ee9d2e06..1d3715c3 100644
              | Self::ComputerCallOutput {
                  internal_chat_message_metadata_passthrough: metadata,
                  ..
-@@ -1532,6 +1589,14 @@ impl ResponseItem {
+@@ -1560,6 +1617,14 @@ impl ResponseItem {
                  internal_chat_message_metadata_passthrough: metadata,
                  ..
              }
@@ -1058,7 +1058,7 @@ index ee9d2e06..1d3715c3 100644
              | Self::ComputerCall {
                  internal_chat_message_metadata_passthrough: metadata,
                  ..
-@@ -1616,6 +1681,14 @@ impl ResponseItem {
+@@ -1652,6 +1717,14 @@ impl ResponseItem {
                  internal_chat_message_metadata_passthrough: metadata,
                  ..
              }
@@ -1073,7 +1073,7 @@ index ee9d2e06..1d3715c3 100644
              | Self::ComputerCall {
                  internal_chat_message_metadata_passthrough: metadata,
                  ..
-@@ -2005,6 +2078,9 @@ fn local_image_content_items(
+@@ -2049,6 +2122,9 @@ fn local_image_content_items(
  impl From<ResponseInputItem> for ResponseItem {
      fn from(item: ResponseInputItem) -> Self {
          match item {
@@ -1084,7 +1084,7 @@ index ee9d2e06..1d3715c3 100644
                  call_id,
                  output,
 diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
-index 7cae1d39..fdf28376 100644
+index 0660e04f..709e973b 100644
 --- a/codex-rs/rollout/src/persistence_metrics.rs
 +++ b/codex-rs/rollout/src/persistence_metrics.rs
 @@ -328,6 +328,8 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
@@ -1097,7 +1097,7 @@ index 7cae1d39..fdf28376 100644
          ResponseItem::ComputerCallOutput { .. } => "response.computer_call_output",
          ResponseItem::CustomToolCall { .. } => "response.custom_tool_call",
 diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
-index 25ad762a..6463ab4d 100644
+index ba461e5c..d490564c 100644
 --- a/codex-rs/rollout/src/policy.rs
 +++ b/codex-rs/rollout/src/policy.rs
 @@ -90,7 +90,9 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
@@ -1110,7 +1110,7 @@ index 25ad762a..6463ab4d 100644
          | ResponseItem::ComputerCallOutput { .. }
          | ResponseItem::CustomToolCall { .. }
          | ResponseItem::CustomToolCallOutput { .. }
-@@ -117,7 +119,9 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+@@ -119,7 +121,9 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
          | ResponseItem::ToolSearchCall { .. }
          | ResponseItem::FunctionCallOutput { .. }
          | ResponseItem::ToolSearchOutput { .. }
@@ -1246,11 +1246,11 @@ index 00000000..c4063006
 +    }
 +}
 diff --git a/codex-rs/tools/src/code_mode.rs b/codex-rs/tools/src/code_mode.rs
-index 73581e77..bb575a1c 100644
+index 7aff25ff..29487306 100644
 --- a/codex-rs/tools/src/code_mode.rs
 +++ b/codex-rs/tools/src/code_mode.rs
-@@ -228,6 +228,7 @@ fn code_mode_tool_definitions_for_spec(
-         | ToolSpec::CodeInterpreter(_)
+@@ -229,6 +229,7 @@ fn code_mode_tool_definitions_for_spec(
+         | ToolSpec::Shell(_)
          | ToolSpec::ImageGeneration(_)
          | ToolSpec::ProviderToolSearch(_)
 +        | ToolSpec::ApplyPatch {}
@@ -1317,29 +1317,29 @@ index 262cb560..32685f10 100644
              ToolPayload::Function { arguments } => Cow::Borrowed(arguments),
              ToolPayload::ToolSearch { arguments } => Cow::Owned(arguments.query.clone()),
 diff --git a/codex-rs/tools/src/tool_search.rs b/codex-rs/tools/src/tool_search.rs
-index eab3fdfb..050d4195 100644
+index 02e722ff..3b3b205a 100644
 --- a/codex-rs/tools/src/tool_search.rs
 +++ b/codex-rs/tools/src/tool_search.rs
-@@ -48,6 +48,7 @@ impl ToolSearchInfo {
-             | ToolSpec::CodeInterpreter(_)
+@@ -49,7 +49,8 @@ impl ToolSearchInfo {
+             | ToolSpec::Shell(_)
              | ToolSpec::ImageGeneration(_)
              | ToolSpec::ProviderToolSearch(_)
+-            | ToolSpec::Computer { .. }
 +            | ToolSpec::ApplyPatch {}
-             | ToolSpec::Computer { .. }
++        | ToolSpec::Computer { .. }
              | ToolSpec::ComputerUsePreview { .. }
              | ToolSpec::WebSearch { .. } => None,
-@@ -98,7 +99,8 @@ fn normalize_search_spec(spec: ToolSpec) -> Option<LoadableToolSpec> {
-         | ToolSpec::CodeInterpreter(_)
+         }
+@@ -100,6 +101,7 @@ fn normalize_search_spec(spec: ToolSpec) -> Option<LoadableToolSpec> {
+         | ToolSpec::Shell(_)
          | ToolSpec::ImageGeneration(_)
          | ToolSpec::ProviderToolSearch(_)
--        | ToolSpec::Computer { .. }
 +        | ToolSpec::ApplyPatch {}
-+            | ToolSpec::Computer { .. }
+         | ToolSpec::Computer { .. }
          | ToolSpec::ComputerUsePreview { .. }
          | ToolSpec::WebSearch { .. } => {
-             return None;
-@@ -150,7 +152,8 @@ fn default_tool_search_text(spec: &ToolSpec) -> String {
-         ToolSpec::FileSearch(_) | ToolSpec::CodeInterpreter(_) | ToolSpec::ImageGeneration(_) => {
+@@ -155,7 +157,8 @@ fn default_tool_search_text(spec: &ToolSpec) -> String {
+         | ToolSpec::ImageGeneration(_) => {
              push_search_part(&mut parts, spec.name().to_string());
          }
 -        ToolSpec::Computer { .. }
@@ -1349,7 +1349,7 @@ index eab3fdfb..050d4195 100644
          | ToolSpec::ProviderToolSearch(_) => {}
          ToolSpec::WebSearch { .. } => {
 diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
-index ad608dda..cd7f6b5c 100644
+index 61b75620..80f67cc5 100644
 --- a/codex-rs/tools/src/tool_spec.rs
 +++ b/codex-rs/tools/src/tool_spec.rs
 @@ -21,6 +21,8 @@ use std::sync::Arc;
@@ -1361,7 +1361,7 @@ index ad608dda..cd7f6b5c 100644
      #[serde(rename = "computer")]
      Computer {},
      #[serde(rename = "computer_use_preview")]
-@@ -79,6 +81,7 @@ impl ToolSpec {
+@@ -81,6 +83,7 @@ impl ToolSpec {
      /// captured namespace. A namespace group or a deferred declaration is not a leaf.
      pub fn has_eager_callable(&self, target: &codex_protocol::ToolName) -> bool {
          match self {
@@ -1369,7 +1369,7 @@ index ad608dda..cd7f6b5c 100644
              ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
                  target.is_default_namespace() && target.name == "computer"
              }
-@@ -139,6 +142,7 @@ impl ToolSpec {
+@@ -142,6 +145,7 @@ impl ToolSpec {
  
      pub fn name(&self) -> &str {
          match self {
@@ -1403,19 +1403,16 @@ index ae738817..9d46c8dd 100644
                  DynamicToolSpec::Namespace(namespace) => namespace
                      .tools
 diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
-index d6128040..f5eaf549 100644
+index 4662c126..ade63f39 100644
 --- a/codex-rs/utils/audio/src/lib.rs
 +++ b/codex-rs/utils/audio/src/lib.rs
-@@ -76,8 +76,10 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+@@ -76,7 +76,9 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
              | ResponseItem::LocalShellCall { .. }
              | ResponseItem::FunctionCall { .. }
              | ResponseItem::ToolSearchCall { .. }
--            | ResponseItem::ComputerCall { .. }
--            | ResponseItem::ComputerCallOutput { .. }
 +            | ResponseItem::ApplyPatchCall { .. }
-+        | ResponseItem::ComputerCall { .. }
+             | ResponseItem::ComputerCall { .. }
 +            | ResponseItem::ApplyPatchCallOutput { .. }
-+        | ResponseItem::ComputerCallOutput { .. }
+             | ResponseItem::ComputerCallOutput { .. }
              | ResponseItem::CustomToolCall { .. }
              | ResponseItem::ToolSearchOutput { .. }
-             | ResponseItem::WebSearchCall { .. }

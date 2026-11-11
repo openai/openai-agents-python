@@ -67,6 +67,8 @@ from ._events import (
     MessageItem,
     ReasoningItem,
     SessionItem as SessionItem,
+    ShellCallItem,
+    ShellCallOutputItem,
     WebSearchCallItem,
 )
 from ._function_tools import (
@@ -1373,6 +1375,8 @@ def _project_progress(
                     "web_search_call",
                     "file_search_call",
                     "code_interpreter_call",
+                    "shell_call",
+                    "shell_call_output",
                     "image_generation_call",
                 }
                 or (
@@ -1391,6 +1395,8 @@ def _project_progress(
                             | WebSearchCallItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
+                            | ShellCallItem
+                            | ShellCallOutputItem
                             | ImageGenerationCallItem,
                             item,
                         ),
@@ -2220,7 +2226,7 @@ def _split_tools(
         else:
             raise TypeError(
                 "tools must use FunctionTool, function_tool, StdioMCP, HttpMCP, "
-                "Checklist, NativeGoals, WebSearch, FileSearch, CodeInterpreter, "
+                "Checklist, NativeGoals, WebSearch, FileSearch, CodeInterpreter, HostedShell, "
                 "ImageGeneration, ToolSearch or NativeAgents"
             )
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
@@ -14082,7 +14088,7 @@ class Session(Generic[ContextT, OutputT]):
             del response
             if not self._admit_tool(state, request):
                 return
-            nested_application_output = None
+            acknowledged_application_output = None
             if started is not None:
                 application_data = _capture_application_data(output.application_data)
                 if application_data is not None:
@@ -14094,18 +14100,18 @@ class Session(Generic[ContextT, OutputT]):
                         namespace=started.namespace,
                         application_data=application_data,
                     )
-                    if code_origin is None:
+                    if code_origin is None and not isinstance(entry, _CapturedComputer):
                         application_call_id = started.call_id
                         state.pending_application_outputs[application_call_id] = application_output
                     else:
-                        nested_application_output = application_output
+                        acknowledged_application_output = application_output
             if entry.finish_turn and response_output["success"] and started is not None:
                 if started.call_id in state.terminal_observations:
                     raise NativeError("Repeated terminal tool observation identity")
                 state.terminal_observations[started.call_id] = started
                 deferred_observation = True
             accepted = await self._respond_tool(
-                state, reply, application_output=nested_application_output
+                state, reply, application_output=acknowledged_application_output
             )
             # A retired receiver grants no delivery authority; the native owner
             # still supplies the selected terminal cause. Writer errors still raise.
