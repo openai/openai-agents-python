@@ -33,7 +33,7 @@ async def next_request(session, tool):
 
 
 @pytest.mark.parametrize("profile", [False, True])
-@pytest.mark.parametrize("mode", ["retry", "timeout", "invocation"])
+@pytest.mark.parametrize("mode", ["retry", "timeout", "invocation", "invocation_clear"])
 async def test_manual_restore_uses_current_attempt_authority(profile, mode):
     lookup = FunctionTool(name="lookup", description="Read", input_type=Lookup, output_type=str)
     calls = []
@@ -47,19 +47,23 @@ async def test_manual_restore_uses_current_attempt_authority(profile, mode):
                 return ModelResponse([function_call("lookup", {"key": "A"}, "manual")["item"]])
             if mode == "retry" and len(calls) == initial_requests + 1:
                 raise ConnectionError("synthetic manual continuation failure")
-            if mode in {"timeout", "invocation"}:
+            if mode in {"timeout", "invocation", "invocation_clear"}:
                 try:
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(0.75 if mode == "invocation_clear" else 2.0)
                 finally:
                     retired.append(True)
             return ModelResponse([assistant_output("unexpected replay")["item"]])
 
-    deadline = "invocation_timeout_ms" if mode == "invocation" else "attempt_timeout_ms"
+    invocation = mode in {"invocation", "invocation_clear"}
+    deadline = "invocation_timeout_ms" if invocation else "attempt_timeout_ms"
+    saved_timeout = 500 if mode == "invocation_clear" else 5000
 
     def declaration(provider, *, current):
         settings = {
             "retry": ModelRetrySettings(max_retries=0 if current else 3, policy=lambda _: True),
-            deadline: (None if mode == "retry" else 1000) if current else 5000,
+            deadline: (None if mode in {"retry", "invocation_clear"} else 1000)
+            if current
+            else saved_timeout,
         }
         worker = Agent(
             name="Worker",
@@ -103,8 +107,8 @@ async def test_manual_restore_uses_current_attempt_authority(profile, mode):
                     controls = settings.setdefault("request_controls", {})
                     retry = controls.setdefault("retry", {})
                     retry["max_retries"] = 3
-                    if mode == "invocation":
-                        settings[deadline] = 5000
+                    if invocation:
+                        settings[deadline] = saved_timeout
                     else:
                         controls[deadline] = 5000
                     changed += 1
@@ -118,9 +122,15 @@ async def test_manual_restore_uses_current_attempt_authority(profile, mode):
                 if mode == "retry"
                 else "timed out|timeout|deadline"
             )
-            with pytest.raises(Exception, match=expected):
+            if mode == "invocation_clear":
                 await request.respond("answer")
-                await restored.restored_turn.get_result()
+                assert (
+                    await restored.restored_turn.get_result()
+                ).final_output == "unexpected replay"
+            else:
+                with pytest.raises(Exception, match=expected):
+                    await request.respond("answer")
+                    await restored.restored_turn.get_result()
         assert len(calls) == initial_requests + 1
-        if mode in {"timeout", "invocation"}:
+        if mode in {"timeout", "invocation", "invocation_clear"}:
             assert retired == [True]

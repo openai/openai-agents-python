@@ -1,4 +1,5 @@
 import asyncio
+import json
 from copy import deepcopy
 
 import pytest
@@ -7,6 +8,7 @@ from pydantic import ValidationError
 from agents import (
     Agent,
     Allow,
+    CustomStorage,
     Deny,
     Handoff,
     LocalStorage,
@@ -21,7 +23,64 @@ from tests.native_fixtures import (
     responses as responses,
     tool_output,
 )
+from tests.native_storage_fixtures import MemorySessionStore
 from tests.test_native_agent_observation import provider
+
+
+async def test_canonical_resume_cannot_activate_callback_only_target(responses):
+    allow_transfer = False
+    effects = []
+
+    def admit(_):
+        return Allow() if allow_transfer else Deny("transfer denied")
+
+    @function_tool(name="route", before=admit)
+    def route() -> str:
+        effects.append("route")
+        return "transferred"
+
+    @function_tool
+    def privileged() -> str:
+        effects.append("privileged")
+        return "privileged effect"
+
+    target = Agent(name="Privileged", instructions="privileged agent", tools=[privileged])
+    agent = Agent(
+        name="Source",
+        instructions="source agent",
+        provider=provider(responses),
+        handoffs=[Handoff(target, route)],
+    )
+    backend = MemorySessionStore()
+    storage = CustomStorage(backend)
+    async with agent.session(storage=storage) as session:
+        identity = session.id
+        responses.respond(assistant_output("source stays"))
+        await (await session.submit("stay on source")).get_result()
+        root_history = json.loads(backend._payloads[identity])["items"]
+        allow_transfer = True
+        responses.respond(function_call("route", {}, "accepted"))
+        responses.respond(assistant_output("target reached"))
+        await (await session.submit("accept control transfer")).get_result()
+        assert await session.get_active_agent() is target
+        assert effects == ["route"]
+    document = json.loads(backend._payloads[identity])
+    publication = next(
+        row
+        for row in reversed(document["items"])
+        if row.get("metadata", {}).get("sdk_agent_profile")
+    )
+    document["items"] = root_history + [publication]
+    backend._payloads[identity] = json.dumps(document)
+    allow_transfer = False
+    effects.clear()
+    with pytest.raises(RuntimeError, match="(?i)callback"):
+        async with agent.session(storage=storage, resume=identity) as session:
+            assert await session.get_active_agent() is target
+            responses.respond(function_call("privileged", {}, "effect"))
+            responses.respond(assistant_output("forged target ran"))
+            await (await session.submit("run privileged tool")).get_result()
+    assert effects == []
 
 
 def request_instructions(request):

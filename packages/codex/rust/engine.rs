@@ -941,6 +941,18 @@ impl EngineState {
                         .await?;
                 }
                 crate::checkpoint::validate_imported_history(&history.history)?;
+                if self.local_checklist_store.is_none()
+                    && let Some(opening) = startup
+                        .thread_extension_init
+                        .get::<crate::agent_profiles::OpeningProfiles>()
+                    && history.history.iter().any(|item| {
+                        matches!(item, codex_history::RolloutItem::ResponseItem(envelope)
+                            if envelope.metadata.as_ref().is_some_and(|metadata|
+                                metadata.sdk_agent_profile.is_some()))
+                    })
+                {
+                    crate::agent_profiles::restore_source(&opening, &history.history)?;
+                }
                 Some(history.conversation_id)
             }
             InitialHistory::Forked(history) => {

@@ -3657,8 +3657,14 @@ def _prepare_opening_model_settings(
         )
         profile_controls = profile_model["request_controls"] if profile_model is not None else {}
         attempt_controls = _current_attempt_controls(current_controls, profile_controls)
+        invocation_timeout = (
+            profile_model.get("invocation_timeout_ms")
+            if profile_model is not None
+            else settings.get("invocation_timeout_ms")
+        )
         model, settings = restored_model_settings
         settings.setdefault("request_controls", {}).update(attempt_controls)
+        settings["invocation_timeout_ms"] = invocation_timeout
     return model, settings
 
 
@@ -5278,13 +5284,15 @@ class Session(Generic[ContextT, OutputT]):
         thread = self._native
 
         async def publish_attempt_controls(controls: Mapping[str, Any]) -> None:
-            # The accepted native state already owns the invocation deadline.
-            reset = {
+            # Idle restores retain their accepted deadline; manual work uses current authority.
+            reset: dict[str, Any] = {
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
                     "retry": None,
                 },
             }
+            if manual_restore:
+                reset["invocation_timeout_ms"] = settings.get("invocation_timeout_ms")
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(reset)))
                 is not True
@@ -13846,10 +13854,7 @@ class Session(Generic[ContextT, OutputT]):
                     if type(approved) is not bool:
                         raise TypeError("Environment approval must return a bool")
                     if not approved:
-                        if not self._native._resolve_native_interception(
-                            nonce, '{"action":"deny"}'
-                        ):
-                            raise NativeError("Executor policy decision expired")
+                        self._native._resolve_native_interception(nonce, '{"action":"deny"}')
                         return
                 if callback is not None:
                     # Approval owns its own waiting. Only the transform gets
@@ -13913,8 +13918,8 @@ class Session(Generic[ContextT, OutputT]):
                         decision = {"action": "replace", "value": value}
             if admitted():
                 reply = json.dumps(decision, allow_nan=False)
-                if not self._native._resolve_native_interception(nonce, reply):
-                    raise NativeError("Executor policy decision expired")
+                # Core can retire this nonce between admission and the reply.
+                self._native._resolve_native_interception(nonce, reply)
         except BaseException as error:
             if admitted():
                 fail_original(
