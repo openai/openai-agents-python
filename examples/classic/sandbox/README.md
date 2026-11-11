@@ -31,6 +31,8 @@ Run these examples from the repository root after completing [Classic source set
 
 ### Docker mounts and S3 memory
 
+Docker rejects manifests containing a `GitRepo` entry before creating or resuming a container. This includes nested entries and applies even with a custom copy launcher. To supply repository files to Docker, include them in the trusted image or use file entries in the manifest.
+
 Install the Docker extra in your source environment:
 
 ```sh

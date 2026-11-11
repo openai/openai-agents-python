@@ -1819,6 +1819,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1849,6 +1850,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1879,6 +1881,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -1913,6 +1916,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -1960,6 +1964,10 @@ class Agent(Generic[ContextT, OutputT]):
         through another Session's transact_history. That Session supplies its own instructions.
         History above 4,096 original records or 8 MiB raises NativeError after completion.
 
+        return_raw_usage=True returns original usage from accepted Responses requests
+        completed during this invocation, in response order.
+        The SDK keeps these objects out of history and checkpoints. A capture above
+        4,096 responses or 8 MiB raises NativeError after completion.
         return_items=True retains the accepted assistant and tool items in
         Completed.items with their producing Agents.
         """
@@ -1975,6 +1983,7 @@ class Agent(Generic[ContextT, OutputT]):
             if not isinstance(input, str):
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
+        raw_usage_token = None
         produced_items_token = None
         try:
             from ._function_tools import FunctionTool
@@ -1987,6 +1996,7 @@ class Agent(Generic[ContextT, OutputT]):
                 NativeError,
                 _handoff_default_names,
                 _produced_items_restore,
+                _raw_usage_restore,
                 _split_tools,
             )
             from .state import SessionState
@@ -2138,14 +2148,21 @@ class Agent(Generic[ContextT, OutputT]):
                 # instruction receipt to the first ordinary submission.
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
-                if not (return_history or return_items) and _private_text_run_eligible(
+                if not (
+                    return_history or return_raw_usage or return_items
+                ) and _private_text_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_private_text_run"] = True
-                if not (return_history or return_items) and _completed_run_eligible(
+                if not (
+                    return_history or return_raw_usage or return_items
+                ) and _completed_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_completed_input"] = input
+            if return_raw_usage and resume_manual:
+                assert state is not None
+                raw_usage_token = _raw_usage_restore.set((self, state, asyncio.current_task()))
             if return_items and resume_manual:
                 assert state is not None
                 produced_items_token = _produced_items_restore.set(
@@ -2157,6 +2174,9 @@ class Agent(Generic[ContextT, OutputT]):
             ) as session:
                 from .session import Completed
 
+                if raw_usage_token is not None:
+                    _raw_usage_restore.reset(raw_usage_token)
+                    raw_usage_token = None
                 if produced_items_token is not None:
                     _produced_items_restore.reset(produced_items_token)
                     produced_items_token = None
@@ -2284,6 +2304,8 @@ class Agent(Generic[ContextT, OutputT]):
                 session._fail_unhandled_questions = (
                     session._interaction_handler is None and not pause_manual
                 )
+                if return_raw_usage:
+                    session._start_raw_usage()
                 if return_items:
                     session._start_produced_items()
                 if resume_manual:
@@ -2310,6 +2332,7 @@ class Agent(Generic[ContextT, OutputT]):
                         on_interaction,
                         return_state=return_state,
                         return_history=return_history,
+                        return_raw_usage=return_raw_usage,
                         return_items=return_items,
                         pause_manual=pause_manual,
                     )
@@ -2318,10 +2341,14 @@ class Agent(Generic[ContextT, OutputT]):
                     result = replace(result, state=await session.save_state())
                 if return_history:
                     result = replace(result, history=await session._run_history())
+                if return_raw_usage:
+                    result = replace(result, raw_usage=session._take_raw_usage(result.turn))
                 if return_items:
                     result = replace(result, items=session._take_produced_items(result.turn))
                 return result
         finally:
+            if raw_usage_token is not None:
+                _raw_usage_restore.reset(raw_usage_token)
             if produced_items_token is not None:
                 _produced_items_restore.reset(produced_items_token)
             options.pop("trace_options", None)
@@ -2355,6 +2382,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -2385,6 +2413,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -2415,6 +2444,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -2449,10 +2479,11 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
-        on_interaction, state, return_history, and return_items follow run().
+        on_interaction, state, return_history, return_raw_usage, and return_items follow run().
         A sync or async handler
         returns request.reply(value); the SDK delivers it before closing.
 
@@ -2484,6 +2515,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["return_state"] = return_state
                 if return_history is not False:
                     options["return_history"] = return_history
+                if return_raw_usage:
+                    options["return_raw_usage"] = return_raw_usage
                 if tool_error_formatter is not None:
                     options["tool_error_formatter"] = tool_error_formatter
                 if on_interaction is not None:
