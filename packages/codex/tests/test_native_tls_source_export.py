@@ -17,9 +17,7 @@ def test_native_tls_compile_inputs_survive_authenticated_source_export(tmp_path:
     integrity = runpy.run_path(str(ROOT / "packages/codex/scripts/source_integrity.py"))
     inputs = integrity["native_inputs"](ROOT / "packages/codex")
     rust = ROOT / "packages/codex/rust/private_http_tls_tests.rs"
-    paths = re.findall(
-        r'include_bytes!\("(\.\./tests/fixtures/private-http-tls/[^"\n]+)"\)', rust.read_text()
-    )
+    paths = re.findall(r'include_bytes!\("(fixtures/private-http-tls/[^"\n]+)"\)', rust.read_text())
     assert len(paths) == 6
     with tarfile.open(archive_path) as archive:
         roots = {Path(name).parts[0] for name in archive.getnames()}

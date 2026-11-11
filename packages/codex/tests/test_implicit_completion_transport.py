@@ -259,7 +259,7 @@ async def test_declared_routing_keeps_implicit_websocket_permission(
 
 
 @pytest.mark.parametrize("size", [16 * 1024 + 1, 512 * 1024])
-async def test_large_private_text_selects_http_without_completed_collection(
+async def test_large_private_text_selects_http_and_completed_collection(
     openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]], size: int
 ) -> None:
     async with NativeProvider(api_key="synthetic-large-policy-key") as provider:
@@ -268,7 +268,7 @@ async def test_large_private_text_selects_http_without_completed_collection(
         assert provider.supports_websockets is None
         assert not vars(provider).get("_closed", False)
     route, config, kwargs, _ = openings.pop()
-    assert route == "_open_conversation"
+    assert route == "_prepare_run_conversation"
     assert kwargs["_private_http"] is True
     assert kwargs["_share_model_http"] is True
     assert config["model_providers.native_agent"]["supports_websockets"] is True
@@ -286,7 +286,7 @@ async def test_large_private_policy_does_not_change_public_session(
             async with agent.session():
                 raise AssertionError("Native opening was not captured")
     assert [(route, kwargs.get("_private_http", False)) for route, _, kwargs, _ in openings] == [
-        ("_open_conversation", True),
+        ("_prepare_run_conversation", True),
         ("create_engine", False),
     ]
     assert all(

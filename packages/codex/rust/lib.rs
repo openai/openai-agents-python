@@ -3845,6 +3845,7 @@ fn _open_conversation<'py>(
         provider_lease.inner.clone(),
         _share_model_http,
         _private_http,
+        false,
     )?;
     async_bridge::future_factory_into_py(py, move || opening)
 }
@@ -3859,6 +3860,7 @@ fn conversation_opening(
     lease: Arc<provider_owner::Lease>,
     share_model_http: bool,
     private_http: bool,
+    private_disposable: bool,
 ) -> PyResult<
     impl std::future::Future<
         Output = PyResult<(
@@ -3872,6 +3874,7 @@ fn conversation_opening(
     let mut options: options::ThreadOptions =
         config::decode(serde_json::from_str(options_json).map_err(py_error)?).map_err(py_error)?;
     options.private_http = private_http;
+    options.private_disposable = private_disposable;
     if !options.permits_initial_config()
         || options.agent_profiles.is_some()
         || !options.manual_tool_slots.is_empty()
@@ -3988,6 +3991,7 @@ fn _prepare_run_conversation(
         provider_lease.inner.clone(),
         _share_model_http,
         _private_http,
+        true,
     )?;
     Ok(agent_run::NativeRun::new(
         opening,

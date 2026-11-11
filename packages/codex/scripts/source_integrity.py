@@ -480,12 +480,6 @@ def native_inputs(native):
     if not rust:
         raise ValueError("Native source inputs are missing; run a fresh native build")
     paths.extend(path for path in rust if path.is_symlink() or not path.is_dir())
-    # Rust TLS tests: compile-time include_bytes! resources.
-    paths.extend(
-        path
-        for path in sorted((native / "tests/fixtures/private-http-tls").rglob("*"))
-        if path.is_symlink() or not path.is_dir()
-    )
     project = native.parents[1]
     paths.extend(
         project / name

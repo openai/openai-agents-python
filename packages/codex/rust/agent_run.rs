@@ -240,7 +240,9 @@ async fn execute(inputs: Inputs, cancelled: CancellationToken) -> PyResult<RunOu
     let mut output = RunOutput {
         scope: Some(scope),
         info: json!({"status": "unsubmitted", "thread_id": state.id.to_string(),
-            "receipt": null, "retired": {"thread": false, "engine": false}}),
+            "receipt": null, "retired": {"thread": false, "engine": false},
+            "private_disposable": state.thread.thread_extension_data()
+                .get::<codex_core::PrivateDisposableRun>().is_some()}),
         archive: NativeRunArchive::default(),
         failures: Vec::new(),
     };

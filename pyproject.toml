@@ -217,7 +217,6 @@ only-include = [
     "packages/codex/rust",
     "packages/codex/scripts",
     "packages/codex/tests/native_fixtures.py",
-    "packages/codex/tests/fixtures/private-http-tls",
     "uv.lock",
 ]
 exclude = ["*.so", "*.dylib", "*.pyd", "/src/agents/bin", "/src/agents/licenses"]
