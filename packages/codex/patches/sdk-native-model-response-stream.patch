@@ -11,7 +11,7 @@ index 3f51e655..8756512a 100644
  pub use crate::common::ResponseId;
  pub use crate::common::ResponseStream;
 diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
-index fd57546f..c430a1d9 100644
+index fd57546f..b0a057f8 100644
 --- a/codex-rs/codex-api/src/received_response_facts.rs
 +++ b/codex-rs/codex-api/src/received_response_facts.rs
 @@ -1,4 +1,6 @@
@@ -21,13 +21,12 @@ index fd57546f..c430a1d9 100644
  use codex_protocol::response_facts::{ProbabilityToken, ResponseFact};
  use serde_json::Value;
  
-@@ -131,6 +133,121 @@ pub(crate) fn contains_refusal(item: &Value) -> bool {
+@@ -131,6 +133,191 @@ pub(crate) fn contains_refusal(item: &Value) -> bool {
                  })
              })
  }
 +
 +const MAX_APPLICATION_STREAM_BYTES: usize = 8 * 1024 * 1024;
-+const MAX_DEFERRED_APPLICATION_EVENTS: usize = 4096;
 +
 +/// Projects a native application model stream without admitting unfinished tool calls.
 +#[derive(Default)]
@@ -104,10 +103,11 @@ index fd57546f..c430a1d9 100644
 +        if count == 0 {
 +            return Ok(());
 +        }
-+        self.deferred_bytes = self.deferred_bytes.saturating_add(json.len());
-+        if self.deferred_bytes > MAX_APPLICATION_STREAM_BYTES
-+            || self.deferred.len().saturating_add(count) > MAX_DEFERRED_APPLICATION_EVENTS
-+        {
++        self.deferred_bytes = self
++            .deferred_bytes
++            .saturating_add(json.len())
++            .saturating_add(count.saturating_mul(std::mem::size_of::<ResponseEvent>()));
++        if self.deferred_bytes > MAX_APPLICATION_STREAM_BYTES {
 +            ready.clear();
 +            return Err(invalid_application_stream(
 +                "Native model stream deferred output exceeds its limit",
@@ -140,10 +140,80 @@ index fd57546f..c430a1d9 100644
 +    }
 +}
 +
++#[cfg(test)]
++mod application_stream_retention_tests {
++    use super::*;
++    use serde_json::json;
++
++    fn deferred_tool() -> ApplicationModelStream {
++        let mut stream = ApplicationModelStream::default();
++        let (ready, advance) = stream.push(
++            &json!({
++                "type":"response.output_item.done", "output_index":0,
++                "item":{"type":"function_call", "call_id":"call", "name":"lookup", "arguments":"{}"}
++            })
++            .to_string(),
++        );
++        assert!(ready.is_empty());
++        assert!(advance);
++        stream
++    }
++
++    #[test]
++    fn many_small_deferred_deltas_remain_valid() {
++        let mut stream = deferred_tool();
++        let delta = json!({"type":"response.output_text.delta", "delta":"x"}).to_string();
++        for _ in 0..5000 {
++            let (ready, advance) = stream.push(&delta);
++            assert!(ready.is_empty());
++            assert!(advance);
++        }
++        let (_, advance) = stream
++            .push(&json!({"type":"response.completed", "response":{"id":"response"}}).to_string());
++        assert!(advance);
++        let events = stream.finish(None).unwrap();
++        assert!(matches!(
++            events.first(),
++            Some(ResponseEvent::OutputItemDone(_))
++        ));
++        assert_eq!(
++            events
++                .iter()
++                .filter(|event| matches!(event, ResponseEvent::OutputTextDelta(_)))
++                .count(),
++            5000
++        );
++        assert!(matches!(
++            events.last(),
++            Some(ResponseEvent::Completed { .. })
++        ));
++    }
++
++    #[test]
++    fn retained_storage_budget_rejects_without_admitting_tool_events() {
++        let mut stream = deferred_tool();
++        let delta = json!({"type":"response.output_text.delta", "delta":"x"}).to_string();
++        let mut rejected = false;
++        for _ in 0..100_000 {
++            let (ready, advance) = stream.push(&delta);
++            assert!(ready.is_empty());
++            if !advance {
++                rejected = true;
++                break;
++            }
++        }
++        assert!(rejected);
++        assert!(matches!(
++            stream.finish(None),
++            Err(ApiError::InvalidRequest { .. })
++        ));
++    }
++}
++
  /// Convert one completed application model response through the provider fact policy.
  /// Validate the complete output before admitting any tool-bearing item.
  pub fn completed_model_response(
-@@ -229,7 +346,10 @@ mod completed_model_response_tests {
+@@ -229,7 +416,10 @@ mod completed_model_response_tests {
      fn malformed_later_item_admits_no_tool() {
          let events = completed_model_response(
              "response".into(),
