@@ -328,3 +328,47 @@ async def test_parent_cancellation_retains_original_body_cleanup_error(responses
             await manager.__aexit__(None, None, None)
         except NativeError as error:
             assert contains(error)
+
+
+@pytest.mark.parametrize("with_body_formatter", [False, True])
+async def test_timeout_formatter_retains_original_body_cleanup_cause(
+    responses, with_body_formatter
+):
+    import asyncio
+
+    cleanup = RuntimeError("body timeout cleanup failed")
+    body_formatted = []
+    timeout_causes = []
+
+    def recover(context, error):
+        body_formatted.append(error)
+        return "must not format a timeout"
+
+    def format_timeout(context, error):
+        timeout_causes.append(error.__cause__)
+        return "Timed out after cleanup"
+
+    @function_tool(
+        error_function=recover if with_body_formatter else None,
+        callback_timeout=0.02,
+        timeout_behavior="error_as_result",
+        timeout_error_function=format_timeout,
+    )
+    async def lookup() -> str:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise cleanup
+
+    responses.respond(function_call("lookup", {}, "timeout-cleanup"))
+    responses.respond(assistant_output("continued after timeout"))
+    async with Agent(
+        instructions="Use lookup.", tools=[lookup], provider=provider(responses)
+    ).session() as session:
+        result = await (await session.submit("begin")).get_result()
+    assert result.final_output == "continued after timeout"
+    assert timeout_causes == [cleanup]
+    assert body_formatted == []
+    assert len(responses.requests) == 2
+    assert "Timed out after cleanup" in str(responses.requests[1]["input"])
+    assert not responses.replies

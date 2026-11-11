@@ -13326,7 +13326,11 @@ class Session(Generic[ContextT, OutputT]):
                         # task itself never owns a return value.
                         value = None
                         if body_error is not None:
-                            timeout_error.__cause__ = body_error
+                            timeout_error.__cause__ = (
+                                body_error.original
+                                if isinstance(body_error, _FunctionBodyFailure)
+                                else body_error
+                            )
                         # No late value is validated or serialized. Format only
                         # under the still-live parent's native admission.
                         text = str(timeout_error)
