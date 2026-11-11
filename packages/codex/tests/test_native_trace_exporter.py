@@ -191,7 +191,9 @@ async def native_restart_case():
     with telemetry.trace("before native restart") as before:
         retired_parent = native.retain_trace_context(before.context._handle)
     assert (await telemetry.force_flush()).status == "success"
-    live = await native.create_engine("{}", "{}", None)
+    live = await native.create_engine(
+        '{"web_search":"disabled"}', '{"ephemeral":true}', "synthetic-key"
+    )
     await telemetry.shutdown()
     with pytest.raises(RuntimeError, match="all Codex clients to close"):
         await telemetry.configure(processors=[second], restart_after_shutdown=True)
