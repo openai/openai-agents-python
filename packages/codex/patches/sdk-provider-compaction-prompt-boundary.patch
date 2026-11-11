@@ -1,0 +1,330 @@
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -566,6 +566,10 @@
+             item: item.clone(),
+             metadata: metadata.cloned(),
+         };
++        if is_provider_compaction_boundary(&processed) {
++            // Re-emit current native instructions after the provider's new window boundary.
++            self.reference_context_item = None;
++        }
+         if let ResponseItem::FunctionCallOutput { output, .. }
+         | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed.item
+         {
+@@ -613,8 +617,23 @@
+         mut self,
+         input_modalities: &[InputModality],
+     ) -> Vec<ResponseItemEnvelope> {
++        let model_items = self.model_items();
++        if model_items.len() != self.items.len() {
++            // Only the prompt projection changes; saved audit envelopes remain untouched.
++            self.items = Arc::new(model_items.to_vec());
++        }
+         self.normalize_history(input_modalities);
+         Arc::unwrap_or_clone(self.items)
++    }
++
++    /// Unnormalized model window, excluding the audit prefix before a provider compaction.
++    fn model_items(&self) -> &[ResponseItemEnvelope] {
++        let start = self
++            .items
++            .iter()
++            .rposition(is_provider_compaction_boundary)
++            .unwrap_or(0);
++        &self.items[start..]
+     }
+ 
+     /// Iterates over raw response items without exposing their history envelopes.
+@@ -662,7 +681,7 @@
+             i64::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i64::MAX);
+ 
+         let items_tokens = self
+-            .items
++            .model_items()
+             .iter()
+             .map(|envelope| estimate_item_token_count(&envelope.item))
+             .try_fold(0i64, |sum, item| item.map(|item| sum.saturating_add(item)))?;
+@@ -860,15 +879,15 @@
+ 
+     fn get_non_last_reasoning_items_tokens(&self) -> i64 {
+         // Get reasoning items excluding all the ones after the last instruction boundary.
+-        let Some(last_user_index) = self
+-            .items
++        let model_items = self.model_items();
++        let Some(last_user_index) = model_items
+             .iter()
+             .rposition(|envelope| is_user_turn_boundary(&envelope.item))
+         else {
+             return 0;
+         };
+ 
+-        self.items
++        model_items
+             .iter()
+             .take(last_user_index)
+             .filter(|envelope| {
+@@ -892,19 +911,19 @@
+     fn items_after_last_model_generated_item(
+         &self,
+     ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
+-        let start = self
+-            .items
++        let model_items = self.model_items();
++        let start = model_items
+             .iter()
+             .rposition(|envelope| is_model_generated_item(&envelope.item))
+-            .map_or(self.items.len(), |index| index.saturating_add(1));
+-        self.items[start..].iter().map(|envelope| &envelope.item)
++            .map_or(model_items.len(), |index| index.saturating_add(1));
++        model_items[start..].iter().map(|envelope| &envelope.item)
+     }
+ 
+     /// Opaque file expansion has no local token estimate. A generated item or an old
+     /// provider usage receipt cannot prove the cost of the next selected prompt.
+     /// Provider-reported usage remains available through the existing token-info owner.
+     pub(crate) fn has_file_content(&self) -> bool {
+-        self.items
++        self.model_items()
+             .iter()
+             .any(|item| crate::file_admission::contains_file(&item.item))
+     }
+@@ -1055,6 +1074,24 @@
+         }
+     }
+     Some(item)
++}
++
++/// Provider boundaries affect only the model projection and its current-context baseline.
++fn is_provider_compaction_boundary(envelope: &ResponseItemEnvelope) -> bool {
++    envelope
++        .metadata
++        .as_ref()
++        .is_some_and(|metadata| metadata.provider_compaction)
++        && match &envelope.item {
++            ResponseItem::Compaction {
++                encrypted_content, ..
++            } => !encrypted_content.is_empty(),
++            ResponseItem::ContextCompaction {
++                encrypted_content: Some(content),
++                ..
++            } => !content.is_empty(),
++            _ => false,
++        }
+ }
+ 
+ /// Configuration updates require harness provenance; raw system messages are never retained.
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -3541,3 +3541,156 @@
+     assert!(prompt.is_empty());
+     assert_eq!(raw_items(&history), vec![call]);
+ }
++
++#[test]
++fn provider_compaction_projects_latest_window_and_preserves_canonical_history() {
++    let compaction = |id: &str| ResponseItemEnvelope {
++        item: ResponseItem::Compaction {
++            id: None,
++            encrypted_content: id.to_owned(),
++            internal_chat_message_metadata_passthrough: None,
++        },
++        metadata: Some(CodexHarnessMetadata {
++            provider_compaction: true,
++            ..Default::default()
++        }),
++    };
++    let mut history =
++        create_history_with_items(vec![user_msg("original user"), assistant_msg("old")]);
++    history.set_reference_context_item(Some(reference_context_item()));
++    let first = compaction("first");
++    history.replay_annotated_item(&first, TruncationPolicy::Tokens(10_000));
++    assert!(history.reference_context_item().is_none());
++    history.record_items(
++        [&user_msg("middle")].into_iter(),
++        TruncationPolicy::Tokens(10_000),
++    );
++    let latest = compaction("latest");
++    // Persisted provenance survives a cold JSON round trip and ordinary history replay.
++    let latest: ResponseItemEnvelope =
++        serde_json::from_str(&serde_json::to_string(&latest).unwrap()).unwrap();
++    history.replay_annotated_item(&latest, TruncationPolicy::Tokens(10_000));
++    let later = user_msg("later");
++    history.record_items([&later].into_iter(), TruncationPolicy::Tokens(10_000));
++    let audit = raw_items(&history);
++    assert_eq!(
++        history.clone().for_prompt(&default_input_modalities()),
++        vec![latest.item, later]
++    );
++    assert_eq!(raw_items(&history), audit);
++    assert_eq!(audit.len(), 6);
++}
++
++#[test]
++fn native_compaction_replacement_keeps_its_retained_user_items() {
++    let user = user_msg("retained outside the native summary");
++    let summary = ResponseItem::Compaction {
++        id: None,
++        encrypted_content: "native replacement".to_owned(),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    let mut history = create_history_with_items(vec![user.clone()]);
++    history.set_reference_context_item(Some(reference_context_item()));
++    let envelope = ResponseItemEnvelope {
++        item: summary.clone(),
++        metadata: Some(CodexHarnessMetadata::default()),
++    };
++    let saved = serde_json::to_string(&envelope).unwrap();
++    assert!(!saved.contains("provider_compaction"));
++    let legacy: ResponseItemEnvelope = serde_json::from_str(&saved).unwrap();
++    history.replay_annotated_item(&legacy, TruncationPolicy::Tokens(10_000));
++    assert!(history.reference_context_item().is_some());
++    assert_eq!(
++        history.for_prompt(&default_input_modalities()),
++        vec![user, summary]
++    );
++}
++
++#[test]
++fn provider_compaction_accounting_ignores_old_files_and_reasoning() {
++    use codex_protocol::input_file::InputFile;
++    let encrypted_reasoning = |text: &str, size: usize| {
++        let mut item = reasoning_msg(text);
++        let ResponseItem::Reasoning {
++            encrypted_content, ..
++        } = &mut item
++        else {
++            unreachable!()
++        };
++        *encrypted_content = Some("A".repeat(size));
++        item
++    };
++    let mut old_file = user_msg("old opaque file");
++    let ResponseItem::Message { content, .. } = &mut old_file else {
++        unreachable!()
++    };
++    content.push(ContentItem::InputFile {
++        file: InputFile::from_file_id("file-before-provider-compaction".into(), None).unwrap(),
++    });
++    let mut history = create_history_with_items(vec![
++        old_file,
++        encrypted_reasoning("old", 1024),
++        assistant_msg("old assistant"),
++    ]);
++    let boundary = ResponseItemEnvelope {
++        item: ResponseItem::Compaction {
++            id: None,
++            encrypted_content: "current opaque window".to_owned(),
++            internal_chat_message_metadata_passthrough: None,
++        },
++        metadata: Some(CodexHarnessMetadata {
++            provider_compaction: true,
++            ..Default::default()
++        }),
++    };
++    history.replay_annotated_item(&boundary, TruncationPolicy::Tokens(10_000));
++    let current = vec![
++        user_msg("current user"),
++        encrypted_reasoning("current", 128),
++        assistant_msg("current assistant"),
++        user_msg("next user"),
++    ];
++    history.record_items(current.iter(), TruncationPolicy::Tokens(10_000));
++    let mut expected =
++        create_history_with_items(std::iter::once(boundary.item).chain(current).collect());
++    for context in [&mut history, &mut expected] {
++        context.update_token_info(
++            &TokenUsage {
++                total_tokens: 321,
++                ..Default::default()
++            },
++            Some(8192),
++        );
++    }
++    let audit = raw_items(&history);
++    assert_eq!(audit.len(), 8);
++    assert!(!history.has_file_content());
++    let base = BaseInstructions {
++        text: "current instructions".to_owned(),
++        provenance: None,
++    };
++    assert_eq!(
++        history.estimate_token_count_with_base_instructions(&base),
++        expected.estimate_token_count_with_base_instructions(&base)
++    );
++    assert!(
++        history
++            .estimate_token_count_with_base_instructions(&base)
++            .is_some()
++    );
++    for server_reasoning_included in [false, true] {
++        assert_eq!(
++            history.get_total_token_usage(server_reasoning_included),
++            expected.get_total_token_usage(server_reasoning_included)
++        );
++    }
++    assert_eq!(
++        history.estimated_tokens_after_last_model_generated_item(),
++        expected.estimated_tokens_after_last_model_generated_item()
++    );
++    assert_eq!(
++        history.token_info().unwrap().last_token_usage.total_tokens,
++        321
++    );
++    assert_eq!(raw_items(&history), audit);
++}
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3650,7 +3650,23 @@
+         let items = items
+             .into_owned()
+             .into_iter()
+-            .map(ResponseItemEnvelope::new)
++            .map(|item| {
++                let provider_compaction = matches!(
++                    &item,
++                    ResponseItem::Compaction { .. }
++                        | ResponseItem::ContextCompaction {
++                            encrypted_content: Some(_),
++                            ..
++                        }
++                );
++                ResponseItemEnvelope {
++                    item,
++                    metadata: provider_compaction.then(|| CodexHarnessMetadata {
++                        provider_compaction: true,
++                        ..Default::default()
++                    }),
++                }
++            })
+             .collect();
+         self.record_prepared_conversation_items(
+             turn_context,
+@@ -3792,6 +3808,15 @@
+         &self,
+         step_context: &step_context::StepContext,
+     ) -> CodexResult<Arc<WorldState>> {
++        let needs_full_context = {
++            let state = self.state.lock().await;
++            state.history.reference_context_item().is_none()
++        };
++        if needs_full_context {
++            return self
++                .record_context_updates_and_set_reference_context_item(step_context)
++                .await;
++        }
+         let turn_context = step_context.turn.as_ref();
+         // Render model-visible state from the same step used to build and run tools.
+         let world_state = Arc::new(self.build_world_state_for_step(step_context).await?);
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -126,6 +126,10 @@
+     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+     pub harness_authored_configuration: bool,
+ 
++    /// Accepted provider compaction starts the next model window; audit history is retained.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub provider_compaction: bool,
++
+     /// Producer compatibility for an opaque compaction item, never the currently selected model.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub compaction_model_hash: Option<String>,

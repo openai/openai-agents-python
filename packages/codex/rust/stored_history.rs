@@ -1,13 +1,13 @@
 //! Read the owning store's committed index without reconstructing a rollout.
 
 use crate::engine::ThreadState;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use codex_protocol::ThreadId;
 use codex_thread_store::{DeleteThreadParams, RevertThreadParams, ThreadStore, ThreadStoreError};
 use codex_thread_store::{
-    ItemSortKey, ListItemsParams, ListItemsPosition, ListTurnsParams,
+    ItemSortKey, ListItemsParams, ListItemsPosition, ListThreadsParams, ListTurnsParams,
     SearchThreadOccurrencesParams, SortDirection, StoredThreadItem, StoredTurnItemsView,
-    StoredTurnStatus,
+    StoredTurnStatus, ThreadSortKey,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -103,6 +103,11 @@ impl CloseAction {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Query {
+    Sessions {
+        limit: usize,
+        cursor: Option<String>,
+        archived: bool,
+    },
     Turns {
         limit: usize,
         cursor: Option<String>,
@@ -125,9 +130,10 @@ pub enum Query {
 impl Query {
     fn check(&self) -> Result<()> {
         let limit = match self {
-            Self::Turns { limit, .. } | Self::Items { limit, .. } | Self::Search { limit, .. } => {
-                *limit
-            }
+            Self::Sessions { limit, .. }
+            | Self::Turns { limit, .. }
+            | Self::Items { limit, .. }
+            | Self::Search { limit, .. } => *limit,
         };
         ensure!(
             (1..=1000).contains(&limit),
@@ -182,6 +188,12 @@ pub async fn read(state: &ThreadState, query: Query) -> Result<Value> {
         state.engine.store.supports_paginated_history_lists(),
         "native stored history index is unsupported by this store"
     );
+    if matches!(&query, Query::Sessions { .. }) {
+        ensure!(
+            state.engine.local_checklist_store.is_some(),
+            "stored application-session discovery requires native LocalStorage"
+        );
+    }
     // Match ordinary history reads: materialize/flush the already loaded owner,
     // including an active or approval-paused turn. No idle or mutation permit is
     // needed for the store's own committed-row transactions.
@@ -189,6 +201,23 @@ pub async fn read(state: &ThreadState, query: Query) -> Result<Value> {
     state.thread.flush_rollout().await?;
     let store = &state.engine.store;
     match query {
+        Query::Sessions {
+            limit,
+            cursor,
+            archived,
+        } => {
+            sessions(
+                state
+                    .engine
+                    .local_checklist_store
+                    .as_ref()
+                    .context("stored application-session discovery requires native LocalStorage")?,
+                limit,
+                cursor,
+                archived,
+            )
+            .await
+        }
         Query::Turns {
             limit,
             cursor,
@@ -279,4 +308,66 @@ pub async fn read(state: &ThreadState, query: Query) -> Result<Value> {
             Ok(serde_json::to_value(page)?)
         }
     }
+}
+
+/// One indexed page of application-session headers, without opening their writers.
+async fn sessions(
+    store: &crate::storage::LocalChecklistStore,
+    limit: usize,
+    cursor: Option<String>,
+    archived: bool,
+) -> Result<Value> {
+    let page = store
+        .list_threads_including_empty_preview(ListThreadsParams {
+            page_size: limit,
+            cursor,
+            sort_key: ThreadSortKey::CreatedAt,
+            sort_direction: SortDirection::Asc,
+            // SDK root and stored-fork startup both use the manager's Exec source.
+            allowed_sources: vec![codex_protocol::protocol::SessionSource::Exec],
+            model_providers: Some(Vec::new()),
+            cwd_filters: None,
+            section: None,
+            project_id: None,
+            archived,
+            search_term: None,
+            relation_filter: None,
+            use_state_db_only: true,
+        })
+        .await
+        .map_err(store_error)?;
+    let mut sessions = Vec::with_capacity(page.items.len());
+    for candidate in page.items {
+        // List metadata omits fork-parent links. Read the actual native header
+        // instead of read_thread's supported missing-rollout SQLite fallback.
+        let path = candidate
+            .rollout_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("stored application-session metadata is unavailable"))?;
+        let header = match codex_rollout::read_session_meta_line(path).await {
+            Ok(header) => header,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => anyhow::bail!("invalid stored application-session metadata"),
+        };
+        ensure!(
+            header.meta.id == candidate.thread_id,
+            "stored application-session metadata identity mismatch"
+        );
+        // The index and a header can be observed at different moments.
+        if !matches!(
+            header.meta.source,
+            codex_protocol::protocol::SessionSource::Exec
+        ) {
+            continue;
+        }
+        sessions.push(json!({
+            "id": header.meta.id.to_string(),
+            "forked_from_id": header.meta.forked_from_id.map(|id| id.to_string()),
+            "parent_thread_id": header.meta.parent_thread_id.map(|id| id.to_string()),
+            "created_at_ms": candidate.created_at.timestamp_millis(),
+            "updated_at_ms": candidate.updated_at.timestamp_millis(),
+        }));
+    }
+    // No refill: deleted entries can leave a short/empty nonterminal page.
+    Ok(json!({"sessions": sessions, "next_cursor": page.next_cursor}))
 }

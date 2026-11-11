@@ -8,6 +8,21 @@ from typing import Any, Literal, cast
 from typing_extensions import TypedDict
 
 
+class StoredSession(TypedDict):
+    """Native Exec application-session identity; no history or resume grant."""
+
+    id: str
+    forked_from_id: str | None
+    parent_thread_id: str | None
+    created_at_ms: int
+    updated_at_ms: int
+
+
+class StoredSessionPage(TypedDict):
+    sessions: list[StoredSession]
+    next_cursor: str | None
+
+
 class StoredItem(TypedDict):
     """Core's indexed item projection, distinct from an original JSON record."""
 
