@@ -149,7 +149,7 @@ index ce0ff876..7bdb9df8 100644
 +        model_omitted: step_context
              .settings
 -            .model_info
-+            .request_controls
++            .request_controls()
 +            .hosted_prompt
              .as_ref()
 -            .input_modalities,
@@ -256,7 +256,7 @@ index ce0ff876..7bdb9df8 100644
 +                model: &source_step_context.settings.model_info.slug,
 +                model_omitted: source_step_context
 +                    .settings
-+                    .request_controls
++                    .request_controls()
 +                    .hosted_prompt
 +                    .as_ref()
 +                    .and_then(Option::as_ref)
@@ -796,7 +796,7 @@ index 7305d816..ba7abe1e 100644
 +        }
 +        let error = err.to_codex_protocol_error();
 +        if matches!(error, CodexErrorInfo::UsageLimitExceeded) {
-+            sess.emit_turn_error_lifecycle(turn_context.as_ref(), error, &err)
++            sess.emit_turn_error_lifecycle(turn_context.as_ref(), error, err.details())
 +                .await;
 +        }
 +        warn!(error = %err, "Post-turn compaction failed; preserving the completed turn");

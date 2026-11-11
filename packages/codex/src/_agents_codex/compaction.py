@@ -180,7 +180,12 @@ class ResponsesCompaction(Generic[ContextT]):
             observe(usage)
             if not isinstance(value, dict) or not isinstance(value.get("output"), list):
                 raise ValueError("Compaction client must return an output window")
-            window = {"items": value["output"], "response_id": value.get("id"), "model": model}
+            response_id = value.get("id")
+            if response_id is not None and (
+                not isinstance(response_id, str) or not response_id.strip()
+            ):
+                raise ValueError("Compaction response ID must be a nonempty string")
+            window = {"items": value["output"], "response_id": response_id, "model": model}
             return cast(dict[str, Any], json.loads(json.dumps(window, allow_nan=False)))
         finally:
             if completed and not reported:

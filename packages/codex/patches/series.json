@@ -670,7 +670,7 @@
     },
     {
       "path": "sdk-borrowed-responses-compaction.patch",
-      "sha256": "0678949ba0884e29db36bce730f1a7e00fd408656558c1e5fe6091b1606a76df"
+      "sha256": "086d34301089639f2d268ad0b27489e84cbde40ff4a49b0978b43a67dabc581c"
     },
     {
       "path": "sdk-trace-delivery-controls.patch",
@@ -681,5 +681,5 @@
       "sha256": "69a74476497a8189f717036a231c5f48a3e391dc06191693dc7507851c81e7dc"
     }
   ],
-  "result_tree": "2a2518cbe703eca57016c2c5fa1dbe8231108aed"
+  "result_tree": "9d4daff0102a7e9530ca88e9fadd97131efa76d6"
 }

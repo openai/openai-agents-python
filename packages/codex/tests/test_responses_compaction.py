@@ -99,6 +99,26 @@ async def test_borrowed_client_receives_full_input_and_preserves_the_complete_wi
         assert not client.is_closed()
 
 
+@pytest.mark.parametrize("response_id", [7, False, "", " "])
+async def test_malformed_response_id_fails_before_native_reply(response_id) -> None:
+    async def send(request):
+        return httpx.Response(200, json={**result(), "id": response_id})
+
+    async with AsyncOpenAI(
+        api_key="synthetic",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(send)),
+    ) as client:
+        factory = ResponsesCompaction(client=client)
+        prepared = factory._context(
+            context(), candidates=(), provider_response=None, model_omitted=False
+        )
+        reports = []
+        with pytest.raises(ValueError, match="response ID"):
+            await factory._window(prepared, provider_response=None, observe=reports.append)
+        assert len(reports) == 1 and reports[0].total_tokens == 6
+
+
 @pytest.mark.parametrize("mode", ["auto", "input", "previous_response_id"])
 async def test_preflight_resolves_mode_model_and_requires_current_acknowledgment(mode) -> None:
     async with AsyncOpenAI(api_key="synthetic") as client:

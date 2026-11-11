@@ -16,7 +16,7 @@ from typing import Any, TextIO, cast
 from urllib.parse import urlsplit
 
 from ._public import preserve_module_identity as _preserve_module_identity
-from ._trace_delivery import _trace_credential_route
+from ._trace_delivery import _trace_credential_route, _trace_export_cancellation
 
 
 def _plain(value: Any) -> Any:
@@ -334,10 +334,8 @@ class OpenAITraceExporter:
                         continue
                     try:
                         payload = json.dumps({"data": records}, allow_nan=False).encode()
-                        delivery = (
-                            self._send(payload, dict(group_headers), credential_events=group_events)
-                            if identity
-                            else self._send(payload, dict(group_headers))
+                        delivery = self._send(
+                            payload, dict(group_headers), credential_events=group_events
                         )
                         await asyncio.wait_for(delivery, timeout=max(0.0, deadline - monotonic()))
                         if monotonic() > deadline:
@@ -385,9 +383,12 @@ class OpenAITraceExporter:
         try:
             # Keep the client inside the delivery's timeout and cancellation scope.
             # Streaming reads only headers; remote response bodies are never retained.
-            async with self._httpx.AsyncClient(
-                timeout=self._timeout, follow_redirects=False, trust_env=False
-            ) as client:
+            async with (
+                _trace_export_cancellation(),
+                self._httpx.AsyncClient(
+                    timeout=self._timeout, follow_redirects=False, trust_env=False
+                ) as client,
+            ):
                 delay = self._retry_delay
                 for attempt in range(self._max_retries + 1):
                     retry = False

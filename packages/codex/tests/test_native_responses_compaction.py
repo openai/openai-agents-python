@@ -137,13 +137,15 @@ async def test_terminal_tool_success_schedules_compaction_before_terminal_retire
         assert "finish-call" in (await session.save_state()).to_json()
 
 
-@pytest.mark.parametrize("failure", ["predicate", "client", "missing_anchor"])
+@pytest.mark.parametrize("failure", ["predicate", "client", "missing_anchor", "malformed_id"])
 async def test_optional_failure_keeps_completed_answer_and_original_context(responses, failure):
     calls = []
     seen = []
 
     async def compact(**body):
         calls.append(body)
+        if failure == "malformed_id":
+            return {**window(), "id": 7}
         raise RuntimeError("compact unavailable")
 
     async def predicate(context):
@@ -177,7 +179,7 @@ async def test_optional_failure_keeps_completed_answer_and_original_context(resp
         saved = await session.save_state()
         assert "KEEP_ORIGINAL_CONTEXT" in saved.to_json()
         assert not any(row["type"] == "compacted" for row in saved.history)
-    assert len(calls) == (1 if failure == "client" else 0)
+    assert len(calls) == (1 if failure in ("client", "malformed_id") else 0)
     if failure == "client":
         assert "MUTATED_DETACHED_CONTEXT" not in json.dumps(calls[0])
 

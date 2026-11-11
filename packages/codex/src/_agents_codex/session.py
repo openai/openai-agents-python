@@ -5190,7 +5190,7 @@ class Session(Generic[ContextT, OutputT]):
         )
         return self._agent_for_profile(receipt)
 
-    def _checkpoint_guardrail_records(self, state: _Submission) -> list[_GuardrailCheckpointRecord]:
+    def _checkpoint_guardrail_records(self, state: _Submission) -> list[dict[str, Any]]:
         root = None if self._profiles else self._original_agent_for_message({})
         runtimes = {**self._voice_profiles, **self._profiles}
         profiles = {id(runtime.profile.agent): key for key, runtime in runtimes.items()}
@@ -5199,19 +5199,25 @@ class Session(Generic[ContextT, OutputT]):
             profile = None if record.agent is root else profiles.get(id(record.agent))
             if profile is None and record.agent is not root:
                 raise NativeError("Guardrail checkpoint has no captured source Agent")
-            records.append(
-                _GuardrailCheckpointRecord(
-                    kind=record.kind,
-                    name=record.name,
-                    agent_profile=profile,
-                    session_id=record.session_id,
-                    turn_id=record.turn_id,
-                    subagent_id=record.subagent_id,
-                    tripwire_triggered=record.result.tripwire_triggered,
-                    output_info=record.result.output_info,
-                    tool_call=record.tool_call,
-                )
+            captured = _GuardrailCheckpointRecord(
+                kind=record.kind,
+                name=record.name,
+                agent_profile=profile,
+                session_id=record.session_id,
+                turn_id=record.turn_id,
+                subagent_id=record.subagent_id,
+                tripwire_triggered=record.result.tripwire_triggered,
+                tool_call=record.tool_call,
             )
+            durable = captured.model_dump(mode="json", exclude={"output_info"})
+            try:
+                info = record.result.output_info
+                if _is_json_value(info):
+                    durable["output_info"] = json.loads(json.dumps(info, allow_nan=False))
+            except Exception:
+                # Live diagnostics stay untouched; unsupported host values are local-only.
+                pass
+            records.append(durable)
         return records
 
     def _restore_guardrail_records(self, saved: SessionState) -> list[GuardrailRecord]:
@@ -5238,11 +5244,12 @@ class Session(Generic[ContextT, OutputT]):
         return records
 
     def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
-        captured = self._agent_for_message(message)
-        profile_id = message.get("profile_id")
-        if isinstance(profile_id, str):
-            return self._source_profile_runtime(profile_id).profile.agent
-        return self._agent if self._agent is not None else captured
+        receipt = (
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
+        return self._original_agent_for_profile(receipt)
 
     def _original_agent_for_profile(self, receipt: Mapping[str, Any] | None) -> Agent[Any, Any]:
         """Expose application identity after validating the captured source receipt."""
@@ -5251,14 +5258,6 @@ class Session(Generic[ContextT, OutputT]):
         if isinstance(profile_id, str):
             return self._source_profile_runtime(profile_id).profile.agent
         return self._agent if self._agent is not None else captured
-
-    def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
-        receipt = (
-            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
-            if "profile_id" in message or "profile_epoch" in message
-            else None
-        )
-        return self._original_agent_for_profile(receipt)
 
     async def _realtime_tool_enabled(
         self,
@@ -14747,6 +14746,7 @@ class Session(Generic[ContextT, OutputT]):
             )
         )
         executor_policy_digest = None
+        guardrail_records: list[dict[str, Any]] = []
         if (
             active_uses_executor
             or self._strict_executor_writes
@@ -14758,6 +14758,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
             if before_seal is not None:
                 before_seal()
+            guardrail_records = self._checkpoint_guardrail_records(active)
             # Block replies and suppress expected ShutdownComplete/EOF while
             # Core decides whether it can stop the original writer. Readers
             # must keep dispatching until native capture confirms suspension.
@@ -14952,10 +14953,7 @@ class Session(Generic[ContextT, OutputT]):
                 payload["executor_read_only"] = True
             if active is not None:
                 usage = active.run_usage.snapshot()
-                payload["guardrail_results"] = [
-                    record.model_dump(mode="json")
-                    for record in self._checkpoint_guardrail_records(active)
-                ]
+                payload["guardrail_results"] = guardrail_records
                 payload["run_usage"] = {
                     name: getattr(usage, name) for name in RunUsage.__dataclass_fields__
                 }

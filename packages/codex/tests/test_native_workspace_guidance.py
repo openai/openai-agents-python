@@ -110,7 +110,17 @@ async def test_native_workspace_appendix_preserves_providers_and_replaces_curren
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@pytest.mark.parametrize("scenario", ["unicode", "oversized_allowlist", "path_priority"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "unicode",
+        "empty_allowlist",
+        "oversized_allowlist",
+        "path_priority",
+        "dense_mounts",
+        "flat_deep",
+    ],
+)
 async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     tmp_path, monkeypatch, responses, scenario
 ) -> None:
@@ -119,8 +129,12 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     (home / "AGENTS.md").write_text("UNDISCOVERED_GLOBAL_RULE")
     monkeypatch.setenv("CODEX_HOME", str(home))
     commands = (
-        [f"fixture-mount-{index}" for index in range(2500)]
+        Manifest().remote_mount_command_allowlist
+        if scenario == "dense_mounts"
+        else [f"fixture-mount-{index}" for index in range(2500)]
         if scenario == "oversized_allowlist"
+        else []
+        if scenario == "empty_allowlist"
         else ["fixture-mount", "fixture-unmount"]
     )
     root = "/workspace/fixtures/workspace-guidance-boundary"
@@ -144,6 +158,12 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
                     }
                 },
             ),
+            **(
+                {f"mount-{index:04d}": declaration() for index in range(600)}
+                if scenario == "dense_mounts"
+                else {}
+            ),
+            **({"flat/pkg/inner/code": Dir()} if scenario == "flat_deep" else {}),
         },
     )
     client = Client([])
@@ -171,10 +191,33 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     assert "Some workspace details have been omitted" in text
     assert f"Executor read-only: {str(scenario == 'path_priority').lower()}" in text
     assert "untrusted external content" in text and "then copy back" in text
+    assert "For any edit to a read-write mount, including apply_patch, copy" in text
     assert "Do not write to read-only mounts" in text
     assert "UNDISCOVERED_GLOBAL_RULE" not in text
     assert "UNDISCOVERED_PROJECT_RULE" not in text
-    storage = json.loads(text.split("Declared storage access:\n")[1].split("\n\n")[0])
+    if scenario == "dense_mounts":
+        assert str(peer.root) != root
+        assert "Working directory: " + json.dumps(str(peer.root)) in text
+        assert "Do not run commands on remote-mounted paths." not in text
+        assert (
+            "Only use these commands on remote-mounted paths: "
+            + json.dumps(commands, separators=(",", ":"))
+            + "."
+        ) in text
+        assert "cp" in commands and "cat" in commands
+    storage, _ = json.JSONDecoder().raw_decode(text.split("Declared storage access:\n")[1])
+    if scenario == "dense_mounts":
+        assert 2 < len(storage) < 602
+        assert [{"path": entry["path"], "access": entry["access"]} for entry in storage[:2]] == [
+            {"path": root + "/data", "access": "read_only"},
+            {"path": root + "/output", "access": "read_write"},
+        ]
+        assert storage[2:] == [
+            {"path": root + f"/mount-{index:04d}", "access": "read_only"}
+            for index in range(len(storage) - 2)
+        ]
+        assert client.events == ["create", "start", "close", "delete"]
+        return
     assert storage == [
         {"path": root + "/data", "access": "read_only"},
         {
@@ -184,17 +227,26 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
         },
     ]
     filesystem = json.loads(text.split("Filesystem layout:\n")[1].split("\n\n")[0])
-    assert filesystem == [
+    expected_filesystem = [
         {
             "path": root + "/src/",
             **({"description": source_description} if scenario != "path_priority" else {}),
         },
         {"path": root + "/src/café.py", "description": file_description},
     ]
-    if scenario == "oversized_allowlist":
-        assert "Do not use remote mount management commands." in text
-        assert "Allowed remote mount commands:" not in text
+    if scenario == "flat_deep":
+        expected_filesystem.extend(
+            {"path": root + "/" + directory}
+            for directory in ("flat/", "flat/pkg/", "flat/pkg/inner/")
+        )
+    assert filesystem == expected_filesystem
+    if scenario in ("empty_allowlist", "oversized_allowlist"):
+        assert "Do not run commands on remote-mounted paths." in text
+        assert "Only use these commands on remote-mounted paths:" not in text
         assert "fixture-mount-0" not in text
     else:
-        assert 'Allowed remote mount commands: ["fixture-mount","fixture-unmount"].' in text
+        assert (
+            'Only use these commands on remote-mounted paths: ["fixture-mount","fixture-unmount"].'
+            in text
+        )
     assert client.events == ["create", "start", "close", "delete"]

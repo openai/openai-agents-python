@@ -107,3 +107,36 @@ async def test_named_guard_diagnostics_survive_manual_restore_without_independen
         }
         assert completed.guardrail_results == records
         assert len(responses.requests) == 3
+
+
+@pytest.mark.parametrize("info", [RuntimeError("local-only"), {"nested": object()}])
+async def test_local_guard_diagnostics_do_not_prevent_manual_checkpoint_restore(responses, info):
+    lookup = FunctionTool(name="lookup", description="Ask.", input_type=Empty, output_type=str)
+    agent = Agent(
+        instructions="Use lookup.",
+        provider=provider(responses),
+        tools=[lookup],
+        input_guardrails=[
+            InputGuardrail(
+                "local-only",
+                lambda turn, context, source, value: GuardrailResult(False, info),
+                run_in_parallel=False,
+            )
+        ],
+    )
+    responses.respond(function_call("lookup", {}, "local-diagnostics"))
+    responses.respond(assistant_output("resumed"))
+    async with timeout(25):
+        async with agent.session() as original:
+            first = await original.submit("begin")
+            await next_request(original.interactions(), lookup)
+            assert first.guardrail_results[0].result.output_info is info
+            saved = await original.suspend()
+            assert first.guardrail_results[0].result.output_info is info
+            assert json.loads(saved.to_json())["guardrail_results"][0].get("output_info") is None
+        async with agent.session(state=SessionState.from_json(saved.to_json())) as restored:
+            request = await next_request(restored.interactions(), lookup)
+            await request.respond("accepted")
+            completed = await restored.restored_turn.get_result()
+            assert completed.final_output == "resumed"
+            assert completed.guardrail_results[0].result.output_info is None
