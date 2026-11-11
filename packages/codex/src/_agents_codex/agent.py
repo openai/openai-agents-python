@@ -1691,6 +1691,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1720,6 +1721,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1749,6 +1751,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1782,6 +1785,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1838,6 +1842,9 @@ class Agent(Generic[ContextT, OutputT]):
         return_history=True captures conversation records before close for replay
         through another Session's transact_history. That Session supplies its own instructions.
         History above 4,096 original records or 8 MiB raises NativeError after completion.
+
+        return_items=True retains the accepted assistant and tool items in
+        Completed.items with their producing Agents.
         """
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(
@@ -1851,6 +1858,7 @@ class Agent(Generic[ContextT, OutputT]):
             if not isinstance(input, str):
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
+        produced_items_token = None
         try:
             from ._function_tools import FunctionTool
             from .manual import _CapturedApproval
@@ -1861,6 +1869,7 @@ class Agent(Generic[ContextT, OutputT]):
                 InteractionRequired,
                 NativeError,
                 _handoff_default_names,
+                _produced_items_restore,
                 _split_tools,
             )
             from .state import SessionState
@@ -2012,20 +2021,28 @@ class Agent(Generic[ContextT, OutputT]):
                 # instruction receipt to the first ordinary submission.
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
-                if not return_history and _private_text_run_eligible(
+                if not (return_history or return_items) and _private_text_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_private_text_run"] = True
-                if not return_history and _completed_run_eligible(
+                if not (return_history or return_items) and _completed_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_completed_input"] = input
+            if return_items and resume_manual:
+                assert state is not None
+                produced_items_token = _produced_items_restore.set(
+                    (self, state, asyncio.current_task())
+                )
             async with session_factory(
                 context=cast(SessionContextT, context),
                 **options,
             ) as session:
                 from .session import Completed
 
+                if produced_items_token is not None:
+                    _produced_items_restore.reset(produced_items_token)
+                    produced_items_token = None
                 if isinstance(session, Completed):
                     return session
                 if (
@@ -2150,6 +2167,8 @@ class Agent(Generic[ContextT, OutputT]):
                 session._fail_unhandled_questions = (
                     session._interaction_handler is None and not pause_manual
                 )
+                if return_items:
+                    session._start_produced_items()
                 if resume_manual:
                     restored = session.restored_turn
                     if restored is None:
@@ -2174,6 +2193,7 @@ class Agent(Generic[ContextT, OutputT]):
                         on_interaction,
                         return_state=return_state,
                         return_history=return_history,
+                        return_items=return_items,
                         pause_manual=pause_manual,
                     )
                 result = await submission.get_result()
@@ -2181,8 +2201,12 @@ class Agent(Generic[ContextT, OutputT]):
                     result = replace(result, state=await session.save_state())
                 if return_history:
                     result = replace(result, history=await session._run_history())
+                if return_items:
+                    result = replace(result, items=session._take_produced_items(result.turn))
                 return result
         finally:
+            if produced_items_token is not None:
+                _produced_items_restore.reset(produced_items_token)
             options.pop("trace_options", None)
             del trace_options
 
@@ -2203,6 +2227,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2232,6 +2257,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2261,6 +2287,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2294,6 +2321,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2307,7 +2335,8 @@ class Agent(Generic[ContextT, OutputT]):
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
-        on_interaction, state, and return_history follow run(). A sync or async handler
+        on_interaction, state, return_history, and return_items follow run().
+        A sync or async handler
         returns request.reply(value); the SDK delivers it before closing.
 
         If opening with a managed Environment fails and automatic cleanup leaves
@@ -2332,6 +2361,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["state"] = state
                 if initial_messages is not None:
                     options["initial_messages"] = initial_messages
+                if return_items:
+                    options["return_items"] = return_items
                 if return_state is not False:
                     options["return_state"] = return_state
                 if return_history is not False:
