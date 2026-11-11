@@ -1986,6 +1986,14 @@ def _split_tools(
 ) -> tuple[
     tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents[Any] | None
 ]:
+    from .hosted_mcp import HostedMCP
+
+    def bindings(values: Any) -> Any:
+        return tuple(item._binding if isinstance(item, HostedMCP) else item for item in values)
+
+    tools = bindings(tools)
+    available = bindings(available) if available is not None else None
+    ceiling = bindings(ceiling) if ceiling is not None else None
     opening = ceiling if ceiling is not None else tools if available is None else available
     admitted: dict[ToolRef, FunctionTool[Any, Any, Any] | HttpMCP[Any] | StdioMCP[Any]] = {}
     mcp_raw_names: dict[ToolRef, str] = {}
@@ -2602,6 +2610,9 @@ def _capture_tools(
 
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
+    if spec.get("type") == "hostedMcp":
+        label = spec.get("serverLabel")
+        return ToolRef(label, "hosted_mcp") if isinstance(label, str) else None
     if spec.get("type") == "computer":
         return ToolRef("computer")
     if spec.get("type") == "namespace":
@@ -4103,6 +4114,7 @@ class Session(Generic[ContextT, OutputT]):
                         + [
                             {"name": tool["type"], "namespace": "functions"}
                             for tool in hosted_tools
+                            if tool["type"] != "mcp"
                         ]
                         + (
                             [{"name": "run", "namespace": "web"}]
@@ -8017,6 +8029,14 @@ class Session(Generic[ContextT, OutputT]):
                             "Native interaction needs on_interaction or Agent.session()"
                         )
 
+                    from ._hosted_mcp_binding import _HostedMCPBinding
+
+                    if isinstance(event._declaration, _HostedMCPBinding):
+                        raise InteractionRequired(
+                            "Hosted MCP approvals require live replies; "
+                            "pass on_interaction or use Agent.session()"
+                        )
+
                     def check_pending() -> None:
                         # Check the whole settled sample, not only the first
                         # request this cursor happened to observe.
@@ -8534,15 +8554,19 @@ class Session(Generic[ContextT, OutputT]):
             )
             # Explicit idle declarations replace bindings; refs only select.
             # Preserve every omitted opening slot and alias for later operations.
+            from .hosted_mcp import HostedMCP
+
             supplied_python = {
-                tool.ref: tool for tool in selection if isinstance(tool, FunctionTool)
+                tool.ref: tool._binding if isinstance(tool, HostedMCP) else tool
+                for tool in selection
+                if isinstance(tool, (FunctionTool, HostedMCP))
             }
             supplied_mcp = tuple(
                 tool for tool in selection if isinstance(tool, (HttpMCP, StdioMCP))
             )
             bindings: list[Tool[ContextT]] = []
             for bound in self._bindings:
-                if isinstance(bound, FunctionTool):
+                if isinstance(bound, (FunctionTool, HostedMCP)):
                     bindings.append(supplied_python.get(bound.ref, bound))
                 elif isinstance(bound, (HttpMCP, StdioMCP)):
                     if not any(server.name == bound.name for server in supplied_mcp):
@@ -8558,6 +8582,20 @@ class Session(Generic[ContextT, OutputT]):
                 else bound
                 for bound in self._bound_tools
             )
+            from ._hosted_mcp_binding import (
+                _CapturedHostedMCPApproval,
+                _CapturedHostedMCPManual,
+            )
+
+            hosted_bindings = (_CapturedHostedMCPApproval, _CapturedHostedMCPManual)
+            for previous, replacement in zip(self._bound_tools, selected, strict=True):
+                if isinstance(previous, hosted_bindings) and (
+                    not isinstance(replacement, hosted_bindings)
+                    or previous.config != replacement.config
+                ):
+                    raise CapabilityError(
+                        "Hosted MCP provider configuration is fixed when the Session opens"
+                    )
             bound_tools = selected
             if self._native_agents is not None:
                 refs = {tool.ref for tool in python}
@@ -13756,7 +13794,19 @@ class Session(Generic[ContextT, OutputT]):
                 )
 
             try:
-                if isinstance(entry, _CapturedComputer):
+                from ._hosted_mcp_binding import _CapturedHostedMCPApproval
+
+                if isinstance(entry, _CapturedHostedMCPApproval):
+                    assert context is not None
+                    value = await self._call_decision_callback(
+                        state,
+                        message,
+                        entry.invoke,
+                        lambda: self._admit_tool(state, request),
+                        context,
+                        parsed,
+                    )
+                elif isinstance(entry, _CapturedComputer):
                     assert context is not None and isinstance(parsed, _ComputerCall)
                     value = await self._call_decision_callback(
                         state,
@@ -14601,8 +14651,10 @@ class Session(Generic[ContextT, OutputT]):
                 "portable restore cannot recover its callback"
             )
 
+        from ._hosted_mcp_binding import _CapturedHostedMCPManual
+
         if any(
-            isinstance(tool, (_CapturedFunction, _CapturedApproval))
+            isinstance(tool, (_CapturedFunction, _CapturedApproval, _CapturedHostedMCPManual))
             and tool._requires_live_manual_session
             for tool in self._catalog.tools
         ):

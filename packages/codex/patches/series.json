@@ -679,7 +679,19 @@
     {
       "path": "sdk-nested-tool-output-acceptance.patch",
       "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
+    },
+    {
+      "path": "sdk-hosted-mcp-approvals.patch",
+      "sha256": "4eb6a4fdac8526ce39c010f714f302e0ef9e03bafa83c723ea2c67456a99c456"
+    },
+    {
+      "path": "sdk-hosted-mcp-qualified-policy.patch",
+      "sha256": "755b75952ca18bd8ce86e9c5a57a67345d44050ea4312a2c736db4c567aedc90"
+    },
+    {
+      "path": "sdk-hosted-mcp-terminal-results.patch",
+      "sha256": "744cd78f8ccd5c9eda5b75427fb1bb731e013995b06d9ea2ef01f22af58a2155"
     }
   ],
-  "result_tree": "448f31f467afe839006a6aa46b557c7c1c4e4dbc"
+  "result_tree": "30fb17942a13a903031ee34734ec1715fb58028c"
 }

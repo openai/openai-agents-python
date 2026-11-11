@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "5302fe1c3642b9de737bd68bfbd15f5061f1c175",
+  "baseline_commit": "d0498527d121e50b34fd1480820d111744b774af",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -439,6 +439,37 @@
           "TurnReceipt": "agents.turn_receipt.TurnReceipt"
         }
       },
+      "agents.hosted_mcp": {
+        "declarations": [
+          "ContextT_co = TypeVar('ContextT_co', covariant=True, default=object)",
+          "ContextT_contra = TypeVar('ContextT_contra', contravariant=True, default=object)",
+          "@with_config(ConfigDict(strict=True, extra='forbid'))\nclass HostedMCPApprovalResult(TypedDict):\n    approve: bool\n    reason: NotRequired[str | None]",
+          "class HostedMCPApprovalArguments(BaseModel):\n    model_config = ConfigDict(strict=True, extra='forbid', frozen=True)\n    server_label: str\n    name: str\n    arguments: str\n    caller: dict[str, JsonValue] | None = None",
+          "@dataclass(frozen=True)\nclass HostedMCPApprovalRequest(Generic[ContextT_co]):\n    context: ToolContext[ContextT_co] = field(repr=False)\n    request_id: str\n    server_label: str\n    name: str\n    arguments: str = field(repr=False)\n    caller: dict[str, JsonValue] | None = field(default=None, repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass HostedMCP(Generic[ContextT_contra]):\n    tool_config: Mapping[str, Any] = field(repr=False)\n    on_approval_request: Callable[[HostedMCPApprovalRequest[ContextT_contra]], HostedMCPApprovalResult | Awaitable[HostedMCPApprovalResult]] | None = field(default=None, repr=False)\n    _binding: Any = field(init=False, repr=False, compare=False)\n\n    @property\n    def ref(self) -> ToolRef:\n        pass\n\n    def match(self, event: object) -> ActionRequested[HostedMCPApprovalArguments, HostedMCPApprovalResult] | None:\n        pass"
+        ],
+        "exports": {
+          "HostedMCP": "agents.hosted_mcp.HostedMCP",
+          "HostedMCPApprovalArguments": "agents.hosted_mcp.HostedMCPApprovalArguments",
+          "HostedMCPApprovalRequest": "agents.hosted_mcp.HostedMCPApprovalRequest",
+          "HostedMCPApprovalResult": "agents.hosted_mcp.HostedMCPApprovalResult"
+        },
+        "imports": [
+          "from collections.abc import Awaitable, Callable, Mapping",
+          "from dataclasses import dataclass, field",
+          "from typing import Any, Generic",
+          "from pydantic import BaseModel, ConfigDict, JsonValue, with_config",
+          "from typing_extensions import NotRequired, TypedDict, TypeVar",
+          "from ._function_tools import ToolContext",
+          "from .manual import ActionRequested",
+          "from .tools import ToolRef"
+        ],
+        "references": {
+          "ActionRequested": "agents.manual.ActionRequested",
+          "ToolContext": "agents._function_tools.ToolContext",
+          "ToolRef": "agents.tools.ToolRef"
+        }
+      },
       "agents.input": {
         "declarations": [
           "class InputText(TypedDict):\n    type: Literal['input_text']\n    text: str",
@@ -491,7 +522,7 @@
           "@dataclass(frozen=True, slots=True)\nclass VerificationProof:\n    credential_id: str = field(repr=False)\n    signature: str = field(repr=False)",
           "@dataclass(frozen=True, slots=True, init=False)\nclass VerificationRequest(_NativeQuestion):\n    type: Literal['verification_request'] = field(default='verification_request', init=False)\n    _registration: HostedVerificationMCP[Any] | ChatGPTAppsMCP[Any] = field(repr=False, compare=False)\n\n    @property\n    def title(self) -> str:\n        pass\n\n    @property\n    def challenge(self) -> bytes:\n        pass\n\n    @property\n    def server_name(self) -> str:\n        pass\n\n    def reply(self, proof: VerificationProof | None) -> ActionReply[VerificationProof | None]:\n        pass\n\n    async def respond(self, proof: VerificationProof) -> None:\n        pass\n\n    async def decline(self) -> None:\n        pass",
           "Interaction: TypeAlias = ActionRequested[Any, Any] | ApprovalRequest | ElicitationRequest | VerificationRequest",
-          "@dataclass(frozen=True)\nclass _CapturedManual:\n    name: str\n    spec_json: str\n    declaration: FunctionTool[Any, Any, Any] = field(repr=False)\n    input_adapter: TypeAdapter[Any] = field(repr=False)\n    output_adapter: TypeAdapter[Any] = field(repr=False)\n    namespace: None = field(default=None, init=False)\n\n    def request(self, grant: Any, invocation: int, slot: int, session: Session[Any, Any], handle: Turn[Any] | ChildInvocation, call_id: str, arguments: Any, code_origin: dict[str, Any] | None, *, model: str | None=None, tracing_context: str | None=None) -> ActionRequested[Any, Any]:\n        pass"
+          "@dataclass(frozen=True)\nclass _CapturedManual:\n    name: str\n    spec_json: str\n    declaration: FunctionTool[Any, Any, Any] = field(repr=False)\n    input_adapter: TypeAdapter[Any] = field(repr=False)\n    output_adapter: TypeAdapter[Any] = field(repr=False)\n    namespace: str | None = field(default=None, init=False)\n\n    def request(self, grant: Any, invocation: int, slot: int, session: Session[Any, Any], handle: Turn[Any] | ChildInvocation, call_id: str, arguments: Any, code_origin: dict[str, Any] | None, *, model: str | None=None, tracing_context: str | None=None) -> ActionRequested[Any, Any]:\n        pass"
         ],
         "exports": {
           "ActionReply": "agents.manual.ActionReply",
@@ -1951,6 +1982,10 @@
       "GuardrailRecord": "agents.guardrails.GuardrailRecord",
       "GuardrailResult": "agents.guardrails.GuardrailResult",
       "GuardrailTripwire": "agents.guardrails.GuardrailTripwire",
+      "HostedMCP": "agents.hosted_mcp.HostedMCP",
+      "HostedMCPApprovalArguments": "agents.hosted_mcp.HostedMCPApprovalArguments",
+      "HostedMCPApprovalRequest": "agents.hosted_mcp.HostedMCPApprovalRequest",
+      "HostedMCPApprovalResult": "agents.hosted_mcp.HostedMCPApprovalResult",
       "HostedVerificationMCP": "agents.mcp.HostedVerificationMCP",
       "HttpMCP": "agents.mcp.HttpMCP",
       "ImageDetail": "agents.input.ImageDetail",
@@ -2741,7 +2776,7 @@
           "@dataclass(frozen=True)\nclass _RunErrorFormatterInheritance:\n    allowed: bool\n    has_function: bool",
           "@dataclass(frozen=True, kw_only=True)\nclass FunctionTool(Generic[InputT, ResultT, BinderT_co]):\n    name: str\n    description: str\n    input_type: type[InputT]\n    output_type: type[ResultT]\n    _bind: BinderT_co | None = field(default=None, repr=False)\n    _requires_context: bool = field(default=False, repr=False)\n    callback_timeout: float | None = None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None = field(default=None, repr=False)\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | BackgroundResult[ToolOutput] | Awaitable[ToolOutput | BackgroundResult[ToolOutput]]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n    strict: bool = False\n    output_schema: dict[str, Any] | None = None\n    timeout_behavior: ToolTimeoutBehavior = 'raise_exception'\n    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None = field(default=None, repr=False)\n    input_error_function: Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None = field(default=None, repr=False)\n    namespace: str | None = None\n    namespace_description: str | None = None\n    finish_turn: bool = False\n    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False\n    run_before_approval: bool = False\n    is_enabled: bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True\n    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(default=None, repr=False)\n    _allow_run_error_formatter: bool | _RunErrorFormatterInheritance = field(default=True, repr=False)\n\n    def __init__(self, *, name: str, description: str, input_type: type[InputT], output_type: type[ResultT], _bind: BinderT_co | None=None, _requires_context: bool=False, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | BackgroundResult[ToolOutput] | Awaitable[ToolOutput | BackgroundResult[ToolOutput]]] | None=None, defer_loading: bool=False, strict: bool=False, output_schema: dict[str, Any] | None=None, timeout_behavior: ToolTimeoutBehavior='raise_exception', timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None=None, input_error_function: Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None=None, namespace: str | None=None, namespace_description: str | None=None, finish_turn: bool=False, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False, run_before_approval: bool=False, is_enabled: bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]=True, error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None=_UNSET_ERROR_FUNCTION, _allow_run_error_formatter: bool | _RunErrorFormatterInheritance | None=None) -> None:\n        pass\n\n    def match(self, event: object) -> ActionRequested[InputT, ResultT] | None:\n        pass\n\n    @property\n    def ref(self) -> ToolRef:\n        pass",
           "_PythonTool: TypeAlias = FunctionTool[Any, Any, Callable[[ToolContextT, PolicyContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]]",
-          "Tool: TypeAlias = _PythonTool[ToolContextT, ToolContextT] | _PythonTool[ToolContextT, object] | _PythonTool[object, ToolContextT] | FunctionTool[Any, Any] | HttpMCP[object] | StdioMCP[object] | HttpMCP[ToolContextT] | StdioMCP[ToolContextT] | Checklist | NativeGoals | WebSearch | FileSearch | CodeInterpreter | ImageGeneration | NativeAgents[ToolContextT]",
+          "Tool: TypeAlias = _PythonTool[ToolContextT, ToolContextT] | _PythonTool[ToolContextT, object] | _PythonTool[object, ToolContextT] | FunctionTool[Any, Any] | HttpMCP[object] | StdioMCP[object] | HttpMCP[ToolContextT] | StdioMCP[ToolContextT] | Checklist | NativeGoals | WebSearch | FileSearch | CodeInterpreter | ImageGeneration | HostedMCP[ToolContextT] | NativeAgents[ToolContextT]",
           "class _ToolDecorator(Protocol[PolicyContextT_contra]):\n\n    @overload\n    def __call__(self, function: Callable[Concatenate[ToolContext[object], ParametersT], Any], /) -> _PythonTool[Any, PolicyContextT_contra]:\n        pass\n\n    @overload\n    def __call__(self, function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any], /) -> _PythonTool[ToolContextT, PolicyContextT_contra]:\n        pass\n\n    @overload\n    def __call__(self, function: Callable[ParametersT, Any], /) -> _PythonTool[Any, PolicyContextT_contra]:\n        pass",
           "def _requires_context(annotation: Any) -> bool:\n    pass",
           "_BeforePolicy: TypeAlias = Callable[[ToolContext[PolicyContextT]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]]",
@@ -2769,6 +2804,7 @@
           "from typing import Any as Any, Concatenate as Concatenate, Generic as Generic, Literal as Literal, Protocol as Protocol, TypeAlias as TypeAlias, cast as cast, overload as overload",
           "from typing_extensions import ParamSpec as ParamSpec, TypeVar as TypeVar",
           "from ._trace_context import TraceContext as TraceContext",
+          "from .hosted_mcp import HostedMCP",
           "from .manual import ActionRequested as ActionRequested, InputT as InputT, ResultT as ResultT",
           "from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP",
           "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents",
@@ -2792,6 +2828,7 @@
           "DecisionProvider": "agents.decisions.DecisionProvider",
           "Deny": "agents.native_interception.Deny",
           "FileSearch": "agents.tools.FileSearch",
+          "HostedMCP": "agents.hosted_mcp.HostedMCP",
           "HttpMCP": "agents.mcp.HttpMCP",
           "ImageGeneration": "agents.tools.ImageGeneration",
           "InputT": "agents.manual.InputT",
@@ -4772,6 +4809,10 @@
       "GuardrailRecord",
       "GuardrailResult",
       "GuardrailTripwire",
+      "HostedMCP",
+      "HostedMCPApprovalArguments",
+      "HostedMCPApprovalRequest",
+      "HostedMCPApprovalResult",
       "HostedVerificationMCP",
       "HttpMCP",
       "ImageDetail",
@@ -4906,6 +4947,7 @@
       "from .decisions import DecisionError as DecisionError, DecisionInput as DecisionInput, DecisionProvider as DecisionProvider, DecisionRequest as DecisionRequest, DecisionResponse as DecisionResponse, OpenAIDecisions as OpenAIDecisions",
       "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",
       "from .guardrails import GuardrailRecord as GuardrailRecord, GuardrailResult as GuardrailResult, GuardrailTripwire as GuardrailTripwire, InputGuardrail as InputGuardrail, OutputGuardrail as OutputGuardrail",
+      "from .hosted_mcp import HostedMCP as HostedMCP, HostedMCPApprovalArguments as HostedMCPApprovalArguments, HostedMCPApprovalRequest as HostedMCPApprovalRequest, HostedMCPApprovalResult as HostedMCPApprovalResult",
       "from .input import AssistantMessage as AssistantMessage, ImageDetail as ImageDetail, InitialMessage as InitialMessage, InputAudio as InputAudio, InputFile as InputFile, InputImage as InputImage, InputImageFile as InputImageFile, InputText as InputText, UserInput as UserInput, UserMessage as UserMessage",
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalDecision as ApprovalDecision, ApprovalRequest as ApprovalRequest, ApprovalRequested as ApprovalRequested, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",

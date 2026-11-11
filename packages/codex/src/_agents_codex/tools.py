@@ -264,7 +264,12 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
 
     # Capture nested mutable configuration before opening can await.
     specs: list[dict[str, Any]] = []
+    from .hosted_mcp import HostedMCP, _live_config
+
     for tool in tools:
+        if isinstance(tool, HostedMCP):
+            specs.append(_live_config(tool))
+            continue
         if not isinstance(tool, _HOSTED_TOOLS):
             continue
         fields = asdict(tool)

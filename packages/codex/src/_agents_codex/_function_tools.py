@@ -46,6 +46,7 @@ from _agents_shared.strict_schema import (
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
+from .hosted_mcp import HostedMCP
 from .manual import (
     ActionRequested as ActionRequested,
     InputT as InputT,
@@ -639,6 +640,7 @@ Tool: TypeAlias = (
     | FileSearch
     | CodeInterpreter
     | ImageGeneration
+    | HostedMCP[ToolContextT]
     | NativeAgents[ToolContextT]
 )
 

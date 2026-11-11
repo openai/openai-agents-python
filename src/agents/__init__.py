@@ -75,6 +75,12 @@ if TYPE_CHECKING:
         InputGuardrail as InputGuardrail,
         OutputGuardrail as OutputGuardrail,
     )
+    from .hosted_mcp import (
+        HostedMCP as HostedMCP,
+        HostedMCPApprovalArguments as HostedMCPApprovalArguments,
+        HostedMCPApprovalRequest as HostedMCPApprovalRequest,
+        HostedMCPApprovalResult as HostedMCPApprovalResult,
+    )
     from .input import (
         AssistantMessage as AssistantMessage,
         ImageDetail as ImageDetail,
@@ -292,6 +298,10 @@ _MODULES = {
     "Checklist": ".tools",
     "NativeGoals": ".tools",
     "NativeGoal": ".state",
+    "HostedMCP": ".hosted_mcp",
+    "HostedMCPApprovalArguments": ".hosted_mcp",
+    "HostedMCPApprovalRequest": ".hosted_mcp",
+    "HostedMCPApprovalResult": ".hosted_mcp",
     "WebSearch": ".tools",
     "FileSearch": ".tools",
     "CodeInterpreter": ".tools",

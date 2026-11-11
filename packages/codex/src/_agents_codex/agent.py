@@ -66,6 +66,7 @@ from .compaction import _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
+from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
 from .model_context import _ContextTransform
@@ -1860,7 +1861,6 @@ class Agent(Generic[ContextT, OutputT]):
         options: dict[str, Any] = {}
         produced_items_token = None
         try:
-            from ._function_tools import FunctionTool
             from .manual import _CapturedApproval
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
@@ -1935,7 +1935,12 @@ class Agent(Generic[ContextT, OutputT]):
                 and before_step is None
                 and prepare_request is None
                 and (tool._bind is None or tool.needs_approval is not False)
-                and (tools is None or tool in tools or tool.ref in tools)
+                and (
+                    tools is None
+                    or tool in tools
+                    or tool.ref in tools
+                    or any(isinstance(item, HostedMCP) and item._binding is tool for item in tools)
+                )
             )
             if state is None and budget is not None and pause_manual:
                 raise CapabilityError(
@@ -2106,11 +2111,14 @@ class Agent(Generic[ContextT, OutputT]):
                                 continue
                             visited.add(target)
                             profile = session._profiles[target].profile
+                            profile_tools, _, _ = _split_tools(
+                                profile.declaration.tools,
+                                profile.declaration.programmatic_tool_calling,
+                            )
                             target_manual = tuple(
                                 tool
-                                for tool in profile.declaration.tools
-                                if isinstance(tool, FunctionTool)
-                                and (tool._bind is None or tool.needs_approval is not False)
+                                for tool in profile_tools
+                                if (tool._bind is None or tool.needs_approval is not False)
                                 and not tool._requires_live_manual_session
                             )
                             has_reachable_manual |= bool(target_manual)
