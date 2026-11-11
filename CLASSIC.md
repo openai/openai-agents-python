@@ -112,6 +112,8 @@ Non-conflicting `agents.realtime` names, including `RealtimeAgent` and
 requested. `RealtimeRunner.run()` has been returning a Classic session. Original
 module-specific imports such as `agents.realtime.model` and
 `agents.realtime.session` have been retaining Classic ownership.
+Wildcard imports from `agents.realtime` have been exposing the native API
+with the base installation.
 
 ```python
 from agents.realtime import RealtimeAgent, RealtimeRunner

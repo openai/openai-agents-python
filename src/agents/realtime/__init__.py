@@ -78,6 +78,7 @@ from _agents_codex.realtime import (
     realtime_handoff as realtime_handoff,
 )
 
+# Wildcard imports are available with the native package's base dependencies.
 __all__ = [
     "BackgroundResult",
     "background_result",
@@ -320,7 +321,6 @@ _CLASSIC_EXPORTS = (
     "OpenAIRealtimeWebSocketModel",
     "get_api_key",
 )
-__all__ += list(_CLASSIC_EXPORTS)
 
 
 def __getattr__(name: str) -> _Any:
@@ -332,4 +332,4 @@ def __getattr__(name: str) -> _Any:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(__all__))
+    return sorted(set(globals()) | set(__all__) | set(_CLASSIC_EXPORTS))

@@ -60,12 +60,14 @@ def test_realtime_aliases_preserve_native_names_and_classic_identity():
     from agents import realtime
 
     before = {name: getattr(realtime, name) for name in CONFLICTS}
+    public_names = set(dir(realtime))
     from agents.classic import realtime as classic
 
     for name in classic.__all__:
         if name not in CONFLICTS:
             assert getattr(realtime, name) is getattr(classic, name), name
-            assert name in realtime.__all__
+            assert name in public_names
+            assert name not in realtime.__all__
     assert {name: getattr(realtime, name) for name in CONFLICTS} == before
     assert realtime.RealtimeSession is not classic.RealtimeSession
     assert agents.Agent is not importlib.import_module("agents.classic").Agent
@@ -75,9 +77,19 @@ def test_realtime_aliases_preserve_native_names_and_classic_identity():
 def test_native_realtime_import_does_not_load_classic():
     private = str(Path(__file__).resolve().parents[1] / "src")
     run_isolated(
-        f"import sys; sys.path.insert(0, {private!r}); "
-        "import agents, agents.realtime; "
-        "assert not any(n.startswith('agents.classic') for n in sys.modules)"
+        f"""
+import sys
+sys.path.insert(0, {private!r})
+sys.modules['griffe'] = None
+import agents.realtime as realtime
+
+assert 'RealtimeAgent' in dir(realtime)
+assert not any(n.startswith('agents.classic') for n in sys.modules)
+from agents.realtime import *
+assert RealtimeSession is realtime.RealtimeSession
+assert 'RealtimeAgent' not in globals()
+assert not any(n.startswith('agents.classic') for n in sys.modules)
+"""
     )
 
 
