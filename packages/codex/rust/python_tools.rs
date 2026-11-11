@@ -8216,6 +8216,8 @@ pub(crate) mod managed_tests {
 
     fn function(name: &str) -> DynamicToolFunctionSpec {
         DynamicToolFunctionSpec {
+            strict: false,
+            output_schema: None,
             name: name.into(),
             description: "test tool".into(),
             input_schema: json!({"type":"object","properties":{}}),
