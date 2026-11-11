@@ -635,7 +635,11 @@
     {
       "path": "sdk-bounded-one-shot-history.patch",
       "sha256": "02da72f8e5bcfab13b3be4680356a62156eb429dcb7497ecc0b9644625c05f98"
+    },
+    {
+      "path": "sdk-provider-item-references.patch",
+      "sha256": "721e67310d0269e626bdefce41f4bd625a985cd0eb9925b8912a3c8a8c300f56"
     }
   ],
-  "result_tree": "fdbd4e60a29f0e6e538413243fe41cccbc3880a9"
+  "result_tree": "86f173a38dbddf1ec5e961b3a314ff307e3d5d15"
 }
