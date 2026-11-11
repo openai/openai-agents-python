@@ -29,6 +29,7 @@ from weakref import ReferenceType as ReferenceType, ref as ref
 from pydantic import (
     BaseModel as BaseModel,
     Field as Field,
+    JsonValue,
     TypeAdapter as TypeAdapter,
     ValidationError as ValidationError,
 )
@@ -997,6 +998,7 @@ class _PreparedManualResult:
     declaration: FunctionTool[Any, Any, Any] = field(repr=False)
     call_id: str
     output: str = field(repr=False)
+    application_data: dict[str, JsonValue] | None = field(repr=False)
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .observation import EventStream
     from .rate_limits import ApiRateLimits
     from .session import Completed, NativeError, Session, TurnStoppedError
+    from .state import ApplicationToolOutput
 
 OutputT = TypeVar("OutputT")
 _DecisionT = TypeVar("_DecisionT")
@@ -90,6 +91,17 @@ class Turn(Generic[OutputT]):
     _native: Any = field(repr=False, compare=False)
     _observation_after: int = field(repr=False, compare=False)
     _guardrail_results: list[Any] = field(repr=False, compare=False)
+
+    @property
+    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
+        """Detached application data from accepted tool results on this turn."""
+        # A restored root has a fresh submission ID for the same native turn.
+        native_turn_id = self.turn_id if self.child_id is None else None
+        return tuple(
+            record.model_copy(deep=True)
+            for record in self._session._application_tool_outputs
+            if record.submission_id == self.submission_id or record.turn_id == native_turn_id
+        )
 
     @property
     def guardrail_results(self) -> tuple[Any, ...]:
@@ -352,6 +364,9 @@ class ChildTurn(Protocol):
 
     @property
     def guardrail_results(self) -> tuple[Any, ...]: ...
+
+    @property
+    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]: ...
 
     @property
     def run_usage(self) -> RunUsage: ...

@@ -241,10 +241,10 @@ index 8bb98c3c6501419953aa26a1af442981c608d5b9..f2e3b686a93bbf5980e3cff8a78cfc85
                  | ToolSpec::Computer { .. }
                  | ToolSpec::ComputerUsePreview { .. }
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index 84bc7cacdc3a8d4209ee0af02093d8917a2b80ac..2465d3ed6639bb53e676e42edd6458fbeef37c9f 100644
+index 7f51b79f171eb2b1af0de9f0c7e322cb4121998f..0be3c4a2a406c41aaa761d4e4650fd3b43b7680a 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
-@@ -517,6 +517,7 @@ impl ToolRegistry {
+@@ -521,6 +521,7 @@ impl ToolRegistry {
                  | ToolSpec::ToolSearch { .. }
                  | ToolSpec::FileSearch(_)
                  | ToolSpec::CodeInterpreter(_)
