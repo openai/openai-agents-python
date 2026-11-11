@@ -4324,6 +4324,12 @@ impl TurnLifecycleContributor for PythonContributor {
                             .is_some_and(|entry| entry.name == qualified_name)
                 })
                 .map(|(key, invocation)| (key.clone(), *invocation));
+            if receipt
+                .as_ref()
+                .is_some_and(|(key, _)| !step.generation.entries[key.reply.slot].finish_turn)
+            {
+                return Ok(None);
+            }
             let held = input
                 .turn_store
                 .get::<codex_extension_api::HeldToolCompletionResults>();

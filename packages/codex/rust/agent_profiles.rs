@@ -55,7 +55,7 @@ pub(crate) struct ProfileSpec {
     before_compact: bool,
     #[serde(default)]
     before_complete: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     tool_batch_completion: bool,
     #[serde(default)]
     selecting_steps: bool,

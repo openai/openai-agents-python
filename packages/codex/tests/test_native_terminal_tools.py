@@ -39,6 +39,40 @@ def provider(peer: ResponsesFixture) -> NativeProvider:
     return NativeProvider(base_url=peer.url, api_key="synthetic-terminal-tools")
 
 
+def test_native_batch_completion_preserves_legacy_profile_fingerprints() -> None:
+    from _agents_codex._agent_profiles import _capture_agent_graph
+    from _agents_codex.session import _capture_profile_runtimes, _capture_tools
+    from agents import _native
+
+    def roster(callback: Any = None) -> list[dict[str, Any]]:
+        target = Agent(instructions="Other", name="Other")
+        root = Agent(
+            instructions="Answer",
+            name="Root",
+            handoffs=[target],
+            tool_batch_completion=callback,
+        )
+        _, declarations = _capture_profile_runtimes(
+            _capture_agent_graph(root),
+            _capture_tools(0, (), None),
+            "Answer",
+            None,
+        )
+        return declarations
+
+    legacy = roster()
+    assert all("tool_batch_completion" not in row for row in legacy)
+    # Captured with the released pre-batch native fingerprint implementation.
+    expected = "1ee377cb24dd5dd57ebf22fc21c356f7b11e274e747805d28edc2fe81122f12f"
+    assert _native._agent_profiles_fingerprint(json.dumps(legacy), "agent_0") == expected
+    explicit_false = [{**row, "tool_batch_completion": False} for row in legacy]
+    assert _native._agent_profiles_fingerprint(json.dumps(explicit_false), "agent_0") == expected
+    enabled = roster(lambda _: ContinueTurn(instructions="continue"))
+    assert enabled[0]["tool_batch_completion"] is True
+    assert "tool_batch_completion" not in enabled[1]
+    assert _native._agent_profiles_fingerprint(json.dumps(enabled), "agent_0") != expected
+
+
 async def test_native_batch_completion_uses_ordered_known_results_and_typed_final_value(
     responses: ResponsesFixture,
 ) -> None:
@@ -100,6 +134,48 @@ async def test_native_batch_completion_uses_ordered_known_results_and_typed_fina
     assert len(responses.requests) == 1
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        ToolOutput(
+            [{"type": "inputText", "text": "first"}, {"type": "inputText", "text": "second"}]
+        ),
+        ToolOutput.image("https://example.invalid/tool.png", detail="high"),
+        ToolOutput.file(file_id="file-batch", filename="record.txt"),
+    ],
+    ids=["multipart-text", "image", "file"],
+)
+async def test_native_batch_completion_exposes_round_trippable_public_output(
+    responses: ResponsesFixture,
+    output: ToolOutput,
+) -> None:
+    observed: list[dict[str, Any]] = []
+
+    @function_tool
+    def lookup() -> ToolOutput:
+        return output
+
+    def complete(ctx: ToolBatchCompletionContext[Any]) -> FinishToolBatch[str]:
+        assert len(ctx.results) == 1
+        observed.append(ctx.results[0].output.to_native())
+        return FinishToolBatch("complete")
+
+    agent = Agent(
+        instructions="Use lookup.",
+        model="gpt-5.5",
+        tools=[lookup],
+        provider=provider(responses),
+        tool_batch_completion=complete,
+    )
+    responses.respond(function_call("lookup", {}, "multipart-call"))
+    async with timeout(30), agent.session() as session:
+        completed = await (await session.submit("look up")).get_result()
+        assert completed.final_output == "complete"
+        assert completed.tool_batch_call_ids == ("multipart-call",)
+    assert observed == [output.to_native()]
+    assert len(responses.requests) == 1
+
+
 async def test_native_batch_completion_yields_to_accepted_handoff(
     responses: ResponsesFixture,
 ) -> None:
@@ -138,8 +214,10 @@ async def test_native_batch_completion_yields_to_accepted_handoff(
     assert len(responses.requests) == 2
 
 
-async def test_native_batch_completion_uses_fresh_failed_manual_reply_after_resume(
+@pytest.mark.parametrize("success", [False, True])
+async def test_native_batch_completion_uses_fresh_manual_reply_after_resume(
     responses: ResponsesFixture,
+    success: bool,
 ) -> None:
     manual = FunctionTool(
         name="lookup",
@@ -168,12 +246,14 @@ async def test_native_batch_completion_uses_fresh_failed_manual_reply_after_resu
     async with timeout(30), agent.session(state=SessionState.from_json(serialized)) as restored:
         assert restored.restored_turn is not None
         request = await next_request(restored.interactions(), manual)
-        await request.respond(ToolOutput.error("lookup failed"))
+        await request.respond(
+            ToolOutput.text("lookup succeeded") if success else ToolOutput.error("lookup failed")
+        )
         completed = await restored.restored_turn.get_result()
         assert completed.final_output == "lookup could not be completed"
         assert completed.tool_call is None
         assert completed.tool_batch_call_ids == ("lookup-pending",)
-    assert proposals == [("lookup-pending", False)]
+    assert proposals == [("lookup-pending", success)]
     assert len(responses.requests) == 1
 
 

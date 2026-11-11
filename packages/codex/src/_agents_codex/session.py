@@ -2200,6 +2200,33 @@ def _native_tool_refs(refs: Sequence[ToolRef]) -> str:
     return json.dumps([{"name": ref.name, "namespace": ref.namespace} for ref in refs])
 
 
+def _native_tool_output_parts(body: Any) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] | None = None
+    if isinstance(body, str):
+        parts = [{"type": "inputText", "text": body}]
+    elif isinstance(body, list):
+        parts = []
+        kinds = {
+            "input_text": "inputText",
+            "input_image": "inputImage",
+            "input_file": "inputFile",
+            "input_audio": "inputAudio",
+        }
+        for raw in body:
+            if not isinstance(raw, dict) or raw.get("type") not in kinds:
+                parts = None
+                break
+            part: dict[str, Any] = deepcopy(raw)
+            kind = part.pop("type")
+            if kind in {"input_image", "input_audio"}:
+                fields = {"image_url": "imageUrl", "file_id": "fileId", "audio_url": "audioUrl"}
+                part = {fields.get(key, key): value for key, value in part.items()}
+            parts.append({"type": kinds[kind], **part})
+    if parts is None:
+        raise ValueError("Unsupported native tool output")
+    return parts
+
+
 @dataclass
 class _ApprovalArguments:
     value: Any
@@ -2408,7 +2435,11 @@ def _capture_profile_runtimes(
                 "before_complete": _needs_before_complete(
                     declaration, input_guardrails, output_guardrails
                 ),
-                "tool_batch_completion": declaration.tool_batch_completion is not None,
+                **(
+                    {"tool_batch_completion": True}
+                    if declaration.tool_batch_completion is not None
+                    else {}
+                ),
                 "selecting_steps": any(
                     check.child_callback is not None
                     for check in (*declaration.input_guardrails, *input_guardrails)
@@ -2457,7 +2488,7 @@ def _install_profile_options(
         "fingerprint": fingerprint,
     }
     for flag in ("transform_context", "before_compact", "before_complete", "tool_batch_completion"):
-        options[f"_{flag}"] = any(row[flag] for row in roster)
+        options[f"_{flag}"] = any(row.get(flag, False) for row in roster)
     grants = options["tool_policy"]["allowed_tools"]
     for profile in profiles:
         functions, servers, _ = _split_tools(
@@ -10250,35 +10281,12 @@ class Session(Generic[ContextT, OutputT]):
         started = state.terminal_observations.pop(call_id, None)
         if started is None:
             return
-        body = item.get("output")
-        parts: list[dict[str, Any]] | None = None
-        if isinstance(body, str):
-            parts = [{"type": "inputText", "text": body}]
-        elif isinstance(body, list):
-            parts = []
-            kinds = {
-                "input_text": "inputText",
-                "input_image": "inputImage",
-                "input_file": "inputFile",
-                "input_audio": "inputAudio",
-            }
-            for raw in body:
-                if not isinstance(raw, dict) or raw.get("type") not in kinds:
-                    parts = None
-                    break
-                part: dict[str, Any] = dict(raw)
-                kind = part.pop("type")
-                if kind in {"input_image", "input_audio"}:
-                    fields = {"image_url": "imageUrl", "file_id": "fileId", "audio_url": "audioUrl"}
-                    part = {fields.get(key, key): value for key, value in part.items()}
-                parts.append({"type": kinds[kind], **part})
         output = None
-        if parts is not None:
-            try:
-                output = ToolOutput(parts)
-                output._validate()
-            except (TypeError, ValueError):
-                output = None
+        try:
+            output = ToolOutput(_native_tool_output_parts(item.get("output")))
+            output._validate()
+        except (TypeError, ValueError):
+            output = None
         self._observe_function_finished(started, "completed", output)
 
     def _drain_terminal_observations(self, state: _CallbackState) -> None:
@@ -11425,7 +11433,7 @@ class Session(Generic[ContextT, OutputT]):
                     tool_output = (
                         ToolOutput.text(body)
                         if isinstance(body, str)
-                        else ToolOutput(deepcopy(body))
+                        else ToolOutput(_native_tool_output_parts(body))
                     )
                     tool_output.success = receipt["succeeded"]
                     results.append(
