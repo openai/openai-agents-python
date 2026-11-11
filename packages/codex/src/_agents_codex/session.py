@@ -1699,32 +1699,49 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
 async def _call_callback(
     callback: Callable[..., Any], admit: Callable[[], bool], /, *args: Any, **kwargs: Any
 ) -> Any:
+    return await _call_callback_entered(callback, admit, args, kwargs)
+
+
+async def _call_callback_entered(
+    callback: Callable[..., Any],
+    admit: Callable[[], bool],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    enter: Callable[[], None] | None = None,
+) -> Any:
     try:
         with _owned_span("callback", "callback"):
-            return await _call_callback_body(callback, admit, *args, **kwargs)
+            return await _call_callback_body(callback, admit, args, kwargs, enter)
     finally:
         # Release SDK-owned callback arguments only after the admitted body exits.
-        del callback, admit, args, kwargs
+        del callback, admit, args, kwargs, enter
 
 
 async def _call_callback_body(
     callback: Callable[..., Any],
     admit: Callable[[], bool],
-    /,
-    *args: Any,
-    **kwargs: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    enter: Callable[[], None] | None = None,
 ) -> Any:
     """Run Python in its appropriate executor and retain ownership until exit."""
     worker: asyncio.Future[Any] | None = None
     value: Any = None
     try:
         if inspect.iscoroutinefunction(callback):
+            if enter is not None:
+                if not admit():
+                    return None
+                enter()
             return await callback(*args, **kwargs)
         loop = asyncio.get_running_loop()
 
         async def admission() -> bool:
             # The asyncio and native ownership check belongs to the application's loop.
-            return admit()
+            allowed = admit()
+            if allowed and enter is not None:
+                enter()
+            return allowed
 
         def invoke_if_admitted() -> Any:
             if asyncio.run_coroutine_threadsafe(admission(), loop).result():
@@ -1765,6 +1782,7 @@ async def _call_callback_body(
         # Release SDK-owned callback arguments only after the admitted body exits.
         args = ()
         kwargs = {}
+        enter = None
         del worker, value
 
 
@@ -5032,12 +5050,21 @@ class Session(Generic[ContextT, OutputT]):
         )
         return self._agent_for_profile(receipt)
 
-    def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
-        captured = self._agent_for_message(message)
-        profile_id = message.get("profile_id")
+    def _original_agent_for_profile(self, receipt: Mapping[str, Any] | None) -> Agent[Any, Any]:
+        """Expose application identity after validating the captured source receipt."""
+        captured = self._agent_for_profile(receipt)
+        profile_id = receipt.get("profile_id") if receipt is not None else None
         if isinstance(profile_id, str):
             return self._source_profile_runtime(profile_id).profile.agent
         return self._agent if self._agent is not None else captured
+
+    def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
+        receipt = (
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
+        return self._original_agent_for_profile(receipt)
 
     async def _realtime_tool_enabled(
         self,
@@ -10793,6 +10820,20 @@ class Session(Generic[ContextT, OutputT]):
         *args: Any,
         **kwargs: Any,
     ) -> Any:
+        return await self._call_decision_callback_entered(
+            state, message, callback, active, None, args, kwargs
+        )
+
+    async def _call_decision_callback_entered(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        callback: Callable[..., Any],
+        active: Callable[[], bool],
+        enter: Callable[[], None] | None,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
         if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
             provider = getattr(self, "_decisions_provider", None)
             if getattr(self, "_profiles", None) or message.get("profile_id") in getattr(
@@ -10812,8 +10853,8 @@ class Session(Generic[ContextT, OutputT]):
                 ),
                 provider,
             ):
-                return await _call_callback(callback, active, *args, **kwargs)
-        return await _call_callback(callback, active, *args, **kwargs)
+                return await _call_callback_entered(callback, active, args, kwargs, enter)
+        return await _call_callback_entered(callback, active, args, kwargs, enter)
 
     async def _run_owned_context_callback(
         self,
@@ -13179,6 +13220,34 @@ class Session(Generic[ContextT, OutputT]):
             if not self._admit_tool(state, request):
                 return
             timeout_output: ToolOutput | None = None
+
+            def enter_body() -> None:
+                if self._realtime is None:
+                    return
+                source = message.get("_sdk_realtime_tool_call")
+                if source is None:
+                    return
+                bindings = self._bindings_for_message(
+                    {**message, "generation": marker["generation"]}
+                )
+                original = next(
+                    (
+                        tool
+                        for tool in bindings
+                        if isinstance(tool, FunctionTool) and tool.ref == ref
+                    ),
+                    None,
+                )
+                if original is not None:
+                    self._realtime._tool_body_started(
+                        source, message["_sdk_realtime_tool_name"], original
+                    )
+
+            async def invoke_body_callback(active: Callable[[], bool]) -> Any:
+                return await self._call_decision_callback_entered(
+                    state, message, entry.callback, active, enter_body, args, kwargs
+                )
+
             duration = entry.callback_timeout
             if isinstance(entry, _CapturedComputer):
                 assert context is not None and isinstance(parsed, _ComputerCall)
@@ -13195,14 +13264,7 @@ class Session(Generic[ContextT, OutputT]):
                     parsed,
                 )
             elif duration is None:
-                value = await self._call_decision_callback(
-                    state,
-                    message,
-                    entry.callback,
-                    lambda: self._admit_tool(state, request),
-                    *args,
-                    **kwargs,
-                )
+                value = await invoke_body_callback(lambda: self._admit_tool(state, request))
             elif entry.timeout_behavior == "error_as_result":
                 loop = asyncio.get_running_loop()
                 cutoff = loop.time() + duration
@@ -13229,9 +13291,7 @@ class Session(Generic[ContextT, OutputT]):
                     nonlocal value, body_error
                     try:
                         if admit_body():
-                            value = await self._call_decision_callback(
-                                state, message, entry.callback, admit_body, *args, **kwargs
-                            )
+                            value = await invoke_body_callback(admit_body)
                     except BaseException as error:
                         # Transport every exit to the owner without letting
                         # process-control exceptions escape this child task.
@@ -13318,14 +13378,7 @@ class Session(Generic[ContextT, OutputT]):
 
                 timer = loop.call_at(cutoff, expire_callback)
                 try:
-                    value = await self._call_decision_callback(
-                        state,
-                        message,
-                        entry.callback,
-                        lambda: self._admit_tool(state, request),
-                        *args,
-                        **kwargs,
-                    )
+                    value = await invoke_body_callback(lambda: self._admit_tool(state, request))
                 finally:
                     timer.cancel()
                     # A busy callback can cross the cutoff before timer dispatch.
