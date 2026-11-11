@@ -447,12 +447,12 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
             used_bytes += added_bytes
     included_storage: list[dict[str, str]] = []
     storage_rows: list[str] = []
-    # Reserve complete paths and modes before optional descriptions.
+    # Every remote path and mode is required to classify mounted content safely.
     for entry in json.loads(storage_layout)["storage"]:
         row = encode({"path": entry["path"], "access": entry["access"]})
         added_bytes = len(row.encode("utf-8")) + bool(storage_rows)
         if used_bytes + added_bytes > max_bytes:
-            continue
+            raise ValueError("Remote mount identities exceed the workspace instruction byte limit")
         included_storage.append(entry)
         storage_rows.append(row)
         used_bytes += added_bytes

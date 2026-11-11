@@ -118,6 +118,8 @@ async def test_native_workspace_appendix_preserves_providers_and_replaces_curren
         "oversized_allowlist",
         "path_priority",
         "dense_mounts",
+        "over_capacity_mounts",
+        "oversized_mount_identity",
         "flat_deep",
     ],
 )
@@ -130,7 +132,7 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     monkeypatch.setenv("CODEX_HOME", str(home))
     commands = (
         Manifest().remote_mount_command_allowlist
-        if scenario == "dense_mounts"
+        if scenario in ("dense_mounts", "over_capacity_mounts", "oversized_mount_identity")
         else [f"fixture-mount-{index}" for index in range(2500)]
         if scenario == "oversized_allowlist"
         else []
@@ -159,10 +161,14 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
                 },
             ),
             **(
-                {f"mount-{index:04d}": declaration() for index in range(600)}
-                if scenario == "dense_mounts"
+                {
+                    f"mount-{index:04d}": declaration()
+                    for index in range(600 if scenario == "over_capacity_mounts" else 300)
+                }
+                if scenario in ("dense_mounts", "over_capacity_mounts")
                 else {}
             ),
+            **({"📚" * 10_100: declaration()} if scenario == "oversized_mount_identity" else {}),
             **({"flat/pkg/inner/code": Dir()} if scenario == "flat_deep" else {}),
         },
     )
@@ -185,6 +191,13 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
         source = sandbox_environment(client, manifest=manifest, options=Options(), connect=connect)
         agent = Agent(instructions="SYNTHETIC_APPLICATION", provider=provider(responses))
         responses.replies.append([assistant_output("done")])
+        if scenario in ("over_capacity_mounts", "oversized_mount_identity"):
+            with pytest.raises(ValueError, match="Remote mount identities exceed"):
+                async with agent.session(environment=source, discover_agents_md=False):
+                    pytest.fail("Over-budget remote identities must reject session opening")
+            assert responses.requests == []
+            assert client.events == ["create", "start", "close", "delete"]
+            return
         async with agent.session(environment=source, discover_agents_md=False) as session:
             await (await session.submit("Read current workspace guidance")).get_result()
     text = _latest_user_instructions(responses.requests[0])
@@ -207,7 +220,7 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
         assert "cp" in commands and "cat" in commands
     storage, _ = json.JSONDecoder().raw_decode(text.split("Declared storage access:\n")[1])
     if scenario == "dense_mounts":
-        assert 2 < len(storage) < 602
+        assert len(storage) == 302
         assert [{"path": entry["path"], "access": entry["access"]} for entry in storage[:2]] == [
             {"path": root + "/data", "access": "read_only"},
             {"path": root + "/output", "access": "read_write"},
