@@ -15,6 +15,17 @@
 
 enum { canary_id = -2047655148, registered_slot_limit = 3 };
 
+struct registry_readback {
+    kern_return_t status;
+    mach_msg_type_number_t count;
+    char slots[registered_slot_limit + 1];
+};
+
+struct pre_exec_readback {
+    kern_return_t clear;
+    struct registry_readback registry;
+};
+
 struct shape {
     unsigned canary;
     unsigned matched;
@@ -44,51 +55,57 @@ static void signal_phase(int fd, char phase) {
     }
 }
 
-static bool registry_clean(const char *phase, mach_port_t replacement) {
+static bool inspect_registry(struct registry_readback *readback, mach_port_t replacement) {
     mach_port_array_t registered = NULL;
-    mach_msg_type_number_t count = 0;
-    kern_return_t status = mach_ports_lookup(mach_task_self(), &registered, &count);
-    bool clean = status == KERN_SUCCESS && count <= registered_slot_limit &&
-                 (count == 0 || registered != NULL);
-    char slots[registered_slot_limit + 1] = "";
-    if (clean) {
-        for (mach_msg_type_number_t i = 0; i < count; ++i) {
+    readback->status = mach_ports_lookup(mach_task_self(), &registered, &readback->count);
+    if (readback->status == KERN_SUCCESS && registered != NULL) {
+        for (mach_msg_type_number_t i = 0; i < readback->count; ++i) {
             mach_port_t name = registered[i];
-            if (name == MACH_PORT_NULL) {
-                slots[i] = 'N';
-            } else if (name == MACH_PORT_DEAD) {
-                slots[i] = 'D';
-            } else {
-                mach_port_type_t type = 0;
-                kern_return_t type_status = mach_port_type(mach_task_self(), name, &type);
-                if (type_status != KERN_SUCCESS) {
-                    slots[i] = '?';
-                } else if (type & MACH_PORT_TYPE_DEAD_NAME) {
-                    slots[i] = 'D';
-                } else if (name == replacement && (type & MACH_PORT_TYPE_SEND)) {
-                    slots[i] = 'A';
+            if (i < registered_slot_limit) {
+                if (name == MACH_PORT_NULL) {
+                    readback->slots[i] = 'N';
+                } else if (name == MACH_PORT_DEAD) {
+                    readback->slots[i] = 'D';
                 } else {
-                    slots[i] = 'L';
+                    mach_port_type_t type = 0;
+                    kern_return_t type_status = mach_port_type(mach_task_self(), name, &type);
+                    if (type_status != KERN_SUCCESS) {
+                        readback->slots[i] = '?';
+                    } else if (type & MACH_PORT_TYPE_DEAD_NAME) {
+                        readback->slots[i] = 'D';
+                    } else if (name == replacement && (type & MACH_PORT_TYPE_SEND)) {
+                        readback->slots[i] = 'A';
+                    } else {
+                        readback->slots[i] = 'L';
+                    }
                 }
+            }
+            if (MACH_PORT_VALID(name)) {
                 mach_port_deallocate(mach_task_self(), name);
             }
-            clean &= slots[i] == 'N' || slots[i] == 'D' || slots[i] == 'A';
         }
-        if (count != 0) {
+        if (readback->count != 0) {
             vm_deallocate(mach_task_self(), (vm_address_t)registered,
-                          count * sizeof(*registered));
+                          readback->count * sizeof(*registered));
         }
     }
+    return readback->status == KERN_SUCCESS && readback->count == registered_slot_limit &&
+           memcmp(readback->slots, "NNN", registered_slot_limit) == 0;
+}
+
+static void print_registry(const char *phase, const struct registry_readback *readback) {
     fprintf(stderr, "registered %s status=%d slots=%u values=%s\n",
-            phase, status, count, slots);
-    return clean;
+            phase, readback->status, readback->count, readback->slots);
 }
 
 static mach_port_t check_replacement(void) {
     mach_port_t port = MACH_PORT_NULL;
     require(task_get_bootstrap_port(mach_task_self(), &port) == KERN_SUCCESS
             && MACH_PORT_VALID(port), "post-exec task slot");
-    require(registry_clean("post-exec", port), "no extra live registered rights");
+    struct registry_readback registry = {0};
+    bool clean = inspect_registry(&registry, port);
+    print_registry("post-exec", &registry);
+    require(clean, "post-exec three null registered slots");
     return port;
 }
 
@@ -232,8 +249,8 @@ static bool run(const char *binary, const char *mode) {
             mach_port_insert_right(mach_task_self(), sink, sink, MACH_MSG_TYPE_MAKE_SEND)
                 == KERN_SUCCESS, "inert receive port");
 
-    int report[2], gate[2];
-    require(pipe(report) == 0 && pipe(gate) == 0 &&
+    int report[2], gate[2], pre_exec[2];
+    require(pipe(report) == 0 && pipe(gate) == 0 && pipe(pre_exec) == 0 &&
             fcntl(report[0], F_SETFL, O_NONBLOCK) == 0, "control pipes");
     char report_arg[16], gate_arg[16];
     snprintf(report_arg, sizeof(report_arg), "%d", report[1]);
@@ -243,24 +260,31 @@ static bool run(const char *binary, const char *mode) {
     const bool canary = strcmp(mode, "canary") == 0;
     const bool idle = strcmp(mode, "idle") == 0;
     // XNU inherits the bootstrap slot, but not an arbitrary parent port name.
-    if (!baseline) {
-        kern_return_t clear = mach_ports_register(mach_task_self(), NULL, 0);
-        fprintf(stderr, "registered clear status=%d\n", clear);
-        require(clear == KERN_SUCCESS, "clear inherited registered ports");
-        require(task_set_bootstrap_port(mach_task_self(), sink) == KERN_SUCCESS,
-                "assign inert task bootstrap port");
-        require(registry_clean("pre-fork", sink), "pre-fork registered rights");
-    }
+    require(task_set_bootstrap_port(mach_task_self(), sink) == KERN_SUCCESS,
+            "assign inert task bootstrap port");
     pid_t child = fork();
     require(child >= 0, "fork");
     if (child == 0) {
         close(report[0]);
         close(gate[1]);
+        close(pre_exec[0]);
+        struct pre_exec_readback readback = {
+            .clear = mach_ports_register(mach_task_self(), NULL, 0),
+        };
+        bool clean = readback.clear == KERN_SUCCESS &&
+                     inspect_registry(&readback.registry, MACH_PORT_NULL);
+        // Keep stdio out of the forked child until exec.
+        if (write(pre_exec[1], &readback, sizeof(readback)) != (ssize_t)sizeof(readback) ||
+            !clean) {
+            _exit(3);
+        }
+        close(pre_exec[1]);
         execl(binary, binary, mode, report_arg, gate_arg, (char *)NULL);
         _exit(4);
     }
     close(report[1]);
     close(gate[0]);
+    close(pre_exec[1]);
 
     struct progress progress = {0};
     struct shape startup = {0}, lookup = {0};
@@ -282,6 +306,18 @@ static bool run(const char *binary, const char *mode) {
     close(report[0]);
     mach_port_destroy(mach_task_self(), sink);
 
+    struct pre_exec_readback readback;
+    bool reported = read(pre_exec[0], &readback, sizeof(readback)) == (ssize_t)sizeof(readback);
+    close(pre_exec[0]);
+    if (reported) {
+        fprintf(stderr, "registered pre-exec clear status=%d\n", readback.clear);
+        if (readback.clear == KERN_SUCCESS) {
+            print_registry("pre-exec", &readback.registry);
+        }
+    } else {
+        fprintf(stderr, "registered pre-exec readback missing\n");
+    }
+
     printf("%s ready=%d entered=%d resumed=%d unavailable=%d invalid_shape=%d", mode,
            progress.ready, progress.entered, progress.resumed, progress.unavailable,
            startup.invalid || lookup.invalid);
@@ -291,33 +327,19 @@ static bool run(const char *binary, const char *mode) {
     putchar('\n');
     fflush(stdout);
 
-    if (!progress.ready || !progress.entered || startup.invalid || lookup.invalid) {
-        return false;
-    }
-    if (baseline) {
-        return progress.resumed && progress.unavailable && !startup.matched && !lookup.matched;
-    }
-    if (canary) {
-        return lookup.canary == 1 && lookup.matched == 0 &&
-               WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    }
-    return idle ? lookup.matched == 0 : progress.resumed;
+    return reported && progress.ready && progress.entered && progress.resumed &&
+           !startup.invalid && !lookup.invalid && startup.canary == 1 &&
+           lookup.canary == 0 && lookup.matched > 0;
 }
 
 int main(int argc, char *argv[]) {
     if (argc == 4) {
+        require(strcmp(argv[1], "ordinary") == 0, "ordinary probe mode");
         stock_child(argv[1], atoi(argv[2]), atoi(argv[3]));
     }
     require(argc == 1 && argv[0][0] == '/' && getuid() != 0, "unprivileged launcher");
     signal(SIGPIPE, SIG_IGN);
     puts("shape=message_count/first_size/first_complex/first_reply");
-    puts("registered=N:null D:dead A:task-port-alias L:distinct-live ?:unclassified");
-    const char *modes[] = {"baseline-ordinary", "baseline-privileged", "canary",
-                           "idle", "ordinary", "privileged"};
-    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
-        if (!run(argv[0], modes[i])) {
-            return 1;
-        }
-    }
-    return 0;
+    puts("registered=N:null D:dead A:task-port-alias L:live ?:unclassified");
+    return run(argv[0], "ordinary") ? 0 : 1;
 }
