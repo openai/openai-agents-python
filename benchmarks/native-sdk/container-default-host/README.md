@@ -2,7 +2,11 @@
 
 The `--default-host-setup` profile has been exercising the normal `https://api.openai.com/v1` address against a local TLS peer. Container-only hostname mapping and a temporary trusted certificate authority (CA) have been preserving hostname verification without a custom endpoint or certificate override.
 
-Supported workload: fresh, final-only, no-tool calls with the default streaming response mode. This example has been selecting native HTTP/SSE. Buffered responses, retained Sessions, tool calls and live observation workloads have been remaining outside this profile.
+Supported workload: fresh, final-only, no-tool calls with the default streaming response mode. Omitted-Provider mode has been accepting the selected wheel's actual default HTTP/SSE or WSS route. Caller-owned mode has been accepting only HTTP/SSE. Buffered responses, retained Sessions, tool calls and live observation workloads have been remaining outside this profile.
+
+The example has been selecting `--native-provider-mode omitted`, with the worker setting only its synthetic API key before SDK import. No caller-owned Provider has been entering that route. The default `caller-owned` option has been retaining the earlier Provider ownership. Both modes have been using fresh independent conversations.
+
+`--native-transport http` below has been declaring the expected HTTP/SSE route, without forcing that route in the SDK. For a wheel selecting WSS by default, `--native-transport websocket` has been declaring the expected route instead. Selecting `caller-owned` has also been requiring the `http` declaration in this profile.
 
 ## Prerequisites
 
@@ -23,11 +27,12 @@ BENCH="$PWD/benchmarks/native-sdk"
 WHEEL="/absolute/path/to/exact-native-wheel.whl"
 CPYTHON_DIR="/absolute/path/to/cpython-3.13.16-linux-x86_64-gnu"
 LAB="$(mktemp -d /tmp/agents-default-host.XXXXXX)"
+RUN_ID="$(cat /proc/sys/kernel/random/uuid)"
 CTX="$LAB/context"
 mkdir "$CTX" "$LAB/output" "$LAB/docker-config"
 export DOCKER_CONFIG="$LAB/docker-config"
-IMAGE="agents-default-host-smoke-$$:local"
-CONTAINER="agents-default-host-smoke-$$"
+IMAGE="agents-default-host-smoke:$RUN_ID"
+CONTAINER="agents-default-host-smoke-$RUN_ID"
 sha256sum "$WHEEL" > "$LAB/wheel.sha256"
 cp -a "$CPYTHON_DIR" "$CTX/python"
 cp "$(command -v uv)" "$CTX/uv"
@@ -55,7 +60,7 @@ timeout --signal=TERM --kill-after=15s 600s \
 docker image inspect "$IMAGE" > "$LAB/image.json"
 ```
 
-The pins have been selecting direct dependencies; complete installed versions have been remaining in the image's two package inventories. A writable task-local `DOCKER_CONFIG` has been avoiding writes to the host's Docker configuration. No host credentials, home, runtime, trust-store or Docker-socket mounts in the smoke container.
+The image's package inventories have been recording the full installed versions. The UUID has been keeping the image tag and container name independent of the temporary directory. A task-local `DOCKER_CONFIG` has been keeping Docker configuration writes in `LAB`. Container mount: the results directory only.
 
 ## Run one offline functional smoke
 
@@ -80,14 +85,14 @@ timeout --signal=TERM --kill-after=15s 180s \
         OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 PYTHONHASHSEED=0 \
         /opt/sdk/bin/python -B /bench/worker.py --engine v1 \
         --default-host-setup /run/sdk-benchmark/setup.json \
-        --native-transport http --case oneshot_text --iterations 1 \
-        --sample-index 0 --output /out/native-smoke.json
+        --native-transport http --native-provider-mode omitted \
+        --case cold_first_result --output /out/native-smoke.json
     ' > "$LAB/container.log" 2>&1
 test -z "$(docker ps --all --quiet --filter "name=^/${CONTAINER}$")"
 docker image rm "$IMAGE"
 rm -rf -- "$CTX"
 ```
 
-Expected result: exit 0, `errors: 0`, `server.errors: 0`, `server.requests: 2`, `default_host: true` and `wire_transport: "sse"` in `native-smoke.json`. One prefill and one measured call, each in a fresh conversation. The worker has been checking exact output, input/history hashes, actual Host/SNI and framing. Container absence after exit and explicit image removal: required cleanup checks. On failure or timeout, the trap has been removing the exact container. Docker-state reconciliation: still required after build cancellation or a partial image. Logs and package inventories in `LAB`; deletion after review and export.
+Expected result: exit 0, `errors: 0`, `server.errors: 0`, `server.requests: 1`, `default_host: true`, `native_provider_mode: "omitted"`, `full_owner_scope: "adapter-lifetime"` and `wire_transport: "sse"` in `native-smoke.json`. One fresh conversation, without prefill. The worker has been checking exact output, input/history hashes, actual Host/SNI, framing and joined peer cleanup. Its null `sample_index` has been preventing admission to a scored comparison. Container absence after exit and explicit image removal: required cleanup checks. On failure or timeout, the trap has been removing the exact container. Docker-state reconciliation: still required after build cancellation or a partial image. Logs and package inventories in `LAB`; deletion after review and export.
 
-A functional smoke has been passing on Ubuntu 24.04/glibc 2.39 with CPython 3.13.16 and one native wheel: two HTTP/SSE requests, zero worker/peer errors, and joined cleanup. That proof has been covering one native worker, not the comparison controller, stable SDK, WebSockets, HTTP/2, other wheels or complete workload suite. This procedure has been retaining worker timing fields without supporting a performance or memory claim.
+The earlier caller-owned functional smoke has been passing on Ubuntu 24.04/glibc 2.39 with CPython 3.13.16 and one native wheel: two HTTP/SSE requests, zero worker/peer errors, and joined cleanup. That proof has been covering only its caller-owned native worker, without qualifying the omitted mode, comparison controller, stable SDK, WebSockets, HTTP/2, other wheels or complete workload suite. This procedure has been retaining worker timing fields without supporting a performance or memory claim. Its Adapter-lifetime CPU endpoint has not been including process-final cache cleanup.

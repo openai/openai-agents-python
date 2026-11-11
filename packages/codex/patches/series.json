@@ -1,5 +1,4 @@
 {
-  "result_tree": "e20d0a5ac522165524aa5935664acb4555204df2",
   "patches": [
     {
       "path": "0001-native-schema-recovery.patch",
@@ -682,6 +681,10 @@
       "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
     },
     {
+      "path": "sdk-provider-tool-search.patch",
+      "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
       "sha256": "68668e758695b7f95164852c62a310cf0fd9bc78d310145ebe81b17fa8aa1eb9"
     },
@@ -729,5 +732,6 @@
       "path": "sdk-trace-delivery-controls.patch",
       "sha256": "ab69e05e28487153d3ab44a9bdae4862e24ad7dc1284a0872118dc703f0e49e8"
     }
-  ]
+  ],
+  "result_tree": "7dc7437bcdabe8573b4a8962d7e661c31fb48509"
 }

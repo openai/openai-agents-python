@@ -45,6 +45,8 @@ pub(crate) struct ProfileSpec {
     terminal_slots: Vec<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     input_error_slots: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    run_input_error_slots: Vec<usize>,
     #[serde(default)]
     step_defaults: Option<Vec<usize>>,
     #[serde(default)]
@@ -289,6 +291,11 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
         .iter()
         .map(|profile| {
             let mut descriptor = serde_json::to_value(profile)?;
+            // Refreshed Session formatter policy; declared input callbacks remain pinned.
+            descriptor
+                .as_object_mut()
+                .unwrap()
+                .remove("run_input_error_slots");
             // Endpoint credentials, process configuration and refreshed policies are not
             // declaration compatibility. Their fresh native owners remain authority.
             descriptor["mcp_servers"] = json!(profile.mcp_servers.keys().collect::<Vec<_>>());
@@ -595,12 +602,18 @@ async fn prepare_profile(
         descriptor.before_complete,
         descriptor.tool_batch_completion,
     ];
+    let input_error_slots = descriptor
+        .input_error_slots
+        .iter()
+        .chain(&descriptor.run_input_error_slots)
+        .copied()
+        .collect::<Vec<_>>();
     let catalog = if voice {
         tools.voice_profile_catalog(
             descriptor.tools.clone(),
             &descriptor.manual_slots,
             &descriptor.terminal_slots,
-            &descriptor.input_error_slots,
+            &input_error_slots,
             descriptor.step_defaults.as_deref(),
             flags,
         )?
@@ -609,7 +622,7 @@ async fn prepare_profile(
             descriptor.tools.clone(),
             &descriptor.manual_slots,
             &descriptor.terminal_slots,
-            &descriptor.input_error_slots,
+            &input_error_slots,
             descriptor.step_defaults.as_deref(),
             flags,
             startup,

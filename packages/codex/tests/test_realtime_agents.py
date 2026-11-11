@@ -365,6 +365,7 @@ def test_live_graph_capture_preserves_provider_output_and_runtime_contracts(sess
     opening = Agent(instructions="Original", provider=provider)
     session = SimpleNamespace(
         _opening_agent=opening,
+        _tool_error_formatter=None,
         _context=None,
         _executor=None,
         _input_guardrails=(
