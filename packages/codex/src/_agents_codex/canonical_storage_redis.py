@@ -11,7 +11,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from ._legacy_history import decode_legacy_item
+from ._legacy_history import (
+    check_legacy_history_size,
+    decode_legacy_item,
+    validate_legacy_history_limits,
+)
 from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._storage_driver import _StorageDriver
@@ -48,6 +52,21 @@ return redis.call('PEXPIRE', KEYS[1], ARGV[2])
 _RELEASE = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end
 return 1
+"""
+_READ_LEGACY = """
+local count = redis.call('LLEN', KEYS[1])
+if count > tonumber(ARGV[1]) then return {count, 0, {}} end
+local size = 0
+local items = {}
+for start = 0, count - 1, 64 do
+  local page = redis.call('LRANGE', KEYS[1], start, math.min(start + 63, count - 1))
+  for _, item in ipairs(page) do
+    size = size + #item
+    if size > tonumber(ARGV[2]) then return {count, size, {}} end
+    items[#items + 1] = item
+  end
+end
+return {count, size, items}
 """
 
 
@@ -159,20 +178,30 @@ class RedisSessionStore:
         await _join(asyncio.create_task(asyncio.to_thread(self.close)))
 
     async def read_legacy_history(
-        self, session_id: str, *, key_prefix: str = "agents:session"
+        self,
+        session_id: str,
+        *,
+        key_prefix: str = "agents:session",
+        max_items: int = 10_000,
+        max_bytes: int = 16 * 1024 * 1024,
     ) -> list[dict[str, Any]]:
         """Read v0 Redis list items in insertion order for native history import.
 
         Finish writes to the v0 session before reading. Import the items with
         the current revision of an empty native Session's `transact_history`.
+        Redis checks both limits before sending the history to the importer.
         """
+        validate_legacy_history_limits(max_items, max_bytes)
         key = f"{key_prefix}:{session_id}:messages"
 
         def read() -> list[dict[str, Any]]:
             self._check_process()
             with self._mutex:
                 self._check_process()
-                rows = self._driver.call(self.client.lrange, key, 0, -1)
+                count, size, rows = self._driver.call(
+                    self.client.eval, _READ_LEGACY, 1, key, max_items, max_bytes
+                )
+                check_legacy_history_size(count, size, max_items, max_bytes)
                 return [decode_legacy_item(row) for row in rows]
 
         return await _join(asyncio.create_task(asyncio.to_thread(read)))

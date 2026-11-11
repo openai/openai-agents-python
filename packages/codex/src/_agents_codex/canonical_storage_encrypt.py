@@ -7,7 +7,11 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from ._legacy_history import decode_legacy_item as _decode_legacy_item
+from ._legacy_history import (
+    check_legacy_history_size as _check_legacy_history_size,
+    decode_legacy_item as _decode_legacy_item,
+    validate_legacy_history_limits as _validate_legacy_history_limits,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
@@ -59,19 +63,24 @@ class EncryptedSessionStore:
         encryption_key: str,
         ttl: int = 600,
         limit: int | None = None,
+        max_items: int = 10_000,
+        max_bytes: int = 16 * 1024 * 1024,
     ) -> list[dict[str, Any]]:
         """Authenticate v0 envelopes and return unexpired items in insertion order.
 
         Use the original session ID, master key, and item TTL. A limit applies
         to the newest authenticated items. Import the result into a native
-        Session backed by an EncryptedSessionStore.
+        Session backed by an EncryptedSessionStore. The import checks the
+        source item count and the bytes of ciphertext it examines.
         """
         from cryptography.fernet import Fernet, InvalidToken
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+        _validate_legacy_history_limits(max_items, max_bytes)
         if limit is not None and limit <= 0:
             return []
+        _check_legacy_history_size(len(items), 0, max_items, max_bytes)
         derived = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
@@ -82,6 +91,7 @@ class EncryptedSessionStore:
         del encryption_key, derived
 
         history: list[dict[str, Any]] = []
+        encoded_bytes = 0
         source = items if limit is None else reversed(items)
         for envelope in source:
             token = envelope.get("payload")
@@ -90,8 +100,11 @@ class EncryptedSessionStore:
                 or "kid" not in envelope
                 or "v" not in envelope
                 or not isinstance(token, str)
+                or not token.isascii()
             ):
                 continue
+            encoded_bytes += len(token)
+            _check_legacy_history_size(0, encoded_bytes, max_items, max_bytes)
             try:
                 item = _decode_legacy_item(cipher.decrypt(token.encode("utf-8"), ttl=ttl))
             except InvalidToken:

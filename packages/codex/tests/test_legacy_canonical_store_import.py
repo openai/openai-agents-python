@@ -6,7 +6,9 @@ import json
 import os
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, closing
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -64,6 +66,13 @@ async def verify_import(
     assert "v0 imported tool result" in request
 
 
+async def verify_import_limits(read: Callable[..., Awaitable[object]]) -> None:
+    with pytest.raises(ValueError, match="exceeds max_items"):
+        await read(max_items=2)
+    with pytest.raises(ValueError, match="exceeds max_bytes"):
+        await read(max_bytes=1)
+
+
 async def test_dapr_reader_uses_the_v0_key_and_rejects_a_non_list():
     class DaprClient:
         async def get_state(self, *, store_name, key, state_metadata):
@@ -100,6 +109,9 @@ async def test_imports_v0_dapr_items(responses):
         )
         before = await client.get_state(store_name=store_name, key=key)
         items = await read_dapr_legacy_history(client, session_id, state_store_name=store_name)
+        await verify_import_limits(
+            partial(read_dapr_legacy_history, client, session_id, state_store_name=store_name)
+        )
         after = await client.get_state(store_name=store_name, key=key)
         assert after.data == before.data
         assert after.etag == before.etag
@@ -145,6 +157,14 @@ async def test_imports_authenticated_unexpired_v0_items_into_native_encrypted_st
     items = EncryptedSessionStore.read_legacy_history(
         source, session_id, encryption_key=source_key, ttl=600, limit=len(V0_ITEMS)
     )
+    with pytest.raises(ValueError, match="exceeds max_items"):
+        EncryptedSessionStore.read_legacy_history(
+            source, session_id, encryption_key=source_key, max_items=1
+        )
+    with pytest.raises(ValueError, match="exceeds max_bytes"):
+        EncryptedSessionStore.read_legacy_history(
+            source, session_id, encryption_key=source_key, max_bytes=1
+        )
     assert (
         EncryptedSessionStore.read_legacy_history(
             source, "unknown-session", encryption_key=source_key, ttl=600
@@ -180,6 +200,11 @@ async def test_imports_v0_sqlite_items_without_changing_the_file(tmp_path, respo
     items = await SQLiteSessionStore.read_legacy_history(
         path, "legacy", messages_table='old "messages'
     )
+    await verify_import_limits(
+        partial(
+            SQLiteSessionStore.read_legacy_history, path, "legacy", messages_table='old "messages'
+        )
+    )
     assert path.read_bytes() == before
     await verify_import(items, responses)
 
@@ -200,6 +225,9 @@ async def test_imports_v0_redis_list_items(responses):
         await client.rpush(key, *(json.dumps(item) for item in V0_ITEMS))
         await client.expire(key, 60)
         items = await store.read_legacy_history("old-session", key_prefix=prefix)
+        await verify_import_limits(
+            partial(store.read_legacy_history, "old-session", key_prefix=prefix)
+        )
         assert await client.ttl(key) > 0
         assert await store.read_legacy_history("missing", key_prefix=prefix) == []
         await verify_import(items, responses)
@@ -248,5 +276,13 @@ async def test_imports_v0_mongo_items_and_batches_from_active_generation(generat
         )
         items = await store.read_legacy_history(
             "old-session", sessions_collection="heads", messages_collection="messages"
+        )
+        await verify_import_limits(
+            partial(
+                store.read_legacy_history,
+                "old-session",
+                sessions_collection="heads",
+                messages_collection="messages",
+            )
         )
         await verify_import(items, responses)

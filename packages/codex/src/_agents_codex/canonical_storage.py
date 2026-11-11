@@ -21,7 +21,12 @@ from dataclasses import dataclass as dataclass
 from pathlib import Path as Path
 from typing import Any as Any, Literal, Protocol as Protocol, runtime_checkable as runtime_checkable
 
-from ._legacy_history import decode_legacy_item as _decode_legacy_item
+from ._legacy_history import (
+    check_legacy_history_size as _check_legacy_history_size,
+    decode_legacy_history_array as _decode_legacy_history_array,
+    decode_legacy_item as _decode_legacy_item,
+    validate_legacy_history_limits as _validate_legacy_history_limits,
+)
 from ._lifecycle import _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolOutput as ToolOutput
@@ -218,18 +223,30 @@ class SQLiteSessionStore:
         session_id: str,
         *,
         messages_table: str = "agent_messages",
+        max_items: int = 10_000,
+        max_bytes: int = 16 * 1024 * 1024,
     ) -> list[dict[str, Any]]:
         """Read a v0 SQLite file in insertion order for native history import.
 
         Finish writes to the v0 session before reading. Import the items with
         the current revision of an empty native Session's `transact_history`.
+        Histories above either limit raise ValueError before item decoding.
         """
+        _validate_legacy_history_limits(max_items, max_bytes)
         table = '"' + messages_table.replace('"', '""') + '"'
 
         def read() -> list[dict[str, Any]]:
             uri = f"{path.resolve().as_uri()}?mode=ro"
             connection = sqlite3.connect(uri, uri=True)
             try:
+                connection.execute("BEGIN")
+                count, size = connection.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(item_bytes), 0) FROM ("
+                    f"SELECT LENGTH(CAST(message_data AS BLOB)) AS item_bytes FROM {table} "
+                    "WHERE session_id = ? LIMIT ?)",
+                    (session_id, max_items + 1),
+                ).fetchone()
+                _check_legacy_history_size(count, size, max_items, max_bytes)
                 rows = connection.execute(
                     f"SELECT message_data FROM {table} WHERE session_id = ? ORDER BY id",
                     (session_id,),
@@ -459,13 +476,18 @@ async def read_dapr_legacy_history(
     *,
     state_store_name: str,
     consistency: Literal["eventual", "strong"] = "eventual",
+    max_items: int = 10_000,
+    max_bytes: int = 16 * 1024 * 1024,
 ) -> list[dict[str, Any]]:
     """Read v0 Dapr items in insertion order with an application-owned async client.
 
     Finish writes to the v0 session before reading from its original Dapr
     application and state store. Import the items with the current revision
     of an empty native Session's `transact_history`.
+    Dapr returns the stored value as one message. Configure the client's
+    receive limit for transport and use these limits for history decoding.
     """
+    _validate_legacy_history_limits(max_items, max_bytes)
     result = await dapr_client.get_state(
         store_name=state_store_name,
         key=f"{session_id}:messages",
@@ -473,10 +495,7 @@ async def read_dapr_legacy_history(
     )
     if not result.data:
         return []
-    items = json.loads(result.data)
-    if not isinstance(items, list):
-        raise ValueError("Dapr v0 session messages must be a JSON list")
-    return [_decode_legacy_item(item) for item in items]
+    return _decode_legacy_history_array(result.data, max_items, max_bytes)
 
 
 # Re-export adapters only after their shared protocols and SQLite base exist.
