@@ -3814,7 +3814,7 @@ class Session(Generic[ContextT, OutputT]):
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
-                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
+                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool, bool]:
                     private_run = (
                         (_atomic_first_turn or _private_default_opening)
                         and observation_retention == "bounded"
@@ -3861,14 +3861,19 @@ class Session(Generic[ContextT, OutputT]):
                     ):
                         private_http = True
                         websockets_enabled = False
-                    return use_completed_owner, websockets_enabled, private_http
+                    atomic_first_turn = (
+                        _atomic_first_turn
+                        or use_completed_owner
+                        or (private_http and owned_provider and bool(available))
+                    )
+                    return use_completed_owner, websockets_enabled, private_http, atomic_first_turn
 
-                use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
-                _atomic_first_turn = (
-                    _atomic_first_turn
-                    or use_completed_owner
-                    or (private_http and owned_provider and bool(available))
-                )
+                (
+                    use_completed_owner,
+                    websockets_enabled,
+                    private_http,
+                    _atomic_first_turn,
+                ) = private_run_policy(provider)
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
