@@ -1646,6 +1646,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                 .submit(Op::RealtimeConversationActivateSdk {
                     generation: p.generation,
                     api_key: p.api_key.map(RealtimeConversationApiKey::new),
+                    connection_options: p.connection_options,
                     reply,
                 })
                 .await?;
@@ -1931,7 +1932,9 @@ pub(crate) async fn prepare_realtime(
 }
 params!(RealtimeSdkActivate {
     generation: String,
-    api_key: Option<String>
+    api_key: Option<String>,
+    #[serde(default)]
+    connection_options: codex_protocol::protocol::RealtimeConversationConnectionOptions
 });
 params!(RealtimeSdkUpdate {
     generation: String,

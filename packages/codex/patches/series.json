@@ -534,7 +534,7 @@
     },
     {
       "path": "sdk-agent-profile-observations.patch",
-      "sha256": "6e7ccb5f3b38d26fa69dbfc33338d829011692ab29a544baa074fb71bbcea607"
+      "sha256": "bb9c6aeb6d2ac7131ed73c91e5d40a869549096dc1b8ea559cda5ed038bdd043"
     },
     {
       "path": "sdk-realtime-filter-forwarded-batches.patch",
@@ -625,13 +625,21 @@
       "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     },
     {
+      "path": "0160-realtime-connection-options.patch",
+      "sha256": "04481c9ccc44ae1667299a20757f75ff1c12ca047f46a8072a9d2b1ee6d7c8e3"
+    },
+    {
       "path": "0160-sdk-realtime-event-context.patch",
       "sha256": "1c8909ef7718231b9b1fc54154617565751b6b7f67d2e3bd0211a8f1c7ced112"
     },
     {
       "path": "0161-sdk-realtime-call-metadata.patch",
       "sha256": "fa87c499a02627ab02b834e07014a1e0c594adcf72833a3a0722f798d6dde80c"
+    },
+    {
+      "path": "sdk-bounded-one-shot-history.patch",
+      "sha256": "02da72f8e5bcfab13b3be4680356a62156eb429dcb7497ecc0b9644625c05f98"
     }
   ],
-  "result_tree": "15ddb38dc44c12e6851f144094f3d73304319667"
+  "result_tree": "e890215f9c3d749aaac06f58e8334184cad94a33"
 }

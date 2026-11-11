@@ -342,7 +342,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
     session._repair_turns = []
     session._repair_items = []
     session._repair_receipts_incomplete = False
-    session._observations = SimpleNamespace()
+    session._observations = SimpleNamespace(include_model_output_items=True)
     state = _Submission(_prepare_spec(root.output_type))
     state.handle = SimpleNamespace(turn_id="original-turn", submission_id="submission")
     settings = {
@@ -423,6 +423,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
             self._closed = True
 
     async def open_repair(cls, declaration, **kwargs):
+        assert kwargs["include_model_output_items"] is True
         opened.append(declaration)
         return Repair()
 
