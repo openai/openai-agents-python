@@ -667,7 +667,11 @@
     {
       "path": "sdk-tool-batch-completion.patch",
       "sha256": "1090afd706b9ce7ef2f1337dc66c42bf8f7b2cf4d8e5cbbd17275b143724bb70"
+    },
+    {
+      "path": "sdk-raw-provider-events.patch",
+      "sha256": "192f9f23ac35e03a1f6b91a5ac14a13b0570397c9846f0e238c08c750460cd9c"
     }
   ],
-  "result_tree": "460fb3dae4aa37f66873e8ae079ad4f0d66cfeda"
+  "result_tree": "80d11fc8c149a0694945f1adc114a96c812c8491"
 }

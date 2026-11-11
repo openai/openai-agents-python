@@ -940,6 +940,17 @@ impl NativeThread {
         })
     }
 
+    fn _enable_raw_provider_events(&self) -> PyResult<()> {
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        let store = inner.thread.thread_extension_data();
+        store.insert(codex_core::ObserveRawProviderEvents);
+        if let Some(control) = store.get::<crate::native_interception::Control>() {
+            control.enable_raw_provider_events();
+        }
+        Ok(())
+    }
+
     #[pyo3(signature = (limit=None, for_replay=false))]
     fn _canonical_history<'py>(
         &self,
