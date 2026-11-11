@@ -43,6 +43,8 @@ The example asks the model to list files in that workspace. The final answer des
 
 Local commands can read the workspace, any additional `writable_roots`, and the platform files they need to run. The SDK starts them with a minimal environment and a system `PATH`. Command output can reach the model provider. For untrusted prompts or files, run each job in a job-private OS sandbox or VM. Keep host credentials and other jobs' data outside that boundary.
 
+On macOS, the local sandbox has been isolating commands from host `launchd` services, including with `write_policy="trusted_workspace_write"`. Directory-backed account lookup in `id -F` and `ssh` has been failing inside that sandbox. A Python function tool has been running with the application's permissions for operations that require host account lookup. [Python functions](tools.md#python-functions)
+
 ### Allow the Linux sandbox helper to use user namespaces on Ubuntu 24.04
 
 Ubuntu 24.04 uses AppArmor to restrict unprivileged user namespaces. The local executor needs these namespaces to start its sandbox. If a local Session fails to start, ask an administrator to check the kernel log. [Ubuntu 24.04 release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)
