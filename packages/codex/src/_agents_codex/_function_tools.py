@@ -106,6 +106,18 @@ class ToolTimeoutError(TimeoutError):
 
 
 @dataclass(frozen=True)
+class ToolInputErrorContext(Generic[ContextT_co]):
+    """Admitted invocation identity before validated arguments."""
+
+    context: ContextT_co = field(repr=False)
+    submission: Turn[Any] | ChildInvocation
+    call_id: str
+    call: ToolCallInfo = field(kw_only=True)
+    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
+    realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)
+
+
+@dataclass(frozen=True)
 class ToolContext(Generic[ContextT_co]):
     """Application context and the admitted native invocation's identity.
 
@@ -254,6 +266,9 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     timeout_error_function: (
         Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None
     ) = field(default=None, repr=False)
+    input_error_function: (
+        Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None
+    ) = field(default=None, repr=False)
     namespace: str | None = None
     namespace_description: str | None = None
     finish_turn: bool = False
@@ -301,6 +316,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             )
         if self.timeout_error_function is not None and not callable(self.timeout_error_function):
             raise TypeError("FunctionTool timeout_error_function must be callable or None")
+        if self.input_error_function is not None and not callable(self.input_error_function):
+            raise TypeError("FunctionTool input_error_function must be callable or None")
         duration = self.callback_timeout
         if duration is not None and (
             isinstance(duration, bool)
@@ -316,6 +333,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             or self.callback_timeout is not None
             or self.timeout_behavior != "raise_exception"
             or self.timeout_error_function is not None
+            or self.input_error_function is not None
         ):
             raise TypeError("Callback settings require a callback registered with function_tool")
 
@@ -382,7 +400,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             )
         if self._bind is not None:
             if context is None:
-                policies: tuple[str, ...] = ("before", "after")
+                policies: tuple[str, ...] = ("before", "after", "input_error_function")
                 if self.callback_timeout is not None and self.timeout_behavior == "error_as_result":
                     policies += ("timeout_error_function",)
                 for name in policies:
@@ -392,7 +410,10 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                     parameters = list(inspect.signature(callback).parameters.values())
                     if parameters:
                         annotation = _policy_hints(callback).get(parameters[0].name)
-                        if get_origin(annotation) is ToolContext and _requires_context(annotation):
+                        if get_origin(annotation) in (
+                            ToolContext,
+                            ToolInputErrorContext,
+                        ) and _requires_context(annotation):
                             raise TypeError(
                                 f"Function tool {self.name!r} {name} requires application "
                                 "context; pass context=..."
@@ -485,6 +506,11 @@ _TimeoutFormatter: TypeAlias = Callable[
 ]
 
 
+_InputErrorFormatter: TypeAlias = Callable[
+    [ToolInputErrorContext[PolicyContextT], Exception, Any], str | Awaitable[str]
+]
+
+
 @overload
 def function_tool(
     function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any],
@@ -495,6 +521,23 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[PolicyContextT],
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+) -> _PythonTool[ToolContextT, PolicyContextT]: ...
+
+
+@overload
+def function_tool(
+    function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any],
+    /,
+    *,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
+    finish_turn: bool = False,
+    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+    run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[ToolContextT] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[ToolContextT, ToolContextT]: ...
@@ -510,6 +553,23 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[PolicyContextT],
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
+
+
+@overload
+def function_tool(
+    function: Callable[ParametersT, Any],
+    /,
+    *,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
+    finish_turn: bool = False,
+    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+    run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[object, object]: ...
@@ -531,6 +591,7 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
@@ -552,6 +613,9 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[object]
+    | _InputErrorFormatter[PolicyContextT]
+    | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
@@ -573,6 +637,7 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
@@ -594,6 +659,9 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[object]
+    | _InputErrorFormatter[PolicyContextT]
+    | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
@@ -615,6 +683,7 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
@@ -638,6 +707,9 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[object]
+    | _InputErrorFormatter[PolicyContextT]
+    | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
@@ -671,10 +743,18 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[Any] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
+
+    Optional input_error_function: initial host argument-validation recovery,
+    with ToolInputErrorContext, the validation error, and detached original JSON.
+    No validated arguments on this context. A string failure result, before
+    approval, before/execute/after, and output validation; default turn failure
+    without this formatter. Replacement/restored input and callback exceptions
+    outside recovery. Core malformed-JSON recovery without custom formatting.
 
     Model arguments must have type annotations and accept keyword arguments.
     Use names supported by Pydantic model fields, with Field(alias=...) when
@@ -779,6 +859,7 @@ def function_tool(
                 callback_timeout=declaration.callback_timeout,
                 timeout_behavior=declaration.timeout_behavior,
                 timeout_error_function=declaration.timeout_error_function,
+                input_error_function=declaration.input_error_function,
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,
@@ -802,6 +883,7 @@ def function_tool(
             is_enabled=is_enabled,
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
+            input_error_function=input_error_function,
             namespace=namespace,
             namespace_description=namespace_description,
         )

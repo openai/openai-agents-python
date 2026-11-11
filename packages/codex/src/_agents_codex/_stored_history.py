@@ -12,6 +12,7 @@ class StoredSession(TypedDict):
     """Native Exec application-session identity; no history or resume grant."""
 
     id: str
+    name: str | None
     forked_from_id: str | None
     parent_thread_id: str | None
     created_at_ms: int
