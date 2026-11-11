@@ -1,0 +1,34 @@
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -1108,11 +1108,30 @@
+         if source.voice_expected.is_some() || source.application_instructions.is_some() {
+             // Both admitted voice profiles and SDK application sources have been
+             // retaining their exact response's captured tool-policy names.
++            let admitted_names = self
++                .calls
++                .iter()
++                .map(|call| call.native_name.clone())
++                .collect::<std::collections::HashSet<_>>();
+             execution.tool_policy = Some(Arc::new(codex_extension_api::ToolPolicy {
+                 allowed_tools: Some(
+                     self.calls
+                         .iter()
+                         .map(|call| call.native_name.clone())
++                        .collect(),
++                ),
++                allowed_mcp_tools: Some(
++                    execution
++                        .mcp
++                        .as_ref()
++                        .into_iter()
++                        .flat_map(|binding| binding.tools().iter())
++                        .filter_map(|tool| {
++                            let name = tool.canonical_tool_name();
++                            admitted_names.contains(&name).then(|| {
++                                (tool.server_name.clone(), tool.tool.name.to_string(), name)
++                            })
++                        })
+                         .collect(),
+                 ),
+                 ..session.tool_policy.as_ref().clone()

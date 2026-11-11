@@ -96,9 +96,11 @@ def test_instruction_options_are_appended_to_public_session_signatures() -> None
     overloads = typing.get_overloads(Agent.session) if sys.version_info >= (3, 11) else ()
     for declaration in [Agent.session, *overloads]:
         parameters = list(inspect.signature(declaration).parameters)
-        assert parameters[-4:] == [
+        assert parameters[-6:] == [
             "max_function_concurrency",
             "observation_retention",
+            "input_guardrails",
+            "output_guardrails",
             "project_guidance",
             "discover_agents_md",
         ]

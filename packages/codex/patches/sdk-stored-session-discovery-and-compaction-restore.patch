@@ -1,0 +1,915 @@
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index d24a43a3..25ea5d72 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1877,6 +1877,7 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
+                     .to_string(),
+             ),
+         },
++        None,
+         &mut auth_recovery,
+         &mut provider_auth_recovery_attempted,
+         &test_session_telemetry(),
+@@ -1989,6 +1990,7 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
+         let (event_sender, event_receiver) = async_channel::unbounded();
+         let result = super::handle_unauthorized(
+             unauthorized(),
++            None,
+             &mut auth_recovery,
+             &mut provider_auth_recovery_attempted,
+             &telemetry,
+@@ -2008,6 +2010,7 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
+             );
+             super::handle_unauthorized(
+                 unauthorized(),
++                None,
+                 &mut auth_recovery,
+                 &mut provider_auth_recovery_attempted,
+                 &telemetry,
+@@ -2828,7 +2831,15 @@ async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Resu
+ #[tokio::test]
+ async fn explicit_output_cap_stops_after_retained_typed_limit_but_uncapped_policy_remains() {
+     for explicit_cap in [false, true] {
+-        let mut observation = terminal_observation("configured-output-cap");
++        let mut observation = ResponseEvent::ResponseObserved(
++            codex_protocol::protocol::ResponseObservation {
++                response_id: Some("configured-output-cap".into()),
++                upstream_request_id: None,
++                status: codex_protocol::protocol::ResponseObservationStatus::Completed,
++                incomplete_reason: None,
++                usage: None,
++            },
++        );
+         if let ResponseEvent::ResponseObserved(value) = &mut observation {
+             value.status = codex_protocol::protocol::ResponseObservationStatus::Incomplete;
+             value.incomplete_reason =
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index fd36164e..8fb71e09 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1077,7 +1077,7 @@ pub(crate) fn rollback_retained_item(
+ }
+ 
+ /// Provider boundaries affect only the model projection and its current-context baseline.
+-fn is_provider_compaction_boundary(envelope: &ResponseItemEnvelope) -> bool {
++pub(crate) fn is_provider_compaction_boundary(envelope: &ResponseItemEnvelope) -> bool {
+     envelope
+         .metadata
+         .as_ref()
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index 3f61ee6d..ccce3d01 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -6,6 +6,7 @@ pub(crate) use history::ContextManager;
+ pub(crate) use history::HistoryReplacement;
+ pub(crate) use history::estimate_image_reference_bytes;
+ pub(crate) use history::estimate_item_token_count;
++pub(crate) use history::is_provider_compaction_boundary;
+ pub(crate) use history::is_user_turn_boundary;
+ 
+ pub(crate) use history::is_api_message;
+diff --git a/codex-rs/core/src/realtime_conversation/item_deletion.rs b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+index 70791b39..3f6cffcd 100644
+--- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
++++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+@@ -769,6 +769,7 @@ mod tests {
+         history
+             .observe_caller_call(
+                 &codex_protocol::protocol::RealtimeFunctionCallRequested {
++                    source_profile: None,
+                     namespace: None,
+                     call_id: "caller-call".into(),
+                     item_id: "live-call-item".into(),
+@@ -813,6 +814,7 @@ mod tests {
+         state
+             .observe(&RealtimeEvent::FunctionCallRequested(
+                 codex_protocol::protocol::RealtimeFunctionCallRequested {
++                    source_profile: None,
+                     namespace: None,
+                     call_id: "call".into(),
+                     item_id: "call-item".into(),
+diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
+index dd3e0584..c036d9de 100644
+--- a/codex-rs/core/src/realtime_conversation/provider_history.rs
++++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
+@@ -2704,6 +2704,7 @@ mod detached_replay_receipt_tests {
+         let request = |response_id| {
+             RealtimeEvent::DetachedResponse(Box::new(RealtimeEvent::FunctionCallRequested(
+                 codex_protocol::protocol::RealtimeFunctionCallRequested {
++                    source_profile: None,
+                     namespace: None,
+                     call_id: "past-call".into(),
+                     item_id: "past-item".into(),
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index 6c58ead7..0113f0a1 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -2780,7 +2780,7 @@ async fn sdk_response_batch_runs_two_native_calls_under_one_source_without_model
+     assert!(
+         session
+             .conversation
+-            .claim_sdk_tools("tools-generation", "provider-response", &ids[..1], "wrong")
++            .claim_sdk_tools("tools-generation", "provider-response", &ids[..1], &[], "wrong")
+             .await
+             .is_err()
+     );
+@@ -3793,6 +3793,7 @@ async fn sdk_wire_native_continuation_case(late_third: bool, new_owner: Option<&
+             "tools-generation",
+             "response-A",
+             &ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
++            &[],
+             "native-output-fixture",
+         )
+         .await
+@@ -4627,13 +4628,13 @@ async fn sdk_scoped_batch_interrupt_joins_its_policy_while_later_batch_executes(
+         let mut init = codex_extension_api::ExtensionDataInit::new();
+         init.insert(Arc::clone(&policy.owner));
+         let started = super::handle_tools_sdk_with_root(&session, None, "tools-generation".into(),
+-            "provider-response".into(), vec!["provider-call".into()], "shared-voice-root".into(),
++            "provider-response".into(), vec!["provider-call".into()], Vec::new(), "shared-voice-root".into(),
+             crate::WithTurnExtensionData::new(codex_protocol::protocol::ThreadSettingsOverrides::default(), init)).await.unwrap();
+         assert!(matches!(started, TurnInputSubmission::Started { .. }));
+         policy.entered.notified().await;
+         assert!(batch_a.completed.get().is_some(), "running initial batch must expose its join receipt");
+         let attached = super::handle_tools_sdk_with_root(&session, Some("shared-voice-root".into()),
+-            "tools-generation".into(), "later-response".into(), vec!["later-call".into()],
++            "tools-generation".into(), "later-response".into(), vec!["later-call".into()], Vec::new(),
+             "later-submission".into(), codex_protocol::protocol::ThreadSettingsOverrides::default().into()).await.unwrap();
+         assert_eq!(attached, TurnInputSubmission::Steered { turn_id: "shared-voice-root".into() });
+         policy.entered.notified().await;
+diff --git a/codex-rs/core/src/session/rollout_reconstruction.rs b/codex-rs/core/src/session/rollout_reconstruction.rs
+index 80478994..fcd38563 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction.rs
+@@ -1,5 +1,6 @@
+ use super::*;
+ use crate::context::world_state::WorldStateSnapshot;
++use crate::context_manager::is_provider_compaction_boundary;
+ use crate::context_manager::is_user_turn_boundary;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::protocol::SessionContextWindow;
+@@ -406,6 +407,16 @@ impl Session {
+                 RolloutItem::ResponseItem(response_item) => {
+                     let active_segment =
+                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
++                    // A provider boundary invalidates older instruction baselines just like
++                    // native compaction. A newer surviving baseline still takes precedence.
++                    if is_provider_compaction_boundary(response_item)
++                        && matches!(
++                            active_segment.reference_context_item,
++                            TurnReferenceContextItem::NeverSet
++                        )
++                    {
++                        active_segment.reference_context_item = TurnReferenceContextItem::Cleared;
++                    }
+                     active_segment.counts_as_user_turn |=
+                         is_user_turn_boundary(&response_item.item);
+                 }
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index c11ef860..55af6be3 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -2767,3 +2767,69 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
+     );
+     assert!(session.reference_context_item().await.is_none());
+ }
++
++#[tokio::test]
++async fn provider_compaction_replay_clears_only_the_surviving_older_baseline() {
++    let (session, turn_context) = make_session_and_context().await;
++    let mut old = turn_context.to_turn_context_item();
++    old.sdk_receipt = None;
++    let mut newer = old.clone();
++    newer.turn_id = Some("newer-provider-compaction-turn".to_owned());
++    let turn = |context: TurnContextItem| {
++        vec![
++            RolloutItem::EventMsg(EventMsg::TurnStarted(
++                codex_protocol::protocol::TurnStartedEvent {
++                    turn_id: context.turn_id.clone().unwrap(),
++                    root_turn_id: None,
++                    trace_id: None,
++                    started_at: None,
++                    model_context_window: Some(128_000),
++                    collaboration_mode_kind: ModeKind::Default,
++                },
++            )),
++            RolloutItem::TurnContext(context),
++            RolloutItem::EventMsg(EventMsg::UserMessage(
++                codex_protocol::protocol::UserMessageEvent {
++                    message: "real user boundary".to_owned(),
++                    ..Default::default()
++                },
++            )),
++        ]
++    };
++    let marker = |provider_compaction| {
++        RolloutItem::ResponseItem(ResponseItemEnvelope {
++            item: ResponseItem::Compaction {
++                id: None,
++                encrypted_content: "opaque provider window".to_owned(),
++                internal_chat_message_metadata_passthrough: None,
++            },
++            metadata: Some(codex_history::CodexHarnessMetadata {
++                provider_compaction,
++                ..Default::default()
++            }),
++        })
++    };
++    let mut cleared = turn(old.clone());
++    cleared.push(marker(true));
++    let mut legacy = turn(old.clone());
++    legacy.push(marker(false));
++    let mut newer_baseline = cleared.clone();
++    newer_baseline.extend(turn(newer.clone()));
++    let mut rolled_back = turn(old.clone());
++    rolled_back.extend(turn(newer.clone()));
++    rolled_back.push(marker(true));
++    rolled_back.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
++        ThreadRolledBackEvent { num_turns: 1 },
++    )));
++    for (items, expected) in [
++        (cleared, None),
++        (legacy, Some(old.clone())),
++        (newer_baseline, Some(newer)),
++        (rolled_back, Some(old)),
++    ] {
++        let reconstructed = session
++            .reconstruct_history_from_rollout(&turn_context, &items)
++            .await;
++        assert_eq!(reconstructed.reference_context_item, expected);
++    }
++}
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index 55430b52..f664c703 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -130,6 +130,7 @@ fn realtime_ignores_private_url_completion_status() {
+ 
+ struct TerminalPolicy {
+     seen: std::sync::Mutex<Vec<String>>,
++    guard_seen: std::sync::Mutex<Vec<String>>,
+     selected: &'static str,
+     invalid: bool,
+ }
+@@ -145,6 +146,10 @@ impl codex_extension_api::TurnLifecycleContributor for TerminalPolicy {
+             let ResponseItem::FunctionCall { call_id, .. } = input.call else {
+                 unreachable!()
+             };
++            if input.guard_only {
++                self.guard_seen.lock().unwrap().push(call_id.clone());
++                return Ok(None);
++            }
+             self.seen.lock().unwrap().push(call_id.clone());
+             if call_id != self.selected {
+                 return Ok(None);
+@@ -187,6 +192,7 @@ async fn terminal_policy_selects_the_first_eligible_call_in_model_order() {
+     let (mut session, turn) = crate::session::tests::make_session_and_context().await;
+     let policy = Arc::new(TerminalPolicy {
+         seen: Default::default(),
++        guard_seen: Default::default(),
+         selected: "second",
+         invalid: false,
+     });
+@@ -199,6 +205,7 @@ async fn terminal_policy_selects_the_first_eligible_call_in_model_order() {
+         &step,
+         &settled_test_calls(),
+         &CancellationToken::new(),
++        &mut 0,
+     )
+     .await
+     .unwrap()
+@@ -213,6 +220,7 @@ async fn terminal_policy_never_runs_for_failed_siblings() {
+     let (mut session, turn) = crate::session::tests::make_session_and_context().await;
+     let policy = Arc::new(TerminalPolicy {
+         seen: Default::default(),
++        guard_seen: Default::default(),
+         selected: "first",
+         invalid: false,
+     });
+@@ -223,12 +231,16 @@ async fn terminal_policy_never_runs_for_failed_siblings() {
+     let mut tools = settled_test_calls();
+     tools.all_succeeded = false;
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
+             .await
+             .unwrap()
+             .is_none()
+     );
+     assert!(policy.seen.lock().unwrap().is_empty());
++    assert_eq!(
++        *policy.guard_seen.lock().unwrap(),
++        vec!["first", "second", "third"]
++    );
+ }
+ 
+ #[tokio::test]
+@@ -240,7 +252,8 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+             &session,
+             &step,
+             &settled_test_calls(),
+-            &CancellationToken::new()
++            &CancellationToken::new(),
++            &mut 0,
+         )
+         .await
+         .unwrap()
+@@ -249,6 +262,7 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+     let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+     extensions.turn_lifecycle_contributor(Arc::new(TerminalPolicy {
+         seen: Default::default(),
++        guard_seen: Default::default(),
+         selected: "first",
+         invalid: true,
+     }));
+@@ -258,6 +272,7 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+         &step,
+         &settled_test_calls(),
+         &CancellationToken::new(),
++        &mut 0,
+     )
+     .await
+     .unwrap_err();
+@@ -271,7 +286,7 @@ async fn terminal_policy_rejects_a_mismatched_accepted_receipt() {
+     let mut tools = settled_test_calls();
+     tools.outputs.swap(0, 1);
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
+             .await
+             .is_err()
+     );
+@@ -461,7 +476,7 @@ async fn tool_terminal_recovery_saved_success_alone_has_no_completion_authority(
+     let (session, turn) = crate::session::tests::make_session_and_context().await;
+     let step = StepContext::for_test(Arc::new(turn));
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
++        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
+             .await
+             .unwrap()
+             .is_none()
+diff --git a/codex-rs/rollout/src/state_db.rs b/codex-rs/rollout/src/state_db.rs
+index 439a1e62..57e39548 100644
+--- a/codex-rs/rollout/src/state_db.rs
++++ b/codex-rs/rollout/src/state_db.rs
+@@ -364,6 +364,81 @@ pub async fn list_threads_db(
+     section: Option<Option<&str>>,
+     project_id: Option<Option<&str>>,
+     search_term: Option<&str>,
++) -> Option<codex_state::ThreadsPage> {
++    list_threads_db_impl(
++        context,
++        sqlite,
++        page_size,
++        cursor,
++        sort_key,
++        sort_direction,
++        allowed_sources,
++        model_providers,
++        cwd_filters,
++        relation_filter,
++        archived,
++        section,
++        project_id,
++        search_term,
++        false,
++    )
++    .await
++}
++
++#[allow(clippy::too_many_arguments)]
++pub async fn list_threads_db_including_empty_preview(
++    context: Option<&codex_state::StateRuntime>,
++    sqlite: &codex_state::SqliteConfig,
++    page_size: usize,
++    cursor: Option<&Cursor>,
++    sort_key: ThreadSortKey,
++    sort_direction: SortDirection,
++    allowed_sources: &[SessionSource],
++    model_providers: Option<&[String]>,
++    cwd_filters: Option<&[PathBuf]>,
++    relation_filter: Option<codex_state::ThreadRelationFilter>,
++    archived: bool,
++    section: Option<Option<&str>>,
++    project_id: Option<Option<&str>>,
++    search_term: Option<&str>,
++) -> Option<codex_state::ThreadsPage> {
++    list_threads_db_impl(
++        context,
++        sqlite,
++        page_size,
++        cursor,
++        sort_key,
++        sort_direction,
++        allowed_sources,
++        model_providers,
++        cwd_filters,
++        relation_filter,
++        archived,
++        section,
++        project_id,
++        search_term,
++        true,
++    )
++    .await
++}
++
++#[allow(clippy::too_many_arguments)]
++async fn list_threads_db_impl(
++    context: Option<&codex_state::StateRuntime>,
++    sqlite: &codex_state::SqliteConfig,
++    page_size: usize,
++    cursor: Option<&Cursor>,
++    sort_key: ThreadSortKey,
++    sort_direction: SortDirection,
++    allowed_sources: &[SessionSource],
++    model_providers: Option<&[String]>,
++    cwd_filters: Option<&[PathBuf]>,
++    relation_filter: Option<codex_state::ThreadRelationFilter>,
++    archived: bool,
++    section: Option<Option<&str>>,
++    project_id: Option<Option<&str>>,
++    search_term: Option<&str>,
++    include_empty_preview: bool,
+ ) -> Option<codex_state::ThreadsPage> {
+     let ctx = context?;
+     if ctx.sqlite() != sqlite {
+@@ -401,7 +476,7 @@ pub async fn list_threads_db(
+         SortDirection::Desc => codex_state::SortDirection::Desc,
+     };
+ 
+-    if let Some(relation_filter) = relation_filter {
++    if relation_filter.is_some() || include_empty_preview {
+         let filters = codex_state::ThreadFilterOptions {
+             archived_only: archived,
+             section,
+@@ -414,10 +489,18 @@ pub async fn list_threads_db(
+             sort_direction: state_sort_direction,
+             search_term,
+         };
+-        return match ctx
+-            .list_threads_by_relation(page_size, relation_filter, filters)
++        let result = if include_empty_preview {
++            ctx.list_threads_including_empty_preview(page_size, filters, relation_filter)
++                .await
++        } else {
++            ctx.list_threads_by_relation(
++                page_size,
++                relation_filter.expect("checked relation"),
++                filters,
++            )
+             .await
+-        {
++        };
++        return match result {
+             Ok(page) => Some(page),
+             Err(err) => {
+                 warn!("state db list_threads failed: {err}");
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index 90b9c4ff..f534fd61 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -478,7 +478,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
+         page_size: usize,
+         filters: ThreadFilterOptions<'_>,
+     ) -> anyhow::Result<crate::ThreadsPage> {
+-        self.list_threads_matching(page_size, filters, /*relation_filter*/ None)
++        self.list_threads_matching(page_size, filters, /*relation_filter*/ None, false)
+             .await
+     }
+ 
+@@ -504,7 +504,18 @@ ON CONFLICT(child_thread_id) DO NOTHING
+         relation_filter: crate::ThreadRelationFilter,
+         filters: ThreadFilterOptions<'_>,
+     ) -> anyhow::Result<crate::ThreadsPage> {
+-        self.list_threads_matching(page_size, filters, Some(relation_filter))
++        self.list_threads_matching(page_size, filters, Some(relation_filter), false)
++            .await
++    }
++
++    /// Indexed committed metadata, including active threads without a preview.
++    pub async fn list_threads_including_empty_preview(
++        &self,
++        page_size: usize,
++        filters: ThreadFilterOptions<'_>,
++        relation_filter: Option<crate::ThreadRelationFilter>,
++    ) -> anyhow::Result<crate::ThreadsPage> {
++        self.list_threads_matching(page_size, filters, relation_filter, true)
+             .await
+     }
+ 
+@@ -513,11 +524,22 @@ ON CONFLICT(child_thread_id) DO NOTHING
+         page_size: usize,
+         filters: ThreadFilterOptions<'_>,
+         relation_filter: Option<crate::ThreadRelationFilter>,
++        include_empty_preview: bool,
+     ) -> anyhow::Result<crate::ThreadsPage> {
+         let limit = page_size.saturating_add(1);
+ 
+         let mut builder = QueryBuilder::<Sqlite>::new("");
+-        push_list_threads_query(&mut builder, filters, relation_filter, limit);
++        if include_empty_preview {
++            push_list_threads_query_with_preview(
++                &mut builder,
++                filters,
++                relation_filter,
++                limit,
++                true,
++            );
++        } else {
++            push_list_threads_query(&mut builder, filters, relation_filter, limit);
++        }
+ 
+         let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
+         let mut items = Vec::with_capacity(rows.len());
+@@ -538,7 +560,11 @@ ON CONFLICT(child_thread_id) DO NOTHING
+                 parent_thread_ids.remove(&overflow_item.id);
+             }
+             items.last().and_then(|item| {
+-                anchor_from_item(item, filters.sort_key, relation_filter.is_some())
++                anchor_from_item(
++                    item,
++                    filters.sort_key,
++                    include_empty_preview || relation_filter.is_some(),
++                )
+             })
+         } else {
+             None
+@@ -1231,6 +1257,16 @@ fn push_list_threads_query(
+     filters: ThreadFilterOptions<'_>,
+     relation_filter: Option<crate::ThreadRelationFilter>,
+     limit: usize,
++) {
++    push_list_threads_query_with_preview(builder, filters, relation_filter, limit, false);
++}
++
++fn push_list_threads_query_with_preview(
++    builder: &mut QueryBuilder<Sqlite>,
++    filters: ThreadFilterOptions<'_>,
++    relation_filter: Option<crate::ThreadRelationFilter>,
++    limit: usize,
++    include_empty_preview: bool,
+ ) {
+     if let Some(crate::ThreadRelationFilter::DescendantsOf(ancestor_thread_id)) = relation_filter {
+         builder.push(
+@@ -1264,7 +1300,8 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
+         ),
+         None => builder.push(" FROM threads"),
+     };
+-    let include_thread_id_tiebreaker = relation_filter.is_some()
++    let include_thread_id_tiebreaker = include_empty_preview
++        || relation_filter.is_some()
+         || matches!(
+             filters.sort_key,
+             SortKey::RecencyAt | SortKey::SectionPosition
+@@ -1273,7 +1310,7 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
+         builder,
+         filters,
+         include_thread_id_tiebreaker,
+-        /*include_empty_preview*/ relation_filter.is_some(),
++        /*include_empty_preview*/ include_empty_preview || relation_filter.is_some(),
+     );
+     match relation_filter {
+         Some(crate::ThreadRelationFilter::DirectChildrenOf(parent_thread_id)) => {
+@@ -1726,6 +1763,27 @@ mod tests {
+             .await
+             .unwrap();
+         assert!(active.items.is_empty());
++        let included = runtime
++            .list_threads_including_empty_preview(10, filters(false), None)
++            .await
++            .unwrap();
++        assert_eq!(
++            included
++                .items
++                .iter()
++                .map(|thread| thread.id)
++                .collect::<Vec<_>>(),
++            vec![thread_id]
++        );
++        assert_eq!(included.next_anchor, None);
++        assert!(
++            runtime
++                .list_threads(10, filters(false))
++                .await
++                .unwrap()
++                .items
++                .is_empty()
++        );
+ 
+         runtime
+             .mark_archived(thread_id, &metadata.rollout_path, Utc::now())
+@@ -1751,6 +1809,72 @@ mod tests {
+         assert!(active.items.is_empty());
+     }
+ 
++    #[tokio::test]
++    async fn include_empty_preview_pages_equal_creation_timestamps() {
++        let codex_home = unique_temp_dir();
++        let runtime = StateRuntime::init(
++            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
++            "test-provider".to_string(),
++        )
++        .await
++        .unwrap();
++        let created_at = DateTime::<Utc>::from_timestamp_millis(1_700_002_000_456).unwrap();
++        let ids = [
++            "00000000-0000-0000-0000-000000000801",
++            "00000000-0000-0000-0000-000000000802",
++            "00000000-0000-0000-0000-000000000803",
++        ]
++        .map(|id| ThreadId::from_string(id).unwrap());
++        for thread_id in ids {
++            let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
++            metadata.created_at = created_at;
++            metadata.preview = Some(String::new());
++            metadata.first_user_message = None;
++            runtime.upsert_thread(&metadata).await.unwrap();
++        }
++        for sort_direction in [SortDirection::Asc, SortDirection::Desc] {
++            let expected = if sort_direction == SortDirection::Asc {
++                ids.to_vec()
++            } else {
++                ids.iter().copied().rev().collect::<Vec<_>>()
++            };
++            let mut anchor = None;
++            for (index, expected_id) in expected.into_iter().enumerate() {
++                let page = runtime
++                    .list_threads_including_empty_preview(
++                        1,
++                        ThreadFilterOptions {
++                            archived_only: false,
++                            allowed_sources: &[],
++                            model_providers: None,
++                            cwd_filters: None,
++                            section: None,
++                            project_id: None,
++                            anchor: anchor.as_ref(),
++                            sort_key: SortKey::CreatedAt,
++                            sort_direction,
++                            search_term: None,
++                        },
++                        None,
++                    )
++                    .await
++                    .unwrap();
++                assert_eq!(
++                    page.items.iter().map(|item| item.id).collect::<Vec<_>>(),
++                    vec![expected_id]
++                );
++                assert_eq!(
++                    page.next_anchor,
++                    (index < 2).then_some(Anchor {
++                        ts: created_at,
++                        id: Some(expected_id),
++                    })
++                );
++                anchor = page.next_anchor;
++            }
++        }
++    }
++
+     #[tokio::test]
+     async fn list_threads_filters_sections_before_recency_pagination_and_uses_index() {
+         let codex_home = unique_temp_dir();
+diff --git a/codex-rs/thread-store/src/local/list_threads.rs b/codex-rs/thread-store/src/local/list_threads.rs
+index 015d35f4..8256cf93 100644
+--- a/codex-rs/thread-store/src/local/list_threads.rs
++++ b/codex-rs/thread-store/src/local/list_threads.rs
+@@ -24,9 +24,24 @@ use crate::ThreadStoreResult;
+ pub(super) async fn list_threads(
+     store: &LocalThreadStore,
+     params: ListThreadsParams,
++) -> ThreadStoreResult<ThreadPage> {
++    list_threads_impl(store, params, false).await
++}
++
++pub(super) async fn list_threads_including_empty_preview(
++    store: &LocalThreadStore,
++    params: ListThreadsParams,
++) -> ThreadStoreResult<ThreadPage> {
++    list_threads_impl(store, params, true).await
++}
++
++async fn list_threads_impl(
++    store: &LocalThreadStore,
++    params: ListThreadsParams,
++    include_empty_preview: bool,
+ ) -> ThreadStoreResult<ThreadPage> {
+     if params.sort_key == ThreadSortKey::SectionPosition {
+-        return list_section_threads(store, params).await;
++        return list_section_threads(store, params, include_empty_preview).await;
+     }
+     let cursor = params
+         .cursor
+@@ -55,7 +70,7 @@ pub(super) async fn list_threads(
+         model_provider_id: store.config.default_model_provider_id.clone(),
+         generate_memories: false,
+     };
+-    let page = list_rollout_threads(
++    let page = list_rollout_threads_with_preview(
+         state_db.clone(),
+         &rollout_config,
+         store.config.default_model_provider_id.as_str(),
+@@ -63,6 +78,7 @@ pub(super) async fn list_threads(
+         cursor.as_ref(),
+         sort_key,
+         sort_direction,
++        include_empty_preview,
+     )
+     .await?;
+ 
+@@ -121,6 +137,7 @@ pub(super) async fn list_threads(
+ async fn list_section_threads(
+     store: &LocalThreadStore,
+     params: ListThreadsParams,
++    include_empty_preview: bool,
+ ) -> ThreadStoreResult<ThreadPage> {
+     let section = params
+         .section
+@@ -197,26 +214,40 @@ async fn list_section_threads(
+         },
+         search_term: params.search_term.as_deref(),
+     };
+-    let page = match params.relation_filter {
+-        Some(ThreadRelationFilter::DirectChildrenOf(thread_id)) => {
+-            state_db
+-                .list_threads_by_relation(
+-                    params.page_size,
+-                    codex_state::ThreadRelationFilter::DirectChildrenOf(thread_id),
+-                    filters,
+-                )
+-                .await
+-        }
+-        Some(ThreadRelationFilter::DescendantsOf(thread_id)) => {
+-            state_db
+-                .list_threads_by_relation(
+-                    params.page_size,
+-                    codex_state::ThreadRelationFilter::DescendantsOf(thread_id),
+-                    filters,
+-                )
+-                .await
++    let page = if include_empty_preview {
++        let relation = params.relation_filter.map(|relation| match relation {
++            ThreadRelationFilter::DirectChildrenOf(id) => {
++                codex_state::ThreadRelationFilter::DirectChildrenOf(id)
++            }
++            ThreadRelationFilter::DescendantsOf(id) => {
++                codex_state::ThreadRelationFilter::DescendantsOf(id)
++            }
++        });
++        state_db
++            .list_threads_including_empty_preview(params.page_size, filters, relation)
++            .await
++    } else {
++        match params.relation_filter {
++            Some(ThreadRelationFilter::DirectChildrenOf(thread_id)) => {
++                state_db
++                    .list_threads_by_relation(
++                        params.page_size,
++                        codex_state::ThreadRelationFilter::DirectChildrenOf(thread_id),
++                        filters,
++                    )
++                    .await
++            }
++            Some(ThreadRelationFilter::DescendantsOf(thread_id)) => {
++                state_db
++                    .list_threads_by_relation(
++                        params.page_size,
++                        codex_state::ThreadRelationFilter::DescendantsOf(thread_id),
++                        filters,
++                    )
++                    .await
++            }
++            None => state_db.list_threads(params.page_size, filters).await,
+         }
+-        None => state_db.list_threads(params.page_size, filters).await,
+     }
+     .map_err(|err| ThreadStoreError::Internal {
+         message: format!("failed to list section-ordered threads: {err}"),
+@@ -253,7 +284,34 @@ pub(super) async fn list_rollout_threads(
+     sort_key: codex_rollout::ThreadSortKey,
+     sort_direction: codex_rollout::SortDirection,
+ ) -> ThreadStoreResult<codex_rollout::ThreadsPage> {
+-    if params.relation_filter.is_some() || params.section.is_some() || params.project_id.is_some() {
++    list_rollout_threads_with_preview(
++        state_db,
++        config,
++        default_model_provider_id,
++        params,
++        cursor,
++        sort_key,
++        sort_direction,
++        false,
++    )
++    .await
++}
++
++async fn list_rollout_threads_with_preview(
++    state_db: Option<codex_rollout::StateDbHandle>,
++    config: &RolloutConfig,
++    default_model_provider_id: &str,
++    params: &ListThreadsParams,
++    cursor: Option<&codex_rollout::Cursor>,
++    sort_key: codex_rollout::ThreadSortKey,
++    sort_direction: codex_rollout::SortDirection,
++    include_empty_preview: bool,
++) -> ThreadStoreResult<codex_rollout::ThreadsPage> {
++    if include_empty_preview
++        || params.relation_filter.is_some()
++        || params.section.is_some()
++        || params.project_id.is_some()
++    {
+         let relation_filter = params
+             .relation_filter
+             .map(|relation_filter| match relation_filter {
+@@ -264,23 +322,43 @@ pub(super) async fn list_rollout_threads(
+                     codex_state::ThreadRelationFilter::DescendantsOf(ancestor_thread_id)
+                 }
+             });
+-        let page = codex_rollout::state_db::list_threads_db(
+-            state_db.as_deref(),
+-            &config.sqlite,
+-            params.page_size,
+-            cursor,
+-            sort_key,
+-            sort_direction,
+-            params.allowed_sources.as_slice(),
+-            params.model_providers.as_deref(),
+-            params.cwd_filters.as_deref(),
+-            relation_filter,
+-            params.archived,
+-            params.section.as_ref().map(Option::as_deref),
+-            params.project_id.as_ref().map(Option::as_deref),
+-            params.search_term.as_deref(),
+-        )
+-        .await
++        let page = if include_empty_preview {
++            codex_rollout::state_db::list_threads_db_including_empty_preview(
++                state_db.as_deref(),
++                &config.sqlite,
++                params.page_size,
++                cursor,
++                sort_key,
++                sort_direction,
++                params.allowed_sources.as_slice(),
++                params.model_providers.as_deref(),
++                params.cwd_filters.as_deref(),
++                relation_filter,
++                params.archived,
++                params.section.as_ref().map(Option::as_deref),
++                params.project_id.as_ref().map(Option::as_deref),
++                params.search_term.as_deref(),
++            )
++            .await
++        } else {
++            codex_rollout::state_db::list_threads_db(
++                state_db.as_deref(),
++                &config.sqlite,
++                params.page_size,
++                cursor,
++                sort_key,
++                sort_direction,
++                params.allowed_sources.as_slice(),
++                params.model_providers.as_deref(),
++                params.cwd_filters.as_deref(),
++                relation_filter,
++                params.archived,
++                params.section.as_ref().map(Option::as_deref),
++                params.project_id.as_ref().map(Option::as_deref),
++                params.search_term.as_deref(),
++            )
++            .await
++        }
+         .ok_or_else(|| ThreadStoreError::Internal {
+             message: "state DB unavailable for filtered thread listing".to_string(),
+         })?;
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index a450c84b..0611d061 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -2535,3 +2535,13 @@ impl LocalThreadStore {
+         })?
+     }
+ }
++
++impl LocalThreadStore {
++    /// Indexed metadata, including committed active threads without user previews.
++    pub async fn list_threads_including_empty_preview(
++        &self,
++        params: crate::ListThreadsParams,
++    ) -> crate::ThreadStoreResult<crate::ThreadPage> {
++        list_threads::list_threads_including_empty_preview(self, params).await
++    }
++}
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -758,6 +758,7 @@
+             ThreadSettingsAppliedEvent {
+                 thread_id: None,
+                 thread_settings: ThreadSettingsSnapshot {
++                    invocation_timeout_ms: None,
+                     request_controls: Default::default(),
+                     tool_choice: None,
+                     disabled_plugin_ids: Vec::new(),

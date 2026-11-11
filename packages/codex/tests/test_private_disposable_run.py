@@ -16,6 +16,10 @@ from agents.observation import EventGap, ModelRequestDispatching, ModelResponseL
 from tests._asyncio import capture_cancellation, timeout
 from tests.test_buffered_responses import json_peer, json_response, provider
 
+private_disposable_only = pytest.mark.skipif(
+    sys.platform != "linux", reason="Private disposal requires Linux managed execution"
+)
+
 
 class OrdinaryAgent(Agent[Any, str]):
     """Keep the oracle outside exact-Agent completion admission."""
@@ -202,7 +206,7 @@ async def test_disposable_archive_overflow_keeps_live_model_history_without_repl
         assert link.response_observation_id == linked["response_observation_id"]
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Managed execution has been requiring Linux.")
+@private_disposable_only
 async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,6 +234,7 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
             stopped.set()
 
     async def adopt(session: Session[Any, Any], *args: Any, **kwargs: Any) -> None:
+        observed["handoff_cancellation_args"] = args[1].cancelled.args
         adopted.append(session)
         await actual_adopt(session, *args, **kwargs)
 
@@ -255,10 +260,17 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
             await asyncio.sleep(0)
             assert not task.done()
             release.set()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as caught:
                 await task
+            expected_cancellation = ("original private cancellation",)
             assert len(errors) == 1
-            assert errors[0].args == ("original private cancellation",)
+            assert errors[0].args == expected_cancellation
+            assert observed["handoff_cancellation_args"] == expected_cancellation
+            # Cancellation-message propagation to awaiters: Python 3.11+.
+            if sys.version_info < (3, 11):
+                assert caught.value.args in ((), expected_cancellation)
+            else:
+                assert caught.value.args == expected_cancellation
             assert len(adopted) == 1 and adopted[0]._closed and adopted[0]._resources_retired
             assert adopted[0]._reader is not None and adopted[0]._reader.done()
             assert len(peer.requests) == 1

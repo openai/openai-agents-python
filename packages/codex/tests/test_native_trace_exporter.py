@@ -147,6 +147,7 @@ def native_trace_child_env() -> dict[str, str]:
         "native_case",
         "native_deadline_case",
         "native_outcome_privacy_case",
+        "native_auth_case",
         pytest.param("native_batch_case", marks=pytest.mark.serial),
     ],
 )
@@ -759,8 +760,167 @@ async def test_mixed_loss_batch_delivers_only_admitted_records(delivery_status):
         assert all(
             row.get("trace_id", row.get("id")) == "trace_" + fresh["trace_id"] for row in records
         )
-        state = exporter._traces["trace_" + fresh["trace_id"]]
-        assert (state.delivered_to is exporter._credentials[0]) is (delivery_status == 200)
         await exporter.on_trace_event({**fresh, "lifecycle": "end"})
         descriptors = [row for row in received[-1]["payload"]["data"] if row["object"] == "trace"]
         assert len(descriptors) == (1 if delivery_status == 503 else 0)
+
+
+async def test_original_snapshot_auth_groups_and_retired_forwarding():
+    from threading import Event
+    from types import MappingProxyType
+
+    from _agents_codex._trace_delivery import _trace_delivery_context, _TraceDeliveryOwner
+
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="fallback-key", organization="fallback-org", endpoint=endpoint
+        )
+        a = MappingProxyType({**completed_event(), "credential_required": True, "sequence": 2})
+        b = MappingProxyType(
+            {**completed_event(), "credential_required": True, "sequence": 3, "span_id": "c" * 16}
+        )
+        routes = {
+            "2": {"identity": "native-A", "headers": {"authorization": "Bearer scope-A"}},
+            "3": {"identity": "native-B", "headers": {"authorization": "Bearer scope-B"}},
+        }
+        owner = _TraceDeliveryOwner((a, b), routes, Event())
+        with _trace_delivery_context(owner, (a, b)):
+            with pytest.raises(RuntimeError):
+                await exporter.on_trace_event({**a, "name": "copied foreign root"})
+            await exporter.on_trace_events((a, b))
+        owner.retire()
+        with pytest.raises(RuntimeError):
+            await exporter.on_trace_event(a)
+        owner = _TraceDeliveryOwner((a,), routes, Event())
+        with _trace_delivery_context(owner, (a,)):
+            await exporter.on_trace_event(a)
+        owner.retire()
+        await exporter.on_trace_event({**completed_event(), "trace_id": "d" * 32, "sequence": 4})
+        headers = [
+            {key.lower(): value for key, value in item["headers"].items()} for item in received
+        ]
+        assert [item["authorization"] for item in headers] == [
+            "Bearer scope-A",
+            "Bearer scope-B",
+            "Bearer scope-A",
+            "Bearer fallback-key",
+        ]
+        assert all(item["openai-organization"] == "fallback-org" for item in headers)
+        assert [
+            sum(record["object"] == "trace" for record in item["payload"]["data"])
+            for item in received
+        ] == [1, 1, 1, 1]
+        assert received[0]["payload"]["data"][0]["workflow_name"] == completed_event()["name"]
+        public = json.dumps([item["payload"] for item in received])
+        assert not any(
+            value in public
+            for value in (
+                "scope-A",
+                "scope-B",
+                "fallback-key",
+                "credential_required",
+                "native-A",
+                "native-B",
+            )
+        )
+
+
+async def native_auth_case():
+    from collections.abc import Mapping
+
+    observed = []
+    groups = []
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="fallback-secret", organization="fallback-org", endpoint=endpoint
+        )
+
+        class Forwarder:
+            async def on_trace_event(self, event):
+                await self.on_trace_events((event,))
+
+            async def on_trace_events(self, events):
+                observed.extend(events)
+                groups.append(events)
+                scoped = next(
+                    (event for event in events if event.get("credential_required") is True), None
+                )
+                if scoped is not None:
+                    with pytest.raises(RuntimeError):
+                        await exporter.on_trace_event({**scoped, "name": "copied foreign root"})
+                await exporter.on_trace_events(events)
+
+        await telemetry.configure(processors=[Forwarder()])
+        a = telemetry.TraceExportCredentials(headers={"Authorization": "Bearer trace-secret-A"})
+        with telemetry.trace("authenticated-A", options={"export_credentials": a}) as root_a:
+            pass
+        del a
+        b = telemetry.TraceExportCredentials(headers={"Authorization": "Bearer trace-secret-B"})
+        with telemetry.trace("authenticated-B", options={"export_credentials": b}) as root_b:
+            pass
+        with telemetry.span(
+            "override-B-under-A", options={"parent": root_a.context, "export_credentials": b}
+        ):
+            pass
+        del b
+        with telemetry.span("late-child-A", options={"parent": root_a.context}):
+            pass
+        with telemetry.span("late-child-B", options={"parent": root_b.context}):
+            pass
+        with telemetry.trace("fallback"):
+            pass
+        result = await telemetry.force_flush()
+        assert result.status == "success"
+        expected = {
+            "Bearer trace-secret-A": {"authenticated-A", "late-child-A"},
+            "Bearer trace-secret-B": {"authenticated-B", "late-child-B", "override-B-under-A"},
+            "Bearer fallback-secret": {"fallback"},
+        }
+        for auth, names in expected.items():
+            requests = [
+                item
+                for item in received
+                if {key.lower(): value for key, value in item["headers"].items()}["authorization"]
+                == auth
+            ]
+            assert requests
+            assert all(
+                {key.lower(): value for key, value in item["headers"].items()}[
+                    "openai-organization"
+                ]
+                == "fallback-org"
+                for item in requests
+            )
+            records = [record for item in requests for record in item["payload"]["data"]]
+            assert {
+                record["span_data"]["name"]
+                for record in records
+                if record["object"] == "trace.span"
+            } == names
+            assert any(record["object"] == "trace" for record in records)
+        assert any(len({event["trace_id"] for event in events}) >= 2 for events in groups)
+
+        def plain(value):
+            if isinstance(value, Mapping):
+                return {key: plain(item) for key, item in value.items()}
+            if isinstance(value, (tuple, list)):
+                return [plain(item) for item in value]
+            return value
+
+        public = json.dumps(plain(observed))
+        assert not any(
+            secret in public
+            for secret in (
+                "trace-secret-A",
+                "trace-secret-B",
+                "fallback-secret",
+                "Authorization",
+                "authorization",
+            )
+        )
+        count = len(received)
+        scoped = next(event for event in observed if event.get("credential_required") is True)
+        with pytest.raises(RuntimeError):
+            await exporter.on_trace_event(scoped)
+        assert len(received) == count
+        await telemetry.shutdown()

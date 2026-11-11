@@ -5,13 +5,26 @@ from typing import Any as Any, Literal as Literal, TypeAlias as TypeAlias
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
-from ._media import ImageDetail as ImageDetail, _capture_file, _capture_image
+from ._media import (
+    _MAX_AUDIO_INPUT_BYTES,
+    ImageDetail as ImageDetail,
+    _capture_audio,
+    _capture_file,
+    _capture_image,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
 class InputText(TypedDict):
     type: Literal["input_text"]
     text: str
+
+
+class InputAudio(TypedDict):
+    """An audio reference passed to Core without local file or transport access."""
+
+    type: Literal["input_audio"]
+    audio_url: str
 
 
 class InputImage(TypedDict):
@@ -42,7 +55,7 @@ class InputFile(TypedDict):
 
 class UserMessage(TypedDict):
     role: Literal["user"]
-    content: str | Sequence[InputText | InputImage | InputImageFile | InputFile]
+    content: str | Sequence[InputText | InputImage | InputImageFile | InputFile | InputAudio]
     type: NotRequired[Literal["message"]]
 
 
@@ -60,7 +73,11 @@ class AssistantMessage(TypedDict):
 InitialMessage: TypeAlias = UserMessage | AssistantMessage
 
 
-def _native_input(input: UserInput) -> list[dict[str, Any]]:
+def _native_input(
+    input: UserInput, *, _audio_budget: list[int] | None = None
+) -> list[dict[str, Any]]:
+    if _audio_budget is None:
+        _audio_budget = [_MAX_AUDIO_INPUT_BYTES]
     if isinstance(input, str):
         return [{"type": "text", "text": input}]
     if not isinstance(input, Mapping):
@@ -87,6 +104,8 @@ def _native_input(input: UserInput) -> list[dict[str, Any]]:
             if set(part) != {"text"} or not isinstance(part["text"], str):
                 raise ValueError("input_text requires a text string")
             parts.append({"type": "text", "text": part["text"]})
+        elif kind == "input_audio":
+            parts.append({"type": "audio", **_capture_audio(part, _audio_budget)})
         elif kind == "input_image":
             parts.append({"type": "image", **_capture_image(part)})
         elif kind == "input_file":
@@ -103,9 +122,11 @@ def _response_content(parts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         "text": "input_text",
         "image": "input_image",
         "file": "input_file",
+        "audio": "input_audio",
         "inputText": "input_text",
         "inputImage": "input_image",
         "inputFile": "input_file",
+        "inputAudio": "input_audio",
     }
     for value in parts:
         part = dict(value)
@@ -117,9 +138,12 @@ def _response_content(parts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
                 "image_url" if key == "imageUrl" else "file_id" if key == "fileId" else key: item
                 for key, item in part.items()
             }
+        elif kind == "inputAudio":
+            part = {"audio_url" if key == "audioUrl" else key: item for key, item in part.items()}
         tag = tags[kind]
         fields = {
             "input_text": {"text"},
+            "input_audio": {"audio_url"},
             "input_image": {"image_url", "file_id", "detail"},
             "input_file": {"file_id", "file_data", "file_url", "filename"},
         }[tag]

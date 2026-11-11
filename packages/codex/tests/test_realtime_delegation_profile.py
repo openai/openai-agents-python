@@ -43,7 +43,9 @@ def owner(target: dict[str, Any] | None) -> RealtimeSession:
         ),
     )
     voice = RealtimeSession(session, config=RealtimeConfig())
+    session._realtime = voice
     voice._live = True
+    voice._ready.set_result(None)
     return voice
 
 
@@ -84,6 +86,7 @@ async def test_delegation_binds_exact_receipt_before_completion_even_without_pro
                             "target": target,
                             "function_tools": None,
                             "expected_selection_id": None,
+                            "disabled_tool_names": None,
                         },
                     },
                 )

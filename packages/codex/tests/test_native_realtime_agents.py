@@ -888,3 +888,151 @@ async def test_agent_configuration_uses_override_accepted_during_callback(realti
         await refreshing
         refreshed = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
         assert refreshed["session"]["instructions"] == "Accepted during callback"
+
+
+async def test_global_voice_policy_keeps_target_source_and_handoff_kind(realtime_peer):
+    peer = realtime_peer
+    instructions_seen = []
+    tools_seen = []
+    defaults_seen = []
+    effects = []
+
+    def agent_defaults(context):
+        defaults_seen.append(context.agent.name)
+        return "Agent default"
+
+    async def global_instructions(context):
+        await asyncio.sleep(0)
+        instructions_seen.append(context.agent.name)
+        return "Global " + context.agent.name
+
+    def global_tools(context, tool):
+        tools_seen.append((context.agent.name, tool.type, tool.name))
+        return tool.type == "handoff"
+
+    @function_tool
+    def ordinary() -> str:
+        raise AssertionError("Global policy excludes ordinary functions")
+
+    destination = Agent(
+        name="C",
+        instructions="Backend C",
+        realtime=RealtimeAgentConfig(instructions=agent_defaults),
+    )
+    target = Agent(
+        name="B",
+        instructions="Backend B",
+        tools=[ordinary],
+        realtime=RealtimeAgentConfig(
+            instructions=agent_defaults,
+            prompt={"id": "target-prompt"},
+        ),
+        handoffs=[
+            realtime_handoff(
+                destination,
+                name="transfer_to_c",
+                on_handoff=lambda _: effects.append("handoff"),
+            )
+        ],
+    )
+    next_target = Agent(
+        name="D",
+        instructions="Backend D",
+        realtime=RealtimeAgentConfig(instructions=agent_defaults),
+    )
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-composed-voice-policy",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            name="A",
+            instructions="Backend A",
+            provider=provider,
+            realtime=RealtimeAgentConfig(instructions=agent_defaults),
+        ).session() as session,
+        session.realtime(
+            config=RealtimeConfig(
+                model="fixture-realtime",
+                instructions=global_instructions,
+                is_tool_enabled=global_tools,
+            )
+        ) as voice,
+    ):
+        initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+        assert initial["session"]["instructions"] == "Global A"
+        start = len(peer.frames)
+        await voice.update_agent(target)
+        updated = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
+        assert updated["session"]["instructions"] == "Global B"
+        assert updated["session"]["prompt"] == {"id": "target-prompt"}
+        names = {tool["name"] for tool in updated["session"]["tools"]}
+        assert "transfer_to_c" in names and "ordinary" not in names
+        assert ("B", "handoff", "transfer_to_c") in tools_seen
+        assert ("B", "function", "ordinary") in tools_seen
+        start = len(peer.frames)
+        await peer.function("transfer_to_c", {}, "composed-handoff")
+        await peer.frame(
+            lambda frame: (
+                frame["type"] == "session.update"
+                and frame["session"].get("instructions") == "Global C"
+            ),
+            after=start,
+        )
+        assert effects == ["handoff"]
+        handoff_checks = [kind for name, kind, tool in tools_seen if tool == "transfer_to_c"]
+        assert len(handoff_checks) >= 2 and set(handoff_checks) == {"handoff"}
+        assert instructions_seen == ["A", "B", "C"]
+        await voice.update({"instructions": "Explicit override"})
+        start = len(peer.frames)
+        await voice.update_agent(next_target)
+        explicit = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
+        assert explicit["session"]["instructions"] == "Explicit override"
+        assert await voice.get_active_agent() is next_target
+        assert instructions_seen == ["A", "B", "C"]
+        assert defaults_seen == []
+        assert peer.responses.requests == []
+
+
+@pytest.mark.parametrize("updated", [False, True], ids=["opening", "updated"])
+async def test_session_output_guard_covers_backend_after_voice_update(realtime_peer, updated):
+    from agents import GuardrailResult, OutputGuardrail
+
+    peer = realtime_peer
+    checked = []
+
+    def check(completion, agent):
+        checked.append((completion.final_output, agent.name))
+        return GuardrailResult(False)
+
+    peer.responses.respond(*text_response("guarded-backend", "guarded-result"))
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-global-voice-output-guard",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            name="A" if updated else "B",
+            instructions="Root",
+            provider=provider,
+        ).session(output_guardrails=(OutputGuardrail("global-voice", check),)) as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        await peer.frame(lambda frame: frame["type"] == "session.update")
+        target = Agent(name="B", instructions="Target")
+        if updated:
+            await voice.update_agent(target)
+        backend = await session.get_active_agent()
+        await peer.handoff("Complete the guarded backend task", call_id="voice-global-guard")
+        result = await peer.frame(
+            lambda frame: frame.get("item", {}).get("call_id") == "voice-global-guard"
+        )
+        assert result["item"]["output"] == "guarded-result"
+        assert checked == [("guarded-result", backend.name)]
+        if updated:
+            assert await voice.get_active_agent() is target
+        assert len(peer.responses.requests) == 1

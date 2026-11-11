@@ -20,7 +20,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .subagents import SubagentConfig as SubagentConfig
 from .tools import ToolRef as ToolRef
-from .usage import TokenUsage as TokenUsage
+from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage
 
 
 @dataclass(frozen=True)
@@ -176,6 +176,7 @@ class _ToolOutcomes(BaseModel):
     response_observation_id: str = Field(min_length=1)
     call_ids: list[str]
     outcomes: list[tuple[str, bool]]
+    held_call_ids: list[str] = Field(default_factory=list)
 
 
 class _ManualContinuation(BaseModel):
@@ -231,6 +232,7 @@ class SessionState(BaseModel):
     # None predates on_step; [] intentionally withholds every optional MCP tool.
     step_mcp_tools: list[_StepMcpTool] | None = None
     native_continuation: _ManualContinuation | None = None
+    run_usage: RunUsage | None = None
     # SDK contract identity is checked before importing native state or grants.
     output_version: Literal[1] | None = None
     output_fingerprint: str | None = None

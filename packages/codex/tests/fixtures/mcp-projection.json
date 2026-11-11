@@ -1,0 +1,62 @@
+[
+  {
+    "server": "docs",
+    "raw": "a.b",
+    "namespace": "mcp__docs",
+    "name": "a_b_98fddac4920d"
+  },
+  {
+    "server": "docs",
+    "raw": "a_b",
+    "namespace": "mcp__docs",
+    "name": "a_b_ad9cfbd56676"
+  },
+  {
+    "server": "docs",
+    "raw": "r\u00e9cord",
+    "namespace": "mcp__docs",
+    "name": "r_cord"
+  },
+  {
+    "server": "docs",
+    "raw": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "namespace": "mcp__docs",
+    "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_667b55e866b4"
+  },
+  {
+    "server": "docs",
+    "raw": "\ue000",
+    "namespace": "mcp__docs",
+    "name": "__2e3a2e842460"
+  },
+  {
+    "server": "docs",
+    "raw": "\ud83d\ude00",
+    "namespace": "mcp__docs",
+    "name": "__cc10b263be5f"
+  },
+  {
+    "server": "team-a",
+    "raw": "lookup",
+    "namespace": "mcp__team_a_6c297ddc1d9b",
+    "name": "lookup"
+  },
+  {
+    "server": "team_a",
+    "raw": "lookup",
+    "namespace": "mcp__team_a_8aa268757a69",
+    "name": "lookup"
+  },
+  {
+    "server": "ab",
+    "raw": "c",
+    "namespace": "mcp__ab",
+    "name": "c_147906af845b"
+  },
+  {
+    "server": "a",
+    "raw": "bc",
+    "namespace": "mcp__a",
+    "name": "bc"
+  }
+]

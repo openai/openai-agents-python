@@ -36,14 +36,19 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "before_complete",
         "decisions",
     )
-    assert tuple(field.name for field in fields(Agent)) == (*original_fields, "realtime")
-    assert Agent.__match_args__ == (*original_fields, "realtime")
+    expected_fields = (*original_fields, "realtime", "input_guardrails", "output_guardrails")
+    assert tuple(field.name for field in fields(Agent)) == expected_fields
+    assert Agent.__match_args__ == expected_fields
     agent = Agent(instructions="Answer.", name="Voice")
     match agent:
         case Agent("Answer.", "Voice"):
             pass
         case _:
             pytest.fail("Existing positional class patterns must retain the agent name")
+    match agent:
+        case Agent(_, _, _, _, _, _, _, _, _, _, _, _, decisions, realtime):
+            assert decisions is None
+            assert realtime is None
     parameters = tuple(signature(Agent).parameters.values())
     assert tuple(parameter.name for parameter in parameters) == (
         "instructions",
@@ -60,6 +65,8 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "before_compact",
         "before_complete",
         "realtime",
+        "input_guardrails",
+        "output_guardrails",
     )
     assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters)
 

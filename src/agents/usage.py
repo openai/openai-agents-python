@@ -7,10 +7,11 @@ from _agents_codex.usage import (
     Callable as Callable,
     Literal as Literal,
     RunBudget as RunBudget,
+    RunUsage as RunUsage,
     TokenUsage as TokenUsage,
     TokenUsageInfo as TokenUsageInfo,
     _token_usage_info as _token_usage_info,
     dataclass as dataclass,
 )
 
-__all__ = ["RunBudget", "TokenUsage", "TokenUsageInfo"]
+__all__ = ["RunBudget", "RunUsage", "TokenUsage", "TokenUsageInfo"]

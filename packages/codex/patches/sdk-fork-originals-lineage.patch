@@ -1,0 +1,283 @@
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 04252c2..0f1ebca 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -348,7 +348,10 @@ impl Session {
+         let live = self.live_thread().ok_or_else(unavailable)?;
+         // Reuse the existing canonical failure flag and durability barrier before trusting storage.
+         live.flush().await.map_err(|_| unavailable())?;
+-        let persisted = live.load_history(false).await.map_err(|_| unavailable())?;
++        let persisted = live
++            .load_original_history(false)
++            .await
++            .map_err(|_| unavailable())?;
+         let originals = codex_history::sdk_originals::SdkOriginalHistory::replay(
+             &persisted.items,
+             |row| {
+diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
+index cfb6c52..589562a 100644
+--- a/codex-rs/thread-store/src/live_thread.rs
++++ b/codex-rs/thread-store/src/live_thread.rs
+@@ -373,6 +373,18 @@ impl LiveThread {
+             .await
+     }
+ 
++    pub async fn load_original_history(
++        &self,
++        include_archived: bool,
++    ) -> ThreadStoreResult<StoredThreadHistory> {
++        self.thread_store
++            .load_original_history(LoadThreadHistoryParams {
++                thread_id: self.thread_id,
++                include_archived,
++            })
++            .await
++    }
++
+     pub async fn read_original_history(
+         &self,
+         reader: Box<dyn crate::OriginalHistoryReader>,
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 45c586f..924dc47 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -628,73 +628,64 @@ impl ThreadStore for LocalThreadStore {
+         Box::pin(LocalThreadStore::load_history(self, params))
+     }
+ 
+-    fn read_original_history(
++    fn load_original_history(
+         &self,
+         params: LoadThreadHistoryParams,
+-        mut reader: Box<dyn crate::OriginalHistoryReader>,
+-    ) -> ThreadStoreFuture<'_, crate::OriginalHistorySnapshot> {
++    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
+         Box::pin(async move {
+-            let path = if let Ok(path) = live_writer::rollout_path(self, params.thread_id).await {
+-                if !params.include_archived
+-                    && helpers::rollout_path_is_archived(
+-                        self.config.codex_home.as_path(),
+-                        path.as_path(),
+-                    )
+-                {
+-                    return Err(crate::ThreadStoreError::InvalidRequest {
+-                        message: format!("thread {} is archived", params.thread_id),
+-                    });
+-                }
+-                path
+-            } else {
+-                read_thread::read_thread(
+-                    self,
+-                    ReadThreadParams {
+-                        thread_id: params.thread_id,
+-                        include_archived: params.include_archived,
+-                        include_history: false,
+-                    },
+-                )
+-                .await?
+-                .rollout_path
+-                .ok_or_else(|| crate::ThreadStoreError::Internal {
+-                    message: "original history rollout path unavailable".into(),
+-                })?
+-            };
+-            let session_meta =
+-                codex_rollout::read_session_meta_line(&path)
+-                    .await
+-                    .map_err(|_| crate::ThreadStoreError::Internal {
++            let thread_id = params.thread_id;
++            let segments = self.original_history_segments(params).await?;
++            let items = tokio::task::spawn_blocking(move || {
++                use std::io::{BufRead, BufReader, Read};
++                let mut items = Vec::new();
++                for segment in segments {
++                    let file = codex_rollout::open_rollout_seekable_reader(&segment.rollout_path)
++                        .map_err(|_| crate::ThreadStoreError::Internal {
+                         message: "original history rollout unavailable".into(),
+                     })?;
+-            if session_meta.meta.id != params.thread_id {
+-                return Err(crate::ThreadStoreError::ThreadNotFound {
+-                    thread_id: params.thread_id,
+-                });
+-            }
+-            // Match the existing SDK complete-audit boundary: this authorized thread's rollout.
+-            // Do not silently prepend reference ancestors and change original snapshot revisions.
+-            tokio::task::spawn_blocking(move || {
+-                let file = codex_rollout::open_rollout_seekable_reader(&path).map_err(|_| {
+-                    crate::ThreadStoreError::Internal {
+-                        message: "original history rollout unavailable".into(),
++                    let mut reader = BufReader::new(file.take(segment.end_byte_offset));
++                    let mut line = String::new();
++                    while reader.read_line(&mut line).map_err(|_| {
++                        crate::ThreadStoreError::Internal {
++                            message: "original history rollout unavailable".into(),
++                        }
++                    })? != 0
++                    {
++                        let parsed = codex_rollout::parse_rollout_line(&line).map_err(|_| {
++                            crate::ThreadStoreError::Internal {
++                                message: "original history rollout unavailable".into(),
++                            }
++                        })?;
++                        items.push(parsed.item);
++                        line.clear();
+                     }
+-                })?;
+-                let end_byte_offset = file
+-                    .metadata()
+-                    .map_err(|_| crate::ThreadStoreError::Internal {
+-                        message: "original history rollout unavailable".into(),
+-                    })?
+-                    .len();
+-                reader.read_segments(&[crate::OriginalHistorySegment {
+-                    rollout_path: path,
+-                    end_byte_offset,
+-                }])
++                }
++                Ok::<_, crate::ThreadStoreError>(items)
+             })
+             .await
+             .map_err(|_| crate::ThreadStoreError::Internal {
+                 message: "original history reader task failed".into(),
+-            })?
++            })??;
++            Ok(StoredThreadHistory {
++                thread_id,
++                revision: None,
++                items,
++            })
++        })
++    }
++
++    fn read_original_history(
++        &self,
++        params: LoadThreadHistoryParams,
++        mut reader: Box<dyn crate::OriginalHistoryReader>,
++    ) -> ThreadStoreFuture<'_, crate::OriginalHistorySnapshot> {
++        Box::pin(async move {
++            let segments = self.original_history_segments(params).await?;
++            tokio::task::spawn_blocking(move || reader.read_segments(&segments))
++                .await
++                .map_err(|_| crate::ThreadStoreError::Internal {
++                    message: "original history reader task failed".into(),
++                })?
+         })
+     }
+ 
+@@ -2501,3 +2492,97 @@ mod tests {
+         }));
+     }
+ }
++
++impl LocalThreadStore {
++    async fn original_history_segments(
++        &self,
++        params: LoadThreadHistoryParams,
++    ) -> ThreadStoreResult<Vec<crate::OriginalHistorySegment>> {
++        let path = if let Ok(path) = live_writer::rollout_path(self, params.thread_id).await {
++            if !params.include_archived
++                && helpers::rollout_path_is_archived(
++                    self.config.codex_home.as_path(),
++                    path.as_path(),
++                )
++            {
++                return Err(crate::ThreadStoreError::InvalidRequest {
++                    message: format!("thread {} is archived", params.thread_id),
++                });
++            }
++            path
++        } else {
++            read_thread::read_thread(
++                self,
++                ReadThreadParams {
++                    thread_id: params.thread_id,
++                    include_archived: params.include_archived,
++                    include_history: false,
++                },
++            )
++            .await?
++            .rollout_path
++            .ok_or_else(|| crate::ThreadStoreError::Internal {
++                message: "original history rollout path unavailable".into(),
++            })?
++        };
++        let session_meta = codex_rollout::read_session_meta_line(&path)
++            .await
++            .map_err(|_| crate::ThreadStoreError::Internal {
++                message: "original history rollout unavailable".into(),
++            })?;
++        if session_meta.meta.id != params.thread_id {
++            return Err(crate::ThreadStoreError::ThreadNotFound {
++                thread_id: params.thread_id,
++            });
++        }
++        let ranges = if session_meta.meta.history_mode
++            == codex_protocol::protocol::ThreadHistoryMode::Paginated
++        {
++            self.resolve_rollout_lineage(params.thread_id, Some(path))
++                .await?
++                .segments
++                .into_iter()
++                .map(|segment| {
++                    (
++                        segment.rollout_path,
++                        segment.end.map(|end| end.end_byte_offset),
++                    )
++                })
++                .collect::<Vec<_>>()
++        } else {
++            vec![(path, None)]
++        };
++        tokio::task::spawn_blocking(move || {
++            ranges
++                .into_iter()
++                .map(|(rollout_path, end)| {
++                    let file = codex_rollout::open_rollout_seekable_reader(&rollout_path).map_err(
++                        |_| crate::ThreadStoreError::Internal {
++                            message: "original history rollout unavailable".into(),
++                        },
++                    )?;
++                    let length = file
++                        .metadata()
++                        .map_err(|_| crate::ThreadStoreError::Internal {
++                            message: "original history rollout unavailable".into(),
++                        })?
++                        .len();
++                    let end_byte_offset = end.unwrap_or(length);
++                    if end_byte_offset > length {
++                        return Err(crate::ThreadStoreError::Internal {
++                            message: "original history prefix unavailable".into(),
++                        });
++                    }
++                    Ok(crate::OriginalHistorySegment {
++                        rollout_path,
++                        end_byte_offset,
++                    })
++                })
++                .collect()
++        })
++        .await
++        .map_err(|_| crate::ThreadStoreError::Internal {
++            message: "original history reader task failed".into(),
++        })?
++    }
++}
+diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
+index 6f5b4d0..6cec59a 100644
+--- a/codex-rs/thread-store/src/store.rs
++++ b/codex-rs/thread-store/src/store.rs
+@@ -206,6 +206,15 @@ pub trait ThreadStore: Any + Send + Sync {
+         params: LoadThreadHistoryParams,
+     ) -> ThreadStoreFuture<'_, StoredThreadHistory>;
+ 
++    /// Loads the complete canonical-original journal, including frozen reference prefixes.
++    /// Explicit complete reads may allocate their complete requested result.
++    fn load_original_history(
++        &self,
++        params: LoadThreadHistoryParams,
++    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
++        self.load_history(params)
++    }
++
+     /// Runs a bounded reader against borrowed records or immutable rollout prefixes.
+     /// There is deliberately no full-history fallback for stores without this capability.
+     fn read_original_history(

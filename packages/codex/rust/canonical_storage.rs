@@ -627,6 +627,19 @@ impl ThreadStore for CanonicalStore {
         })
     }
 
+    fn read_original_history(
+        &self,
+        params: LoadThreadHistoryParams,
+        mut reader: Box<dyn codex_thread_store::OriginalHistoryReader>,
+    ) -> ThreadStoreFuture<'_, codex_thread_store::OriginalHistorySnapshot> {
+        Box::pin(async move {
+            let mut writers = self.writers.lock().await;
+            self.load(params.thread_id, &mut writers).await?;
+            let snapshot = writers[&params.thread_id].snapshot.as_ref().unwrap();
+            reader.read_items(&snapshot.items)
+        })
+    }
+
     fn load_latest_model_context(
         &self,
         params: LoadThreadHistoryParams,

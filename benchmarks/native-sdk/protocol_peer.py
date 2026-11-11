@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import re
+import ssl
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -131,6 +132,7 @@ class Operation:
 class Peer:
     def __init__(self, args: argparse.Namespace):
         self.args = args
+        self.tls_names = {}
         self.operations: dict[str, Operation] = {}
         self.receipts: deque[dict[str, Any]] = deque(maxlen=RECEIPT_LIMIT)
         self.requests = self.errors = self.body_bytes = self.response_bytes = 0
@@ -370,6 +372,10 @@ class Peer:
         self.receipts.append(receipt)
         op = None
         try:
+            secure = request.transport.get_extra_info("ssl_object")
+            receipt.update(
+                request_host=request.headers.get("Host"), tls_sni=self.tls_names.get(secure)
+            )
             raw = await request.read() if raw_body is None else raw_body
             self.body_bytes += len(raw)
             receipt["body_bytes"] = len(raw)
@@ -576,7 +582,18 @@ async def serve(args: argparse.Namespace) -> None:
     site = web.TCPSite(runner, "127.0.0.1", args.port)
     await site.start()
     port = runner.addresses[0][1]
-    print(json.dumps({"base_url": f"http://127.0.0.1:{port}/v1"}), flush=True)
+    ready = {"base_url": f"http://127.0.0.1:{port}/v1"}
+    if args.tls_cert:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(args.tls_cert, args.tls_key)
+        context.set_servername_callback(
+            lambda connection, name, _context: peer.tls_names.__setitem__(connection, name)
+        )
+        await web.TCPSite(runner, "127.0.0.1", 443, ssl_context=context).start()
+        ready.update(
+            base_url="https://api.openai.com/v1", control_base_url=f"http://127.0.0.1:{port}/v1"
+        )
+    print(json.dumps(ready), flush=True)
     try:
         await asyncio.Event().wait()
     finally:
@@ -586,12 +603,16 @@ async def serve(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--tls-cert")
+    parser.add_argument("--tls-key")
     parser.add_argument("--tools-per-round", type=int, default=1)
     parser.add_argument("--tool-rounds", type=int, default=1)
     parser.add_argument("--chunks", type=int, default=8)
     parser.add_argument("--output-chars", type=int, default=256)
     parser.add_argument("--delay-ms", type=float, default=0)
     args = parser.parse_args()
+    if bool(args.tls_cert) != bool(args.tls_key):
+        parser.error("Both TLS certificate and key are required")
     if not (
         0 <= args.port <= 65535
         and args.tools_per_round >= 0
