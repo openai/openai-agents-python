@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json as json
 from dataclasses import dataclass as dataclass, field as field
-from typing import Any, Literal
+from typing import Any, Literal as Literal
 
 from pydantic import JsonValue as JsonValue
 
