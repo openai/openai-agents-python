@@ -32,6 +32,7 @@ mod ops;
 mod options;
 mod plan_usage;
 mod private_http;
+mod private_wss;
 mod project_search;
 mod provider_owner;
 mod python_tools;

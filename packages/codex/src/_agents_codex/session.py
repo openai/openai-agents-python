@@ -3403,6 +3403,34 @@ def _capture_opening_agent(
     )
 
 
+def _default_private_tls_profile(
+    provider: NativeProvider, provider_config: Mapping[str, Any], websockets_enabled: bool
+) -> bool:
+    return (
+        provider_config["model_provider"] == "native_agent"
+        and provider.supports_websockets is None
+        and websockets_enabled
+        and not provider._routing_config()
+        and sys.platform == "linux"
+        and not any(
+            name in os.environ
+            for name in (
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "REQUEST_METHOD",
+                "CODEX_SANDBOX",
+                "CODEX_CA_CERTIFICATE",
+                "SSL_CERT_DIR",
+                "SSL_CERT_FILE",
+            )
+        )
+    )
+
+
 def _supports_atomic_first_turn(
     agent: Agent[Any, Any],
     *,
@@ -3810,6 +3838,12 @@ class Session(Generic[ContextT, OutputT]):
                     tools=available,
                 )
             )
+            _private_wss_candidate = (
+                _atomic_first_turn
+                and _private_text_run
+                and agent.provider is None
+                and bool(available)
+            )
             # Owned defaults keep ordinary startup and its existing close custody.
             _private_default_opening = (
                 _atomic_first_turn
@@ -3977,7 +4011,7 @@ class Session(Generic[ContextT, OutputT]):
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
-                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
+                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool, bool]:
                     private_run = (
                         (_atomic_first_turn or _private_default_opening)
                         and observation_retention == "bounded"
@@ -4000,33 +4034,28 @@ class Session(Generic[ContextT, OutputT]):
                     if (
                         private_run
                         and (_private_text_run or use_completed_owner)
-                        and provider_config["model_provider"] == "native_agent"
-                        and provider.supports_websockets is None
-                        and websockets_enabled
-                        and not provider._routing_config()
-                        and sys.platform == "linux"
-                        and not any(
-                            name in os.environ
-                            for name in (
-                                "HTTP_PROXY",
-                                "http_proxy",
-                                "HTTPS_PROXY",
-                                "https_proxy",
-                                "ALL_PROXY",
-                                "all_proxy",
-                                "REQUEST_METHOD",
-                                "CODEX_SANDBOX",
-                                "CODEX_CA_CERTIFICATE",
-                                "SSL_CERT_DIR",
-                                "SSL_CERT_FILE",
-                            )
+                        and _default_private_tls_profile(
+                            provider, provider_config, websockets_enabled
                         )
                     ):
                         private_http = True
                         websockets_enabled = False
-                    return use_completed_owner, websockets_enabled, private_http
+                    private_wss_tls = (
+                        _private_wss_candidate
+                        and observation_retention == "bounded"
+                        and provider.model_backend is None
+                        and provider.auth is None
+                        and _tracing_context is None
+                        and not output.max_retries
+                        and _default_private_tls_profile(
+                            provider, provider_config, websockets_enabled
+                        )
+                    )
+                    return use_completed_owner, websockets_enabled, private_http, private_wss_tls
 
-                use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
+                use_completed_owner, websockets_enabled, private_http, private_wss_tls = (
+                    private_run_policy(provider)
+                )
                 _atomic_first_turn = _atomic_first_turn or use_completed_owner
                 config = _native_session_config(
                     executor=executor,
@@ -4083,6 +4112,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **({"_sdk_websocket_tls": True} if private_wss_tls else {}),
                     **guidance_options,
                     **(
                         {"user_instructions_appendix": lease._workspace_instructions}
@@ -4512,6 +4542,7 @@ class Session(Generic[ContextT, OutputT]):
                     session._native._enable_model_producer(True)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
+                options.pop("_sdk_websocket_tls", None)
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider

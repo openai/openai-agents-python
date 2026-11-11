@@ -506,7 +506,21 @@ async def test_sign_in_with_chatgpt_keeps_external_bearer_and_original_http(
 
 
 @pytest.mark.parametrize(
-    "profile", ["small", "large", "session", "tool", "hook", "state", "context", "events"]
+    "profile",
+    [
+        "small",
+        "large",
+        "session",
+        "tool",
+        "hook",
+        "state",
+        "context",
+        "events",
+        "ca",
+        "proxy",
+        "raw_usage",
+        "raw_usage_tool",
+    ],
 )
 async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
     openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]],
@@ -517,6 +531,7 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
     native = importlib.import_module("agents._native")
     providers: list[NativeProvider] = []
     starts: list[dict[str, Any]] = []
+    thread_options: list[dict[str, Any]] = []
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-implicit-process-policy")
 
     class OwnedProvider(NativeProvider):
@@ -529,6 +544,7 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
             self, options_json: str, specs_json: str, **kwargs: Any
         ) -> None:
             starts.append(kwargs)
+            thread_options.append(json.loads(options_json))
             raise _OpeningCaptured
 
     async def create_engine(config_json: str, *args: Any, **kwargs: Any) -> CapturedEngine:
@@ -547,8 +563,12 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
     monkeypatch.setattr(native, "create_engine", create_engine)
     agent_options: dict[str, Any] = {}
     run_options: dict[str, Any] = {}
-    if profile == "tool":
+    if profile in ("tool", "ca", "proxy", "raw_usage_tool"):
         agent_options["tools"] = [optional_tool]
+        if profile == "ca":
+            monkeypatch.setenv("SSL_CERT_FILE", "")
+        elif profile == "proxy":
+            monkeypatch.setenv("HTTPS_PROXY", "")
     elif profile == "hook":
         agent_options["before_complete"] = lambda *args: None
     elif profile == "state":
@@ -557,6 +577,8 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         run_options["context"] = object()
     elif profile == "events":
         run_options["observation_retention"] = "all"
+    if profile in ("raw_usage", "raw_usage_tool"):
+        run_options["return_raw_usage"] = True
     agent = Agent(instructions="Answer briefly.", **agent_options)
     assert agent.provider is None
     with pytest.raises(_OpeningCaptured):
@@ -574,6 +596,7 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         assert starts == []
     else:
         assert starts == [{"initial_messages_json": None}]
+        assert bool(thread_options[0].get("_sdk_websocket_tls", False)) is (profile == "tool")
     assert len(providers) == 1 and providers[0].api_key is None and providers[0]._closed
     assert agent.provider is None
     assert not openings
