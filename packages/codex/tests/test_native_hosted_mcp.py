@@ -902,3 +902,112 @@ async def test_native_hosted_mcp_public_observations_keep_typed_items_and_defaul
             assert observed[0].type == kind and observed[0].status == "completed"
         recorded = [entry async for entry in session.items() if entry["type"] == kind]
         assert len(recorded) == 1 and recorded[0]["provider_data"] == item
+
+
+async def test_native_hosted_mcp_sync_approval_keeps_the_event_loop_responsive(
+    responses: ResponsesFixture,
+) -> None:
+    import threading
+
+    loop = asyncio.get_running_loop()
+    release, finished = threading.Event(), threading.Event()
+    observed: list[bool] = []
+
+    def unblock() -> None:
+        observed.append(not finished.is_set())
+        release.set()
+
+    def decide(_request: Any) -> dict[str, bool]:
+        loop.call_soon_threadsafe(unblock)
+        try:
+            release.wait(1)
+            return {"approve": False}
+        finally:
+            finished.set()
+
+    responses.respond(approval())
+    responses.respond(assistant_output("Responsive."))
+    async with timeout(30), provider(responses) as native:
+        try:
+            result = await Agent(
+                instructions="Use docs.",
+                provider=native,
+                model="gpt-5.2",
+                tools=[declaration(callback=decide)],
+            ).run("Lookup.")
+            assert result.final_output == "Responsive."
+        finally:
+            release.set()
+    assert observed == [True]
+
+
+async def test_native_hosted_mcp_cancel_joins_sync_approval_worker_without_publication(
+    responses: ResponsesFixture,
+) -> None:
+    import threading
+
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release, exited = threading.Event(), threading.Event()
+
+    def decide(_request: Any) -> dict[str, bool]:
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            release.wait(2)
+            return {"approve": True}
+        finally:
+            exited.set()
+
+    responses.respond(approval())
+    responses.respond(assistant_output("Cancelled worker must not approve."))
+    async with (
+        timeout(30),
+        provider(responses) as native,
+        Agent(
+            instructions="Use docs.",
+            provider=native,
+            model="gpt-5.2",
+            tools=[declaration(callback=decide)],
+        ).session() as session,
+    ):
+        try:
+            turn = await session.submit("Lookup.")
+            await entered.wait()
+            assert not exited.is_set()
+            cancelling = asyncio.create_task(turn.cancel())
+            await asyncio.sleep(0)
+            assert not cancelling.done()
+            release.set()
+            await cancelling
+            assert exited.is_set()
+            with pytest.raises(TurnStoppedError):
+                await turn.get_result()
+        finally:
+            release.set()
+    assert not replies(responses)
+
+
+@pytest.mark.parametrize("retained", [False, True])
+async def test_native_hosted_mcp_update_narrows_provider_advertisement_to_current_catalog(
+    responses: ResponsesFixture,
+    retained: bool,
+) -> None:
+    docs, other = (
+        declaration(require_approval="never"),
+        declaration("other", require_approval="never"),
+    )
+    responses.respond(assistant_output("Updated."))
+    async with (
+        timeout(30),
+        provider(responses) as native,
+        Agent(
+            instructions="Respond.", provider=native, model="gpt-5.2", tools=[docs, other]
+        ).session() as session,
+    ):
+        await session.update(tools=[docs] if retained else [])
+        assert (await (await session.submit("Respond.")).get_result()).final_output == "Updated."
+    assert [
+        tool["server_label"]
+        for tool in responses.requests[0].get("tools", [])
+        if tool["type"] == "mcp"
+    ] == (["docs"] if retained else [])

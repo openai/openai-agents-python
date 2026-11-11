@@ -56,7 +56,7 @@ class _CapturedHostedMCPApproval(_CapturedFunction):
     declaration: HostedMCP[Any] = field(repr=False)
     config: dict[str, Any] = field(repr=False)
 
-    async def invoke(self, context: ToolContext[Any], parsed: BaseModel) -> Any:
+    def invoke(self, context: ToolContext[Any], parsed: BaseModel) -> Any:
         assert isinstance(parsed, _ApprovalArguments)
         value = parsed.model_dump(mode="json")
         _check_request(self.config, value)
@@ -73,7 +73,7 @@ class _CapturedHostedMCPApproval(_CapturedFunction):
                 caller=deepcopy(parsed.caller),
             )
         )
-        return await result if inspect.isawaitable(result) else result
+        return result
 
 
 @dataclass(frozen=True, kw_only=True)
