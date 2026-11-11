@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -113,6 +114,90 @@ async def test_native_prompt_cold_restore_uses_current_declaration(
         "pmpt_current",
     ]
     assert all("instructions" not in request for request in responses.requests)
+
+
+@pytest.mark.parametrize("location", ["profile", "thread_settings"])
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("direct_state", [False, True])
+async def test_native_prompt_saved_reference_cannot_replace_current_declaration(
+    responses: ResponsesFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+    dynamic: bool,
+    direct_state: bool,
+) -> None:
+    for _ in range(2):
+        responses.respond(assistant_output("prompt result"))
+    reference = {"id": "pmpt_current"}
+
+    def source(_context: Any) -> Any:
+        return reference
+
+    modified = 0
+
+    def replace(value: Any) -> Any:
+        nonlocal modified
+        if isinstance(value, str):
+            try:
+                nested = json.loads(value)
+            except (ValueError, TypeError):
+                return value
+            if isinstance(nested, (dict, list)):
+                before = modified
+                nested = replace(nested)
+                return json.dumps(nested) if modified != before else value
+        elif isinstance(value, list):
+            return [replace(item) for item in value]
+        elif isinstance(value, dict):
+            if location == "profile" and isinstance(value.get("sdk_agent_profile"), dict):
+                model = value["sdk_agent_profile"]["model"]
+            elif location == "thread_settings" and value.get("type") == "thread_settings_applied":
+                model = value["thread_settings"]
+            else:
+                model = None
+            if model is not None:
+                controls = model.setdefault("request_controls", {})
+                prompt = controls.setdefault("hosted_prompt", {})
+                if prompt is None:
+                    controls["hosted_prompt"] = prompt = {}
+                prompt["reference"] = {"id": "pmpt_injected"}
+                modified += 1
+            return {key: replace(item) for key, item in value.items()}
+        return value
+
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=responses.url, api_key="synthetic-prompt-key", supports_websockets=False
+        ) as provider,
+    ):
+        target = Agent(name="target", hosted_prompt=reference)
+        agent = Agent(
+            hosted_prompt=source if dynamic else reference,
+            provider=provider,
+            handoffs=[target],
+        )
+        async with agent.session() as session:
+            await session.update(model="gpt-5.5")
+            await (await session.submit("before restore")).get_result()
+            saved = await session.save_state()
+        payload = replace(json.loads(saved.to_json()))
+        assert modified > 0
+
+        def reject_acquisition(*args: Any, **kwargs: Any) -> Any:
+            pytest.fail("forged state acquired provider authority")
+
+        monkeypatch.setattr(NativeProvider, "_acquire_lease", reject_acquisition)
+        with pytest.raises(ValueError, match="Saved prompt references"):
+            if direct_state:
+                saved.history[:] = payload["history"]
+                state = saved
+            else:
+                state = SessionState.from_json(json.dumps(payload))
+            async with agent.session(state=state) as restored:
+                await (await restored.submit("after restore")).get_result()
+    assert len(responses.requests) == 1
+    assert responses.requests[0]["prompt"]["id"] == "pmpt_current"
 
 
 @pytest.mark.parametrize("explicit", [False, True])
