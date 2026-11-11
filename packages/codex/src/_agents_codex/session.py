@@ -12074,12 +12074,16 @@ class Session(Generic[ContextT, OutputT]):
                 try:
                     if factory is None:
                         return None
+                    transform = declaration.transform_context
+                    provider_response = (
+                        message.get("provider_response") if transform is None else None
+                    )
                     prepared = factory._context(
                         request,
                         candidates=tuple(
                             request.items[index] for index in message["candidate_indexes"]
                         ),
-                        provider_response=message.get("provider_response"),
+                        provider_response=provider_response,
                         model_omitted=message["model_omitted"],
                     )
                     if policy:
@@ -12101,7 +12105,6 @@ class Session(Generic[ContextT, OutputT]):
                         return decision
                     if not active():
                         raise asyncio.CancelledError
-                    transform = declaration.transform_context
                     original_controls: tuple[dict[str, Any], ...] = ()
                     if prepared.mode == "input" and transform is not None:
                         original_controls = deepcopy(
@@ -12135,7 +12138,7 @@ class Session(Generic[ContextT, OutputT]):
                             prepared = replace(prepared, items=tuple(replacement))
                     return await factory._window(
                         prepared,
-                        provider_response=message.get("provider_response"),
+                        provider_response=provider_response,
                         observe=observe,
                         original_controls=original_controls,
                     )

@@ -92,8 +92,9 @@ class ResponsesCompaction(Generic[ContextT]):
     ``auto`` uses input unless an acknowledged provider anchor covers that exact
     input. Configuration and callbacks never become checkpoint authority.
 
-    Current native sessions have been supplying input windows. Explicit previous
-    response mode has been rejecting without a native acknowledged-window receipt.
+    Auto mode has been selecting an acknowledged, unchanged native provider window
+    when available and otherwise supplying input. Explicit previous-response mode
+    has been rejecting without that native receipt.
     Hosted prompts omitting the model have been requiring an explicit compaction model.
     """
 

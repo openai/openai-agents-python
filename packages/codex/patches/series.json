@@ -739,7 +739,11 @@
     {
       "path": "sdk-managed-receipt-original-identity.patch",
       "sha256": "34fe1f7148b64f5c47be3106db23350ada4b22086e9d73bd4a4da7d50db71995"
+    },
+    {
+      "path": "sdk-acknowledged-provider-window.patch",
+      "sha256": "da22bf16b3eeb4e5c4acb1837c919437f1f67860b448a9a4a73b010ca2178788"
     }
   ],
-  "result_tree": "4143b9b6628c91b4d4de9db65eed6f4213d8599d"
+  "result_tree": "5c8571ce72b5fc83f8bc4ede5b08cc05fb7b5b70"
 }
