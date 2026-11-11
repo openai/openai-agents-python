@@ -273,7 +273,15 @@ class _NativeInterception:
                     for server in bindings
                     if isinstance(server, _MCP)
                     and server._has_before
-                    and {"namespace": call.namespace, "name": call.name} in _tool_names((server,))
+                    and (
+                        notice is not None
+                        and notice.get("mcp_identity") is not None
+                        and notice["mcp_identity"][0] == server.name
+                        and notice["mcp_identity"][1] in server.tools
+                        or (notice is None or notice.get("mcp_identity") is None)
+                        and {"namespace": call.namespace, "name": call.name}
+                        in _tool_names((server,))
+                    )
                 ),
                 None,
             )
@@ -695,8 +703,12 @@ class _NativeInterception:
                 assert call.namespace is not None
                 # _select resolved exactly one descriptor and _tool_names
                 # rejected projected collisions before admission.
-                index = _tool_names((descriptor,)).index(
-                    {"namespace": call.namespace, "name": call.name}
+                index = (
+                    descriptor.tools.index(notice["mcp_identity"][1])
+                    if notice is not None and notice.get("mcp_identity") is not None
+                    else _tool_names((descriptor,)).index(
+                        {"namespace": call.namespace, "name": call.name}
+                    )
                 )
                 original_arguments = (
                     json.loads(call.input) if isinstance(call.input, str) else deepcopy(call.input)

@@ -269,6 +269,17 @@ pub(crate) fn fingerprint(roster_json: &str, root_id: &str) -> Result<String> {
     roster_fingerprint(&decode_roster(roster_json)?, root_id)
 }
 
+pub(crate) fn opening(thread: &CodexThread) -> Option<(OpeningProfiles, Vec<InstructionFile>)> {
+    let store = thread.thread_extension_data();
+    Some((
+        (*store.get::<OpeningProfiles>()?).clone(),
+        store
+            .get::<OpeningFiles>()
+            .map(|files| files.0.clone())
+            .unwrap_or_default(),
+    ))
+}
+
 pub(crate) fn install_opening(
     startup: &mut StartThreadOptions,
     opening: OpeningProfiles,

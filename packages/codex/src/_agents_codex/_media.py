@@ -1,7 +1,8 @@
 """Capture provider-owned media data without opening files or transports."""
 
 import base64
-from collections.abc import Mapping
+import json
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, TypeAlias
 from urllib.parse import urlsplit
 
@@ -21,6 +22,101 @@ def _source(value: object, *, file: bool = False) -> str:
     if not value or (file and value.isspace()):
         raise ValueError("Media source must be nonempty")
     return value
+
+
+# Reuse the native model WebSocket ceiling before JSON receipt encoding.
+_MAX_AUDIO_INPUT_BYTES = 64 * 1024 * 1024
+_AUDIO_PART_OVERHEAD = len(json.dumps([{"type": "audio", "audio_url": ""}]))
+
+
+def _contains_audio(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        if value.get("type") in ("audio", "input_audio"):
+            return True
+        return any(
+            _contains_audio(value[key])
+            for key in ("input", "content", "initial_messages")
+            if key in value
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_contains_audio(part) for part in value)
+    return False
+
+
+def _check_audio_json(value: Any, *, contains_audio: bool | None = None) -> None:
+    """Bound the complete SDK-owned audio DTO before default ASCII JSON encoding."""
+    if not (_contains_audio(value) if contains_audio is None else contains_audio):
+        return
+    remaining = _MAX_AUDIO_INPUT_BYTES
+    active: set[int] = set()
+
+    def consume(size: int) -> None:
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0:
+            raise ValueError("Audio input exceeds the native request capacity")
+
+    def count(item: Any) -> None:
+        if isinstance(item, str):
+            consume(2)
+            length = str.__len__(item)
+            if length > remaining:
+                raise ValueError("Audio input exceeds the native request capacity")
+            for start in range(0, length, 32_768):
+                consume(len(json.dumps(str.__getitem__(item, slice(start, start + 32_768)))) - 2)
+        elif isinstance(item, (dict, list, tuple)):
+            identity = id(item)
+            if identity in active:
+                raise ValueError("Circular reference detected")
+            active.add(identity)
+            try:
+                consume(2 + max(0, len(item) - 1) * 2)
+                if isinstance(item, dict):
+                    consume(len(item) * 2)
+                    for key, child in item.items():
+                        if not isinstance(key, str):
+                            if key is None or isinstance(key, (bool, int, float)):
+                                key = json.dumps(key)
+                            else:
+                                # Retain the existing encoder's unsupported-key error.
+                                json.dumps({key: None})
+                        count(key)
+                        count(child)
+                else:
+                    for child in item:
+                        count(child)
+            finally:
+                active.remove(identity)
+        else:
+            consume(len(json.dumps(item)))
+
+    count(value)
+
+
+def _audio_json(value: Any) -> str:
+    _check_audio_json(value)
+    return json.dumps(value)
+
+
+def _capture_audio(value: object, budget: list[int] | None = None) -> dict[str, Any]:
+    data = _record(value)
+    if set(data) != {"audio_url"}:
+        raise ValueError("Audio requires exactly one audio_url")
+    audio = _source(data["audio_url"])
+    if budget is None:
+        budget = [_MAX_AUDIO_INPUT_BYTES]
+    size = _AUDIO_PART_OVERHEAD
+    length = str.__len__(audio)
+    if length > budget[0] - size:
+        raise ValueError("Audio input exceeds the native request capacity")
+    # Python receipts use ASCII JSON. Bound quoting scratch, including astral escapes.
+    for start in range(0, length, 32_768):
+        chunk = str.__getitem__(audio, slice(start, start + 32_768))
+        size += len(json.dumps(chunk)) - 2
+        if size > budget[0]:
+            raise ValueError("Audio input exceeds the native request capacity")
+    budget[0] -= size
+    return {"audio_url": audio}
 
 
 def _capture_image(value: object) -> dict[str, Any]:

@@ -16,9 +16,12 @@ from aiohttp.test_utils import TestServer
 
 from agents import (
     Agent,
+    Allow,
     HttpMCP,
+    MCPCallContext,
     NativeError,
     SessionBusyError,
+    StopTurn,
     ToolContext,
     TurnStoppedError,
     function_tool,
@@ -200,13 +203,14 @@ async def test_native_mixed_wire_identity_schema_history_and_python_slots(
         ctx.context.calls.append(ctx.call_id)
         return "python-receipt:" + key
 
-    responses.respond(function_call("mcp__docsfind_record", {"key": "43"}, "python-call"))
-    responses.respond(mcp_call("find_record", "mcp__docs", "native-call"))
-    responses.respond(mcp_call("__", "mcp__docs", "unicode-call"))
-    responses.respond(mcp_call("excluded", "mcp__docs", "excluded-call"))
-    responses.respond(assistant_output("complete"))
     async with timeout(30), peer.serve() as url:
         descriptor = HttpMCP(name="docs", url=url, tools=["find-record", "查找"])
+        native_ref = HttpMCP(name="docs", url=url, tools=list(peer.names)).tool("find-record")
+        responses.respond(function_call("mcp__docsfind_record", {"key": "43"}, "python-call"))
+        responses.respond(mcp_call(native_ref.name, native_ref.namespace or "", "native-call"))
+        responses.respond(mcp_call("__", "mcp__docs", "unicode-call"))
+        responses.respond(mcp_call("excluded", "mcp__docs", "excluded-call"))
+        responses.respond(assistant_output("complete"))
         agent = Agent(
             instructions="Use selected tools.",
             tools=[descriptor, local],
@@ -232,10 +236,10 @@ async def test_native_mixed_wire_identity_schema_history_and_python_slots(
             declared = declarations(responses.requests[0])
             assert set(declared) == {
                 ("functions", "mcp__docsfind_record"),
-                ("mcp__docs", "find_record"),
+                ("mcp__docs", native_ref.name),
                 ("mcp__docs", "__"),
             }, json.dumps(responses.requests[0])
-            assert declared["mcp__docs", "find_record"]["parameters"]["properties"] == {
+            assert declared["mcp__docs", native_ref.name]["parameters"]["properties"] == {
                 "key": {"type": "string"}
             }
             items = [item async for item in session.items()]
@@ -244,7 +248,7 @@ async def test_native_mixed_wire_identity_schema_history_and_python_slots(
                 "mcp__docsfind_record",
                 "functions.mcp__docsfind_record",
             }
-            assert names["native-call"] == "mcp__docs.find_record"
+            assert names["native-call"] == f"mcp__docs.{native_ref.name}"
             outputs = {
                 i["call_id"]: i["output"] for i in items if i["type"] == "function_call_output"
             }
@@ -491,7 +495,7 @@ async def test_native_call_cancellation_and_timeout_keep_core_as_owner(
                     await session.save_state()
                 if ending == "timeout":
                     assert (await (handle).get_result()).final_output == "after timeout"
-                    assert "timed out" in str(responses.requests[-1]["input"]).lower()
+                    assert "MCP tool invocation failed" in str(responses.requests[-1]["input"])
                 else:
                     await (handle.cancel() if ending == "cancel" else session._aclose())
                     with pytest.raises(TurnStoppedError):
@@ -593,12 +597,10 @@ async def test_whole_initial_mcp_ceiling_rejects_collisions_before_io(
         {"name": "bad space"},
         {"name": ""},
         {"tools": "read"},
-        {"tools": ["find-record", "find_record"]},
-        {"tools": ["查找", "__"]},
         {"tools": ["read", "read"]},
         {"tools": ["\ud800"]},
         {"tools": [""]},
-        {"tools": ["x" * 122]},
+        {"tools": ["\x00"]},
         {"url": "file:///tmp/mcp"},
         {"url": "https://secret@example.invalid/mcp"},
         {"url": "https://example.invalid/mcp#fragment"},
@@ -825,3 +827,152 @@ async def test_fresh_and_restored_native_default_model_with_current_mcp_selectio
             (tmp_path / "default-model-requests.json").write_text(
                 json.dumps(responses.requests, indent=2)
             )
+
+
+async def test_native_collision_names_survive_raw_step_narrowing(
+    responses: ResponsesFixture,
+) -> None:
+    peer = Peer(names=("a.b", "a_b"))
+    async with timeout(30), peer.serve() as url:
+        remote = HttpMCP(name="docs", url=url, tools=["a.b", "a_b"])
+        dotted, underscored = remote.tool("a.b"), remote.tool("a_b")
+        responses.respond(mcp_call(dotted.name, dotted.namespace, "first"))
+        responses.respond(mcp_call(underscored.name, underscored.namespace, "second"))
+        responses.respond(mcp_call(dotted.name, dotted.namespace, "third"))
+        responses.respond(assistant_output("complete"))
+        selections = ([remote], [underscored], [dotted], [dotted])
+        async with Agent(
+            instructions="Use selected tools.", tools=[remote], provider=provider(responses)
+        ).session() as session:
+            handle = await session.submit(
+                "read", before_step=lambda turn, step_index: selections[step_index]
+            )
+            assert (await handle.get_result()).final_output == "complete"
+        assert [call["name"] for call in peer.calls] == ["a.b", "a_b", "a.b"]
+        assert [(dotted.namespace, dotted.name)] == list(declarations(responses.requests[2]))
+
+
+@pytest.mark.asyncio
+async def test_partial_mcp_declaration_resolves_against_peer_collision_catalog(
+    responses: ResponsesFixture,
+) -> None:
+    from agents import CapabilityError
+
+    peer = Peer(names=("a.b", "a_b"))
+    policies: list[str] = []
+
+    def before(request: MCPCallContext[Any], call: Any) -> Allow:
+        assert (call.namespace, call.name) == (actual.namespace, actual.name)
+        policies.append(request.tool_name)
+        return Allow()
+
+    async with timeout(30), peer.serve() as url:
+        complete = HttpMCP(name="docs", url=url, tools=["a.b", "a_b"])
+        actual = complete.tool("a.b")
+        partial = HttpMCP(
+            name="docs",
+            url=url,
+            tools=["a.b"],
+            before=before,
+        )
+        assert partial.tool("a.b").name != actual.name
+        responses.respond(mcp_call(actual.name, actual.namespace, "partial"))
+        responses.respond(assistant_output("complete"))
+        async with Agent(
+            instructions="Read the selected tool.", tools=[partial], provider=provider(responses)
+        ).session() as session:
+            handle = await session.submit(
+                "read",
+                tools=[partial.tool("a.b")],
+                before_step=lambda turn, step_index: [partial.tool("a.b")],
+            )
+            assert (await handle.get_result()).final_output == "complete"
+            denied = await session.submit(
+                "deny", before_step=lambda turn, step_index: [complete.tool("a_b")]
+            )
+            with pytest.raises(CapabilityError):
+                await denied.get_result()
+        assert policies == ["a.b"]
+        assert [call["name"] for call in peer.calls] == ["a.b"]
+        assert len(responses.requests) == 2
+        assert list(declarations(responses.requests[0])) == [(actual.namespace, actual.name)]
+
+
+def test_raw_mcp_reference_selection_uses_captured_identity() -> None:
+    from _agents_codex.session import _split_tools
+    from agents import CapabilityError
+
+    partial = HttpMCP(name="docs", url="http://localhost/mcp", tools=["a.b"])
+    complete = HttpMCP(name="docs", url="http://localhost/mcp", tools=["a.b", "a_b"])
+    assert partial.tool("a.b") != complete.tool("a.b")
+    _, selected, _ = _split_tools((complete.tool("a.b"),), available=(partial,), ceiling=(partial,))
+    assert len(selected) == 1
+    assert selected[0].tools == ("a.b",)
+    with pytest.raises(CapabilityError):
+        _split_tools((complete.tool("a_b"),), available=(partial,), ceiling=(partial,))
+
+
+@pytest.mark.parametrize("phase", ["before", "approval"])
+async def test_partial_mcp_graph_policy_survives_accepted_update(
+    responses: ResponsesFixture, phase: str
+) -> None:
+    from agents import CapabilityError
+
+    peer = Peer(names=("a.b", "a_b"))
+    calls: list[str] = []
+
+    def stop(request: MCPCallContext[Any], call: Any) -> StopTurn:
+        assert request.tool_name == "a.b"
+        calls.append(phase)
+        return StopTurn("private-policy-stop")
+
+    async with timeout(30), peer.serve() as url:
+        complete = HttpMCP(name="docs", url=url, tools=["a.b", "a_b"])
+        actual = complete.tool("a.b")
+        partial = HttpMCP(
+            name="docs",
+            url=url,
+            tools=["a.b"],
+            **{phase: stop},
+        )
+        native_provider = provider(responses)
+        unused = Agent(name="unused", instructions="Unused target", provider=native_provider)
+        responses.respond(assistant_output("ready"))
+        responses.respond(mcp_call(actual.name, actual.namespace, "after-update"))
+        responses.respond(assistant_output("must not continue"))
+        async with Agent(
+            instructions="Use only the selected record tool.",
+            tools=[partial],
+            handoffs=[unused],
+            provider=native_provider,
+        ).session() as session:
+            assert (await (await session.submit("warm")).get_result()).final_output == "ready"
+            await session.update(tools=[partial])
+            handle = await session.submit(
+                "after update",
+                tools=[partial.tool("a.b")],
+                before_step=lambda turn, step_index: [partial.tool("a.b")],
+            )
+            with pytest.raises((TurnStoppedError, NativeError)):
+                await handle.get_result()
+            assert calls == [phase]
+            assert peer.calls == []
+            assert len(responses.requests) == 2
+            denied = await session.submit(
+                "deny sibling", before_step=lambda turn, step_index: [complete.tool("a_b")]
+            )
+            with pytest.raises(CapabilityError):
+                await denied.get_result()
+            assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("tools", [["find-record", "find_record"], ["查找", "__"], ["x" * 122]])
+def test_mcp_declarations_project_colliding_unicode_and_long_raw_names(tools: list[str]) -> None:
+    descriptor = HttpMCP(name="docs", url="https://example.invalid/mcp", tools=tools)
+    refs = [descriptor.tool(raw) for raw in tools]
+    assert len({(ref.namespace, ref.name) for ref in refs}) == len(tools)
+    for ref in refs:
+        assert ref.namespace == "mcp__docs"
+        assert ref.name.isascii()
+        assert all(character.isalnum() or character == "_" for character in ref.name)
+        assert len((ref.namespace + "::" + ref.name).encode("ascii")) <= 128

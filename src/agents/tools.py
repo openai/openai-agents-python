@@ -39,6 +39,7 @@ from _agents_codex.tools import (
     ToolRef as ToolRef,
     TypeAdapter as TypeAdapter,
     WebSearch as WebSearch,
+    WebSearchImageSettings as WebSearchImageSettings,
     WebSearchLocation as WebSearchLocation,
     _CapturedFunction as _CapturedFunction,
     _CapturedManual as _CapturedManual,

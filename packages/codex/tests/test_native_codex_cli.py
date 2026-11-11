@@ -666,3 +666,376 @@ async def test_cancelling_prompt_backpressure_joins_cli_and_stderr(
                 await asyncio.wait_for(asyncio.gather(*remaining, return_exceptions=True), 5)
 
     await _run_in_native_session(responses, invoke)
+
+
+async def test_context_thread_authorization_and_stream_readback(tmp_path: Path, responses):
+    executable = cli(tmp_path)
+    events = []
+    readback = []
+
+    async def resolve(context):
+        assert context.call_id == "cli-callback"
+        return "application-thread"
+
+    def observe(event, context):
+        events.append((event.type, context.call_id))
+
+    async def completed(thread_id, outcome, context):
+        readback.append((thread_id, outcome, context.call_id))
+        raise RuntimeError("Observer failure must not change success")
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(executable)},
+        resolve_thread=resolve,
+        on_stream=observe,
+        on_thread=completed,
+    )
+    binding = declaration._bind(None, None, declaration)
+    result = await _run_in_native_session(
+        responses, lambda context: binding.callback(context, prompt="Run", thread_id=None)
+    )
+    assert result["response"] == "CLI completed"
+    arguments = json.loads((tmp_path / "arguments.jsonl").read_text())
+    assert "resume" in arguments and "application-thread" in arguments
+    assert [kind for kind, _ in events] == ["thread.started", "item.completed", "turn.completed"]
+    assert readback == [("synthetic-thread", "completed", "cli-callback")]
+
+
+async def test_failed_thread_readback_does_not_authorize_model_reuse(tmp_path: Path, responses):
+    executable = cli(tmp_path)
+    executable.write_text(executable.read_text().replace("'turn.completed'", "'turn.failed'"))
+    # A valid failure event still exposes its known thread after joined cleanup.
+    executable.write_text(
+        executable.read_text().replace(
+            "'usage': {'input_tokens': 3, 'cached_input_tokens': 1, 'output_tokens': 2}",
+            "'error': {'message': 'synthetic failure'}",
+        )
+    )
+    readback = []
+
+    def observe(thread_id, outcome, context):
+        readback.append((thread_id, outcome))
+        raise RuntimeError("Observer must not mask the CLI error")
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(executable)}, on_thread=observe
+    )
+    binding = declaration._bind(None, None, declaration)
+
+    async def invoke(context):
+        with pytest.raises(RuntimeError, match="synthetic failure"):
+            await binding.callback(context, prompt="Run", thread_id=None)
+        with pytest.raises(ValueError, match="not issued"):
+            await binding.callback(context, prompt="Run", thread_id="synthetic-thread")
+
+    await _run_in_native_session(responses, invoke)
+    assert readback == [("synthetic-thread", "failed")]
+    assert len((tmp_path / "arguments.jsonl").read_text().splitlines()) == 1
+
+
+async def test_context_thread_resolver_rechecks_signal_before_cli(tmp_path: Path, responses):
+    executable = cli(tmp_path)
+    signal = asyncio.Event()
+
+    async def resolve(context):
+        signal.set()
+        return "application-thread"
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(executable)},
+        turn_options=TurnOptions(signal=signal),
+        resolve_thread=resolve,
+    )
+    binding = declaration._bind(None, None, declaration)
+
+    async def invoke(context):
+        with pytest.raises(RuntimeError, match="cancelled before execution"):
+            await binding.callback(context, prompt="Run", thread_id=None)
+
+    await _run_in_native_session(responses, invoke)
+    assert not (tmp_path / "arguments.jsonl").exists()
+
+
+async def test_custom_cli_parameters_validate_and_use_existing_native_owner(tmp_path, responses):
+    from typing import Literal
+
+    from pydantic import BaseModel, Field
+
+    class Parameters(BaseModel):
+        inputs: list[dict[str, str]] = Field(min_length=1)
+        ticket: Literal["validated"]
+        thread_id: str | None = None
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(cli(tmp_path))}, parameters=Parameters
+    )
+    responses.replies.extend(
+        [
+            [
+                function_call(
+                    "codex",
+                    {"inputs": [{"type": "text", "text": "  exact text  "}], "ticket": "validated"},
+                    "custom-cli",
+                )
+            ],
+            [assistant_output("done")],
+        ]
+    )
+    async with Agent(
+        instructions="Use codex.", provider=provider(responses), tools=[declaration]
+    ).session() as session:
+        assert (await (await session.submit("Run")).get_result()).final_output == "done"
+    assert (tmp_path / "stdin.txt").read_text() == "  exact text  "
+    assert declaration.input_type is Parameters
+
+
+async def test_cli_failure_formatter_runs_after_cleanup(tmp_path, responses):
+    executable = cli(tmp_path)
+    executable.write_text(
+        executable.read_text()
+        .replace("'turn.completed'", "'turn.failed'")
+        .replace(
+            "'usage': {'input_tokens': 3, 'cached_input_tokens': 1, 'output_tokens': 2}",
+            "'error': {'message': 'synthetic failure'}",
+        )
+    )
+    observed = []
+
+    async def format_error(context, error):
+        observed.append((context.call_id, str(error)))
+        return "Application-selected failure message"
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(executable)},
+        failure_error_function=format_error,
+    )
+    binding = declaration._bind(None, None, declaration)
+    result = await _run_in_native_session(
+        responses, lambda context: binding.callback(context, prompt="Run", thread_id=None)
+    )
+    assert result == "Application-selected failure message"
+    assert observed == [("cli-callback", "synthetic failure")]
+
+
+@pytest.mark.parametrize(
+    "policy", ["sensitive", "metadata", "disabled", "zero-budget", "oversized-unicode"]
+)
+def test_cli_item_tracing_native(policy):
+    import subprocess
+
+    from agents import _native
+
+    env = dict(os.environ)
+    env.pop("OPENAI_API_KEY", None)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH")))
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            (
+                "import asyncio,sys,agents; agents.__path__.append(sys.argv[1]); "
+                "from tests.test_native_codex_cli import _cli_item_tracing_case; "
+                "asyncio.run(_cli_item_tracing_case(sys.argv[2]))"
+            ),
+            str(Path(_native.__file__).parent),
+            policy,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _cli_item_tracing_case(policy):
+    import tempfile
+    from collections.abc import Mapping
+
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    from agents import NativeProvider, telemetry
+    from tests.native_fixtures import ResponsesFixture
+
+    def plain(value):
+        if isinstance(value, Mapping):
+            return {key: plain(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [plain(item) for item in value]
+        return value
+
+    class Recorder:
+        def __init__(self):
+            self.events = []
+
+        def on_trace_event(self, event):
+            self.events.append(plain(event))
+
+    recorder = Recorder()
+    await telemetry.configure(processors=[recorder])
+    fixture = ResponsesFixture()
+    application = web.Application()
+    application.router.add_post("/v1/responses", fixture.handle)
+    with tempfile.TemporaryDirectory() as directory:
+        executable = cli(Path(directory))
+
+        def item(identifier, status):
+            if policy == "oversized-unicode" and status == "completed":
+                status = "failed"
+            return {
+                "id": identifier,
+                "type": "command_execution",
+                "command": "PRIVATE_COMMAND🙂" * 1200
+                if policy == "oversized-unicode"
+                else "PRIVATE_COMMAND",
+                "aggregated_output": "PRIVATE_OUTPUT🙂" * 1200
+                if policy == "oversized-unicode"
+                else "PRIVATE_OUTPUT" * 100,
+                "status": status,
+                "exit_code": 0 if status == "completed" else None,
+            }
+
+        events = [
+            {"type": "item.started", "item": item("a", "in_progress")},
+            {"type": "item.started", "item": item("b", "in_progress")},
+            {"type": "item.completed", "item": item("a", "completed")},
+            {"type": "item.completed", "item": item("b", "completed")},
+        ]
+        executable.write_text(
+            executable.read_text().replace(
+                "for event in events:", f"events = {events!r} + events\nfor event in events:"
+            )
+        )
+        fixture.replies.extend(
+            [[function_call("codex", {"prompt": "Run"}, "trace-cli")], [assistant_output("done")]]
+        )
+        async with TestServer(application) as server:
+            async with NativeProvider(
+                base_url=str(server.make_url("/v1")), api_key="synthetic"
+            ) as selected:
+                declaration = codex_tool(
+                    codex_options={"codex_path_override": str(executable)},
+                    span_data_max_chars=None
+                    if policy == "oversized-unicode"
+                    else 0
+                    if policy == "zero-budget"
+                    else 128,
+                )
+                with telemetry.trace(
+                    "CLI parent",
+                    options=telemetry.TraceOptions(
+                        disabled=policy == "disabled",
+                        include_sensitive_data=policy
+                        in ("sensitive", "zero-budget", "oversized-unicode"),
+                    ),
+                ):
+                    async with Agent(
+                        instructions="Use codex.", provider=selected, tools=[declaration]
+                    ).session() as session:
+                        assert (
+                            await (await session.submit("Run")).get_result()
+                        ).final_output == "done"
+    assert (await telemetry.force_flush()).status == "success"
+    records = [event for event in recorder.events if event["name"] == "Codex command execution"]
+    if policy == "disabled":
+        assert records == []
+    else:
+        ended = [event for event in records if event["lifecycle"] == "end"]
+        assert len(ended) == 2
+        assert len({event["parent_span_id"] for event in ended}) == 1
+        assert len({event["span_id"] for event in ended}) == 2
+        if policy == "oversized-unicode":
+            assert all(event["outcome"] == "error" for event in ended)
+            for event in ended:
+                assert event["attributes"].get("sdk.outcome.category") != "trace_end_error"
+                payload = event["attributes"]["sdk.outcome.data"]
+                assert len(payload.encode("utf-8")) <= 4096
+                assert json.loads(payload)["status"] == "failed"
+
+        payload = json.dumps(records)
+        assert ("PRIVATE_COMMAND" in payload) is (policy in ("sensitive", "oversized-unicode"))
+        assert ("PRIVATE_OUTPUT" in payload) is (policy in ("sensitive", "oversized-unicode"))
+    await telemetry.shutdown()
+
+
+async def test_cli_stream_observer_applies_backpressure_and_joins(tmp_path, responses):
+    entered, release, terminal = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    observed = []
+
+    def on_event(event):
+        if event.type == "turn.completed":
+            terminal.set()
+
+    async def on_stream(event, context):
+        entered.set()
+        await release.wait()
+        observed.append((event.type, context.call_id))
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(cli(tmp_path))},
+        on_event=on_event,
+        on_stream=on_stream,
+    )
+    binding = declaration._bind(None, None, declaration)
+
+    async def invoke(context):
+        task = asyncio.create_task(binding.callback(context, prompt="Run", thread_id=None))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            assert not terminal.is_set() and not task.done()
+            release.set()
+            return await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    result = await _run_in_native_session(responses, invoke)
+    assert result["response"] == "CLI completed"
+    assert terminal.is_set()
+    assert observed == [
+        (kind, "cli-callback") for kind in ("thread.started", "item.completed", "turn.completed")
+    ]
+
+
+async def test_cli_stream_observer_cancellation_joins_before_readback(tmp_path, responses):
+    entered, retired = asyncio.Event(), asyncio.Event()
+    readback = []
+
+    async def on_stream(event, context):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            retired.set()
+
+    def on_thread(identifier, outcome, context):
+        assert retired.is_set()
+        readback.append((identifier, outcome))
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(cli(tmp_path))},
+        on_stream=on_stream,
+        on_thread=on_thread,
+    )
+    binding = declaration._bind(None, None, declaration)
+
+    async def invoke(context):
+        task = asyncio.create_task(binding.callback(context, prompt="Run", thread_id=None))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert retired.is_set()
+            assert readback == [("synthetic-thread", "cancelled")]
+            with pytest.raises(ValueError, match="not issued"):
+                await binding.callback(context, prompt="Run", thread_id="synthetic-thread")
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    await _run_in_native_session(responses, invoke)

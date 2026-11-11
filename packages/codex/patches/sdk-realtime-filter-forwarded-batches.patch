@@ -1,0 +1,48 @@
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index d2d6cd57..58860202 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -6111,6 +6111,17 @@ async fn handle_realtime_server_event_with_configuration(
+             sdk.history.lock().unwrap().observe_deleted(item_id);
+         }
+     }
++    // Publish the same actionable batch that Core admits. A rejected function
++    // already has its correlated error output and cannot enter the host batch.
++    if let RealtimeEvent::ResponseDone(response) = &mut event
++        && let Some(sdk) = &handoff_state.sdk
++    {
++        let calls = sdk.function_calls.lock().await;
++        let seen = sdk.seen.lock().await;
++        response.function_call_ids.retain(|id| {
++            calls.contains_key(id) || !seen.get(id).is_some_and(|call| call.output_published)
++        });
++    }
+     let should_stop = match &event {
+         RealtimeEvent::AudioOut(frame) => {
+             match session_kind {
+@@ -6227,15 +6238,6 @@ async fn handle_realtime_server_event_with_configuration(
+             false
+         }
+         RealtimeEvent::ResponseDone(response) => {
+-            let mut response = response.clone();
+-            if let Some(sdk) = &handoff_state.sdk {
+-                let calls = sdk.function_calls.lock().await;
+-                let seen = sdk.seen.lock().await;
+-                response.function_call_ids.retain(|id| {
+-                    calls.contains_key(id)
+-                        || !seen.get(id).is_some_and(|call| call.output_published)
+-                });
+-            }
+             if handoff_state.sdk.is_some()
+                 && (response.response_id.is_none()
+                     || response.response_id != response_create_queue.sdk_response_id)
+@@ -6448,9 +6450,6 @@ async fn handle_realtime_server_event_with_configuration(
+             {
+                 anyhow::bail!("Native function reused a caller-managed call ID");
+             }
+-            if let Some(configuration) = &configuration {
+-                tool_task::captured_definition(configuration, &request.name)?;
+-            }
+             let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
+                 &request.namespace,
+                 &request.call_id,

@@ -1,0 +1,99 @@
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -1,6 +1,7 @@
+ //! Explicit native request preferences. These values never grant tool authority.
+ use crate::ToolName;
+ use crate::config_types::Verbosity;
++use crate::openai_models::InputModality;
+ use schemars::JsonSchema;
+ use serde::{Deserialize, Serialize};
+ use std::collections::BTreeMap;
+@@ -27,6 +28,15 @@
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct ModelRequestControls {
++    /// Declared input support for the selected model; never a provider request field.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "Array<'text' | 'image' | 'audio'> | null")]
++    #[schemars(with = "Option<Vec<InputModality>>")]
++    pub input_modalities: Option<Option<Vec<InputModality>>>,
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -153,7 +163,8 @@
+ 
+ impl ModelRequestControls {
+     pub fn is_empty(&self) -> bool {
+-        self.truncation.is_none()
++        self.input_modalities.is_none()
++            && self.truncation.is_none()
+             && self.include.is_none()
+             && self.context_management.is_none()
+             && self.extra_body.is_none()
+@@ -171,6 +182,9 @@
+     }
+ 
+     pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.input_modalities.is_some() {
++            self.input_modalities = patch.input_modalities.clone();
++        }
+         if patch.truncation.is_some() {
+             self.truncation = patch.truncation.clone();
+         }
+@@ -221,6 +235,18 @@
+ 
+     /// Check wire shapes independently of uncertain model-level support.
+     pub fn validate_shape(&self) -> Result<(), String> {
++        if let Some(Some(modalities)) = &self.input_modalities {
++            if modalities.is_empty()
++                || modalities
++                    .iter()
++                    .enumerate()
++                    .any(|(index, value)| modalities[..index].contains(value))
++            {
++                return Err(
++                    "input_modalities must be a nonempty list of distinct modalities".into(),
++                );
++            }
++        }
+         if self
+             .truncation
+             .as_ref()
+@@ -231,6 +257,7 @@
+         }
+         if let Some(Some(body)) = &self.extra_body {
+             const RESERVED: &[&str] = &[
++                "input_modalities",
+                 "type",
+                 "generate",
+                 "model",
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -64,10 +64,13 @@
+     /// Derives request values from selected settings and pinned metadata.
+     pub(super) fn new(
+         selected: Arc<StepSettings>,
+-        model_info: Arc<ModelInfo>,
++        mut model_info: Arc<ModelInfo>,
+         fast_mode_enabled: bool,
+         context_window_override: Option<i64>,
+     ) -> Self {
++        if let Some(Some(modalities)) = &selected.request_controls.input_modalities {
++            Arc::make_mut(&mut model_info).input_modalities = modalities.clone();
++        }
+         let reasoning_summary = selected
+             .reasoning_summary
+             .unwrap_or(model_info.default_reasoning_summary);
+@@ -178,6 +181,8 @@
+         let model_info = if selected.collaboration_mode.model()
+             == self.selected.collaboration_mode.model()
+             && selected.personality == self.selected.personality
++            && selected.request_controls.input_modalities
++                == self.selected.request_controls.input_modalities
+         {
+             Arc::clone(&self.model_info)
+         } else {

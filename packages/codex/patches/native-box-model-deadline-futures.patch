@@ -1,0 +1,20 @@
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2154,7 +2154,7 @@
+         }
+     };
+     let outcome = match &invocation_deadline {
+-        Some(owner) => owner.run(invocation).await,
++        Some(owner) => owner.run(Box::pin(invocation)).await,
+         None => invocation.await,
+     };
+     if invocation_deadline
+@@ -4039,7 +4039,7 @@
+     let outcome: CodexResult<SamplingRequestResult> = if has_logical_deadline {
+         sampling.await
+     } else {
+-        deadline.run(sampling).await
++        deadline.run(Box::pin(sampling)).await
+     };
+     // A final success (including preemption) or nonretryable error owns its
+     // outcome before cleanup. Only a retryable failure retains the logical clock.

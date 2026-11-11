@@ -241,7 +241,10 @@ if TYPE_CHECKING:
         approval_children,
         body_with_neutral_policy,
         contextual_children,
+        decorated_input_formatter,
+        direct_input_formatter,
         explicit_dynamic_result_agent,
+        format_input_error,
         formatter_only,
         mixed_approval_children,
         mixed_children,
@@ -254,6 +257,8 @@ if TYPE_CHECKING:
         policy_only,
         after_only,
         formatter_only,
+        direct_input_formatter,
+        decorated_input_formatter,
         mixed_policies,
         policy_with_dynamic_body,
     ):
@@ -289,3 +294,15 @@ if TYPE_CHECKING:
 if TYPE_CHECKING:
     explicit_dynamic_result_agent.session()  # pyright: ignore[reportCallIssue]
     explicit_dynamic_result_agent.session(context="wrong")  # pyright: ignore[reportArgumentType]
+
+
+if TYPE_CHECKING:
+
+    def mismatched_input_body(context: ToolContext[str], key: str) -> str:
+        return context.context + key
+
+    mismatched_input_tool = function_tool(
+        mismatched_input_body, input_error_function=format_input_error
+    )
+    Agent[Application](instructions="Read.", tools=[mismatched_input_tool])  # pyright: ignore[reportArgumentType]
+    Agent[str](instructions="Read.", tools=[mismatched_input_tool])  # pyright: ignore[reportArgumentType]

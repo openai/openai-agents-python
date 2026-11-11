@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from _agents_codex.observation import (
     TYPE_CHECKING as TYPE_CHECKING,
+    AgentProfileChanged as AgentProfileChanged,
     Any as Any,
     ApiRateLimits as ApiRateLimits,
     ApiRateLimitsUpdated as ApiRateLimitsUpdated,
@@ -76,6 +77,7 @@ __all__ = [
     "SessionEnded",
     "TurnFinished",
     "TurnStarted",
+    "AgentProfileChanged",
     "ToolFinished",
     "ToolStarted",
     "UsageUpdated",

@@ -13,6 +13,7 @@ from typing import Any, TextIO, cast
 from urllib.parse import urlsplit
 
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._trace_delivery import _trace_credential_route
 
 
 def _plain(value: Any) -> Any:
@@ -41,7 +42,7 @@ class _TraceState:
     descriptor: dict[str, Any]
     active_spans: int = 0
     root_ended: bool = False
-    delivered_to: object | None = None
+    delivered_to: tuple[object, str] | None = None
 
 
 def _descriptor(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -71,8 +72,8 @@ class OpenAITraceExporter:
     worker loop. No client is shared across loops and no background queue or
     Classic span objects are created. Failures are reported by the native
     processor delivery/flush counters. Admitted records in a native-drain batch are
-    delivered as one HTTP request before any unrelated admission error is reported;
-    native acknowledgement waits for that request. Up to 1024 recent
+    delivered in one HTTP request per effective credential before unrelated admission
+    errors; native acknowledgement after delivery. Up to 1024 recent
     trace descriptors are retained. Active roots and descendants prevent eviction;
     completed traces are retired first. Retained native contexts have been supplying
     original closed-root descriptors after ordinary eviction. New roots beyond active capacity fail
@@ -184,8 +185,8 @@ class OpenAITraceExporter:
         self._recovery_sequence = max(self._recovery_sequence or 0, sequence)
 
     def _prepare_events(
-        self, events: Sequence[Mapping[str, Any]], revision: object
-    ) -> tuple[list[dict[str, Any]], list[tuple[str, _TraceState, dict[str, Any]]], str | None]:
+        self, events: Sequence[Mapping[str, Any]]
+    ) -> tuple[dict[str, _TraceState], list[Mapping[str, Any]], str | None]:
         states: dict[str, _TraceState] = {}
         admitted: list[Mapping[str, Any]] = []
         admission_error = None
@@ -244,38 +245,7 @@ class OpenAITraceExporter:
             self._traces.move_to_end(trace_id)
             states[trace_id] = state
             admitted.append(event)
-        # Native acknowledgement covers the whole batch. Preserve valid traces
-        # even when unrelated records have lost their root descriptor.
-        pending = [
-            (trace_id, state, state.descriptor)
-            for trace_id, state in states.items()
-            if state.delivered_to is not revision
-        ]
-        records = [descriptor for _, _, descriptor in pending]
-        for event in admitted:
-            if event["lifecycle"] == "end":
-                records.append(
-                    {
-                        "object": "trace.span",
-                        "id": _span_id(event["span_id"]),
-                        "trace_id": "trace_" + event["trace_id"],
-                        "parent_id": _span_id(event["parent_span_id"]),
-                        "started_at": _timestamp(event["start_time_unix_nanos"]),
-                        "ended_at": _timestamp(event["end_time_unix_nanos"]),
-                        "span_data": {
-                            "type": "custom",
-                            "name": event["name"],
-                            "data": _plain(event["attributes"]),
-                        },
-                        "error": {
-                            "message": "Native span failed",
-                            "data": {"outcome": event["outcome"]},
-                        }
-                        if event["outcome"] == "error"
-                        else None,
-                    }
-                )
-        return records, pending, admission_error
+        return states, admitted, admission_error
 
     async def on_trace_event(self, event: Mapping[str, Any]) -> None:
         try:
@@ -284,53 +254,119 @@ class OpenAITraceExporter:
             del self, event
 
     async def on_trace_events(self, events: Sequence[Mapping[str, Any]]) -> None:
-        """Deliver one native-owned batch before its records may be acknowledged."""
-        revision, headers = self._credentials
-        records: list[dict[str, Any]] = []
-        pending: list[tuple[str, _TraceState, dict[str, Any]]] = []
-        payload = b""
+        """Deliver a batch grouped by captured authentication within one budget."""
+        revision, fallback_headers = self._credentials
         deadline = monotonic() + self._timeout
         cancelled: asyncio.CancelledError | None = None
         failed = False
         admission_error = None
-        delivery_failed = False
-        trace_id = state = descriptor = None
+        groups: dict[str, tuple[dict[str, str], list[Mapping[str, Any]]]] | None
+        event_routes = groups = states = admitted = route = event = None
+        group_headers = group_events = identity = trace_ids = pending = records = payload = None
+        trace_id = state = descriptor = delivery = None
         try:
             try:
-                records, pending, admission_error = self._prepare_events(events, revision)
-                if records:
-                    payload = json.dumps({"data": records}, allow_nan=False).encode()
-                    await asyncio.wait_for(
-                        self._send(payload, dict(headers)), timeout=max(0.0, deadline - monotonic())
-                    )
+                # Reject copied or retired credential-marked snapshots before state mutation.
+                event_routes = {id(event): _trace_credential_route(event) for event in events}
+                states, admitted, admission_error = self._prepare_events(events)
+                groups = {}
+                for event in admitted:
+                    route = event_routes[id(event)]
+                    identity = route["identity"] if route else ""
+                    if identity not in groups:
+                        group_headers = (
+                            {
+                                **{key.lower(): value for key, value in fallback_headers.items()},
+                                **route["headers"],
+                            }
+                            if route
+                            else dict(fallback_headers)
+                        )
+                        groups[identity] = (group_headers, [])
+                    groups[identity][1].append(event)
+                for identity, (group_headers, group_events) in groups.items():
+                    trace_ids = {"trace_" + event["trace_id"] for event in group_events}
+                    pending = [
+                        (trace_id, state, state.descriptor)
+                        for trace_id, state in states.items()
+                        if trace_id in trace_ids and state.delivered_to != (revision, identity)
+                    ]
+                    records = [descriptor for _, _, descriptor in pending]
+                    for event in group_events:
+                        if event["lifecycle"] == "end":
+                            records.append(
+                                {
+                                    "object": "trace.span",
+                                    "id": _span_id(event["span_id"]),
+                                    "trace_id": "trace_" + event["trace_id"],
+                                    "parent_id": _span_id(event["parent_span_id"]),
+                                    "started_at": _timestamp(event["start_time_unix_nanos"]),
+                                    "ended_at": _timestamp(event["end_time_unix_nanos"]),
+                                    "span_data": {
+                                        "type": "custom",
+                                        "name": event["name"],
+                                        "data": _plain(event["attributes"]),
+                                    },
+                                    "error": {
+                                        "message": "Native span failed",
+                                        "data": {"outcome": event["outcome"]},
+                                    }
+                                    if event["outcome"] == "error"
+                                    else None,
+                                }
+                            )
+                    if not records:
+                        continue
+                    try:
+                        payload = json.dumps({"data": records}, allow_nan=False).encode()
+                        delivery = (
+                            self._send(payload, dict(group_headers), credential_events=group_events)
+                            if identity
+                            else self._send(payload, dict(group_headers))
+                        )
+                        await asyncio.wait_for(delivery, timeout=max(0.0, deadline - monotonic()))
+                        if monotonic() > deadline:
+                            failed = True
+                        elif self._credentials[0] is revision:
+                            for trace_id, state, descriptor in pending:
+                                if (
+                                    self._traces.get(trace_id) is state
+                                    and state.descriptor is descriptor
+                                ):
+                                    state.delivered_to = (revision, identity)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        failed = True
             except asyncio.CancelledError as error:
-                # Preserve cancellation identity/args without completed transport frames.
                 cancelled = error.with_traceback(None)
                 cancelled.__cause__ = None
                 cancelled.__context__ = None
             except Exception:
                 failed = True
-            delivery_failed = failed or (bool(records) and monotonic() > deadline)
-            if cancelled is None and not delivery_failed:
-                if self._credentials[0] is revision:
-                    for trace_id, state, descriptor in pending:
-                        if self._traces.get(trace_id) is state and state.descriptor is descriptor:
-                            state.delivered_to = revision
-                if admission_error is None:
-                    return
+            if cancelled is None and not failed and admission_error is None:
+                return
         finally:
-            del self, events, payload, records, pending, headers, trace_id, state, descriptor
+            del self, events, fallback_headers, event_routes, groups, states, admitted, route, event
+            del group_headers, group_events, identity, trace_ids, pending, records, payload
+            del trace_id, state, descriptor, delivery
         if cancelled is not None:
             raise cancelled from None
+        message = "Native OpenAI trace export failed"
         if admission_error is not None:
-            message = "Native OpenAI trace export failed: record admission failed"
-            if delivery_failed:
+            message += ": record admission failed"
+            if failed:
                 message += "; delivery failed"
-            raise RuntimeError(message) from None
-        raise RuntimeError("Native OpenAI trace export failed") from None
+        raise RuntimeError(message) from None
 
-    async def _send(self, payload: bytes, headers: dict[str, str]) -> None:
-        client = response = None
+    async def _send(
+        self,
+        payload: bytes,
+        headers: dict[str, str],
+        *,
+        credential_events: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        client = response = event = None
         try:
             # Keep the client inside the delivery's timeout and cancellation scope.
             # Streaming reads only headers; remote response bodies are never retained.
@@ -340,6 +376,8 @@ class OpenAITraceExporter:
                 for attempt in range(self._max_retries + 1):
                     retry = False
                     try:
+                        for event in credential_events:
+                            _trace_credential_route(event)
                         async with client.stream(
                             "POST", self._address.geturl(), content=payload, headers=headers
                         ) as response:
@@ -353,7 +391,7 @@ class OpenAITraceExporter:
             # Avoid exposing endpoints, request bodies, response bodies or credentials.
             raise RuntimeError("Native OpenAI trace export failed") from None
         finally:
-            del self, payload, headers, client, response
+            del self, payload, headers, client, response, credential_events, event
 
 
 class ConsoleTraceProcessor:

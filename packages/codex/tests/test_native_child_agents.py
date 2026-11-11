@@ -260,6 +260,13 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             root_result = await (root).get_result()
             assert root_result.thread_usage is not None
             assert root_result.thread_usage.total_token_usage.total_tokens == 216
+            root_snapshot = root_result.run_usage
+            assert (root_snapshot.requests, root_snapshot.total_tokens) in {
+                (2, 216),
+                (3, 226),
+                (3, 238),
+                (4, 248),
+            }
             by_id = {handle.child_id: handle for handle in await handles(session, 2)}
             alpha = by_id[peer.child_metadata["alpha"][0]["thread_id"]]
             beta = by_id[peer.child_metadata["beta"][0]["thread_id"]]
@@ -268,6 +275,10 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             first, other = await asyncio.gather((alpha).get_result(), (beta).get_result())
             assert first.turn is alpha and other.turn is beta
             assert first.final_output == "alpha complete" and other.final_output == "beta complete"
+            assert first.run_usage.requests == 2 and other.run_usage.requests == 2
+            assert first.run_usage.total_tokens == 20 and other.run_usage.total_tokens == 44
+            assert root.run_usage.requests == 6 and root.run_usage.total_tokens == 280
+            assert root_result.run_usage == root_snapshot
             assert first.thread_usage is not None and other.thread_usage is not None
             assert first.thread_usage.total_token_usage.total_tokens == 20
             assert first.thread_usage.last_token_usage.total_tokens == 10
@@ -283,7 +294,8 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             peer.action = collaboration(
                 "followup_task", {"target": "/root/alpha", "message": "Continue."}, "followup"
             )
-            await (await session.submit("Continue alpha")).get_result()
+            followup = await session.submit("Continue alpha")
+            await followup.get_result()
             await peer.entered["alpha"].wait()
             current = await captured_turn(session, alpha.child_id)
             while current is None or current.turn_id == alpha.turn_id:
@@ -295,6 +307,10 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             assert await (beta).get_result() == other
             peer.release["alpha"].set()
             later = await (current).get_result()
+            assert later.run_usage.requests == 1 and later.run_usage.total_tokens == 30
+            assert followup.run_usage.requests == 3 and followup.run_usage.total_tokens == 246
+            assert root.run_usage.requests == 6 and root.run_usage.total_tokens == 280
+            assert root_result.run_usage == root_snapshot
             assert len(peer.child_requests["alpha"]) == 3
             assert later.thread_usage is not None
             assert later.thread_usage.total_token_usage.total_tokens == 50

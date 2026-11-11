@@ -133,3 +133,80 @@ async def test_realtime_close_expires_pending_managed_decision(realtime_peer: Re
         assert (
             await (await session.submit("Continue.")).get_result()
         ).final_output == "root remains usable"
+
+
+@pytest.mark.parametrize("managed", [False, True])
+async def test_realtime_original_input_recovery_continues_once(realtime_peer, managed):
+    peer = realtime_peer
+    effects, policies, predicates, formatted = [], [], [], []
+
+    def before(context):
+        policies.append("before")
+        return Allow()
+
+    def after(context, output):
+        policies.append("after")
+        return output
+
+    def predicate(context):
+        predicates.append(True)
+        return True
+
+    def recover(context, error, original):
+        assert original == {"key": 7}
+        formatted.append(True)
+        return "Invalid risky input"
+
+    @function_tool(
+        input_error_function=recover,
+        needs_approval=predicate if managed else False,
+        before=before,
+        after=after,
+    )
+    def risky(key: str) -> str:
+        effects.append(key)
+        return "unexpected"
+
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-input-recovery",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Use risky.", tools=[risky], provider=provider).session() as session,
+    ):
+        async with session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", tools=(risky,))
+        ) as voice:
+            start = len(peer.frames)
+            await peer.function("risky", {"key": 7}, "invalid-original")
+            output = await peer.frame(
+                lambda frame: (
+                    frame["type"] == "conversation.item.create"
+                    and frame.get("item", {}).get("call_id") == "invalid-original"
+                ),
+                after=start,
+            )
+            assert output["item"]["output"] == "Invalid risky input"
+            await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
+            await voice.update({"instructions": "Use risky."})
+            assert (
+                len([frame for frame in peer.frames[start:] if frame["type"] == "response.create"])
+                == 1
+            )
+            assert (
+                len(
+                    [
+                        frame
+                        for frame in peer.frames[start:]
+                        if frame["type"] == "conversation.item.create"
+                        and frame.get("item", {}).get("call_id") == "invalid-original"
+                    ]
+                )
+                == 1
+            )
+            assert formatted == [True]
+            assert not effects and not policies and not predicates
+            assert await session.pending_interactions() == ()
+            assert not peer.responses.requests
