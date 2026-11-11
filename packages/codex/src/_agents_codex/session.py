@@ -942,10 +942,18 @@ class RunErrorDetails:
     incomplete: bool = False
 
 
-def get_run_error_details(error: BaseException) -> RunErrorDetails | None:
-    """Read evidence captured by Agent.run(capture_error_details=True)."""
-    details = object.__getattribute__(error, "__dict__").get("_agents_native_run_error_details")
-    return details if isinstance(details, RunErrorDetails) else None
+class RunDiagnosticError(Exception):
+    """An opted-in native run failure, with the original exception as its cause."""
+
+    __slots__ = ("_details",)
+
+    def __init__(self, details: RunErrorDetails) -> None:
+        super().__init__("Native run failed")
+        self._details = details
+
+    @property
+    def details(self) -> RunErrorDetails:
+        return self._details
 
 
 @dataclass(frozen=True)
@@ -8081,17 +8089,16 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _capture_run_error_details(
         self,
-        error: Exception,
         turn: Turn[Any],
         input: UserInput | None,
         *,
         settled: bool = True,
-    ) -> None:
+    ) -> RunErrorDetails | None:
         # Preserve the first failure if evidence capture is interrupted.
         with suppress(Exception, asyncio.CancelledError):
             guardrail_results = turn.guardrail_results
             if turn.turn_id is None and not guardrail_results:
-                return
+                return None
             responses: list[dict[str, Any]] = []
             items: tuple[ProducedItem, ...] = ()
             incomplete = not settled
@@ -8126,16 +8133,15 @@ class Session(Generic[ContextT, OutputT]):
                 last_agent = await self.get_active_agent()
             except Exception:
                 incomplete = True
-            object.__getattribute__(error, "__dict__")["_agents_native_run_error_details"] = (
-                RunErrorDetails(
-                    input=input,
-                    last_agent=last_agent,
-                    items=items,
-                    raw_responses=tuple(responses),
-                    guardrail_results=guardrail_results,
-                    incomplete=incomplete,
-                )
+            return RunErrorDetails(
+                input=input,
+                last_agent=last_agent,
+                items=items,
+                raw_responses=tuple(responses),
+                guardrail_results=guardrail_results,
+                incomplete=incomplete,
             )
+        return None
 
     async def _run_with_interactions(
         self,
@@ -8274,11 +8280,16 @@ class Session(Generic[ContextT, OutputT]):
             if return_items:
                 result = replace(result, items=self._take_produced_items(result.turn))
         except BaseException as error:
+            failure = error
             if capture_error_details and isinstance(error, Exception):
-                await self._capture_run_error_details(
-                    error, submission, error_input, settled=waiter.done() and not waiter.cancelled()
+                details = await self._capture_run_error_details(
+                    submission, error_input, settled=waiter.done() and not waiter.cancelled()
                 )
-            await _close_after_error(error, close)
+                if details is not None:
+                    failure = RunDiagnosticError(details)
+            await _close_after_error(failure, close)
+            if failure is not error:
+                raise failure from error
             raise
         else:
             await _join(asyncio.create_task(close()))

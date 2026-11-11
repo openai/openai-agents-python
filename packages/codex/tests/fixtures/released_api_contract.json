@@ -1384,7 +1384,7 @@
           "class InteractionRequired(NativeError):\n    state: SessionState | None = None",
           "@dataclass(frozen=True, slots=True)\nclass ProducedItem:\n    item: SessionItem\n    agent: Agent[Any, Any]\n    handoff_target: Agent[Any, Any] | None = None",
           "@dataclass(frozen=True, slots=True)\nclass RunErrorDetails:\n    input: UserInput | None = field(repr=False)\n    last_agent: Agent[Any, Any] | None\n    items: tuple[ProducedItem, ...]\n    raw_responses: tuple[dict[str, Any], ...] = field(repr=False)\n    guardrail_results: tuple[GuardrailRecord, ...] = field(repr=False)\n    incomplete: bool = False",
-          "def get_run_error_details(error: BaseException) -> RunErrorDetails | None:\n    pass",
+          "class RunDiagnosticError(Exception):\n    __slots__ = ('_details',)\n\n    def __init__(self, details: RunErrorDetails) -> None:\n        pass\n\n    @property\n    def details(self) -> RunErrorDetails:\n        pass",
           "@dataclass(frozen=True)\nclass Completed(Generic[OutputT, TurnT]):\n    turn: TurnT\n    final_output: OutputT\n    thread_usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()\n    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)\n    tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)\n    guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)\n    history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)\n    items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)\n    raw_usage: tuple[RawProviderUsage, ...] | None = field(default=None, repr=False, kw_only=True)\n    run_usage: RunUsage = field(init=False)\n\n    @property\n    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:\n        pass",
           "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",
           "class _BeforeStep(Protocol[_SelectionContextT_contra]):\n\n    def __call__(self, turn: Turn[Any], /, *, step_index: int) -> Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents[_SelectionContextT_contra]] | None | StopTurn | Awaitable[Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents[_SelectionContextT_contra]] | None | StopTurn]:\n        pass",
@@ -1402,13 +1402,13 @@
           "NativeError": "agents.session.NativeError",
           "ProducedItem": "agents.session.ProducedItem",
           "ResponseIntegrityReason": "typing.Literal",
+          "RunDiagnosticError": "agents.session.RunDiagnosticError",
           "RunErrorDetails": "agents.session.RunErrorDetails",
           "Session": "agents.session.Session",
           "SessionBusyError": "agents.session.SessionBusyError",
           "StaleTurnError": "agents.session.StaleTurnError",
           "TurnStoppedError": "agents.session.TurnStoppedError",
-          "get_cleanup": "agents.session.get_cleanup",
-          "get_run_error_details": "agents.session.get_run_error_details"
+          "get_cleanup": "agents.session.get_cleanup"
         },
         "imports": [
           "from collections.abc import AsyncIterator as AsyncIterator, Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
@@ -2056,6 +2056,7 @@
       "ResponseIntegrityReason": "agents.session.ResponseIntegrityReason",
       "ResponsesModel": "agents.models.ResponsesModel",
       "RunBudget": "agents.usage.RunBudget",
+      "RunDiagnosticError": "agents.session.RunDiagnosticError",
       "RunErrorDetails": "agents.session.RunErrorDetails",
       "RunUsage": "agents.usage.RunUsage",
       "SQLAlchemySessionStore": "agents.canonical_storage.SQLAlchemySessionStore",
@@ -2104,7 +2105,6 @@
       "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
       "get_cleanup": "agents.session.get_cleanup",
-      "get_run_error_details": "agents.session.get_run_error_details",
       "run_demo_loop": "agents.repl.run_demo_loop"
     },
     "root_declarations": [],
@@ -4891,6 +4891,7 @@
       "ResponseIntegrityReason",
       "ResponsesModel",
       "RunBudget",
+      "RunDiagnosticError",
       "RunErrorDetails",
       "RunUsage",
       "SQLAlchemySessionStore",
@@ -4939,7 +4940,6 @@
       "computer_tool",
       "function_tool",
       "get_cleanup",
-      "get_run_error_details",
       "run_demo_loop"
     ],
     "root_imports": [
@@ -4966,7 +4966,7 @@
       "from .recovery import LocalRecoveryRequired as LocalRecoveryRequired, ReconciledCall as ReconciledCall, UncertainCall as UncertainCall",
       "from .repl import run_demo_loop as run_demo_loop",
       "from .schema import NativeOutput as NativeOutput, OutputSpec as OutputSpec, OutputValidationError as OutputValidationError, OutputValidationIssue as OutputValidationIssue, PromptedOutput as PromptedOutput",
-      "from .session import Capabilities as Capabilities, CapabilityError as CapabilityError, Completed as Completed, FeatureName as FeatureName, FeatureSupport as FeatureSupport, InteractionExpiredError as InteractionExpiredError, InteractionRequired as InteractionRequired, NativeError as NativeError, ProducedItem as ProducedItem, ResponseIntegrityReason as ResponseIntegrityReason, RunErrorDetails as RunErrorDetails, Session as Session, SessionBusyError as SessionBusyError, StaleTurnError as StaleTurnError, TurnStoppedError as TurnStoppedError, get_cleanup as get_cleanup, get_run_error_details as get_run_error_details",
+      "from .session import Capabilities as Capabilities, CapabilityError as CapabilityError, Completed as Completed, FeatureName as FeatureName, FeatureSupport as FeatureSupport, InteractionExpiredError as InteractionExpiredError, InteractionRequired as InteractionRequired, NativeError as NativeError, ProducedItem as ProducedItem, ResponseIntegrityReason as ResponseIntegrityReason, RunDiagnosticError as RunDiagnosticError, RunErrorDetails as RunErrorDetails, Session as Session, SessionBusyError as SessionBusyError, StaleTurnError as StaleTurnError, TurnStoppedError as TurnStoppedError, get_cleanup as get_cleanup",
       "from .state import ApplicationToolOutput as ApplicationToolOutput, ChecklistState as ChecklistState, ChecklistStep as ChecklistStep, CheckpointStatus as CheckpointStatus, LocalStorage as LocalStorage, NativeGoal as NativeGoal, SessionState as SessionState",
       "from .subagents import Subagent as Subagent",
       "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, HostedShell as HostedShell, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolOutputFile as ToolOutputFile, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, ToolSearch as ToolSearch, ToolSearchResult as ToolSearchResult, WebSearch as WebSearch",

@@ -17,10 +17,10 @@ from agents import (
     NativeError,
     NativeProvider,
     ProducedItem,
+    RunDiagnosticError,
     Session,
     ToolOutput,
     function_tool,
-    get_run_error_details,
 )
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_manual_tools import LookupArgs
@@ -236,15 +236,15 @@ async def test_failed_native_run_details_outlive_its_session(responses, capture)
             provider=provider,
             input_guardrails=[InputGuardrail("allow-lookup", policy, run_in_parallel=False)],
         )
-        with pytest.raises(ValueError) as caught:
+        with pytest.raises(RunDiagnosticError if capture else ValueError) as caught:
             await agent.run("original request", capture_error_details=capture)
 
-    assert caught.value is error
-    details = get_run_error_details(error)
     if not capture:
-        assert details is None
+        assert caught.value is error
         return
-    assert details is not None
+    assert isinstance(caught.value, RunDiagnosticError)
+    assert caught.value.__cause__ is error
+    details = caught.value.details
     assert details.input == "original request"
     assert details.last_agent is agent
     accepted = [
@@ -284,4 +284,30 @@ async def test_cancelled_error_capture_preserves_the_original_failure(responses,
                 await run
 
     assert caught.value is error
-    assert get_run_error_details(error) is None
+
+
+async def test_native_failure_details_are_scoped_when_runs_share_an_exception(responses):
+    shared = ValueError("synthetic shared callback failure")
+
+    @function_tool
+    def fail() -> str:
+        raise shared
+
+    responses.respond(function_call("fail", {}, "first-failing-call"))
+    responses.respond(function_call("fail", {}, "second-failing-call"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-shared-error-diagnostics"
+    ) as provider:
+        agent = Agent(instructions="Call fail.", tools=[fail], provider=provider)
+        first, second = await asyncio.gather(
+            agent.run("first request", capture_error_details=True),
+            agent.run("second request", capture_error_details=True),
+            return_exceptions=True,
+        )
+
+    assert isinstance(first, RunDiagnosticError)
+    assert isinstance(second, RunDiagnosticError)
+    assert first is not second
+    assert first.__cause__ is second.__cause__ is shared
+    assert first.details.input == "first request"
+    assert second.details.input == "second request"

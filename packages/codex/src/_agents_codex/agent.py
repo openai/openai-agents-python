@@ -1858,7 +1858,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_items=True retains the accepted assistant and tool items in
         Completed.items with their producing Agents.
         capture_error_details=True retains run evidence on submission errors.
-        Call get_run_error_details(error) after catching the original exception.
+        Read the snapshot from RunDiagnosticError.details. The original error is its cause.
         """
         capture_error_details = capture_error_details is True
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
@@ -1887,6 +1887,7 @@ class Agent(Generic[ContextT, OutputT]):
                 CapabilityError,
                 InteractionRequired,
                 NativeError,
+                RunDiagnosticError,
                 _handoff_default_names,
                 _produced_items_restore,
                 _raw_usage_restore,
@@ -2235,7 +2236,9 @@ class Agent(Generic[ContextT, OutputT]):
                     result = await submission.get_result()
                 except Exception as error:
                     if capture_error_details:
-                        await session._capture_run_error_details(error, submission, error_input)
+                        details = await session._capture_run_error_details(submission, error_input)
+                        if details is not None:
+                            raise RunDiagnosticError(details) from error
                     raise
                 if return_state:
                     result = replace(result, state=await session.save_state())

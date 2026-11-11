@@ -193,13 +193,13 @@ if TYPE_CHECKING:
         NativeError as NativeError,
         ProducedItem as ProducedItem,
         ResponseIntegrityReason as ResponseIntegrityReason,
+        RunDiagnosticError as RunDiagnosticError,
         RunErrorDetails as RunErrorDetails,
         Session as Session,
         SessionBusyError as SessionBusyError,
         StaleTurnError as StaleTurnError,
         TurnStoppedError as TurnStoppedError,
         get_cleanup as get_cleanup,
-        get_run_error_details as get_run_error_details,
     )
     from .state import (
         ApplicationToolOutput as ApplicationToolOutput,
@@ -424,7 +424,7 @@ _MODULES = {
     "NativeError": ".session",
     "ProducedItem": ".session",
     "RunErrorDetails": ".session",
-    "get_run_error_details": ".session",
+    "RunDiagnosticError": ".session",
     "ResponseIntegrityReason": ".session",
     "Session": ".session",
     "SessionBusyError": ".session",
