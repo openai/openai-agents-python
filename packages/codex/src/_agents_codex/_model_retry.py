@@ -52,7 +52,11 @@ def _normalized_error(error: BaseException) -> NormalizedError:
     # A borrowed OpenAI client has already imported its error types. Native
     # declarations and custom producers can work without that optional client.
     openai = sys.modules.get("openai")
-    timeout_types = (TimeoutError, getattr(openai, "APITimeoutError", TimeoutError))
+    timeout_types = (
+        TimeoutError,
+        asyncio.TimeoutError,
+        getattr(openai, "APITimeoutError", TimeoutError),
+    )
     network_types = (
         ConnectionError,
         *timeout_types,
@@ -89,7 +93,10 @@ def _normalized_error(error: BaseException) -> NormalizedError:
                 if math.isfinite(delay) and delay >= 0:
                     retry_after = delay
                     break
-        abort |= _is_model_abort(current)
+        # asyncio timeouts retain their internal cancellation as a cause.
+        # Preserve real aborts while avoiding a false veto below a timeout.
+        if not (timeout and isinstance(current, asyncio.CancelledError)):
+            abort |= _is_model_abort(current)
         timeout |= isinstance(current, timeout_types)
         network |= isinstance(current, network_types)
         following = read(current, "__cause__") or read(current, "__context__")

@@ -11347,6 +11347,11 @@ class Session(Generic[ContextT, OutputT]):
             callback = declaration.transform_context
             source = declaration.hosted_prompt
             enabled = message.get("hosted_prompt") is True
+            if source is not None and not enabled and message.get("purpose") == "compaction":
+                # Native local compaction deliberately omits server-prompt controls.
+                # Keep its admitted transform path without resolving a prompt factory.
+                source = None
+                callback = callback if callback is not None else (lambda _request: None)
             if (source is not None) != enabled:
                 raise NativeError("Hosted prompt ownership differs from the restored request")
             if source is None and callback is None:
