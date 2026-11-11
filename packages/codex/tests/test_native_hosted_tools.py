@@ -17,6 +17,7 @@ from agents import (
     ImageGeneration,
     NativeError,
     NativeProvider,
+    Session,
     SessionState,
     TurnStoppedError,
     function_tool,
@@ -104,6 +105,40 @@ async def test_native_model_output_items_are_opt_in_scoped_and_detached(
             if isinstance(event, ModelOutputItemCompleted)
         ]
         assert replay[0]["summary"] == [{"type": "summary_text", "text": "Provider summary."}]
+
+
+@pytest.mark.parametrize("include_items", [False, True])
+async def test_late_model_output_item_signals_an_observation_gap(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, include_items: bool
+) -> None:
+    read_events = Session._read_events
+    started = asyncio.Event()
+
+    async def deliver_late_completion(session, prefix=(), prefix_error=None):
+        event = {
+            "id": "retired-turn",
+            "msg": {
+                "type": "item_completed",
+                "thread_id": session.id,
+                "turn_id": "retired-turn",
+                "item": {"type": "Reasoning", "id": "late", "summary_text": ["Late reasoning."]},
+            },
+        }
+        started.set()
+        await read_events(session, ((event, False), *prefix), prefix_error)
+
+    monkeypatch.setattr(Session, "_read_events", deliver_late_completion)
+    async with (
+        timeout(30),
+        provider(responses) as native_provider,
+        Agent(instructions="Respond.", provider=native_provider).session(
+            include_model_output_items=include_items
+        ) as session,
+    ):
+        await started.wait()
+    events = [event async for event in session.events()]
+    assert any(isinstance(event, EventGap) for event in events) is include_items
+    assert all(not isinstance(event, ModelOutputItemCompleted) for event in events)
 
 
 # Deliberately include unknown provider fields to detect lossy normalization.

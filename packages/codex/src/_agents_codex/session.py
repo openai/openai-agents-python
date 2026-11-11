@@ -10015,6 +10015,7 @@ class Session(Generic[ContextT, OutputT]):
             _captured_siwc_provider=captured_siwc_provider,
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
+            include_model_output_items=self._observations.include_model_output_items,
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
@@ -12087,6 +12088,14 @@ class Session(Generic[ContextT, OutputT]):
                         turn_id=late_turn_id,
                         submission_id=started.submission_id if started is not None else None,
                     ):
+                        continue
+                    late_item = message.get("item")
+                    if (
+                        self._observations.include_model_output_items
+                        and isinstance(late_item, dict)
+                        and late_item.get("type") in {"AgentMessage", "Reasoning"}
+                    ):
+                        self._observations._mark_gap()
                         continue
                 if self._startup_failure is not None and (state is None or state.handle is None):
                     if not self._startup_failure.done() and message.get("type") in {
