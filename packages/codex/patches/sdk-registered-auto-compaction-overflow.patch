@@ -1,0 +1,20 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 3a06a85c51bb301a68c4f4273bccac532360fe4f..deedfd1452cd5e5698f48182c4e5498dc658e071 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -491,6 +491,15 @@ async fn run_compact_task_inner_impl(
+                 return Err(e);
+             }
+             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
++                if matches!(compaction_metadata.trigger(), CompactionTrigger::Auto)
++                    && sess
++                        .services
++                        .model_client
++                        .auth_manager()
++                        .is_some_and(|manager| manager.terminal_auto_compaction_limit_errors())
++                {
++                    return Err(e);
++                }
+                 if turn_input_len > 1 {
+                     // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
+                     error!(
