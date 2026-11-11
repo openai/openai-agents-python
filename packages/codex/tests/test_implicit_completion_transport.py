@@ -5,15 +5,18 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
 from agents import (
     Agent,
+    Allow,
     NativeProvider,
     SignInWithChatGPT,
     SignInWithChatGPTCredentials,
+    ToolContext,
     function_tool,
 )
 
@@ -84,20 +87,13 @@ async def test_private_completion_preserves_explicit_transport_choices(
     assert not openings
 
 
-@pytest.mark.parametrize("profile", ["session", "tool", "hook", "state", "events", "context"])
+@pytest.mark.parametrize("profile", ["session", "hook", "state", "events", "context"])
 async def test_observable_profiles_keep_implicit_websocket_permission(
     openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]], profile: str
 ) -> None:
-    @function_tool
-    def optional_tool() -> str:
-        """Return synthetic tool output."""
-        return "unused"
-
     kwargs: dict[str, Any] = {}
     options: dict[str, Any] = {}
-    if profile == "tool":
-        kwargs["tools"] = [optional_tool]
-    elif profile == "hook":
+    if profile == "hook":
         kwargs["before_complete"] = lambda *args: None
     elif profile == "state":
         options["return_state"] = True
@@ -117,6 +113,188 @@ async def test_observable_profiles_keep_implicit_websocket_permission(
     assert route == ("create_engine" if profile in ("session", "hook") else "_open_conversation")
     assert config["model_providers.native_agent"]["supports_websockets"] is True
     assert not kwargs.get("_private_http", False)
+    assert not openings
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        "default",
+        "async",
+        "namespace",
+        "finish_turn",
+        "timeout_raise",
+        "timeout_result",
+        "before",
+        "after",
+        "tool_context",
+        "concurrency",
+    ],
+)
+async def test_eager_function_options_use_http_with_the_ordinary_collector(
+    openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]], profile: str
+) -> None:
+    calls: list[str] = []
+
+    @function_tool
+    def lookup() -> str:
+        """Return synthetic tool output."""
+        calls.append("lookup")
+        return "record"
+
+    @function_tool
+    async def async_lookup() -> str:
+        """Return synthetic asynchronous tool output."""
+        calls.append("async")
+        return "record"
+
+    @function_tool
+    def contextual_lookup(context: ToolContext[None]) -> str:
+        """Return synthetic tool output without application context."""
+        assert context.context is None
+        calls.append("context")
+        return "record"
+
+    tool = lookup
+    options: dict[str, Any] = {}
+    if profile == "async":
+        tool = async_lookup
+    elif profile == "namespace":
+        tool = replace(tool, namespace="records", namespace_description="Record lookup")
+    elif profile == "finish_turn":
+        tool = replace(tool, finish_turn=True)
+    elif profile == "timeout_raise":
+        tool = replace(tool, callback_timeout=1.0)
+    elif profile == "timeout_result":
+        tool = replace(
+            tool,
+            callback_timeout=1.0,
+            timeout_behavior="error_as_result",
+            timeout_error_function=lambda context, error: "Tool deadline exceeded",
+        )
+    elif profile == "before":
+        tool = replace(tool, before=lambda context: Allow())
+    elif profile == "after":
+        tool = replace(tool, after=lambda context, output: output)
+    elif profile == "tool_context":
+        tool = contextual_lookup
+    elif profile == "concurrency":
+        options["max_function_concurrency"] = 1
+    async with NativeProvider(api_key="synthetic-function-policy-key") as provider:
+        with pytest.raises(_OpeningCaptured):
+            await Agent(instructions="Use the tool.", provider=provider, tools=[tool]).run(
+                "fresh function input", **options
+            )
+    route, config, kwargs, _ = openings.pop()
+    assert route == "_open_conversation"
+    assert config["model_providers.native_agent"]["supports_websockets"] is True
+    assert kwargs["_private_http"] is True
+    assert kwargs["_share_model_http"] is True
+    assert not calls
+    assert not openings
+
+
+@pytest.mark.parametrize("profile", ["manual", "approval", "approval_callback", "deferred"])
+async def test_non_eager_functions_keep_the_original_opening(
+    openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]], profile: str
+) -> None:
+    @function_tool
+    def lookup() -> str:
+        """Return synthetic tool output."""
+        return "record"
+
+    if profile == "manual":
+        tool = replace(lookup, _bind=None)
+    elif profile == "approval":
+        tool = replace(lookup, needs_approval=True)
+    elif profile == "approval_callback":
+        tool = replace(lookup, needs_approval=lambda context: False)
+    else:
+        tool = replace(lookup, defer_loading=True)
+    async with NativeProvider(api_key="synthetic-function-fallback-key") as provider:
+        with pytest.raises(_OpeningCaptured):
+            await Agent(instructions="Use the tool.", provider=provider, tools=[tool]).run("input")
+    route, config, kwargs, _ = openings.pop()
+    assert route == "create_engine"
+    assert config["model_providers.native_agent"]["supports_websockets"] is True
+    assert not kwargs.get("_private_http", False)
+    assert not openings
+
+
+@pytest.mark.parametrize("choice", [None, True, False])
+async def test_tool_runs_preserve_explicit_transport_choices(
+    openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]], choice: bool | None
+) -> None:
+    @function_tool
+    def lookup() -> str:
+        """Return synthetic tool output."""
+        return "record"
+
+    async with NativeProvider(
+        api_key="synthetic-function-explicit-key", supports_websockets=choice
+    ) as provider:
+        with pytest.raises(_OpeningCaptured):
+            await Agent(instructions="Use the tool.", provider=provider, tools=[lookup]).run(
+                "input"
+            )
+    route, config, kwargs, _ = openings.pop()
+    assert route == "_open_conversation"
+    assert config["model_providers.native_agent"]["supports_websockets"] is (choice is not False)
+    assert kwargs["_private_http"] is (choice is None)
+    assert not openings
+
+
+@pytest.mark.parametrize("profile", ["context", "return_state", "events", "tool_override", "hook"])
+async def test_tool_runs_keep_observable_overrides_on_the_original_transport(
+    openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]], profile: str
+) -> None:
+    @function_tool
+    def lookup() -> str:
+        """Return synthetic tool output."""
+        return "record"
+
+    options: dict[str, Any] = {}
+    agent_options: dict[str, Any] = {}
+    if profile == "context":
+        options["context"] = object()
+    elif profile == "return_state":
+        options["return_state"] = True
+    elif profile == "events":
+        options["observation_retention"] = "all"
+    elif profile == "tool_override":
+        options["tools"] = [lookup]
+    else:
+        agent_options["before_complete"] = lambda *args: None
+    async with NativeProvider(api_key="synthetic-function-observable-key") as provider:
+        with pytest.raises(_OpeningCaptured):
+            await Agent(
+                instructions="Use the tool.", provider=provider, tools=[lookup], **agent_options
+            ).run("input", **options)
+    route, config, kwargs, _ = openings.pop()
+    assert route == (
+        "create_engine" if profile in ("tool_override", "hook") else "_open_conversation"
+    )
+    assert config["model_providers.native_agent"]["supports_websockets"] is True
+    assert not kwargs.get("_private_http", False)
+    assert not openings
+
+
+async def test_large_tool_input_keeps_the_ordinary_collector(
+    openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]],
+) -> None:
+    @function_tool
+    def lookup() -> str:
+        """Return synthetic tool output."""
+        return "record"
+
+    async with NativeProvider(api_key="synthetic-large-function-key") as provider:
+        with pytest.raises(_OpeningCaptured):
+            await Agent(instructions="Use the tool.", provider=provider, tools=[lookup]).run(
+                "x" * (512 * 1024)
+            )
+    route, _, kwargs, _ = openings.pop()
+    assert route == "_open_conversation"
+    assert kwargs["_private_http"] is True
     assert not openings
 
 
@@ -158,7 +336,7 @@ async def test_mixed_calls_preserve_transport_choices_on_one_provider(
             with pytest.raises(_OpeningCaptured):
                 await agent.run("final text without tool calls")
         assert provider.supports_websockets is None
-    expected = [("_prepare_run_conversation", True), ("_open_conversation", False)]
+    expected = [("_prepare_run_conversation", True), ("_open_conversation", True)]
     if tool_first:
         expected.reverse()
     assert [

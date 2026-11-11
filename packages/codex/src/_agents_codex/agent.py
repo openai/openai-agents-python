@@ -2309,9 +2309,10 @@ def _completed_run_eligible(
     trace_options: TraceOptions | Mapping[str, Any] | None,
 ) -> bool:
     """Private completion profile; native archive and output bounds remain unchanged."""
-    return _private_text_run_eligible(
+    eligible = _private_text_run_eligible(
         agent, input, context, return_state, parent_trace, trace_options
     )
+    return eligible and not agent.tools
 
 
 def _private_text_run_eligible(
@@ -2322,7 +2323,7 @@ def _private_text_run_eligible(
     parent_trace: TraceContext | Mapping[str, str | None] | None,
     trace_options: TraceOptions | Mapping[str, Any] | None,
 ) -> bool:
-    """Private plain-text one-shot profile, independent of archive limits."""
+    """Text-run transport candidate; atomic opening checks resolved tools."""
     return (
         type(agent) is Agent
         and type(input) is str
@@ -2334,7 +2335,6 @@ def _private_text_run_eligible(
         and not agent.output_guardrails
         and not agent.input_guardrails
         and not return_state
-        and not agent.tools
         and not agent.handoffs
         and (agent.output_type is None or agent.output_type is str)
         and parent_trace is None
