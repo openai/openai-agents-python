@@ -10553,7 +10553,10 @@ class Session(Generic[ContextT, OutputT]):
         )
 
     def _observe_accepted_tool_output(self, state: _CallbackState, item: Any) -> None:
-        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+        if not isinstance(item, dict) or item.get("type") not in {
+            "function_call_output",
+            "apply_patch_call_output",
+        }:
             return
         call_id = item.get("call_id")
         if not isinstance(call_id, str):

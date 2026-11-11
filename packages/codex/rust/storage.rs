@@ -1106,6 +1106,7 @@ impl SamplingState {
                     ResponseItem::FunctionCall { .. }
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::ComputerCall { .. }
+                        | ResponseItem::ApplyPatchCall { .. }
                 ) =>
             {
                 self.tool_calls += 1;
@@ -1161,7 +1162,7 @@ impl LossSuspension {
                 if let RolloutItem::ResponseItem(envelope) = item {
                     // Approval and manual keys bind functions only. A custom
                     // call sharing this ID makes cancellation attribution unsafe.
-                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. }
+                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } | ResponseItem::ApplyPatchCall { call_id, .. }
                         if *call_id == key.call)
                     {
                         return None;
