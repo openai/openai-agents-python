@@ -3915,6 +3915,9 @@ fn conversation_opening(
         && cfg!(target_os = "linux")
         && options.permits_private_disposable()
         && specs.is_empty();
+    if process_private_http {
+        provider_owner::check_process_runtime_pid()?;
+    }
     let settings_value: serde_json::Value = serde_json::from_str(settings_json)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let has_settings = settings_value
@@ -3924,7 +3927,13 @@ fn conversation_opening(
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(async move {
         let (mut state, generated_home) = lease
-            .conversation_engine(config_json, runtime_json, api_key, share_model_http)
+            .conversation_engine(
+                config_json,
+                runtime_json,
+                api_key,
+                share_model_http,
+                process_private_http,
+            )
             .await?;
         if private_http {
             // Only this scope selects an idle transport owner, never the parent.
@@ -4343,6 +4352,19 @@ fn configure_telemetry<'py>(
 }
 
 #[pyfunction]
+fn _close_implicit_runtime_at_exit(py: Python<'_>) {
+    py.detach(provider_owner::close_process_runtime_at_exit);
+}
+
+#[pyfunction]
+fn _close_implicit_runtime<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    provider_owner::check_process_runtime_pid()?;
+    async_bridge::future_into_py(py, async move {
+        async_bridge::retain_writer_operation(provider_owner::close_process_runtime()).await
+    })
+}
+
+#[pyfunction]
 #[pyo3(signature = (timeout_ms=None))]
 fn shutdown_telemetry<'py>(
     py: Python<'py>,
@@ -4476,6 +4498,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(configure_telemetry, module)?)?;
+    module.add_function(wrap_pyfunction!(_close_implicit_runtime, module)?)?;
+    let runtime_exit = wrap_pyfunction!(_close_implicit_runtime_at_exit, module)?;
+    module.add_function(runtime_exit.clone())?;
+    module
+        .py()
+        .import("atexit")?
+        .getattr("register")?
+        .call1((runtime_exit,))?;
     module.add_function(wrap_pyfunction!(shutdown_telemetry, module)?)?;
     module.add_function(wrap_pyfunction!(start_trace_span, module)?)?;
     module.add_function(wrap_pyfunction!(end_trace_span, module)?)?;
