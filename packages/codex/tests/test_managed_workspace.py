@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 from contextlib import asynccontextmanager
@@ -51,6 +52,127 @@ def test_pair_detaches_and_rejects_mixed_or_corrupted_receipts():
     damaged["workspace"] = workspace.replace("workspace-a", "workspace-b")
     with pytest.raises(ValueError, match="association"):
         ManagedWorkspaceCheckpoint.from_json(json.dumps(damaged))
+
+
+def test_recomputed_pair_cannot_borrow_workspace_only_authorization():
+    from _agents_codex._managed_workspace import _ManagedWorkspaceSource
+
+    workspace = '{"backend_id":"fixture","provider_state":{"id":"B"}}'
+    pair = ManagedWorkspaceCheckpoint._capture(conversation("B"), workspace)
+    data = json.loads(pair.to_json())
+    data["conversation"] = conversation("A")
+    data["association"] = hashlib.sha256(
+        (data["conversation"] + "\0" + workspace).encode()
+    ).hexdigest()
+    forged = ManagedWorkspaceCheckpoint.from_json(json.dumps(data))
+    managed = _ManagedWorkspaceSource(
+        gateway(None), backend_id="fixture", authorized_payload={"id": "B"}
+    )
+    with pytest.raises(ValueError, match="trusted.*checkpoint"):
+        managed.validate_resume(forged)
+
+
+def test_capture_provenance_and_trusted_full_pair_grants_are_distinct():
+    from dataclasses import asdict
+
+    from _agents_codex._managed_workspace import _capture_retired_workspace, _ManagedWorkspaceSource
+
+    workspace = '{"backend_id":"fixture","provider_state":{"id":"B"}}'
+    captured = _capture_retired_workspace(conversation("B"), workspace)
+    imported = ManagedWorkspaceCheckpoint.from_json(captured.to_json())
+    managed = _ManagedWorkspaceSource(
+        gateway(None), backend_id="fixture", authorized_payload={"id": "B"}
+    )
+    assert managed.validate_resume(captured) == imported
+    for ordinary in (imported, ManagedWorkspaceCheckpoint._capture(conversation("B"), workspace)):
+        with pytest.raises(ValueError, match="trusted.*checkpoint"):
+            managed.validate_resume(ordinary)
+    granted = _ManagedWorkspaceSource(
+        gateway(None),
+        backend_id="fixture",
+        authorized_payload={"id": "B"},
+        authorized_checkpoint=imported,
+    )
+    assert granted.validate_resume(imported) == imported
+    other = ManagedWorkspaceCheckpoint._capture(conversation("A"), workspace)
+    with pytest.raises(ValueError, match="trusted.*checkpoint"):
+        granted.validate_resume(other)
+    with pytest.raises(ValueError, match="trusted.*checkpoint"):
+        granted.validate_resume(_capture_retired_workspace(conversation("A"), workspace))
+    wrong_workspace = _ManagedWorkspaceSource(
+        gateway(None),
+        backend_id="fixture",
+        authorized_payload={"id": "other"},
+        authorized_checkpoint=imported,
+    )
+    with pytest.raises(ValueError, match="current authorized"):
+        wrong_workspace.validate_resume(captured)
+    assert "_capture_provenance" not in repr(captured)
+    assert set(asdict(captured)) == {"conversation_json", "workspace_json", "association"}
+    assert set(json.loads(captured.to_json())) == {
+        "format",
+        "conversation",
+        "workspace",
+        "association",
+    }
+    assert "conversation" not in repr(granted)
+
+
+async def test_public_opening_denies_serialized_pair_before_any_acquisition():
+    from _agents_codex._managed_workspace import _ManagedWorkspaceSource
+
+    events = []
+
+    @asynccontextmanager
+    async def acquire():
+        events.append("acquire")
+        yield Environment(url="wss://fixture.invalid", cwd="/workspace")
+
+    workspace = '{"backend_id":"fixture","provider_state":{"id":"B"}}'
+    pair = ManagedWorkspaceCheckpoint.from_json(
+        ManagedWorkspaceCheckpoint._capture(conversation("A"), workspace).to_json()
+    )
+    managed = _ManagedWorkspaceSource(
+        acquire(), backend_id="fixture", authorized_payload={"id": "B"}
+    )
+    with pytest.raises(ValueError, match="trusted.*checkpoint"):
+        async with Agent(instructions="").session(state=pair, environment=managed):
+            pytest.fail("Untrusted pair reached native opening")
+    assert events == []
+
+
+async def test_public_source_captures_trusted_checkpoint_without_serializing_during_validation(
+    tmp_path,
+):
+    (tmp_path / "value").write_text("B")
+    client = SnapshotClient([], tmp_path)
+    live = await client.create(
+        manifest=Manifest(root=str(tmp_path)),
+        options=Options(),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "archives"),
+    )
+    payload = client.serialize_session_state(live.state)
+    workspace = json.dumps(
+        {"backend_id": client.backend_id, "provider_state": payload},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    pair = ManagedWorkspaceCheckpoint._capture(conversation("B"), workspace)
+    managed = sandbox_environment(
+        client,
+        manifest=Manifest(root=str(tmp_path)),
+        options=Options(),
+        connect=gateway,
+        managed_workspace=True,
+        authorized_resume_state=live.state,
+        authorized_resume_checkpoint=pair,
+    )
+    before = list(client.events)
+    imported = ManagedWorkspaceCheckpoint.from_json(pair.to_json())
+    assert managed.validate_resume(imported) == imported
+    assert client.events == before
 
 
 class SnapshotClient(Client):
@@ -114,7 +236,7 @@ async def gateway(selected):
     yield Environment(url="wss://executor.invalid", cwd=str(selected.state.manifest.root), tools=[])
 
 
-def source(client, *, state=None):
+def source(client, *, state=None, expected=None):
     return sandbox_environment(
         client,
         manifest=Manifest(root=str(client.root)),
@@ -122,7 +244,7 @@ def source(client, *, state=None):
         connect=getattr(client, "gateway", gateway),
         managed_workspace=True,
         **(
-            {"authorized_resume_state": state}
+            {"authorized_resume_state": state, "authorized_resume_checkpoint": expected}
             if state is not None
             else {"snapshot": LocalSnapshotSpec(base_path=client.root / "archives")}
         ),
@@ -205,8 +327,9 @@ async def test_native_pair_a_survives_resumed_workspace_b(responses, native_mana
     authorized_a = client.saved_state.model_copy(deep=True)
     original_path = authorized_a.snapshot._path()
     original_bytes = original_path.read_bytes()
+    decoded_a = ManagedWorkspaceCheckpoint.from_json(pair_a.to_json())
     async with agent.session(
-        state=pair_a, environment=source(client, state=authorized_a)
+        state=decoded_a, environment=source(client, state=authorized_a, expected=pair_a)
     ) as native:
         assert (root / "value").read_text() == "A"
         (root / "value").write_text("B")

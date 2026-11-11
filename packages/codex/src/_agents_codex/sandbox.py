@@ -139,6 +139,7 @@ def sandbox_environment(
     concurrency_limits: SandboxConcurrencyLimits | None = None,
     archive_limits: SandboxArchiveLimits | None = None,
     managed_workspace: bool = False,
+    authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None = None,
 ) -> AbstractAsyncContextManager[Environment[_ContextT]]:
     """Own a provider-selected sandbox and its native gateway for one native Session.
 
@@ -161,6 +162,11 @@ def sandbox_environment(
     Provider reuse checks can require a fresh sandbox when current network restrictions differ.
     Mappings are not accepted as manifests. Validate untrusted data before
     constructing a Manifest; construction alone does not authorize its contents.
+    An authorized_resume_checkpoint has been granting the exact conversation and
+    workspace pair after application authentication of externally stored bytes.
+    Passing an untrusted submitted pair as its own authorization has been defeating
+    this boundary. SDK-retired in-memory pairs have been retaining provenance;
+    deserialization has been requiring this explicit trusted whole-pair grant.
     """
     try:
         captured_options = deepcopy(
@@ -186,6 +192,11 @@ def sandbox_environment(
     if managed_workspace and snapshot is None and authorized_resume_state is None:
         snapshot = resolve_default_local_snapshot_spec()
     managed_source: _ManagedWorkspaceSource | None = None
+    if authorized_resume_checkpoint is not None:
+        if not isinstance(authorized_resume_checkpoint, ManagedWorkspaceCheckpoint):
+            raise TypeError("authorized_resume_checkpoint must be a ManagedWorkspaceCheckpoint")
+        if not managed_workspace or authorized_resume_state is None:
+            raise ValueError("Trusted checkpoint authorization requires managed provider resume")
     original_authorized_state = authorized_resume_state
     authorized_payload = None
     captured_manifest = _manifest(manifest)
@@ -303,6 +314,7 @@ def sandbox_environment(
             source_manager,
             backend_id=client.backend_id,
             authorized_payload=authorized_payload,
+            authorized_checkpoint=authorized_resume_checkpoint,
         )
         return managed_source
     return source_manager

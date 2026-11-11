@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "69a949e1319f08a06581df5ab606125ef74c2ee3",
+  "baseline_commit": "b3f3ccc40ae668912c4379839ab32ba9338b5de5",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1094,7 +1094,7 @@
         "declarations": [
           "_OptionsT = TypeVar('_OptionsT')",
           "_ContextT = TypeVar('_ContextT')",
-          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]], snapshot: SnapshotSpec | SnapshotBase | None=None, session: SandboxSession | None=None, authorized_resume_state: SandboxSessionState | None=None, concurrency_limits: SandboxConcurrencyLimits | None=None, archive_limits: SandboxArchiveLimits | None=None, managed_workspace: bool=False) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
+          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]], snapshot: SnapshotSpec | SnapshotBase | None=None, session: SandboxSession | None=None, authorized_resume_state: SandboxSessionState | None=None, concurrency_limits: SandboxConcurrencyLimits | None=None, archive_limits: SandboxArchiveLimits | None=None, managed_workspace: bool=False, authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None=None) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
           "@redact_mount_error_data_sync\ndef render_storage_layout(manifest: Manifest) -> str:\n    pass"
         ],
         "exports": {
@@ -1156,7 +1156,7 @@
           "from _agents_shared.sandbox_session_state import SandboxSessionState",
           "from _agents_shared.snapshot import LocalSnapshot, LocalSnapshotSpec, NoopSnapshot, NoopSnapshotSpec, RemoteSnapshot, RemoteSnapshotSpec, SnapshotBase, SnapshotSpec",
           "from _agents_shared.token_truncation import TruncationPolicy, truncate_text",
-          "from _agents_shared.snapshot_defaults import cleanup_stale_default_local_snapshots as cleanup_stale_default_local_snapshots, default_local_snapshot_base_dir as default_local_snapshot_base_dir, resolve_default_local_snapshot_spec",
+          "from _agents_shared.snapshot_defaults import cleanup_stale_default_local_snapshots as cleanup_stale_default_local_snapshots, default_local_snapshot_base_dir as default_local_snapshot_base_dir, resolve_default_local_snapshot_spec as resolve_default_local_snapshot_spec",
           "from .classic.sandbox.session.sandbox_session import SandboxSession",
           "from .executor import Environment"
         ],
@@ -1943,12 +1943,12 @@
       },
       "_agents_codex._managed_workspace": {
         "declarations": [
-          "@dataclass(frozen=True)\nclass ManagedWorkspaceCheckpoint:\n    conversation_json: str\n    workspace_json: str\n    association: str\n\n    @property\n    def conversation(self) -> SessionState:\n        pass\n\n    @property\n    def workspace(self) -> dict[str, Any]:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, source: str) -> ManagedWorkspaceCheckpoint:\n        pass"
+          "@dataclass(frozen=True)\nclass ManagedWorkspaceCheckpoint:\n    conversation_json: str\n    workspace_json: str\n    association: str\n    _capture_provenance: ClassVar[tuple[str, str, str] | None] = None\n\n    @property\n    def conversation(self) -> SessionState:\n        pass\n\n    @property\n    def workspace(self) -> dict[str, Any]:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, source: str) -> ManagedWorkspaceCheckpoint:\n        pass"
         ],
         "exports": {},
         "imports": [
           "from dataclasses import dataclass",
-          "from typing import Any",
+          "from typing import Any, ClassVar",
           "from .state import SessionState"
         ],
         "references": {

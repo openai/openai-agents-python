@@ -81,6 +81,7 @@ from ._lifecycle import (
 from ._managed_workspace import (
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
     ManagedWorkspaceCheckpoint,
+    _capture_retired_workspace,
     _ManagedWorkspaceSource,
 )
 from ._mcp_errors import _protect_mcp_methods
@@ -3229,10 +3230,9 @@ class Session(Generic[ContextT, OutputT]):
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
         managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
         if isinstance(state, ManagedWorkspaceCheckpoint):
-            captured_pair = ManagedWorkspaceCheckpoint.from_json(state.to_json())
             if managed_source is None:
                 raise ValueError("Managed checkpoint requires a current managed sandbox source")
-            managed_source.validate_resume(captured_pair)
+            captured_pair = managed_source.validate_resume(state)
             state = captured_pair.conversation
         lease = None
         pending_environment: _EnvironmentLease | None = None
@@ -13463,7 +13463,7 @@ class Session(Generic[ContextT, OutputT]):
             await self.aclose()
             if managed.receipt is None:
                 raise NativeError("Managed provider retirement omitted its workspace receipt")
-            return ManagedWorkspaceCheckpoint._capture(state.to_json(), managed.receipt)
+            return _capture_retired_workspace(state.to_json(), managed.receipt)
 
         managed.capture_task = asyncio.create_task(retire())
         return await asyncio.shield(managed.capture_task)
