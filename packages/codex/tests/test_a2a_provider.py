@@ -7,6 +7,7 @@ import traceback
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
+import anyio
 import pytest
 
 pytest.importorskip("a2a")
@@ -194,18 +195,26 @@ async def test_cancelled_provider_releases_credentials_from_diagnostics(stage):
         assert "alice-token" not in "".join(traceback.StackSummary.from_list(frames).format())
 
 
-async def test_creation_shares_one_deadline_across_discovery_and_rpc(tmp_path):
+async def test_creation_shares_one_deadline_across_discovery_and_rpc(tmp_path, monkeypatch):
     calls = []
+    deadlines = []
+    release_rpc = asyncio.Event()
+    handle_request = _BoundedTransport.handle_async_request
+
+    async def record_deadline(transport, request):
+        deadlines.append((request.method, anyio.current_effective_deadline()))
+        return await handle_request(transport, request)
+
+    monkeypatch.setattr(_BoundedTransport, "handle_async_request", record_deadline)
 
     def app(url):
         async def discovery(request):
-            await asyncio.sleep(0.35)
             return JSONResponse(MessageToDict(card(url)))
 
         async def rpc(request):
             body = await request.json()
             calls.append(body["method"])
-            await asyncio.sleep(0.35)
+            await release_rpc.wait()
             task = {
                 "id": "task",
                 "contextId": "context",
@@ -217,12 +226,18 @@ async def test_creation_shares_one_deadline_across_discovery_and_rpc(tmp_path):
 
     async with serve(app) as url:
         provider = make_provider(
-            endpoint(url), tmp_path / "journal.db", limits=A2ALimits(timeout=0.55)
+            endpoint(url), tmp_path / "journal.db", limits=A2ALimits(timeout=1.5)
         )
         current = claim(provider)
-        assert (await provider.start(current, Query(text="create"))).status == "unknown"
-        assert (await provider.start(current, Query(text="retry"))).status == "unknown"
+        try:
+            assert (await provider.start(current, Query(text="create"))).status == "unknown"
+            assert (await provider.start(current, Query(text="retry"))).status == "unknown"
+        finally:
+            release_rpc.set()
     assert calls == ["SendMessage"]
+    (discovery_method, discovery_deadline), (rpc_method, rpc_deadline), *_ = deadlines
+    assert (discovery_method, rpc_method) == ("GET", "POST")
+    assert discovery_deadline == rpc_deadline < float("inf")
 
 
 async def test_known_receipt_observes_without_another_creation(tmp_path, responses):

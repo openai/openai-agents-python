@@ -3785,13 +3785,18 @@ classic-voice = [
     { name = "urllib3" },
     { name = "websockets" },
 ]
-
-tracing = [
-    { name = "httpx2", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "httpx2", version = "2.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+dapr = [
+    { name = "aiohttp" },
+    { name = "dapr" },
+    { name = "grpcio" },
+    { name = "protobuf" },
 ]
 decisions = [
     { name = "openai" },
+]
+tracing = [
+    { name = "httpx2", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "httpx2", version = "2.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 voice = [
     { name = "certifi" },
@@ -3853,10 +3858,10 @@ requires-dist = [
     { name = "a2a-sdk", marker = "extra == 'a2a'", specifier = "==1.3.0" },
     { name = "aiohttp", marker = "extra == 'classic-blaxel'", specifier = ">=3.14.3,<4" },
     { name = "aiohttp", marker = "extra == 'classic-cloudflare'", specifier = ">=3.14.3,<4" },
-    { name = "aiohttp", marker = "extra == 'classic-dapr'", specifier = ">=3.14.3,<4" },
     { name = "aiohttp", marker = "extra == 'classic-daytona'", specifier = ">=3.14.3,<4" },
     { name = "aiohttp", marker = "extra == 'classic-litellm'", specifier = ">=3.14.3,<4" },
     { name = "aiohttp", marker = "extra == 'classic-modal'", specifier = ">=3.14.3,<4" },
+    { name = "aiohttp", marker = "extra == 'dapr'", specifier = ">=3.14.3,<4" },
     { name = "any-llm-sdk", marker = "python_full_version >= '3.11' and extra == 'classic-any-llm'", specifier = ">=1.11.0,<2" },
     { name = "asyncpg", marker = "extra == 'classic-sqlalchemy'", specifier = ">=0.29.0" },
     { name = "blaxel", marker = "extra == 'classic-blaxel'", specifier = ">=0.2.51" },
@@ -3865,7 +3870,7 @@ requires-dist = [
     { name = "cbor2", marker = "extra == 'classic-vercel'", specifier = ">=5.9.0" },
     { name = "certifi", marker = "extra == 'classic'", specifier = ">=2026.10.19" },
     { name = "cryptography", marker = "extra == 'classic-encrypt'", specifier = ">=45.0,<51" },
-    { name = "dapr", marker = "extra == 'classic-dapr'", specifier = ">=1.16.0" },
+    { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
     { name = "daytona", marker = "extra == 'classic-daytona'", specifier = ">=0.155.0" },
     { name = "docker", marker = "extra == 'classic-docker'", specifier = ">=6.1" },
     { name = "e2b", marker = "extra == 'classic-e2b'", specifier = "==2.31.0" },
@@ -3873,7 +3878,7 @@ requires-dist = [
     { name = "filelock", marker = "extra == 'classic-litellm'", specifier = ">=3.20.3" },
     { name = "graphviz", marker = "extra == 'classic-viz'", specifier = ">=0.17" },
     { name = "griffelib", marker = "extra == 'classic'", specifier = ">=2,<3" },
-    { name = "grpcio", marker = "extra == 'classic-dapr'", specifier = ">=1.60.0" },
+    { name = "grpcio", marker = "extra == 'dapr'", specifier = ">=1.60.0" },
     { name = "h2", marker = "extra == 'classic-e2b'", specifier = ">=4.4.1" },
     { name = "h2", marker = "extra == 'classic-modal'", specifier = ">=4.4.1" },
     { name = "httpx2", marker = "extra == 'classic'", specifier = ">=2.12.0" },
@@ -3889,7 +3894,6 @@ requires-dist = [
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-any-llm'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-blaxel'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-cloudflare'" },
-    { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-dapr'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-daytona'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-docker'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-e2b'" },
@@ -3906,11 +3910,12 @@ requires-dist = [
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-viz'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-voice'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'voice'" },
-    { name = "protobuf", marker = "extra == 'classic-dapr'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
+    { name = "openai-agents", extras = ["classic", "dapr"], marker = "extra == 'classic-dapr'" },
     { name = "protobuf", marker = "extra == 'classic-daytona'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
     { name = "protobuf", marker = "extra == 'classic-e2b'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
     { name = "protobuf", marker = "extra == 'classic-modal'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
     { name = "protobuf", marker = "extra == 'classic-temporal'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
+    { name = "protobuf", marker = "extra == 'dapr'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
     { name = "pydantic", specifier = ">=2.12.2,<3" },
     { name = "pydantic", marker = "extra == 'classic'", specifier = ">=2.12.2,<3" },
     { name = "pygments", marker = "python_full_version >= '3.11' and extra == 'classic-any-llm'", specifier = ">=2.20.0" },
@@ -3936,7 +3941,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'classic-voice'", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
-provides-extras = ["tracing", "a2a", "decisions", "voice", "classic", "classic-voice", "classic-viz", "classic-litellm", "classic-any-llm", "classic-realtime", "classic-sqlalchemy", "classic-encrypt", "classic-redis", "classic-dapr", "classic-mongodb", "classic-docker", "classic-blaxel", "classic-daytona", "classic-cloudflare", "classic-e2b", "classic-modal", "classic-vercel", "classic-s3", "classic-temporal"]
+provides-extras = ["dapr", "tracing", "a2a", "decisions", "voice", "classic", "classic-voice", "classic-viz", "classic-litellm", "classic-any-llm", "classic-realtime", "classic-sqlalchemy", "classic-encrypt", "classic-redis", "classic-dapr", "classic-mongodb", "classic-docker", "classic-blaxel", "classic-daytona", "classic-cloudflare", "classic-e2b", "classic-modal", "classic-vercel", "classic-s3", "classic-temporal"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -6,7 +6,11 @@ import pytest
 
 import _agents_codex.realtime as realtime
 from agents import Agent
-from agents.realtime import RealtimeConfig, RealtimeConversationItemObserved
+from agents.realtime import (
+    RealtimeConfig,
+    RealtimeConversationItemObserved,
+    RealtimeProviderRequestError,
+)
 from tests._asyncio import timeout
 from tests.test_native_realtime_adapter import SocketAdapter, adapter_peer as adapter_peer, provider
 
@@ -80,9 +84,12 @@ async def test_native_adapter_preserves_bounded_generic_frames(adapter_peer, kin
         assert adapter_peer.socket is not None
         await adapter_peer.socket.send_json(frame_for(kind, 2))
         if kind == "error":
-            with pytest.raises(RuntimeError, match="fixture_failure"):
-                async for _ in voice.events():
-                    pass
+            async for event in voice.events():
+                if isinstance(event, RealtimeProviderRequestError):
+                    assert event == RealtimeProviderRequestError("fixture_failure", None)
+                    break
+            else:
+                pytest.fail("Bounded generic error was not observed")
         else:
             async for event in voice.events():
                 if isinstance(event, RealtimeConversationItemObserved):
