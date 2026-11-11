@@ -12,7 +12,7 @@ from collections.abc import (
     Mapping as Mapping,
     Sequence as Sequence,
 )
-from dataclasses import dataclass as dataclass, field as field
+from dataclasses import dataclass as dataclass, field as field, fields as fields
 from functools import partial as partial
 from types import UnionType as UnionType
 from typing import (
@@ -226,6 +226,11 @@ class ToolContext(Generic[ContextT_co]):
         )
 
 
+_UNSET_ERROR_FUNCTION = cast(
+    Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None, object()
+)
+
+
 @dataclass(frozen=True, kw_only=True)
 class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     """A function that runs a registered callback or takes its result from the app.
@@ -281,6 +286,58 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
         default=None, repr=False
     )
+    _allow_run_error_formatter: bool = field(default=True, repr=False)
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        input_type: type[InputT],
+        output_type: type[ResultT],
+        _bind: BinderT_co | None = None,
+        _requires_context: bool = False,
+        callback_timeout: float | None = None,
+        before: Callable[
+            [ToolContext[Any]],
+            Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments],
+        ]
+        | None = None,
+        after: Callable[
+            [ToolContext[Any], ToolOutput],
+            ToolOutput
+            | BackgroundResult[ToolOutput]
+            | Awaitable[ToolOutput | BackgroundResult[ToolOutput]],
+        ]
+        | None = None,
+        defer_loading: bool = False,
+        timeout_behavior: ToolTimeoutBehavior = "raise_exception",
+        timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
+        | None = None,
+        input_error_function: Callable[
+            [ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]
+        ]
+        | None = None,
+        namespace: str | None = None,
+        namespace_description: str | None = None,
+        finish_turn: bool = False,
+        needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+        run_before_approval: bool = False,
+        is_enabled: bool
+        | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+        error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
+        | None = _UNSET_ERROR_FUNCTION,
+        _allow_run_error_formatter: bool | None = None,
+    ) -> None:
+        # replace() carries inheritance unchanged, including same-value None copies.
+        if _allow_run_error_formatter is None:
+            _allow_run_error_formatter = error_function is not None
+        if error_function is _UNSET_ERROR_FUNCTION:
+            error_function = None
+        values = locals()
+        for declaration in fields(self):
+            object.__setattr__(self, declaration.name, values[declaration.name])
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if self.error_function is not None and not callable(self.error_function):
@@ -789,7 +846,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[Any] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
-    error_function: _BodyErrorFormatter[Any] | None = None,
+    error_function: _BodyErrorFormatter[Any] | None = _UNSET_ERROR_FUNCTION,
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -905,6 +962,7 @@ def function_tool(
                 timeout_error_function=declaration.timeout_error_function,
                 input_error_function=declaration.input_error_function,
                 error_function=declaration.error_function,
+                _allow_run_error_formatter=declaration._allow_run_error_formatter,
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,

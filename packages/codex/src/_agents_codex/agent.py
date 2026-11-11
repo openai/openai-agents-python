@@ -60,6 +60,7 @@ from ._lifecycle import (
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _MAX_AUDIO_INPUT_BYTES, _check_audio_json, _contains_audio
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._tool_errors import ToolErrorFormatter
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete
@@ -1275,6 +1276,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
@@ -1303,6 +1305,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
@@ -1331,6 +1334,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
@@ -1359,6 +1363,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
@@ -1507,6 +1512,7 @@ class Agent(Generic[ContextT, OutputT]):
                 parent_trace=parent_trace,
                 trace_options=trace_options,
                 on_interaction=on_interaction,
+                tool_error_formatter=tool_error_formatter,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
                 input_guardrails=input_guardrails,
@@ -1540,6 +1546,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
@@ -1550,6 +1557,8 @@ class Agent(Generic[ContextT, OutputT]):
         _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT] | Completed[OutputT]]:
+        if tool_error_formatter is not None and not callable(tool_error_formatter):
+            raise TypeError("tool_error_formatter must be callable or None")
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
         from .session import Completed, Session
@@ -1579,6 +1588,7 @@ class Agent(Generic[ContextT, OutputT]):
                 project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
+                tool_error_formatter=tool_error_formatter,
                 observation_retention=observation_retention,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
@@ -1631,6 +1641,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1658,6 +1669,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1685,6 +1697,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1711,6 +1724,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1826,6 +1840,8 @@ class Agent(Generic[ContextT, OutputT]):
                     )
                     if tools is None and before_step is None and state is None:
                         _check_tools(self.tools)
+            if tool_error_formatter is not None and not callable(tool_error_formatter):
+                raise TypeError("tool_error_formatter must be callable or None")
             if on_interaction is not None and not callable(on_interaction):
                 raise TypeError("on_interaction must be callable")
             if not isinstance(return_state, bool):
@@ -1903,6 +1919,8 @@ class Agent(Generic[ContextT, OutputT]):
             ] = self.session
             if initial_messages is not None:
                 options["initial_messages"] = initial_messages
+            if tool_error_formatter is not None:
+                options["tool_error_formatter"] = tool_error_formatter
             if on_interaction is not None:
                 options["on_interaction"] = on_interaction
             if parent_trace is not None:
@@ -2125,6 +2143,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -2152,6 +2171,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -2179,6 +2199,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -2205,6 +2226,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -2258,6 +2280,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["initial_messages"] = initial_messages
                 if return_state is not False:
                     options["return_state"] = return_state
+                if tool_error_formatter is not None:
+                    options["tool_error_formatter"] = tool_error_formatter
                 if on_interaction is not None:
                     options["on_interaction"] = on_interaction
                 if provider is not None:
