@@ -1,0 +1,489 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1122,6 +1122,11 @@
+         self.session.sdk_history_snapshot(limit).await
+     }
+ 
++    #[doc(hidden)]
++    pub async fn sdk_replay_history_snapshot(&self) -> CodexResult<(String, usize, Vec<String>)> {
++        self.session.sdk_replay_history_snapshot().await
++    }
++
+     /// Replace a canonical history suffix under the SDK's exclusive idle permit.
+     #[doc(hidden)]
+     pub async fn sdk_replace_history(
+@@ -1290,7 +1295,11 @@
+         generation: &str,
+         receipt: &codex_extension_api::AgentProfileReceipt,
+     ) {
+-        crate::realtime_conversation::release_voice_agent_source(&self.session, generation, receipt);
++        crate::realtime_conversation::release_voice_agent_source(
++            &self.session,
++            generation,
++            receipt,
++        );
+     }
+ 
+     pub fn release_realtime_agent_profile_sources(&self, generation: &str) {
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -274,11 +274,39 @@
+         &self,
+         limit: Option<usize>,
+     ) -> codex_protocol::error::Result<(String, usize, Vec<String>)> {
+-        if let Some(snapshot) = self.state.lock().await.sdk_originals.snapshot(limit) {
+-            return Ok(snapshot);
++        self.sdk_history_snapshot_inner(limit, None).await
++    }
++
++    pub(crate) async fn sdk_replay_history_snapshot(
++        &self,
++    ) -> codex_protocol::error::Result<(String, usize, Vec<String>)> {
++        const MAX_RECORDS: usize = 4096;
++        const MAX_BYTES: usize = 8 * 1024 * 1024;
++        self.sdk_history_snapshot_inner(Some(MAX_RECORDS), Some(MAX_BYTES))
++            .await
++    }
++
++    async fn sdk_history_snapshot_inner(
++        &self,
++        limit: Option<usize>,
++        max_bytes: Option<usize>,
++    ) -> codex_protocol::error::Result<(String, usize, Vec<String>)> {
++        use super::original_history_read::REPLAY_HISTORY_LIMIT_ERROR;
++        use super::original_history_read::SnapshotReader;
++        use codex_protocol::error::CodexErr;
++        {
++            let state = self.state.lock().await;
++            let originals = &state.sdk_originals;
++            if max_bytes.is_some() && originals.len().zip(limit).is_some_and(|(n, cap)| n > cap) {
++                return Err(CodexErr::InvalidRequest(REPLAY_HISTORY_LIMIT_ERROR.into()));
++            }
++            if max_bytes.is_none_or(|cap| originals.retained_bytes() <= cap)
++                && let Some(snapshot) = originals.snapshot(limit)
++            {
++                return Ok(snapshot);
++            }
+         }
+         if let Some(limit) = limit {
+-            use codex_protocol::error::CodexErr;
+             let unavailable =
+                 || CodexErr::InvalidRequest("Canonical original history is unavailable".into());
+             let (token, total, policy) = {
+@@ -296,12 +324,21 @@
+             };
+             let live = self.live_thread().ok_or_else(unavailable)?;
+             live.flush().await.map_err(|_| unavailable())?;
+-            let snapshot =
+-                live.read_original_history(Box::new(
+-                    super::original_history_read::SnapshotReader { limit, policy },
+-                ))
++            let snapshot = live
++                .read_original_history(Box::new(SnapshotReader {
++                    limit,
++                    policy,
++                    max_bytes,
++                }))
+                 .await
+-                .map_err(|_| unavailable())?;
++                .map_err(|error| match error {
++                    codex_thread_store::ThreadStoreError::InvalidRequest { message }
++                        if max_bytes.is_some() && message == REPLAY_HISTORY_LIMIT_ERROR =>
++                    {
++                        CodexErr::InvalidRequest(message)
++                    }
++                    _ => unavailable(),
++                })?;
+             let state = self.state.lock().await;
+             if token
+                 != (
+diff --git a/codex-rs/core/src/session/original_history_read.rs b/codex-rs/core/src/session/original_history_read.rs
+--- a/codex-rs/core/src/session/original_history_read.rs
++++ b/codex-rs/core/src/session/original_history_read.rs
+@@ -115,8 +115,38 @@
+ pub(super) struct SnapshotReader {
+     pub(super) limit: usize,
+     pub(super) policy: TruncationPolicy,
+-}
++    pub(super) max_bytes: Option<usize>,
++}
++pub(super) const REPLAY_HISTORY_LIMIT_ERROR: &str =
++    "Run completed, but its one-shot conversation history exceeds the result size limit";
++
++fn snapshot_error(error: io::Error) -> ThreadStoreError {
++    if error.kind() == io::ErrorKind::FileTooLarge {
++        return ThreadStoreError::InvalidRequest {
++            message: REPLAY_HISTORY_LIMIT_ERROR.into(),
++        };
++    }
++    ThreadStoreError::Internal {
++        message: "original history stream unavailable".into(),
++    }
++}
++
+ impl SnapshotReader {
++    fn fold(&self, total: usize) -> io::Result<SdkOriginalSnapshotFold> {
++        if self.max_bytes.is_some() && total > self.limit {
++            return Err(io::ErrorKind::FileTooLarge.into());
++        }
++        Ok(SdkOriginalSnapshotFold::new(total, self.limit).with_byte_limit(self.max_bytes))
++    }
++
++    fn check_projection_size(&self, row: &ResponseItemEnvelope) -> io::Result<()> {
++        if let Some(max_bytes) = self.max_bytes {
++            serde_json::to_writer(LimitedWriter(max_bytes), row)
++                .map_err(|error| error.io_error_kind().map_or_else(invalid, io::Error::from))?;
++        }
++        Ok(())
++    }
++
+     fn native_projection(&self, row: &ResponseItemEnvelope) -> Option<ResponseItemEnvelope> {
+         let mut projected = ContextManager::new();
+         let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
+@@ -187,7 +217,11 @@
+         fold: &mut SdkOriginalSnapshotFold,
+     ) -> io::Result<()> {
+         fold.begin_item().map_err(|_| invalid())?;
+-        source.original(entry.original, self, fold)?;
++        let read = source.original(entry.original, self, fold);
++        if fold.byte_limit_exceeded() {
++            return Err(io::ErrorKind::FileTooLarge.into());
++        }
++        read?;
+         fold.end_item().map_err(|_| invalid())
+     }
+     fn read(&self, items: &[RolloutItem]) -> io::Result<OriginalHistorySnapshot> {
+@@ -212,7 +246,7 @@
+         source.rewind()?;
+         let mut seen_generation = 0usize;
+         if !has_rollback {
+-            let mut fold = SdkOriginalSnapshotFold::new(total, self.limit);
++            let mut fold = self.fold(total)?;
+             while let Some(action) = source.next(self)? {
+                 match action {
+                     Action::Reset => seen_generation += 1,
+@@ -244,7 +278,7 @@
+         if seen_generation != generation {
+             return Err(invalid());
+         }
+-        let mut fold = SdkOriginalSnapshotFold::new(positions.len, self.limit);
++        let mut fold = self.fold(positions.len)?;
+         for index in 0..positions.len {
+             self.fold_original(source, positions.get(index)?, &mut fold)?;
+         }
+@@ -537,8 +571,16 @@
+         reader: &SnapshotReader,
+     ) -> io::Result<Option<ResponseItemEnvelope>> {
+         Ok(match reader.row(self.items, position)? {
+-            Row::Native(row) => reader.native_projection(row),
+-            Row::Original(row) => row.projection.clone(),
++            Row::Native(row) => {
++                reader.check_projection_size(row)?;
++                reader.native_projection(row)
++            }
++            Row::Original(row) => {
++                if let Some(projection) = &row.projection {
++                    reader.check_projection_size(projection)?;
++                }
++                row.projection.clone()
++            }
+         })
+     }
+     fn original(
+@@ -570,6 +612,21 @@
+     Native(&'a ResponseItemEnvelope),
+     Original(&'a codex_history::sdk_originals::SdkOriginalItem),
+ }
++
++struct LimitedWriter(usize);
++impl Write for LimitedWriter {
++    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++        self.0 = self
++            .0
++            .checked_sub(bytes.len())
++            .ok_or(io::ErrorKind::FileTooLarge)?;
++        Ok(bytes.len())
++    }
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
+ struct FoldWriter<'a>(&'a mut SdkOriginalSnapshotFold);
+ impl Write for FoldWriter<'_> {
+     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+@@ -582,18 +639,14 @@
+ }
+ impl OriginalHistoryReader for SnapshotReader {
+     fn read_items(&mut self, items: &[RolloutItem]) -> ThreadStoreResult<OriginalHistorySnapshot> {
+-        self.read(items).map_err(|_| ThreadStoreError::Internal {
+-            message: "original history stream unavailable".to_string(),
+-        })
++        self.read(items).map_err(snapshot_error)
+     }
+     fn read_segments(
+         &mut self,
+         _segments: &[OriginalHistorySegment],
+     ) -> ThreadStoreResult<OriginalHistorySnapshot> {
+         self.read_source(&mut stream::LocalSource::new(_segments))
+-            .map_err(|_| ThreadStoreError::Internal {
+-                message: "original history stream unavailable".into(),
+-            })
++            .map_err(snapshot_error)
+     }
+ }
+ 
+@@ -603,6 +656,37 @@
+     use codex_history::sdk_originals::{SdkOriginalHistory, SdkOriginalItem, input_projection};
+     use codex_protocol::protocol::ThreadRolledBackEvent;
+     use serde_json::json;
++
++    #[test]
++    fn replay_snapshot_requires_all_records_to_fit() {
++        let originals = [
++            json!({"type": "audit", "value": "first"}),
++            json!({"type": "audit", "value": "second"}),
++        ];
++        let records = [checkpoint(&originals)];
++        let expected: Vec<_> = originals.iter().map(serde_json::Value::to_string).collect();
++        let bytes = expected.iter().map(String::len).sum::<usize>();
++
++        let mut reader = SnapshotReader {
++            limit: 2,
++            policy: TruncationPolicy::Bytes(4096),
++            max_bytes: Some(bytes),
++        };
++        assert_eq!(reader.read_items(&records).unwrap().2, expected);
++
++        for (limit, max_bytes) in [(2, bytes - 1), (1, bytes)] {
++            reader.limit = limit;
++            reader.max_bytes = Some(max_bytes);
++            assert!(matches!(
++                reader.read_items(&records),
++                Err(ThreadStoreError::InvalidRequest { message })
++                    if message == REPLAY_HISTORY_LIMIT_ERROR
++            ));
++        }
++
++        reader.max_bytes = None;
++        assert_eq!(reader.read_items(&records).unwrap().2, expected[1..]);
++    }
+ 
+     fn checkpoint(values: &[serde_json::Value]) -> RolloutItem {
+         let mut originals = SdkOriginalHistory::default();
+@@ -643,6 +727,7 @@
+             let reader = SnapshotReader {
+                 limit,
+                 policy: TruncationPolicy::Bytes(4096),
++                max_bytes: None,
+             };
+             assert_eq!(
+                 reader.read(&records).unwrap(),
+@@ -670,6 +755,7 @@
+                 let reader = SnapshotReader {
+                     limit,
+                     policy: TruncationPolicy::Bytes(4096),
++                    max_bytes: None,
+                 };
+                 assert_eq!(
+                     reader.read(&records).unwrap(),
+@@ -733,6 +819,7 @@
+         let reader = SnapshotReader {
+             limit: 1,
+             policy: TruncationPolicy::Bytes(4096),
++            max_bytes: None,
+         };
+         let expected = full(&reader, &records).snapshot(Some(1));
+         live.append_items(&records).await.unwrap();
+@@ -785,6 +872,7 @@
+             let mut reader = SnapshotReader {
+                 limit,
+                 policy: TruncationPolicy::Bytes(4096),
++                max_bytes: None,
+             };
+             assert_eq!(
+                 reader.read_segments(&segments).unwrap(),
+@@ -808,6 +896,7 @@
+             let reader = SnapshotReader {
+                 limit: 1,
+                 policy: TruncationPolicy::Bytes(4096),
++                max_bytes: None,
+             };
+             assert_eq!(
+                 reader.read(&records).unwrap(),
+@@ -882,6 +971,7 @@
+         let mut reader = SnapshotReader {
+             limit: 1,
+             policy: TruncationPolicy::Bytes(4096),
++            max_bytes: None,
+         };
+         let snapshot = reader.read_segments(&segments).unwrap();
+         let bounded_peak = peak_rss();
+diff --git a/codex-rs/core/src/session/original_history_stream.rs b/codex-rs/core/src/session/original_history_stream.rs
+--- a/codex-rs/core/src/session/original_history_stream.rs
++++ b/codex-rs/core/src/session/original_history_stream.rs
+@@ -132,14 +132,28 @@
+             end: input.line_end()?,
+         })
+     }
+-    fn native(&mut self, position: Position) -> io::Result<ResponseItemEnvelope> {
++    fn native(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++    ) -> io::Result<ResponseItemEnvelope> {
+         let segment = usize::try_from(position.record).map_err(|_| invalid())?;
+         let frame = self.frame(segment, position.item)?;
+         if frame.kind.as_deref() != Some("response_item") {
+             return Err(invalid());
+         }
++        let payload_span = frame.payload.ok_or_else(invalid)?;
++        if let Some(max_bytes) = reader.max_bytes {
++            let span_len = |span: Span| span.end.checked_sub(span.start).ok_or_else(invalid);
++            let decode_bytes = span_len(payload_span)?
++                .checked_add(frame.metadata.map(span_len).transpose()?.unwrap_or(0))
++                .ok_or(io::ErrorKind::FileTooLarge)?;
++            if decode_bytes > max_bytes as u64 {
++                return Err(io::ErrorKind::FileTooLarge.into());
++            }
++        }
+         let payload = self
+-            .cursor(segment, frame.payload.ok_or_else(invalid)?.start)?
++            .cursor(segment, payload_span.start)?
+             .value::<serde_json::Value>()?;
+         let mut value = serde_json::Map::new();
+         value.insert("type".into(), "response_item".into());
+@@ -158,10 +172,20 @@
+             _ => Err(invalid()),
+         }
+     }
+-    fn envelope(&mut self, position: Position) -> io::Result<Option<ResponseItemEnvelope>> {
+-        let value = self
+-            .cursor(position.record as usize, position.item)?
+-            .value::<serde_json::Value>()?;
++    fn envelope(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++    ) -> io::Result<Option<ResponseItemEnvelope>> {
++        let input = self.cursor(position.record as usize, position.item)?;
++        if let Some(max) = reader.max_bytes {
++            let span = input.skip()?;
++            if span.end.checked_sub(span.start).ok_or_else(invalid)? > max as u64 {
++                return Err(io::ErrorKind::FileTooLarge.into());
++            }
++            input.seek(span.start)?;
++        }
++        let value = input.value::<serde_json::Value>()?;
+         serde_json::from_value(value).map_err(|_| invalid())
+     }
+     fn array(&mut self, segment: usize, start: u64, legacy: bool) -> io::Result<()> {
+@@ -274,7 +298,7 @@
+                         record: array.segment as u64,
+                         item: item.start,
+                     };
+-                    let row = self.envelope(position)?.ok_or_else(invalid)?;
++                    let row = self.envelope(position, reader)?.ok_or_else(invalid)?;
+                     if !crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
+                         continue;
+                     }
+@@ -347,7 +371,7 @@
+                         record: segment as u64,
+                         item: position,
+                     };
+-                    let row = self.native(position)?;
++                    let row = self.native(position, reader)?;
+                     if crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
+                         return Ok(Some(Action::Append(Entry {
+                             original: position,
+@@ -396,10 +420,10 @@
+         reader: &SnapshotReader,
+     ) -> io::Result<Option<ResponseItemEnvelope>> {
+         match position.kind {
+-            10 => Ok(reader.native_projection(&self.native(position)?)),
+-            12 => self.envelope(position),
++            10 => Ok(reader.native_projection(&self.native(position, reader)?)),
++            12 => self.envelope(position, reader),
+             13 => Ok(self
+-                .envelope(position)?
++                .envelope(position, reader)?
+                 .and_then(|row| reader.native_projection(&row))),
+             _ => Err(invalid()),
+         }
+@@ -407,18 +431,18 @@
+     fn original(
+         &mut self,
+         position: Position,
+-        _reader: &SnapshotReader,
++        reader: &SnapshotReader,
+         fold: &mut SdkOriginalSnapshotFold,
+     ) -> io::Result<()> {
+         match position.kind {
+             11 => self
+                 .cursor(position.record as usize, position.item)?
+                 .string(|bytes| fold.write_item(bytes).map_err(|_| invalid())),
+-            10 => serde_json::to_writer(FoldWriter(fold), &self.native(position)?.item)
++            10 => serde_json::to_writer(FoldWriter(fold), &self.native(position, reader)?.item)
+                 .map_err(|_| invalid()),
+             13 => serde_json::to_writer(
+                 FoldWriter(fold),
+-                &self.envelope(position)?.ok_or_else(invalid)?.item,
++                &self.envelope(position, reader)?.ok_or_else(invalid)?.item,
+             )
+             .map_err(|_| invalid()),
+             _ => Err(invalid()),
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -289,6 +289,8 @@
+     items: Vec<String>,
+     active: bool,
+     current: Option<Vec<u8>>,
++    remaining_bytes: Option<usize>,
++    byte_limit_exceeded: bool,
+ }
+ 
+ impl SdkOriginalSnapshotFold {
+@@ -301,7 +303,18 @@
+             items: Vec::new(),
+             active: false,
+             current: None,
+-        }
++            remaining_bytes: None,
++            byte_limit_exceeded: false,
++        }
++    }
++
++    pub fn with_byte_limit(mut self, limit: Option<usize>) -> Self {
++        self.remaining_bytes = limit;
++        self
++    }
++
++    pub fn byte_limit_exceeded(&self) -> bool {
++        self.byte_limit_exceeded
+     }
+ 
+     pub fn begin_item(&mut self) -> Result<(), &'static str> {
+@@ -320,10 +333,17 @@
+         if !self.active {
+             return Err("inconsistent original stream");
+         }
++        if let Some(current) = &mut self.current {
++            if let Some(remaining) = &mut self.remaining_bytes {
++                let Some(next) = remaining.checked_sub(bytes.len()) else {
++                    self.byte_limit_exceeded = true;
++                    return Err("original stream exceeds the snapshot byte limit");
++                };
++                *remaining = next;
++            }
++            current.extend_from_slice(bytes);
++        }
+         self.index.hash.update(bytes);
+-        if let Some(current) = &mut self.current {
+-            current.extend_from_slice(bytes);
+-        }
+         Ok(())
+     }
+ 
