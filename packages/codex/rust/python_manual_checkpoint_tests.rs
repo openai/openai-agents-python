@@ -109,7 +109,7 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
         // SDK sender. The SDK's successful send is deliberately before Core
         // can commit a terminal outcome.
         for _ in 0..2 {
-            let request = tools.next_request().await;
+            let request = super::managed_tests::next_callback_request(&tools).await;
             let key: PendingKey = serde_json::from_value(request["msg"].clone()).unwrap();
             if key.call == "call-B" {
                 let sender = tools.take_reply(&state.id.to_string(), &key).unwrap().unwrap();

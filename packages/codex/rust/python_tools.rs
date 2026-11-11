@@ -6997,6 +6997,25 @@ pub(crate) mod managed_tests {
         }
     }
 
+    // Model-attempt observations share this FIFO but require no callback reply.
+    pub(super) async fn next_callback_request(tools: &PythonTools) -> Value {
+        loop {
+            let event = tools.next_request().await;
+            if event["msg"]["type"] != "_sdk_model_attempt" {
+                return event;
+            }
+            assert_eq!(event["id"], event["msg"]["turn_id"]);
+            assert!(event["msg"]["turn_id"].is_string());
+            assert!(
+                event["msg"]["data"]["attempt_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+            let _: codex_protocol::model_retry::ModelAttemptPhase =
+                serde_json::from_value(event["msg"]["data"]["phase"].clone()).unwrap();
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn prepared_request_rechecks_admission_after_no_edit_reply() {
         use codex_protocol::user_input::UserInput;
@@ -7025,6 +7044,16 @@ pub(crate) mod managed_tests {
             .await
             .unwrap();
             assert_eq!(started["status"], "started");
+            let attempt = tools.next_request().await;
+            assert_eq!(attempt["msg"]["type"], "_sdk_model_attempt");
+            assert_eq!(attempt["id"], started["turn_id"]);
+            assert_eq!(attempt["msg"]["turn_id"], started["turn_id"]);
+            assert_eq!(attempt["msg"]["data"]["phase"], "started");
+            assert!(
+                attempt["msg"]["data"]["attempt_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
             let request = tools.next_request().await;
             assert_eq!(request["msg"]["type"], "_sdk_prepare_request");
             assert_eq!(request["msg"]["turn_id"], started["turn_id"]);
@@ -8037,7 +8066,7 @@ pub(crate) mod managed_tests {
                 "input":[UserInput::Text { text:"run the manual lookup".into(), text_elements:vec![] }]
             })).await.unwrap();
             assert_eq!(original["status"], "started");
-            let notice = tools.next_request().await;
+            let notice = next_callback_request(&tools).await;
             assert_eq!(notice["msg"]["callId"], "call-lookup");
             assert!(manual_checkpoint::ready(&state, &native.manual).await.unwrap());
             let mut payload = manual_checkpoint::capture(&state, &native.manual, None)
@@ -8067,7 +8096,7 @@ pub(crate) mod managed_tests {
             let resumed = restored.current().unwrap();
             let tools = resumed.thread.thread_extension_data().get::<PythonTools>().unwrap();
             manual_checkpoint::prepare(&resumed, &restored.manual).await.unwrap();
-            let notice = tools.next_request().await;
+            let notice = next_callback_request(&tools).await;
             assert_eq!(notice["msg"]["callId"], "call-lookup");
             let mut grants = tools.manual_snapshot(&resumed.id.to_string()).unwrap();
             assert_eq!(grants.len(), 1);
