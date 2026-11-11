@@ -27,7 +27,6 @@ else:
         # Fall back to direct import (when run as a script)
         from my_workflow import MyWorkflow
 
-CHUNK_LENGTH_S = 0.05  # 100ms
 SAMPLE_RATE = 24000
 FORMAT = np.int16
 CHANNELS = 1
@@ -178,6 +177,7 @@ class RealtimeApp(App[None]):
         device_info = sd.query_devices()
         print(device_info)
 
+        # Read 20 ms of microphone audio at a time.
         read_size = int(SAMPLE_RATE * 0.02)
 
         stream = sd.InputStream(

@@ -313,7 +313,7 @@ def test_reference_adapter_allows_distinct_sessions_in_one_database(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["text", "error", "image", "mixed"])
+@pytest.mark.parametrize("kind", ["text", "error", "image", "mixed", "empty_application_data"])
 async def test_reconcile_preserves_the_actual_tool_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
@@ -322,12 +322,17 @@ async def test_reconcile_preserves_the_actual_tool_output(
     image = "data:image/png;base64,c3ludGhldGlj"
     outputs = {
         "text": "plain result",
+        "empty_application_data": ToolOutput([ToolOutputText("plain result")], application_data={}),
         "error": ToolOutput.error("verified external failure"),
         "image": ToolOutput.image(image),
         "mixed": ToolOutput([ToolOutputText("caption"), ToolOutputImage(image)], success=False),
     }
     expected = {
         "text": {"contentItems": [{"type": "inputText", "text": "plain result"}], "success": True},
+        "empty_application_data": {
+            "contentItems": [{"type": "inputText", "text": "plain result"}],
+            "success": True,
+        },
         "error": {
             "contentItems": [{"type": "inputText", "text": "verified external failure"}],
             "success": False,
@@ -413,8 +418,13 @@ async def test_reconcile_rejects_invalid_output_before_native_acquisition(
 
     calls = []
 
-    async def reconcile(*args):
+    class Operation:
+        async def run(self):
+            pass
+
+    def reconcile(*args):
         calls.append(args)
+        return Operation()
 
     monkeypatch.setattr(_native, "reconcile_canonical_store", reconcile)
     store = SQLiteSessionStore(tmp_path / "history.sqlite")
@@ -427,6 +437,16 @@ async def test_reconcile_rejects_invalid_output_before_native_acquisition(
             turn_id="turn",
             call_id="call",
             output=ToolOutput([{"type": "unknown"}]),
+        )
+    with pytest.raises(ValueError, match="application data"):
+        await storage.reconcile(
+            session_id="session",
+            turn_id="turn",
+            call_id="call",
+            output=ToolOutput(
+                [{"type": "inputText", "text": "verified"}],
+                application_data={"receipt": "application-only"},
+            ),
         )
     assert calls == []
     assert not store._owners

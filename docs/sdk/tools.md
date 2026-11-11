@@ -239,7 +239,9 @@ For Code Interpreter, supply an existing container ID or an auto-container confi
 
 `Session.events()` and `Turn.events()` include `HostedToolCallProgress` observations from `agents.observation`. By default, hosted completion observations contain only item identity and status, and progress contains only the provider event type and SDK identities. For a trusted consumer, pass `include_execution_details=True` to either `events()` method. This exposes complete hosted items and provider progress, including code, search results, and image bytes. Keep these payloads private.
 
-These passive streams report gaps if a reader falls behind. They retain at most 16 MiB of base64 per preview and 32 MiB across retained previews. Oversized previews also produce gaps; missed previews cannot be recovered from history. Read `Session.items()` for the final image, including images too large for a completion observation. Final tool items also retain provider fields in `provider_data`, including failure details and image metadata. These items and text annotations survive saved-state restore. Restoring history does not grant tool access: declare the tools again in the current Agent to use them in later turns.
+Under the default bounded policy, these passive streams have been retaining up to 16 MiB of base64 per preview and 32 MiB across previews. `EventGap` has been reporting previews lost to these limits. Matching development builds have been offering [full observation retention](sessions.md#stream-observations) for readers that need to retain larger previews.
+
+Read `Session.items()` for the final image, including images too large for a completion observation. Final tool items also retain provider fields in `provider_data`, including failure details and image metadata. These items and text annotations survive saved-state restore. Restoring history does not grant tool access: declare the tools again in the current Agent to use them in later turns.
 
 Runnable examples for [file search, Code Interpreter, and images](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/hosted_tools) show each tool separately.
 
@@ -386,7 +388,7 @@ Read `ToolStarted` and `ToolFinished` records from `session.events()` to observe
 
 A Python start record means the SDK accepted a function call. An MCP start record can precede approval and server execution. Cancellation may leave an MCP call without a matching finish record. A completion status does not prove that earlier effects were rolled back.
 
-Observations do not delay tool execution or completion. The buffer has a fixed limit. If a reader falls behind and the SDK drops older records, the reader can receive `EventGap`. Use [stream observations](sessions.md#stream-observations) to consume events while waiting for a turn. Use the [supported tool controls](#inspect-or-change-tool-values) to validate or change tool values.
+Observations have been reporting activity without delaying tool execution or completion. The default buffer has been dropping older records when full. For late readers, `EventGap` has been reporting the missing range. Matching development builds have been supporting [full observation retention](sessions.md#stream-observations) for late readers. Use the [supported tool controls](#inspect-or-change-tool-values) to validate or change tool values.
 
 <a id="local-execution"></a>
 <a id="replace-write-roots-between-turns"></a>
