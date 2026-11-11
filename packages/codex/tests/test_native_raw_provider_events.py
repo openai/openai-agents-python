@@ -26,6 +26,31 @@ from tests.test_native_provider_websockets import peer as websocket_peer
 PRIVATE_MARKER = "SYNTHETIC_RAW_PROVIDER_EXTENSION_c8e34b"
 
 
+async def test_all_raw_retention_keeps_payload_without_measuring_it(monkeypatch):
+    from types import SimpleNamespace
+
+    from _agents_codex import observation
+
+    def unexpected_serialization(*args, **kwargs):
+        pytest.fail("Unbounded observation retention serialized the raw payload")
+
+    buffer = observation._ObservationBuffer("session", retention="all")
+    payload = {"type": "response.fixture", "provider_extension": PRIVATE_MARKER}
+    monkeypatch.setattr(observation, "json", SimpleNamespace(dumps=unexpected_serialization))
+    event = buffer.append(
+        RawProviderEvent(
+            session_id="session",
+            submission_id="submission",
+            turn_id="turn",
+            source="responses",
+            transport="sse",
+            payload=payload,
+        )
+    )
+    assert isinstance(event, RawProviderEvent)
+    assert event.payload == payload
+
+
 @pytest.mark.requires_native_linux_sandbox
 async def test_raw_child_frames_follow_the_admitted_child_turn(
     tmp_path, monkeypatch, native_executor_binary

@@ -482,7 +482,7 @@ class _ObservationBuffer:
             )
         if isinstance(event, ResponseFactReceived):
             size += len(json.dumps(event.record, ensure_ascii=False, separators=(",", ":")))
-        elif isinstance(event, RawProviderEvent):
+        elif isinstance(event, RawProviderEvent) and self.retention == "bounded":
             payload_size = len(json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")))
         elif isinstance(event, HostedToolCallProgress):
             metadata = event.event
