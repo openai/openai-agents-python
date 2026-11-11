@@ -1,0 +1,336 @@
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index d9152d46076d19c529d19ecfe6540376c034c67e..cb4b70e0528ea5cccd7e44551738f542b8c422ac 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -57,6 +57,7 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                 | ResponseItem::ConfigurationUpdate { .. }
+                 | ResponseItem::CompactionTrigger { .. }
+                 | ResponseItem::ContextCompaction { .. }
++                | ResponseItem::ItemReference { .. }
+                 | ResponseItem::Other => {}
+             }
+             ServerNotification::RawResponseItemCompleted(notification)
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index dfea3121e7d6264058dfaabd4aee1c85c48b347d..344d29877dfa9784706d0b019291d592521efe5d 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -74,6 +74,7 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+         | ResponseItem::CompactionTrigger { .. }
+         | ResponseItem::ContextCompaction { .. }
+         | ResponseItem::AdditionalTools { .. }
++        | ResponseItem::ItemReference { .. }
+         | ResponseItem::Other => false,
+     }) {
+         return Err(invalid_request(REMOTE_IMAGE_URL_ERROR));
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index c13f7f4f8ef76312d068c0cabfd6fa528ef710ba..98c18f34c3d4aec1b52ce221e237f3f00500be42 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -117,6 +117,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
++            | ResponseItem::ItemReference { .. }
+             | ResponseItem::Other => false,
+         },
+         RolloutItem::RealtimeItem(_)
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index a16635cb92e8f3003e76296affe69d40cf719114..bec449cea0af3efe269d59043aec0d7362119e49 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -191,6 +191,7 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::ConfigurationUpdate { .. }
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
++            | ResponseItem::ItemReference { .. }
+             | ResponseItem::Other => {}
+         }
+     }
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index d43a40c62da07d5a49b69d74003b4c0e55034d01..8d734cddefe326d3c52e8a45f305d7066be85251 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1122,6 +1122,7 @@ pub(crate) fn is_api_message(
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ContextCompaction { .. } => true,
++        ResponseItem::ItemReference { .. } => true,
+         ResponseItem::CompactionTrigger { .. } => false,
+         ResponseItem::Other => false,
+     }
+@@ -1284,6 +1285,7 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+         } => estimate_function_output_bytes(&output.body)
+             .saturating_add(text_bytes(call_id))
+             .saturating_add(text_bytes(name.as_deref().unwrap_or_default())),
++        ResponseItem::ItemReference { id } => text_bytes(id),
+         // These payloads are themselves JSON arguments, rather than transport envelopes
+         // around text. Keep their JSON syntax in the estimate.
+         ResponseItem::AdditionalTools { tools, .. } => json_content_bytes(tools),
+@@ -1486,6 +1488,7 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+         | ResponseItem::AgentMessage { .. }
++        | ResponseItem::ItemReference { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
+index 1a0cdcf307cea485fa8c3385535335e4ecbbd89f..10728bcf4f1e0407231e368e00e10d230480ce29 100644
+--- a/codex-rs/core/src/image_preparation.rs
++++ b/codex-rs/core/src/image_preparation.rs
+@@ -289,6 +289,7 @@ pub(crate) async fn prepare_response_items(
+             | ResponseItem::ConfigurationUpdate { .. }
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
++            | ResponseItem::ItemReference { .. }
+             | ResponseItem::Other => None,
+         };
+         prepared_items.push(item);
+diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
+index a70e5faf6d3b77f8fa6d90f9c92276aed1cb8ec0..e19d63cb7ca8d5dbed4f3bbf0407f15ba309a900 100644
+--- a/codex-rs/core/src/prepared_request.rs
++++ b/codex-rs/core/src/prepared_request.rs
+@@ -163,6 +163,7 @@ mod tests {
+     #[test]
+     fn native_text_function_and_mcp_items_preserve_submitted_fields() {
+         for item in [
++            json!({"type":"item_reference","id":"provider-not-local"}),
+             json!({"type":"message","role":"user","content":[{"type":"input_text","text":"note"}]}),
+             json!({"type":"function_call","name":"reserve","arguments":"{\"seats\":2}","call_id":"call-1"}),
+             json!({"type":"function_call_output","call_id":"call-1","output":"SHAPED_RESULT"}),
+@@ -176,6 +177,8 @@ mod tests {
+     #[test]
+     fn unknown_nested_null_and_skipped_optional_null_are_rejected() {
+         for item in [
++            json!({"type":"item_reference"}),
++            json!({"type":"item_reference","id":17}),
+             json!({"type":"message","role":"user","content":[{"type":"input_text","text":"note","unknown":null}]}),
+             json!({"type":"message","role":"user","id":null,"content":[]}),
+         ] {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 339a905576815c58bb46b08a5c54490839248fe2..a3564df634f2be76d7cd5a6d80997ca9d3c10851 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3782,6 +3782,7 @@ async fn try_run_sampling_request(
+                         | ResponseItem::ConfigurationUpdate { .. }
+                         | ResponseItem::CompactionTrigger { .. }
+                         | ResponseItem::ContextCompaction { .. }
++                        | ResponseItem::ItemReference { .. }
+                         | ResponseItem::Other => false,
+                     };
+ 
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 7bb9930b1930e4d81d05e6b419635e2808dec21b..83c308c26f5c5eefd7f3d2432fe256053fab0c53 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -451,6 +451,7 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::ConfigurationUpdate { .. } => "configuration_update",
+         ResponseItem::CompactionTrigger { .. } => "compaction_trigger",
+         ResponseItem::ContextCompaction { .. } => "context_compaction",
++        ResponseItem::ItemReference { .. } => "item_reference",
+         ResponseItem::Other => "other",
+     };
+     debug!(
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index 6117ec6e31939738d15d248b31561fd4a09f95cf..30cf3daaddf9f210926b23c0d3f09fd13fc4cdbc 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -452,6 +452,7 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         | ResponseItem::FunctionCallOutput { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+         | ResponseItem::ToolSearchOutput { .. }
++        | ResponseItem::ItemReference { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index d67aa0523a29bea4c42acfd221e551a53e222afc..4d5b55797ef9b63727606cfbf50f1a6a250077de 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -530,6 +530,7 @@ fn recent_images(
+             | ResponseItem::ConfigurationUpdate { .. }
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
++            | ResponseItem::ItemReference { .. }
+             | ResponseItem::Other => {}
+         }
+         for image in image_references {
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index 4cc98a00618e0952ab6ee9f565994bacdfdfc03b..82f1e9f7b2def1001bc49ac3aecb801cd9cad30c 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -355,6 +355,7 @@ pub fn collect_transcript(
+             | ResponseItem::ConfigurationUpdate { .. }
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
++            | ResponseItem::ItemReference { .. }
+             | ResponseItem::Other => continue,
+         };
+ 
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index 22cba0193de6ad62dd5f61270374d788acbd29d5..d77c9401434190281828714dc286d4462b8d7317 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -648,6 +648,30 @@ mod tests {
+     use super::*;
+     use serde_json::json;
+ 
++    #[test]
++    fn provider_reference_id_is_not_a_local_occurrence_id() {
++        let value = json!({"type":"item_reference","id":"opaque/provider pointer é"});
++        let mut item = input_projection(&value.to_string()).unwrap().unwrap();
++        assert!(item.id().is_none());
++        assert!(item.id_prefix().is_none());
++        item.set_id(Some(codex_protocol::ResponseItemId::new("msg")));
++        assert_eq!(serde_json::to_value(item).unwrap(), value);
++    }
++
++    #[test]
++    fn legacy_audit_only_provider_references_stay_audit_only() {
++        let original = json!({"type":"item_reference","id":"remote"}).to_string();
++        let mut history = SdkOriginalHistory::default();
++        history.append(SdkOriginalItem {
++            original: original.clone(),
++            projection: None,
++        });
++        let restored: SdkOriginalHistory =
++            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
++        assert!(restored.projection().is_empty());
++        assert_eq!(restored.snapshot(None).2, vec![original]);
++    }
++
+     #[test]
+     fn streamed_snapshot_has_the_complete_revision_with_only_the_requested_suffix() {
+         let originals = [r#"{"type":"future","value":17}"#, r#"{"text":"é😀"}"#, "{}"];
+@@ -875,6 +899,8 @@ mod tests {
+     fn malformed_known_calls_reject_instead_of_becoming_audit_only() {
+         for raw in [
+             r#"{"type":"function_call","arguments":17}"#,
++            r#"{"type":"item_reference"}"#,
++            r#"{"type":"item_reference","id":17}"#,
+             r#"{"type":"message","content":false}"#,
+         ] {
+             assert!(input_projection(raw).is_err());
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index cf4cd07a65c39d2ea0d4196567734474fdde073e..ab9ced7edc3515442d26b559eec525ed674e7cd1 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1423,6 +1423,7 @@ impl SessionTelemetry {
+             ResponseItem::ConfigurationUpdate { .. } => "configuration_update".into(),
+             ResponseItem::CompactionTrigger { .. } => "compaction_trigger".into(),
+             ResponseItem::ContextCompaction { .. } => "context_compaction".into(),
++            ResponseItem::ItemReference { .. } => "item_reference".into(),
+             ResponseItem::Other => "other".into(),
+         }
+     }
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 44ff89b0a0f28d9bfbd40ac8111a1b347b78c815..e4185a640fbd24cee05a0430c6576b3e4696f477 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1024,6 +1024,10 @@ impl InternalChatMessageMetadataPassthrough {
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+ #[serde(tag = "type", rename_all = "snake_case")]
+ pub enum ResponseItem {
++    /// Opaque Responses provider pointer, not a local occurrence ID.
++    ItemReference {
++        id: String,
++    },
+     ComputerCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         id: Option<ResponseItemId>,
+@@ -1350,7 +1354,10 @@ impl ResponseItem {
+             | Self::ImageGenerationCall { id, .. }
+             | Self::Compaction { id, .. }
+             | Self::ContextCompaction { id, .. } => id.as_ref(),
+-            Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => None,
++            Self::ConfigurationUpdate { .. }
++            | Self::CompactionTrigger { .. }
++            | Self::ItemReference { .. }
++            | Self::Other => None,
+         }
+     }
+ 
+@@ -1376,7 +1383,10 @@ impl ResponseItem {
+             | Self::ImageGenerationCall { id, .. }
+             | Self::Compaction { id, .. }
+             | Self::ContextCompaction { id, .. } => *id = new_id,
+-            Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => {}
++            Self::ConfigurationUpdate { .. }
++            | Self::CompactionTrigger { .. }
++            | Self::ItemReference { .. }
++            | Self::Other => {}
+         }
+     }
+ 
+@@ -1401,7 +1411,10 @@ impl ResponseItem {
+             Self::CodeInterpreterCall { .. } => Some("ci"),
+             Self::ImageGenerationCall { .. } => Some("ig"),
+             Self::Compaction { .. } | Self::ContextCompaction { .. } => Some("cmp"),
+-            Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => None,
++            Self::ConfigurationUpdate { .. }
++            | Self::CompactionTrigger { .. }
++            | Self::ItemReference { .. }
++            | Self::Other => None,
+         }
+     }
+ 
+@@ -1559,6 +1572,7 @@ impl ResponseItem {
+             Self::ConfigurationUpdate { .. }
+             | Self::CompactionTrigger { .. }
+             | Self::AdditionalTools { .. }
++            | Self::ItemReference { .. }
+             | Self::Other => None,
+         }
+     }
+@@ -1642,6 +1656,7 @@ impl ResponseItem {
+             Self::ConfigurationUpdate { .. }
+             | Self::CompactionTrigger { .. }
+             | Self::AdditionalTools { .. }
++            | Self::ItemReference { .. }
+             | Self::Other => None,
+         }
+     }
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index b07bc85e1a2a9e45c523eb43940e4dc5c5f04522..7cae1d39cbd1a6dc209d2d38efcf8c91b0e58d18 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -340,6 +340,7 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+         ResponseItem::ConfigurationUpdate { .. } => "response.configuration_update",
+         ResponseItem::CompactionTrigger { .. } => "response.compaction_trigger",
+         ResponseItem::ContextCompaction { .. } => "response.context_compaction",
++        ResponseItem::ItemReference { .. } => "response.item_reference",
+         ResponseItem::Other => "response.other",
+     }
+ }
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 4412e42123821a1015a65519d45a84f2d5e41630..15ce271af0591250cc87398204176b9a68971ad3 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -101,6 +101,7 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ContextCompaction { .. } => true,
++        ResponseItem::ItemReference { .. } => true,
+         ResponseItem::CompactionTrigger { .. } | ResponseItem::Other => false,
+     }
+ }
+@@ -130,6 +131,7 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::CompactionTrigger { .. }
+         | ResponseItem::ContextCompaction { .. }
++        | ResponseItem::ItemReference { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
+index 33d4d288918324ddaf07b8c753bfd7148d795997..d6128040e1ebfbc741adb68f076ae2d100274060 100644
+--- a/codex-rs/utils/audio/src/lib.rs
++++ b/codex-rs/utils/audio/src/lib.rs
+@@ -88,6 +88,7 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+             | ResponseItem::ConfigurationUpdate { .. }
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
++            | ResponseItem::ItemReference { .. }
+             | ResponseItem::Other => {}
+         }
+     }
