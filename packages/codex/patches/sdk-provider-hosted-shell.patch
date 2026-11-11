@@ -1,0 +1,660 @@
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index cb4b70e0..98d69fb6 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -52,6 +52,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                 | ResponseItem::ToolSearchOutput { .. }
+                 | ResponseItem::FileSearchCall { .. }
+                 | ResponseItem::CodeInterpreterCall { .. }
++                | ResponseItem::ShellCall { .. }
++                | ResponseItem::ShellCallOutput { .. }
+                 | ResponseItem::WebSearchCall { .. }
+                 | ResponseItem::Compaction { .. }
+                 | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 344d2987..df8890dc 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -68,6 +68,8 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+             | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ShellCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index bdba7398..99cd74c0 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -210,7 +210,6 @@ impl<'de> Deserialize<'de> for ResponsesStreamEvent {
+             item: Option<Value>,
+             item_id: Option<String>,
+             call_id: Option<String>,
+-            delta: Option<String>,
+             text: Option<String>,
+             summary_index: Option<i64>,
+             content_index: Option<i64>,
+@@ -220,6 +219,13 @@ impl<'de> Deserialize<'de> for ResponsesStreamEvent {
+         let raw = Value::deserialize(deserializer)?;
+         let fields: Fields =
+             serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
++        let delta = if fields.kind == "response.shell_call_output_content.delta" {
++            // Shell stdout and stderr deltas remain in the raw progress event.
++            None
++        } else {
++            Option::<String>::deserialize(raw.get("delta").unwrap_or(&Value::Null))
++                .map_err(serde::de::Error::custom)?
++        };
+         Ok(Self {
+             kind: fields.kind,
+             headers: fields.headers,
+@@ -229,7 +235,7 @@ impl<'de> Deserialize<'de> for ResponsesStreamEvent {
+             item: fields.item,
+             item_id: fields.item_id,
+             call_id: fields.call_id,
+-            delta: fields.delta,
++            delta,
+             text: fields.text,
+             summary_index: fields.summary_index,
+             content_index: fields.content_index,
+@@ -505,6 +511,10 @@ pub fn process_responses_event(
+             .kind
+             .starts_with("response.code_interpreter_call_code.")
+         || event.kind.starts_with("response.image_generation_call.")
++        || event.kind.starts_with("response.shell_call_command.")
++        || event
++            .kind
++            .starts_with("response.shell_call_output_content.")
+     {
+         return Ok(Some(ResponseEvent::HostedToolCallProgress(
+             codex_protocol::protocol::HostedToolCallProgressEvent { event: event.raw },
+@@ -887,6 +897,8 @@ mod tests {
+                 "output_index":1,"sequence_number":5,"delta":"print(1)"}),
+             serde_json::json!({"type":"response.file_search_call.searching", "item_id":"fs_test",
+                 "output_index":0,"sequence_number":6}),
++            serde_json::json!({"type":"response.shell_call_output_content.delta", "item_id":"shell_test",
++                "output_index":0,"command_index":0,"sequence_number":7,"delta":{"stdout":"out","stderr":"err"}}),
+         ] {
+             let event = serde_json::from_value(value.clone()).unwrap();
+             let Some(super::ResponseEvent::HostedToolCallProgress(progress)) =
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 98c18f34..9bfcdbb3 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -113,6 +113,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+             | ResponseItem::WebSearchCall { .. }
+             | ResponseItem::FileSearchCall { .. }
+             | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ShellCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::CompactionTrigger { .. }
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index bec449ce..5af9121a 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -186,6 +186,8 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::WebSearchCall { .. }
+             | ResponseItem::FileSearchCall { .. }
+             | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ShellCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index d43452c1..b3b9bdbe 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -925,6 +925,8 @@ fn reject_compaction_tool_output(item: &ResponseItem) -> CodexResult<()> {
+             | ResponseItem::WebSearchCall { .. }
+             | ResponseItem::FileSearchCall { .. }
+             | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ShellCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+     ) {
+         return Err(CodexErr::Fatal(
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 8d734cdd..b3654ddc 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1119,6 +1119,8 @@ pub(crate) fn is_api_message(
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ShellCall { .. }
++        | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ContextCompaction { .. } => true,
+@@ -1300,6 +1302,12 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+         }
+         | ResponseItem::CodeInterpreterCall {
+             provider_fields, ..
++        }
++        | ResponseItem::ShellCall {
++            provider_fields, ..
++        }
++        | ResponseItem::ShellCallOutput {
++            provider_fields, ..
+         } => json_content_bytes(provider_fields),
+         ResponseItem::ImageGenerationCall {
+             revised_prompt,
+@@ -1475,6 +1483,8 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ShellCall { .. }
++        | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::ComputerCall { .. }
+         | ResponseItem::CustomToolCall { .. }
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index 9f642ff5..f80a4bf4 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -253,14 +253,15 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+                 results: results.clone(),
+             }))
+         }
+-        ResponseItem::FileSearchCall { id, .. } | ResponseItem::CodeInterpreterCall { id, .. } => {
+-            Some(TurnItem::HostedToolCall(
+-                codex_protocol::items::HostedToolCallItem {
+-                    id: id.as_deref()?.to_string(),
+-                    item: item.clone(),
+-                },
+-            ))
+-        }
++        ResponseItem::FileSearchCall { id, .. }
++        | ResponseItem::CodeInterpreterCall { id, .. }
++        | ResponseItem::ShellCall { id, .. }
++        | ResponseItem::ShellCallOutput { id, .. } => Some(TurnItem::HostedToolCall(
++            codex_protocol::items::HostedToolCallItem {
++                id: id.as_deref()?.to_string(),
++                item: item.clone(),
++            },
++        )),
+         ResponseItem::ImageGenerationCall {
+             id,
+             status,
+diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
+index 10728bcf..b1cb1cbe 100644
+--- a/codex-rs/core/src/image_preparation.rs
++++ b/codex-rs/core/src/image_preparation.rs
+@@ -284,6 +284,8 @@ pub(crate) async fn prepare_response_items(
+             | ResponseItem::WebSearchCall { .. }
+             | ResponseItem::FileSearchCall { .. }
+             | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ShellCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 6e165b6f..180298a8 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3854,6 +3854,8 @@ async fn try_run_sampling_request(
+                         | ResponseItem::WebSearchCall { .. }
+                         | ResponseItem::FileSearchCall { .. }
+                         | ResponseItem::CodeInterpreterCall { .. }
++                        | ResponseItem::ShellCall { .. }
++                        | ResponseItem::ShellCallOutput { .. }
+                         | ResponseItem::ImageGenerationCall { .. }
+                         | ResponseItem::Compaction { .. }
+                         | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 83c308c2..729130d9 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -446,6 +446,8 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::WebSearchCall { .. } => "web_search_call",
+         ResponseItem::FileSearchCall { .. } => "file_search_call",
+         ResponseItem::CodeInterpreterCall { .. } => "code_interpreter_call",
++        ResponseItem::ShellCall { .. } => "shell_call",
++        ResponseItem::ShellCallOutput { .. } => "shell_call_output",
+         ResponseItem::ImageGenerationCall { .. } => "image_generation_call",
+         ResponseItem::Compaction { .. } => "compaction",
+         ResponseItem::ConfigurationUpdate { .. } => "configuration_update",
+@@ -466,6 +468,8 @@ pub(crate) async fn handle_non_tool_response_item(
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ShellCall { .. }
++        | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. } => {
+             let mut turn_item = parse_turn_item(item)?;
+             finalize_turn_item(sess, contributor_policy, &mut turn_item, plan_mode).await;
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index 8bb98c3c..f2e3b686 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -139,6 +139,7 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+                 | ToolSpec::ToolSearch { .. }
+                 | ToolSpec::FileSearch(_)
+                 | ToolSpec::CodeInterpreter(_)
++                | ToolSpec::Shell(_)
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::Computer { .. }
+                 | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 84bc7cac..2465d3ed 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -517,6 +517,7 @@ impl ToolRegistry {
+                 | ToolSpec::ToolSearch { .. }
+                 | ToolSpec::FileSearch(_)
+                 | ToolSpec::CodeInterpreter(_)
++                | ToolSpec::Shell(_)
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::Computer { .. }
+                 | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 35ce3a4e..8115fe4a 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -209,6 +209,7 @@ impl ToolRouter {
+                 ToolSpec::ToolSearch { .. }
+                 | ToolSpec::FileSearch(_)
+                 | ToolSpec::CodeInterpreter(_)
++                | ToolSpec::Shell(_)
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::WebSearch { .. } => false,
+             })
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index e23a4052..48548828 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -680,6 +680,7 @@ fn finalize_selected_tool_router(
+                     ToolSpec::ToolSearch { .. } => TOOL_SEARCH_TOOL_NAME,
+                     ToolSpec::FileSearch(_)
+                     | ToolSpec::CodeInterpreter(_)
++                    | ToolSpec::Shell(_)
+                     | ToolSpec::ImageGeneration(_)
+                     | ToolSpec::Computer { .. }
+                     | ToolSpec::ComputerUsePreview { .. }
+@@ -1119,6 +1120,7 @@ fn register_code_mode_executors(
+             | ToolSpec::ToolSearch { .. }
+             | ToolSpec::FileSearch(_)
+             | ToolSpec::CodeInterpreter(_)
++            | ToolSpec::Shell(_)
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/core/src/tools/tool_namespaces_info.rs b/codex-rs/core/src/tools/tool_namespaces_info.rs
+index c31bd4d7..9b656221 100644
+--- a/codex-rs/core/src/tools/tool_namespaces_info.rs
++++ b/codex-rs/core/src/tools/tool_namespaces_info.rs
+@@ -42,6 +42,7 @@ pub(super) fn collect_tool_namespaces_info(
+             }
+             ToolSpec::FileSearch(_)
+             | ToolSpec::CodeInterpreter(_)
++            | ToolSpec::Shell(_)
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index 30cf3daa..fbb17b7e 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -443,6 +443,8 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ShellCall { .. }
++        | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ContextCompaction { .. } => true,
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index 4d5b5579..062aff92 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -525,6 +525,8 @@ fn recent_images(
+             | ResponseItem::WebSearchCall { .. }
+             | ResponseItem::FileSearchCall { .. }
+             | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ShellCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index 82f1e9f7..15596277 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -348,6 +348,8 @@ pub fn collect_transcript(
+             | ResponseItem::AdditionalTools { .. }
+             | ResponseItem::FileSearchCall { .. }
+             | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ShellCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::ToolSearchCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index ab9ced7e..6f999551 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1418,6 +1418,8 @@ impl SessionTelemetry {
+             ResponseItem::WebSearchCall { .. } => "web_search_call".into(),
+             ResponseItem::FileSearchCall { .. } => "file_search_call".into(),
+             ResponseItem::CodeInterpreterCall { .. } => "code_interpreter_call".into(),
++            ResponseItem::ShellCall { .. } => "shell_call".into(),
++            ResponseItem::ShellCallOutput { .. } => "shell_call_output".into(),
+             ResponseItem::ImageGenerationCall { .. } => "image_generation_call".into(),
+             ResponseItem::Compaction { .. } => "compaction".into(),
+             ResponseItem::ConfigurationUpdate { .. } => "configuration_update".into(),
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index ee9d2e06..fed04103 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1281,6 +1281,28 @@ pub enum ResponseItem {
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
++    ShellCall {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        id: Option<ResponseItemId>,
++        status: String,
++        #[serde(flatten)]
++        provider_fields: serde_json::Map<String, serde_json::Value>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++    },
++    ShellCallOutput {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        id: Option<ResponseItemId>,
++        status: String,
++        #[serde(flatten)]
++        provider_fields: serde_json::Map<String, serde_json::Value>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++    },
+     ImageGenerationCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+@@ -1358,6 +1380,8 @@ impl ResponseItem {
+             | Self::Reasoning { id, .. }
+             | Self::FileSearchCall { id, .. }
+             | Self::CodeInterpreterCall { id, .. }
++            | Self::ShellCall { id, .. }
++            | Self::ShellCallOutput { id, .. }
+             | Self::ImageGenerationCall { id, .. }
+             | Self::Compaction { id, .. }
+             | Self::ContextCompaction { id, .. } => id.as_ref(),
+@@ -1387,6 +1411,8 @@ impl ResponseItem {
+             | Self::Reasoning { id, .. }
+             | Self::FileSearchCall { id, .. }
+             | Self::CodeInterpreterCall { id, .. }
++            | Self::ShellCall { id, .. }
++            | Self::ShellCallOutput { id, .. }
+             | Self::ImageGenerationCall { id, .. }
+             | Self::Compaction { id, .. }
+             | Self::ContextCompaction { id, .. } => *id = new_id,
+@@ -1416,6 +1442,8 @@ impl ResponseItem {
+             Self::WebSearchCall { .. } => Some("ws"),
+             Self::FileSearchCall { .. } => Some("fs"),
+             Self::CodeInterpreterCall { .. } => Some("ci"),
++            Self::ShellCall { .. } => Some("sh"),
++            Self::ShellCallOutput { .. } => Some("sho"),
+             Self::ImageGenerationCall { .. } => Some("ig"),
+             Self::Compaction { .. } | Self::ContextCompaction { .. } => Some("cmp"),
+             Self::ConfigurationUpdate { .. }
+@@ -1564,6 +1592,14 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::ShellCall {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
++            | Self::ShellCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::ImageGenerationCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -1648,6 +1684,14 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::ShellCall {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
++            | Self::ShellCallOutput {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::ImageGenerationCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -2632,6 +2676,12 @@ mod tests {
+                 "queries":["docs"],"results":[{"file_id":"file_test","text":"answer","extra":7}],"future":{"a":null}}),
+             serde_json::json!({"type":"code_interpreter_call","id":"ci_test","status":"completed",
+                 "container_id":"cntr_test","code":"print(1)","outputs":[{"type":"logs","logs":"1"}],"future":true}),
++            serde_json::json!({"type":"shell_call","id":"sh_test","call_id":"call_test",
++                "status":"completed","action":{"commands":["printf test"],"timeout_ms":1000},
++                "environment":{"type":"container_reference","container_id":"cntr_test"}}),
++            serde_json::json!({"type":"shell_call_output","id":"sho_test","call_id":"call_test",
++                "status":"completed","output":[{"stdout":"test","stderr":"",
++                "outcome":{"type":"exit","exit_code":0}}],"future":true}),
+             serde_json::json!({"type":"image_generation_call","id":"ig_test","status":"in_progress",
+                 "result":null,"quality":"high","size":"1024x1024","future":{"a":1}}),
+             serde_json::json!({"type":"image_generation_call","id":"ig_null","status":"completed",
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index 7cae1d39..0660e04f 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -335,6 +335,8 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+         ResponseItem::WebSearchCall { .. } => "response.web_search_call",
+         ResponseItem::FileSearchCall { .. } => "response.file_search_call",
+         ResponseItem::CodeInterpreterCall { .. } => "response.code_interpreter_call",
++        ResponseItem::ShellCall { .. } => "response.shell_call",
++        ResponseItem::ShellCallOutput { .. } => "response.shell_call_output",
+         ResponseItem::ImageGenerationCall { .. } => "response.image_generation_call",
+         ResponseItem::Compaction { .. } => "response.compaction",
+         ResponseItem::ConfigurationUpdate { .. } => "response.configuration_update",
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 15ce271a..59ce439b 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -97,6 +97,8 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ShellCall { .. }
++        | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::Compaction { .. }
+@@ -127,6 +129,8 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ShellCall { .. }
++        | ResponseItem::ShellCallOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::CompactionTrigger { .. }
+diff --git a/codex-rs/tools/src/code_mode.rs b/codex-rs/tools/src/code_mode.rs
+index 15bdbbcc..179f5cf6 100644
+--- a/codex-rs/tools/src/code_mode.rs
++++ b/codex-rs/tools/src/code_mode.rs
+@@ -226,6 +226,7 @@ fn code_mode_tool_definitions_for_spec(
+         ToolSpec::ToolSearch { .. }
+         | ToolSpec::FileSearch(_)
+         | ToolSpec::CodeInterpreter(_)
++        | ToolSpec::Shell(_)
+         | ToolSpec::ImageGeneration(_)
+         | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/tools/src/hosted_tools.rs b/codex-rs/tools/src/hosted_tools.rs
+index 0c9bf808..822a1bea 100644
+--- a/codex-rs/tools/src/hosted_tools.rs
++++ b/codex-rs/tools/src/hosted_tools.rs
+@@ -12,6 +12,7 @@ pub struct HostedModelTools {
+ pub enum HostedToolSpec {
+     FileSearch(FileSearchTool),
+     CodeInterpreter(CodeInterpreterTool),
++    Shell(HostedShellTool),
+     ImageGeneration(ImageGenerationTool),
+ }
+ 
+@@ -20,6 +21,7 @@ impl From<HostedToolSpec> for crate::ToolSpec {
+         match spec {
+             HostedToolSpec::FileSearch(config) => Self::FileSearch(config),
+             HostedToolSpec::CodeInterpreter(config) => Self::CodeInterpreter(config),
++            HostedToolSpec::Shell(config) => Self::Shell(config),
+             HostedToolSpec::ImageGeneration(config) => Self::ImageGeneration(config),
+         }
+     }
+@@ -86,6 +88,30 @@ pub struct CodeInterpreterTool {
+     pub allowed_callers: Option<Vec<String>>,
+ }
+ 
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct HostedShellTool {
++    #[serde(flatten)]
++    pub provider_data: serde_json::Map<String, serde_json::Value>,
++    pub environment: HostedShellEnvironment,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub allowed_callers: Option<Vec<String>>,
++}
++
++/// A provider-managed container, with the remaining options validated by Responses.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum HostedShellEnvironment {
++    ContainerAuto {
++        #[serde(flatten)]
++        options: serde_json::Map<String, serde_json::Value>,
++    },
++    ContainerReference {
++        container_id: String,
++        #[serde(flatten)]
++        options: serde_json::Map<String, serde_json::Value>,
++    },
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct AutoCodeInterpreterContainer {
+     #[serde(rename = "type")]
+@@ -221,6 +247,33 @@ mod tests {
+             .is_err()
+         );
+     }
++
++    #[test]
++    fn hosted_shell_serializes_managed_environments_without_admitting_local_shell() {
++        for environment in [
++            json!({
++                "type":"container_auto",
++                "file_ids":["file_test"],
++                "memory_limit":"4g",
++                "skills":[{"type":"skill_reference","skill_id":"skill_test"}],
++                "network_policy":{"type":"disabled"}
++            }),
++            json!({"type":"container_reference","container_id":"cntr_test"}),
++        ] {
++            let wire =
++                json!({"type":"shell","environment":environment,"allowed_callers":["direct"]});
++            let hosted: HostedToolSpec = serde_json::from_value(wire.clone()).unwrap();
++            let spec = crate::ToolSpec::from(hosted);
++            assert_eq!(spec.name(), "shell");
++            assert_eq!(serde_json::to_value(spec).unwrap(), wire);
++        }
++        assert!(
++            serde_json::from_value::<HostedToolSpec>(json!({
++                "type":"shell","environment":{"type":"local"}
++            }))
++            .is_err()
++        );
++    }
+ }
+ 
+ fn include_outputs_default() -> bool {
+diff --git a/codex-rs/tools/src/tool_search.rs b/codex-rs/tools/src/tool_search.rs
+index 75b8380e..9c93c2ee 100644
+--- a/codex-rs/tools/src/tool_search.rs
++++ b/codex-rs/tools/src/tool_search.rs
+@@ -46,6 +46,7 @@ impl ToolSearchInfo {
+             ToolSpec::ToolSearch { .. }
+             | ToolSpec::FileSearch(_)
+             | ToolSpec::CodeInterpreter(_)
++            | ToolSpec::Shell(_)
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+@@ -95,6 +96,7 @@ fn normalize_search_spec(spec: ToolSpec) -> Option<LoadableToolSpec> {
+         ToolSpec::ToolSearch { .. }
+         | ToolSpec::FileSearch(_)
+         | ToolSpec::CodeInterpreter(_)
++        | ToolSpec::Shell(_)
+         | ToolSpec::ImageGeneration(_)
+         | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+@@ -145,7 +147,10 @@ fn default_tool_search_text(spec: &ToolSpec) -> String {
+         ToolSpec::ToolSearch { description, .. } => {
+             push_search_part(&mut parts, description.clone());
+         }
+-        ToolSpec::FileSearch(_) | ToolSpec::CodeInterpreter(_) | ToolSpec::ImageGeneration(_) => {
++        ToolSpec::FileSearch(_)
++        | ToolSpec::CodeInterpreter(_)
++        | ToolSpec::Shell(_)
++        | ToolSpec::ImageGeneration(_) => {
+             push_search_part(&mut parts, spec.name().to_string());
+         }
+         ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {}
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index 3eb02d9b..0cc7557f 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -66,6 +66,8 @@ pub enum ToolSpec {
+     FileSearch(crate::FileSearchTool),
+     #[serde(rename = "code_interpreter")]
+     CodeInterpreter(crate::CodeInterpreterTool),
++    #[serde(rename = "shell")]
++    Shell(crate::HostedShellTool),
+     #[serde(rename = "image_generation")]
+     ImageGeneration(crate::ImageGenerationTool),
+     #[serde(rename = "custom")]
+@@ -108,6 +110,7 @@ impl ToolSpec {
+             Self::WebSearch { .. }
+             | Self::FileSearch(_)
+             | Self::CodeInterpreter(_)
++            | Self::Shell(_)
+             | Self::ImageGeneration(_) => {
+                 target.is_default_namespace() && self.name() == target.name
+             }
+@@ -124,6 +127,7 @@ impl ToolSpec {
+             ToolSpec::WebSearch { .. } => "web_search",
+             ToolSpec::FileSearch(_) => "file_search",
+             ToolSpec::CodeInterpreter(_) => "code_interpreter",
++            ToolSpec::Shell(_) => "shell",
+             ToolSpec::ImageGeneration(_) => "image_generation",
+             ToolSpec::Freeform(tool) => tool.name.as_str(),
+         }
+diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
+index d6128040..4662c126 100644
+--- a/codex-rs/utils/audio/src/lib.rs
++++ b/codex-rs/utils/audio/src/lib.rs
+@@ -83,6 +83,8 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+             | ResponseItem::WebSearchCall { .. }
+             | ResponseItem::FileSearchCall { .. }
+             | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ShellCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::ConfigurationUpdate { .. }

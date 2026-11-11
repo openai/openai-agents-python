@@ -228,11 +228,12 @@ class HostedShellReferenceEnvironment(TypedDict):
 
 @dataclass(frozen=True, kw_only=True)
 class HostedShell:
-    """Run shell commands in provider-owned containers, without local execution.
+    """Provider containers have been running shell commands through Responses.
 
-    Use container_auto to provision a container or container_reference to reuse
-    one. The provider owns container lifetime and validates resource, skill and
-    network settings. Closing a Session does not delete the container or files.
+    container_auto has been provisioning containers; container_reference has
+    been reusing them. The provider has been controlling lifetime and validating
+    resource, skill and network settings. Closing a Session has been leaving
+    the provider container and its files intact.
     """
 
     environment: HostedShellAutoEnvironment | HostedShellReferenceEnvironment

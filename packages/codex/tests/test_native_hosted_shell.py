@@ -35,7 +35,7 @@ async def test_native_hosted_shell_preserves_wire_progress_and_cold_replay(
     environment: Any,
 ) -> None:
     call = {
-        "id": "shell-command",
+        "id": "sh_command",
         "type": "shell_call",
         "call_id": "shell-call",
         "status": "completed",
@@ -43,7 +43,7 @@ async def test_native_hosted_shell_preserves_wire_progress_and_cold_replay(
         "future_call": {"keep": True},
     }
     output = {
-        "id": "shell-receipt",
+        "id": "sh_receipt",
         "type": "shell_call_output",
         "call_id": "shell-call",
         "status": "completed",
@@ -55,14 +55,14 @@ async def test_native_hosted_shell_preserves_wire_progress_and_cold_replay(
     progress = [
         {
             "type": "response.shell_call_command.delta",
-            "item_id": "shell-command",
+            "item_id": "sh_command",
             "output_index": 0,
             "command_index": 0,
             "delta": "printf provider",
         },
         {
             "type": "response.shell_call_output_content.delta",
-            "item_id": "shell-receipt",
+            "item_id": "sh_receipt",
             "output_index": 1,
             "content_index": 0,
             "delta": {"stdout": "provider", "stderr": ""},
@@ -147,3 +147,47 @@ async def test_native_hosted_shell_preserves_wire_progress_and_cold_replay(
     ]
     assert replayed == [call, output]
     assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("kind", ["shell_call", "shell_call_output"])
+async def test_native_hosted_shell_can_complete_without_assistant_text(
+    responses: ResponsesFixture,
+    kind: str,
+) -> None:
+    raw: dict[str, Any] = {
+        "id": "shell-only",
+        "type": kind,
+        "call_id": "shell-only-call",
+        "status": "completed",
+        **(
+            {"action": {"commands": ["printf provider"]}}
+            if kind == "shell_call"
+            else {
+                "output": [
+                    {
+                        "stdout": "provider",
+                        "stderr": "",
+                        "outcome": {"type": "exit", "exit_code": 0},
+                    }
+                ]
+            }
+        ),
+    }
+    responses.respond({"type": "response.output_item.done", "output_index": 0, "item": raw})
+    agent = Agent(
+        instructions="Use the hosted shell without a text answer.",
+        model="gpt-5.5",
+        tools=[HostedShell(environment={"type": "container_auto"})],
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-shell-only"),
+    )
+    async with timeout(30), agent.session() as session:
+        turn = await session.submit("run in the provider")
+        await turn.get_result()
+        items = [item async for item in session.items()]
+        matched = [
+            item["provider_data"]
+            for item in items
+            if item["type"] == "shell_call" or item["type"] == "shell_call_output"
+        ]
+        assert matched == [raw]
+    assert len(responses.requests) == 1
