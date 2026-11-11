@@ -1,7 +1,6 @@
 //! Request-scoped application model output; Core remains the turn and tool owner.
 use super::*;
-use codex_api::{ApiError, ResponseEvent};
-use codex_extension_api::ApplicationModelStream;
+use codex_api::{ApiError, ApplicationModelStream, ResponseEvent};
 use codex_extension_api::{
     ModelRequestContributor, ModelRequestInput, ModelResponseInterceptor, ModelResponseStream,
     ModelToolAdmission,
