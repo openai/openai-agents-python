@@ -292,6 +292,20 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
             // Endpoint credentials, process configuration and refreshed policies are not
             // declaration compatibility. Their fresh native owners remain authority.
             descriptor["mcp_servers"] = json!(profile.mcp_servers.keys().collect::<Vec<_>>());
+            // Runtime-only policy reset; unchanged declaration compatibility.
+            if let Some(controls) = descriptor
+                .pointer_mut("/model/request_controls")
+                .and_then(Value::as_object_mut)
+                && controls.get("retry") == Some(&json!({"has_policy": false}))
+            {
+                controls.remove("retry");
+                if controls.is_empty() {
+                    descriptor["model"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("request_controls");
+                }
+            }
             Ok(descriptor)
         })
         .collect::<Result<Vec<_>>>()?;

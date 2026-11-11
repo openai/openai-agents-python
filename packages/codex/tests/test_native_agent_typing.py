@@ -1200,6 +1200,16 @@ def hosted_handoff_type_contract() -> None:
         handoffs=[Handoff(typed, transfer)],
     )
 
+    def completed_batch(_context: agents.ToolBatchCompletionContext[None]) -> None:
+        return None
+
+    Agent(hosted_prompt={"id": "pmpt_test"}, tool_batch_completion=completed_batch)
+    Agent(
+        hosted_prompt={"id": "pmpt_test"},
+        output_type=PromptAnswer,
+        tool_batch_completion=completed_batch,
+    )
+
 
 def body_error_formatter(context: ToolContext[Application], error: Exception) -> str:
     return context.context.tenant

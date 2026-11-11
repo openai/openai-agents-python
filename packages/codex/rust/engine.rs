@@ -714,6 +714,17 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let private_http = options.private_http;
+        let process_private_http = options.process_private_http
+            && cfg!(target_os = "linux")
+            && self.owns_runtime_services()
+            && options.permits_private_disposable()
+            && !options.transform_context
+            && !options.before_compact
+            && !options.before_complete
+            && !options.tool_batch_completion
+            && initial_messages.is_none()
+            && history.is_none()
+            && python_specs.as_ref().is_some_and(Vec::is_empty);
         let private_disposable = options.private_disposable
             && options.permits_private_disposable()
             && initial_messages.is_none()
@@ -851,7 +862,12 @@ impl EngineState {
             );
         }
         let native = self
-            .start_prepared_with_transport(startup, instructions, private_http)
+            .start_prepared_with_transport(
+                startup,
+                instructions,
+                private_http,
+                process_private_http,
+            )
             .await?;
         if let Some(batch) = initial_messages {
             let state = native
@@ -873,7 +889,7 @@ impl EngineState {
         startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
     ) -> anyhow::Result<NativeThread> {
-        self.start_prepared_with_transport(startup, instructions, false)
+        self.start_prepared_with_transport(startup, instructions, false, false)
             .await
     }
 
@@ -882,10 +898,16 @@ impl EngineState {
         mut startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
         private_http: bool,
+        process_private_http: bool,
     ) -> anyhow::Result<NativeThread> {
         // build_startup has already validated the unchanged provider against the
         // retained Engine. Only this owned thread config receives the restriction.
-        prepare_private_transport(&mut startup, self.model_http_pool.as_ref(), private_http)?;
+        let process_pool = process_private_http.then(crate::private_http::process_pool);
+        prepare_private_transport(
+            &mut startup,
+            process_pool.as_ref().or(self.model_http_pool.as_ref()),
+            private_http || process_private_http,
+        )?;
         if self.runtime_parent.is_some() {
             ensure!(
                 matches!(&startup.initial_history, InitialHistory::New),
