@@ -37,6 +37,10 @@ jobs:
           static const char *self;
           static const mach_msg_id_t sentinel_id = 0x434458;
           struct sentinel { mach_msg_header_t h; uint32_t global_matches_task; };
+          #pragma pack(push,4)
+          struct identity_lookup { mach_msg_header_t h; NDR_record_t ndr; char name[128]; int32_t target; unsigned char instance[16]; uint64_t flags; };
+          #pragma pack(pop)
+          _Static_assert(sizeof(struct identity_lookup)==188,"lookup wire size");
           
           static const char *names[] = {
             "com.apple.system.opendirectoryd.libinfo_debug",
@@ -87,7 +91,7 @@ jobs:
               if (mode!=2) { usleep(10000); continue; }
               union { mach_msg_header_t h; unsigned char bytes[65536]; } message;
               memset(&message,0,sizeof(message));
-              kern_return_t kr=mach_msg(&message.h,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(message),sink,50,MACH_PORT_NULL);
+              kern_return_t kr=mach_msg(&message.h,MACH_RCV_MSG|MACH_RCV_TIMEOUT|MACH_RCV_VOUCHER|MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)|MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),0,sizeof(message),sink,50,MACH_PORT_NULL);
               if (kr==MACH_RCV_TIMED_OUT) continue;
               if (kr!=KERN_SUCCESS) { printf("{\"receive_error\":%d}\n",kr); kill(-child,SIGKILL); kill(child,SIGKILL); waitpid(child,&status,0); break; }
               received++;
@@ -121,7 +125,27 @@ jobs:
                 }
               }
               printf("{\"command\":\"%s\",\"message_id\":%d,\"size\":%u,\"complex\":%s,\"descriptors\":%u,\"recognized_service\":\"%s\"}\n",command,message.h.msgh_id,message.h.msgh_size,(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX)?"true":"false",count,service);
-              /* No request is forwarded. Only a conventional denial is sent, if a reply right exists. */
+              /* Forward only the exact existing read-only libinfo service lookup. */
+              if (message.h.msgh_id==0x40000324 && message.h.msgh_size==sizeof(struct identity_lookup) && !(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && message.h.msgh_voucher_port==MACH_PORT_NULL && MACH_MSGH_BITS_REMOTE(message.h.msgh_bits)==MACH_MSG_TYPE_MOVE_SEND_ONCE) {
+                struct identity_lookup *lookup=(void*)&message;
+                size_t offset=(message.h.msgh_size+3u)&~3u;
+                mach_msg_audit_trailer_t *audit=(void*)(message.bytes+offset);
+                bool owner=audit->msgh_trailer_type==MACH_MSG_TRAILER_FORMAT_0 && audit->msgh_trailer_size>=sizeof(*audit) && (pid_t)audit->msgh_audit.val[5]==child;
+                bool name=strnlen(lookup->name,sizeof(lookup->name))==strlen("com.apple.system.opendirectoryd.libinfo") && !strcmp(lookup->name,"com.apple.system.opendirectoryd.libinfo");
+                printf("{\"command\":\"%s\",\"lookup_flags\":%llu,\"lookup_target\":%d,\"owner_matches\":%s}\n",command,(unsigned long long)lookup->flags,lookup->target,owner?"true":"false");
+                if (owner && name && !memcmp(&lookup->ndr,&NDR_record,sizeof(NDR_record)) && lookup->target==0 && lookup->flags==8) {
+                  mach_port_t reply=message.h.msgh_remote_port;
+                  memset(lookup->instance,0,sizeof(lookup->instance));
+                  message.h.msgh_remote_port=bootstrap_port; message.h.msgh_local_port=reply;
+                  message.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MOVE_SEND_ONCE);
+                  kr=mach_msg(&message.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,message.h.msgh_size,0,MACH_PORT_NULL,100,MACH_PORT_NULL);
+                  printf("{\"command\":\"%s\",\"identity_lookup_forward_result\":%d}\n",command,kr);
+                  if(kr==KERN_SUCCESS) continue;
+                  message.h.msgh_remote_port=reply; message.h.msgh_local_port=MACH_PORT_NULL;
+                  message.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE,0);
+                }
+              }
+              /* All other requests have been denied, including transferred rights. */
               if (message.h.msgh_remote_port!=MACH_PORT_NULL) {
                 mig_reply_error_t reply={0};
                 reply.Head.msgh_bits=MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(message.h.msgh_bits),0);
