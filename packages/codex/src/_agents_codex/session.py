@@ -60,6 +60,7 @@ from ._events import (
     FileSearchCallItem,
     ImageGenerationCallItem,
     MessageItem,
+    ReasoningItem,
     SessionItem as SessionItem,
     WebSearchCallItem,
 )
@@ -912,6 +913,8 @@ class Completed(Generic[OutputT, TurnT]):
     Session.items(). final_output contains display text without those ranges.
     One-shot runners populate state when called with return_state=True.
     Existing native checkpoint restrictions still apply.
+    One-shot runners populate history with conversation records for replay when
+    called with return_history=True. The destination Session supplies its instructions.
     """
 
     turn: TurnT
@@ -921,6 +924,7 @@ class Completed(Generic[OutputT, TurnT]):
     repair_attempts: tuple[RecordedTurn, ...] = ()
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
+    history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
 
     def __post_init__(self) -> None:
@@ -1305,14 +1309,18 @@ def _project_progress(
         elif kind == "item_completed":
             item = project_model_output_item(message["item"], True, turn_id)
             if item is not None and (
-                item["type"]
+                buffer.include_model_output_items
+                or item["type"]
                 in {
                     "web_search_call",
                     "file_search_call",
                     "code_interpreter_call",
                     "image_generation_call",
                 }
-                or any(part.get("annotations") for part in item["content"])
+                or (
+                    item["type"] == "message"
+                    and any(part.get("annotations") for part in item["content"])
+                )
             ):
                 buffer.append(
                     ModelOutputItemCompleted(
@@ -1321,6 +1329,7 @@ def _project_progress(
                         submission_id=submission_id,
                         item=cast(
                             MessageItem
+                            | ReasoningItem
                             | WebSearchCallItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
@@ -1700,31 +1709,51 @@ async def _call_callback(
     callback: Callable[..., Any], admit: Callable[[], bool], /, *args: Any, **kwargs: Any
 ) -> Any:
     try:
+        return await _call_callback_entered(callback, admit, args, kwargs)
+    finally:
+        del callback, admit, args, kwargs
+
+
+async def _call_callback_entered(
+    callback: Callable[..., Any],
+    admit: Callable[[], bool],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    enter: Callable[[], None] | None = None,
+) -> Any:
+    try:
         with _owned_span("callback", "callback"):
-            return await _call_callback_body(callback, admit, *args, **kwargs)
+            return await _call_callback_body(callback, admit, args, kwargs, enter)
     finally:
         # Release SDK-owned callback arguments only after the admitted body exits.
-        del callback, admit, args, kwargs
+        del callback, admit, args, kwargs, enter
 
 
 async def _call_callback_body(
     callback: Callable[..., Any],
     admit: Callable[[], bool],
-    /,
-    *args: Any,
-    **kwargs: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    enter: Callable[[], None] | None = None,
 ) -> Any:
     """Run Python in its appropriate executor and retain ownership until exit."""
     worker: asyncio.Future[Any] | None = None
     value: Any = None
     try:
         if inspect.iscoroutinefunction(callback):
+            if enter is not None:
+                if not admit():
+                    return None
+                enter()
             return await callback(*args, **kwargs)
         loop = asyncio.get_running_loop()
 
         async def admission() -> bool:
             # The asyncio and native ownership check belongs to the application's loop.
-            return admit()
+            allowed = admit()
+            if allowed and enter is not None:
+                enter()
+            return allowed
 
         def invoke_if_admitted() -> Any:
             if asyncio.run_coroutine_threadsafe(admission(), loop).result():
@@ -1765,6 +1794,8 @@ async def _call_callback_body(
         # Release SDK-owned callback arguments only after the admitted body exits.
         args = ()
         kwargs = {}
+        enter = None
+        callback = admit = cast(Any, None)
         del worker, value
 
 
@@ -3256,6 +3287,7 @@ class Session(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        include_model_output_items: bool = False,
         discover_agents_md: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
@@ -4148,6 +4180,7 @@ class Session(Generic[ContextT, OutputT]):
                     _start_event_reader=handoff is None,
                     max_function_concurrency=max_function_concurrency,
                     observation_retention=observation_retention,
+                    include_model_output_items=include_model_output_items,
                 )
                 session._input_guardrails = input_guardrails
                 session._output_guardrails = output_guardrails
@@ -4543,6 +4576,7 @@ class Session(Generic[ContextT, OutputT]):
         _start_event_reader: bool = True,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
     ) -> None:
         self._trace_context: str | None = None
         self._provider_lease: Any = None
@@ -4665,7 +4699,11 @@ class Session(Generic[ContextT, OutputT]):
         self._interaction_error: BaseException | None = None
         self._sync_cleanup_owner = _sync_run.get()
         self._sync_cleanup_deferred = False
-        self._observations = _ObservationBuffer(self.id, retention=observation_retention)
+        self._observations = _ObservationBuffer(
+            self.id,
+            retention=observation_retention,
+            include_model_output_items=include_model_output_items,
+        )
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._plan_usage_reads: set[asyncio.Task[str]] = set()
         self._rate_limit_parent: Session[Any, Any] | None = None
@@ -5032,12 +5070,21 @@ class Session(Generic[ContextT, OutputT]):
         )
         return self._agent_for_profile(receipt)
 
-    def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
-        captured = self._agent_for_message(message)
-        profile_id = message.get("profile_id")
+    def _original_agent_for_profile(self, receipt: Mapping[str, Any] | None) -> Agent[Any, Any]:
+        """Expose application identity after validating the captured source receipt."""
+        captured = self._agent_for_profile(receipt)
+        profile_id = receipt.get("profile_id") if receipt is not None else None
         if isinstance(profile_id, str):
             return self._source_profile_runtime(profile_id).profile.agent
         return self._agent if self._agent is not None else captured
+
+    def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
+        receipt = (
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
+        return self._original_agent_for_profile(receipt)
 
     async def _realtime_tool_enabled(
         self,
@@ -7146,6 +7193,11 @@ class Session(Generic[ContextT, OutputT]):
         omitted prefixes. Imported unknown fields and missing IDs unchanged;
         current model context and projected ``items()`` available separately.
         """
+        return await self._capture_canonical_history(limit)
+
+    async def _capture_canonical_history(
+        self, limit: int | None, *, for_replay: bool = False
+    ) -> CanonicalHistorySnapshot:
         self._check_callback_operation("read canonical history from its own Session")
         self._check_idle_update()
         if limit is not None and (
@@ -7154,7 +7206,7 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("limit must be a nonnegative integer or None")
 
         async def capture() -> CanonicalHistorySnapshot:
-            value = json.loads(await self._native._canonical_history(limit))
+            value = json.loads(await self._native._canonical_history(limit, for_replay))
             return CanonicalHistorySnapshot(
                 value["revision"],
                 value["total"],
@@ -7162,6 +7214,19 @@ class Session(Generic[ContextT, OutputT]):
             )
 
         return await self._join_mutation(asyncio.create_task(capture()))
+
+    async def _run_history(self) -> tuple[dict[str, Any], ...]:
+        try:
+            snapshot = await self._capture_canonical_history(None, for_replay=True)
+        except NativeError:
+            raise
+        except RuntimeError as error:
+            raise NativeError(str(error)) from error
+        return tuple(
+            item
+            for item in snapshot.items
+            if item.get("type") != "message" or item.get("role") not in ("developer", "system")
+        )
 
     async def transact_history(
         self,
@@ -7644,6 +7709,7 @@ class Session(Generic[ContextT, OutputT]):
         handler: _InteractionHandler | None,
         *,
         return_state: bool = False,
+        return_history: bool = False,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
         """Own live replies and Session shutdown for a one-shot run."""
@@ -7763,6 +7829,8 @@ class Session(Generic[ContextT, OutputT]):
             result = await waiter
             if return_state:
                 result = replace(result, state=await self.save_state())
+            if return_history:
+                result = replace(result, history=await self._run_history())
         except BaseException as error:
             await _close_after_error(error, close)
             raise
@@ -10000,6 +10068,7 @@ class Session(Generic[ContextT, OutputT]):
             _captured_siwc_provider=captured_siwc_provider,
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
+            include_model_output_items=self._observations.include_model_output_items,
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
@@ -10464,6 +10533,8 @@ class Session(Generic[ContextT, OutputT]):
         if message.get("thread_id") != self.id:
             return
         agent = self._agent_for_message(message)
+        previous_id = message.get("previous_profile_id")
+        previous = self._profiles.get(previous_id) if isinstance(previous_id, str) else None
         self._observations.append(
             AgentProfileChanged(
                 session_id=self.id,
@@ -10472,6 +10543,10 @@ class Session(Generic[ContextT, OutputT]):
                 profile_id=message["profile_id"],
                 profile_epoch=message["profile_epoch"],
                 agent_name=agent.name,
+                previous_profile_id=previous.profile.id if previous is not None else None,
+                previous_agent_name=previous.profile.declaration.name
+                if previous is not None
+                else None,
             )
         )
 
@@ -10793,6 +10868,20 @@ class Session(Generic[ContextT, OutputT]):
         *args: Any,
         **kwargs: Any,
     ) -> Any:
+        return await self._call_decision_callback_entered(
+            state, message, callback, active, None, args, kwargs
+        )
+
+    async def _call_decision_callback_entered(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        callback: Callable[..., Any],
+        active: Callable[[], bool],
+        enter: Callable[[], None] | None,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
         if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
             provider = getattr(self, "_decisions_provider", None)
             if getattr(self, "_profiles", None) or message.get("profile_id") in getattr(
@@ -10812,8 +10901,8 @@ class Session(Generic[ContextT, OutputT]):
                 ),
                 provider,
             ):
-                return await _call_callback(callback, active, *args, **kwargs)
-        return await _call_callback(callback, active, *args, **kwargs)
+                return await _call_callback_entered(callback, active, args, kwargs, enter)
+        return await _call_callback_entered(callback, active, args, kwargs, enter)
 
     async def _run_owned_context_callback(
         self,
@@ -12073,6 +12162,14 @@ class Session(Generic[ContextT, OutputT]):
                         submission_id=started.submission_id if started is not None else None,
                     ):
                         continue
+                    late_item = message.get("item")
+                    if (
+                        self._observations.include_model_output_items
+                        and isinstance(late_item, dict)
+                        and late_item.get("type") in {"AgentMessage", "Reasoning"}
+                    ):
+                        self._observations._mark_gap()
+                        continue
                 if self._startup_failure is not None and (state is None or state.handle is None):
                     if not self._startup_failure.done() and message.get("type") in {
                         "exec_approval_request",
@@ -13179,6 +13276,34 @@ class Session(Generic[ContextT, OutputT]):
             if not self._admit_tool(state, request):
                 return
             timeout_output: ToolOutput | None = None
+
+            def enter_body() -> None:
+                if self._realtime is None:
+                    return
+                source = message.get("_sdk_realtime_tool_call")
+                if source is None:
+                    return
+                bindings = self._bindings_for_message(
+                    {**message, "generation": marker["generation"]}
+                )
+                original = next(
+                    (
+                        tool
+                        for tool in bindings
+                        if isinstance(tool, FunctionTool) and tool.ref == ref
+                    ),
+                    None,
+                )
+                if original is not None:
+                    self._realtime._tool_body_started(
+                        source, message["_sdk_realtime_tool_name"], original
+                    )
+
+            async def invoke_body_callback(active: Callable[[], bool]) -> Any:
+                return await self._call_decision_callback_entered(
+                    state, message, entry.callback, active, enter_body, args, kwargs
+                )
+
             duration = entry.callback_timeout
             if isinstance(entry, _CapturedComputer):
                 assert context is not None and isinstance(parsed, _ComputerCall)
@@ -13195,14 +13320,7 @@ class Session(Generic[ContextT, OutputT]):
                     parsed,
                 )
             elif duration is None:
-                value = await self._call_decision_callback(
-                    state,
-                    message,
-                    entry.callback,
-                    lambda: self._admit_tool(state, request),
-                    *args,
-                    **kwargs,
-                )
+                value = await invoke_body_callback(lambda: self._admit_tool(state, request))
             elif entry.timeout_behavior == "error_as_result":
                 loop = asyncio.get_running_loop()
                 cutoff = loop.time() + duration
@@ -13229,9 +13347,7 @@ class Session(Generic[ContextT, OutputT]):
                     nonlocal value, body_error
                     try:
                         if admit_body():
-                            value = await self._call_decision_callback(
-                                state, message, entry.callback, admit_body, *args, **kwargs
-                            )
+                            value = await invoke_body_callback(admit_body)
                     except BaseException as error:
                         # Transport every exit to the owner without letting
                         # process-control exceptions escape this child task.
@@ -13318,14 +13434,7 @@ class Session(Generic[ContextT, OutputT]):
 
                 timer = loop.call_at(cutoff, expire_callback)
                 try:
-                    value = await self._call_decision_callback(
-                        state,
-                        message,
-                        entry.callback,
-                        lambda: self._admit_tool(state, request),
-                        *args,
-                        **kwargs,
-                    )
+                    value = await invoke_body_callback(lambda: self._admit_tool(state, request))
                 finally:
                     timer.cancel()
                     # A busy callback can cross the cutoff before timer dispatch.
