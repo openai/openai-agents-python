@@ -8,7 +8,13 @@ from typing import cast
 
 from typing_extensions import Self
 
+from .. import session
+from ..types import ExecResult
+
 DependencyKey = str
+GitRepoCopyLauncher = Callable[
+    ["session.BaseSandboxSession", str, tuple[str, ...]], Awaitable[ExecResult]
+]
 
 
 class DependenciesError(RuntimeError):
@@ -71,7 +77,16 @@ class Dependencies:
     callers register shared runtime-only objects such as service clients or lazy factories.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, git_repo_copy_launcher: GitRepoCopyLauncher | None = None) -> None:
+        """Optionally supply the hosted image's trusted launcher for GitRepo copies.
+
+        The launcher receives the session, the SDK's shell script, and its positional arguments.
+        Run the script as `sh -c SCRIPT sandbox-git-copy ARG...` with the image's shell and
+        copy tools. Use a provider transport that starts the shell with a clean environment and
+        tool paths outside the writable workspace. Bind the launcher on the application client
+        that creates or resumes the sandbox.
+        """
+        self.git_repo_copy_launcher = git_repo_copy_launcher
         self._bindings: dict[DependencyKey, _Binding] = {}
         self._cache: dict[DependencyKey, object] = {}
         self._pending: dict[DependencyKey, asyncio.Task[object]] = {}
@@ -103,7 +118,7 @@ class Dependencies:
         return self
 
     def clone(self) -> Dependencies:
-        cloned = Dependencies()
+        cloned = Dependencies(git_repo_copy_launcher=self.git_repo_copy_launcher)
         for key, binding in self._bindings.items():
             if isinstance(binding, _ValueBinding):
                 cloned._bindings[key] = _ValueBinding(value=binding.value)

@@ -3790,15 +3790,19 @@
       "agents.classic.sandbox.session.dependencies": {
         "declarations": [
           "DependencyKey = str",
+          "GitRepoCopyLauncher = Callable[['session.BaseSandboxSession', str, tuple[str, ...]], Awaitable[ExecResult]]",
           "FactoryFn = Callable[['Dependencies'], object | Awaitable[object]]",
-          "class Dependencies:\n\n    def __init__(self) -> None:\n        pass\n\n    @classmethod\n    def with_values(cls, values: Mapping[DependencyKey, object]) -> Dependencies:\n        pass\n\n    def bind_value(self, key: DependencyKey, value: object, *, overwrite: bool=False) -> Self:\n        pass\n\n    def clone(self) -> Dependencies:\n        pass\n\n    def bind_factory(self, key: DependencyKey, factory: FactoryFn, *, cache: bool=True, overwrite: bool=False, owns_result: bool=False) -> Self:\n        pass\n\n    async def get(self, key: DependencyKey) -> object | None:\n        pass\n\n    async def require(self, key: DependencyKey, *, consumer: str | None=None) -> object:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
+          "class Dependencies:\n\n    def __init__(self, *, git_repo_copy_launcher: GitRepoCopyLauncher | None=None) -> None:\n        pass\n\n    @classmethod\n    def with_values(cls, values: Mapping[DependencyKey, object]) -> Dependencies:\n        pass\n\n    def bind_value(self, key: DependencyKey, value: object, *, overwrite: bool=False) -> Self:\n        pass\n\n    def clone(self) -> Dependencies:\n        pass\n\n    def bind_factory(self, key: DependencyKey, factory: FactoryFn, *, cache: bool=True, overwrite: bool=False, owns_result: bool=False) -> Self:\n        pass\n\n    async def get(self, key: DependencyKey) -> object | None:\n        pass\n\n    async def require(self, key: DependencyKey, *, consumer: str | None=None) -> object:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
           "from collections.abc import Awaitable, Callable, Mapping",
-          "from typing_extensions import Self"
+          "from typing_extensions import Self",
+          "from ..types import ExecResult"
         ],
-        "references": {}
+        "references": {
+          "ExecResult": "agents.classic.sandbox.types.ExecResult"
+        }
       },
       "agents.classic.sandbox.session.events": {
         "declarations": [

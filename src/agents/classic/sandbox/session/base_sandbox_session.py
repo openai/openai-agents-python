@@ -665,6 +665,10 @@ class BaseSandboxSession(abc.ABC):
 
     async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
         """Run a GitRepo copy with the backend's system tools and a clean environment."""
+        if self._dependencies is not None:
+            launch = self._dependencies.git_repo_copy_launcher
+            if launch is not None:
+                return await launch(self, script, arguments)
         # Start env in the workspace so it clears the manifest environment before
         # the copy shell enters the checkout.
         return await self.exec(

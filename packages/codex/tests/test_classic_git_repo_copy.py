@@ -17,6 +17,7 @@ from agents.classic.sandbox.entries.artifacts import _GIT_COPY_SOURCE_BOUNDARY
 from agents.classic.sandbox.errors import GitCopyError
 from agents.classic.sandbox.manifest import Environment, Manifest
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.classic.sandbox.session.dependencies import Dependencies
 from agents.classic.sandbox.types import ExecResult
 from agents.classic.sandbox.workspace_paths import _resolve_git_copy_path
 
@@ -25,6 +26,8 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="requires a POSIX she
 
 class FixtureGitSession:
     """Replace network cloning with a benign directory fixture."""
+
+    _dependencies: Dependencies | None = None
 
     def __init__(self, fixture: Path, cwd: Path, *, copy_path: str = os.defpath) -> None:
         self.fixture = fixture
