@@ -591,7 +591,19 @@
     {
       "path": "sdk-mcp-forced-choice-captured-binding.patch",
       "sha256": "4bd3b5089c6843c58c3c8af71f50e488142a1a26ce29d6d5dcc4041cf7ff1985"
+    },
+    {
+      "path": "sdk-provider-compaction-prompt-boundary.patch",
+      "sha256": "77e0de10c45e19b433a07437917870b43d9ca68fb3d2147b5279d5ed22845d49"
+    },
+    {
+      "path": "sdk-stored-session-discovery-and-compaction-restore.patch",
+      "sha256": "1e8b7a34760ffb9bedc4750741903573e483db2bf5e07768cfa6ce51a00bc229"
+    },
+    {
+      "path": "sdk-native-compaction-provider-window.patch",
+      "sha256": "51748b7cd628e84a055b0af35c84bd157dbf097f170fe1025e59e7ab4b2d6d72"
     }
   ],
-  "result_tree": "117c8a6363c61081270c91b326336bab0152c74e"
+  "result_tree": "16ed9e467b0a75dbae3d8f63697e6600a100d57c"
 }

@@ -28,6 +28,8 @@ from ._stored_history import (
     StoredMatch as StoredMatch,
     StoredMatchPage as StoredMatchPage,
     StoredMatchRange as StoredMatchRange,
+    StoredSession as StoredSession,
+    StoredSessionPage as StoredSessionPage,
     StoredTurn as StoredTurn,
     StoredTurnPage as StoredTurnPage,
 )

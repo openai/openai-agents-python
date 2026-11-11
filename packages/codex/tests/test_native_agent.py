@@ -44,6 +44,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "set_paused_goal",
         "fork",
         "fork_stored",
+        "stored_sessions",
         "stored_turns",
         "stored_items",
         "search_history",

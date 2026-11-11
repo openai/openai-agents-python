@@ -1471,6 +1471,15 @@ fn observe_turn(turn_id: &mut Option<String>, item: &RolloutItem) {
 }
 
 impl LocalChecklistStore {
+    pub(crate) async fn list_threads_including_empty_preview(
+        &self,
+        params: codex_thread_store::ListThreadsParams,
+    ) -> codex_thread_store::ThreadStoreResult<codex_thread_store::ThreadPage> {
+        self.inner
+            .list_threads_including_empty_preview(params)
+            .await
+    }
+
     pub(crate) fn check_durability(&self) -> ThreadStoreResult<()> {
         if self
             .durability_failure

@@ -96,6 +96,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._stored_history import (
     StoredItemPage,
     StoredMatchPage,
+    StoredSessionPage,
     StoredTurnPage,
     _item_page as _stored_item_page,
     _options as _stored_options,
@@ -13447,6 +13448,43 @@ class Session(Generic[ContextT, OutputT]):
             raise RuntimeError("Stored history operation requires an open Session before close")
         self._stored_close_action = self._native._stored_history_close_action(json.dumps(action))
         await self.aclose()
+
+    async def stored_sessions(
+        self, *, limit: int = 50, cursor: str | None = None, archived: bool = False
+    ) -> StoredSessionPage:
+        """Committed native Exec application-session headers from this LocalStorage.
+
+        Exec source category, including SDK and exec applications; interactive CLI,
+        IDE and subagent source categories excluded. Native creation-order cursor;
+        active/approval-paused reads, without snapshot isolation or totals.
+        Archived collection only for archived=True; active collection otherwise.
+        Concurrent creation/deletion and transient indexed opening/fork records;
+        no stable pagination or publication promise. Potential short/empty pages
+        with a next cursor after deletion.
+        Fork-parent links from validated metadata; without opening the listed sessions
+        or loading their history. Existing materialization/flush of the current owner.
+
+        Page sizes 1 through 1000; default 50. Opaque cursors for the same options.
+        Paging with the returned cursor, including empty pages::
+
+            cursor: str | None = None
+            ids: list[str] = []
+            while True:
+                page = await session.stored_sessions(limit=50, cursor=cursor)
+                ids.extend(item["id"] for item in page["sessions"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+        """
+        self._check_open()
+        options = _stored_options(limit, cursor)
+        options.pop("descending")
+        if type(archived) is not bool:
+            raise TypeError("archived must be a bool")
+        value = await self._native._stored_history(
+            json.dumps({"kind": "sessions", **options, "archived": archived})
+        )
+        return cast(StoredSessionPage, json.loads(value))
 
     async def stored_turns(
         self,

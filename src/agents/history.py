@@ -41,6 +41,8 @@ from _agents_codex.history import (
     StoredMatch as StoredMatch,
     StoredMatchPage as StoredMatchPage,
     StoredMatchRange as StoredMatchRange,
+    StoredSession as StoredSession,
+    StoredSessionPage as StoredSessionPage,
     StoredTurn as StoredTurn,
     StoredTurnPage as StoredTurnPage,
     TextProbabilitiesFact as TextProbabilitiesFact,
