@@ -6,8 +6,18 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, ModelRequest, ModelResponse, NativeProvider
-from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
+from agents import Agent, FunctionTool, ModelRequest, ModelResponse, NativeProvider, function_tool
+from agents.handoffs import Handoff
+from agents.state import SessionState
+from tests._asyncio import timeout
+from tests.native_fixtures import (
+    ResponsesFixture,
+    assistant_output,
+    function_call,
+    responses as responses,
+    tool_output,
+)
+from tests.test_native_manual_tools import LookupArgs, next_request
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -82,6 +92,89 @@ async def test_native_prompt_cold_restore_uses_current_declaration(
         "pmpt_current",
     ]
     assert all("instructions" not in request for request in responses.requests)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_native_prompt_callback_handoff_preserves_instruction_presence(
+    responses: ResponsesFixture, explicit: bool
+) -> None:
+    @function_tool
+    def transfer() -> str:
+        return "transferred"
+
+    responses.respond(assistant_output("prompt result"))
+    options: dict[str, Any] = {"instructions": ""} if explicit else {}
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-prompt-key", supports_websockets=False
+    ) as provider:
+        agent = Agent(
+            hosted_prompt={"id": "pmpt_owned"},
+            handoffs=[Handoff(Agent(name="target", instructions="Target instructions"), transfer)],
+            provider=provider,
+            **options,
+        )
+        assert (await agent.run("Use hosted instructions")).final_output == "prompt result"
+
+    assert len(responses.requests) == 1
+    request = responses.requests[0]
+    assert request["prompt"] == {"id": "pmpt_owned"}
+    if explicit:
+        assert request["instructions"] == ""
+    else:
+        assert "instructions" not in request
+
+
+@pytest.mark.parametrize("factory", [False, True])
+async def test_native_prompt_manual_restore_uses_current_declaration(
+    responses: ResponsesFixture, factory: bool
+) -> None:
+    lookup = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    resolutions = 0
+
+    def current_prompt(context: Any) -> Any:
+        nonlocal resolutions
+        resolutions += 1
+        return {"id": "pmpt_current"}
+
+    responses.respond(function_call("lookup", {"key": "A"}, "call-A"))
+    async with (
+        timeout(25),
+        NativeProvider(
+            base_url=responses.url, api_key="synthetic-prompt-key", supports_websockets=False
+        ) as provider,
+    ):
+        original = Agent(hosted_prompt={"id": "pmpt_before"}, tools=[lookup], provider=provider)
+        async with original.session() as source:
+            turn = await source.submit("Read a record")
+            await next_request(source.interactions(), lookup)
+            encoded = (await source.suspend()).to_json()
+            assert "pmpt_before" not in encoded
+            saved = SessionState.from_json(encoded)
+
+        responses.respond(assistant_output("resumed with current prompt"))
+        current = Agent(
+            hosted_prompt=current_prompt if factory else {"id": "pmpt_current"},
+            tools=[lookup],
+            provider=provider,
+        )
+        async with current.session(state=saved) as restored:
+            handle = restored.restored_turn
+            assert handle is not None and handle.turn_id == turn.turn_id
+            request = await next_request(restored.interactions(), lookup)
+            assert request.call_id == "call-A"
+            await request.respond("accepted result")
+            assert (await handle.get_result()).final_output == "resumed with current prompt"
+
+    assert [request["prompt"] for request in responses.requests] == [
+        {"id": "pmpt_before"},
+        {"id": "pmpt_current"},
+    ]
+    assert all("instructions" not in request for request in responses.requests)
+    assert all("model" not in request for request in responses.requests)
+    assert tool_output(responses.requests[1], "call-A") == "accepted result"
+    assert resolutions == int(factory)
 
 
 async def test_native_prompt_model_update_does_not_inject_default_instructions(

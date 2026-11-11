@@ -463,13 +463,23 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
             "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (
-            ordinary | {"named_tool_choice", "attempt_timeout_ms", "retry"}
+            ordinary | {"named_tool_choice", "attempt_timeout_ms", "retry", "hosted_prompt"}
         ):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
         normalized = _native_model_settings(
             None,
             cast(ModelSettings, {key: value for key, value in controls.items() if key in ordinary}),
         ).get("request_controls", {})
+        if "hosted_prompt" in controls:
+            prompt = controls["hosted_prompt"]
+            if prompt is not None and (
+                not isinstance(prompt, dict)
+                or prompt.keys() - {"omit_model", "omit_instructions", "omit_tools"}
+                or any(type(value) is not bool for value in prompt.values())
+            ):
+                raise ValueError("Manual checkpoint has invalid hosted prompt omission controls")
+            # The current Agent supplies the reference for each admitted request.
+            normalized["hosted_prompt"] = prompt
         if "named_tool_choice" in controls:
             target = controls["named_tool_choice"]
             if target is not None:

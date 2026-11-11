@@ -68,13 +68,11 @@ def _capture_agent_graph(
             for reference in source.handoffs
             if isinstance(reference, Handoff)
         }
+        instructions = (
+            source.instructions if getattr(source, "_hosted_instructions_provided", True) else None
+        )
         declaration = Agent[Any, Any](
-            instructions=cast(
-                str,
-                source.instructions
-                if getattr(source, "_hosted_instructions_provided", True)
-                else None,
-            ),
+            instructions=cast(str, instructions),
             realtime=source.realtime,
             hosted_prompt=source.hosted_prompt,
             name=source.name,
@@ -185,7 +183,11 @@ def _capture_agent_graph(
             (tool.ref for tool in declaration.tools if isinstance(tool, FunctionTool)), targets
         )
         if callback_tools:
-            declaration = replace(declaration, tools=(*declaration.tools, *callback_tools))
+            declaration = replace(
+                declaration,
+                instructions=cast(str, instructions),
+                tools=(*declaration.tools, *callback_tools),
+            )
         profiles.append(
             _AgentProfile(
                 f"{id_prefix}{indices[id(agent)]}",
