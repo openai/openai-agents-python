@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "99aec30c872c2819bc694823d3d1a501968e4884",
+  "baseline_commit": "1721829558b2add45cda5a11c9e2d7abce0bb9e2",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -140,12 +140,14 @@
           "from dataclasses import dataclass as dataclass",
           "from pathlib import Path as Path",
           "from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable",
+          "from .canonical_storage_dapr import DaprSessionStore as DaprSessionStore",
           "from .canonical_storage_encrypt import EncryptedSessionStore as EncryptedSessionStore",
           "from .canonical_storage_mongodb import MongoDBSessionStore as MongoDBSessionStore",
           "from .canonical_storage_redis import RedisSessionStore as RedisSessionStore",
           "from .tools import ToolOutput as ToolOutput"
         ],
         "references": {
+          "DaprSessionStore": "_agents_codex.canonical_storage_dapr.DaprSessionStore",
           "EncryptedSessionStore": "_agents_codex.canonical_storage_encrypt.EncryptedSessionStore",
           "MongoDBSessionStore": "_agents_codex.canonical_storage_mongodb.MongoDBSessionStore",
           "RedisSessionStore": "_agents_codex.canonical_storage_redis.RedisSessionStore",
@@ -1805,6 +1807,7 @@
       "ComputerSafetyError": "agents.computer.ComputerSafetyError",
       "ContinueTurn": "agents.completion.ContinueTurn",
       "CustomStorage": "agents.canonical_storage.CustomStorage",
+      "DaprSessionStore": "agents.canonical_storage.DaprSessionStore",
       "DecisionError": "agents.decisions.DecisionError",
       "DecisionInput": "agents.decisions.DecisionInput",
       "DecisionProvider": "agents.decisions.DecisionProvider",
@@ -2008,6 +2011,16 @@
         "imports": [
           "from collections.abc import Mapping, Sequence",
           "from typing import Any, TextIO"
+        ],
+        "references": {}
+      },
+      "_agents_codex.canonical_storage_dapr": {
+        "declarations": [
+          "class DaprSessionStore:\n\n    def __init__(self, client: DaprClient, *, state_store_name: str, key_prefix: str='agents:canonical:v1', lease_seconds: float=30) -> None:\n        pass\n\n    @classmethod\n    async def from_address(cls, dapr_address: str='localhost:50001', *, state_store_name: str, key_prefix: str='agents:canonical:v1', lease_seconds: float=30) -> DaprSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from dapr.aio.clients import DaprClient"
         ],
         "references": {}
       },
@@ -4564,6 +4577,7 @@
       "ComputerSafetyError",
       "ContinueTurn",
       "CustomStorage",
+      "DaprSessionStore",
       "DecisionError",
       "DecisionInput",
       "DecisionProvider",
@@ -4705,7 +4719,7 @@
       "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, ToolInputErrorContext as ToolInputErrorContext, ToolTimeoutBehavior as ToolTimeoutBehavior, ToolTimeoutError as ToolTimeoutError, function_tool as function_tool",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
-      "from .canonical_storage import CustomStorage as CustomStorage, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
+      "from .canonical_storage import CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn",
       "from .computer import Computer as Computer, ComputerProvider as ComputerProvider, ComputerSafetyError as ComputerSafetyError, computer_tool as computer_tool",
