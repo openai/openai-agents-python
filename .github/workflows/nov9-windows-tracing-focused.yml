@@ -44,5 +44,5 @@ jobs:
           uv sync --frozen --group dev --no-install-project --python 3.14.10
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv pip install --no-deps --python .venv/Scripts/python.exe "$env:NOV9_VERIFIED_WHEEL"
-      - name: Run original deadline case once under the 45 second cap
+      - name: Observe the original deadline case warmup under the 45 second cap
         run: '& "./.venv/Scripts/python.exe" ../diagnostic/.github/diagnostics/nov9-windows-trace-probe.py'
