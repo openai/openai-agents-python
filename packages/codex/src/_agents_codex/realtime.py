@@ -22,6 +22,7 @@ from contextvars import Context, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
@@ -227,6 +228,12 @@ class RealtimeConfig:
     ``api_key`` may be a string or a synchronous/asynchronous callback. It is
     resolved once for this connection and never replaces the Session's auth.
     Closing during resolution cancels the owned callback before connecting.
+
+    ``url`` selects an exact trusted application WebSocket endpoint. An override
+    never inherits provider credentials; supply ``api_key`` or ``headers`` when
+    authentication is needed. ``headers`` replaces all application headers,
+    including authentication; an empty mapping sends none. These options apply
+    to built-in WebSockets and SIP attachment, not WebRTC or custom adapters.
     """
 
     model: str | None = None
@@ -249,6 +256,8 @@ class RealtimeConfig:
     tool_error_formatter: (
         Callable[[RealtimeToolErrorContext], str | None | Awaitable[str | None]] | None
     ) = field(default=None, repr=False)
+    url: str | None = field(default=None, repr=False)
+    headers: Mapping[str, str] | None = field(default=None, repr=False)
 
 
 async def _prepare_realtime_params(
@@ -943,6 +952,33 @@ class RealtimeSession:
             raise TypeError("Realtime is_tool_enabled must be a callback")
         if config.tool_error_formatter is not None and not callable(config.tool_error_formatter):
             raise TypeError("Realtime tool_error_formatter must be a callback")
+        if config.url is not None or config.headers is not None:
+            if config.adapter is not None or isinstance(config.transport, RealtimeWebRTC):
+                raise ValueError("url and headers require a built-in WebSocket connection")
+        if config.url is not None:
+            if not isinstance(config.url, str):
+                raise TypeError("url must be a WebSocket URL string")
+            try:
+                parsed_url = urlsplit(config.url)
+                valid_url = (
+                    parsed_url.scheme in {"ws", "wss"}
+                    and parsed_url.hostname is not None
+                    and parsed_url.username is None
+                    and parsed_url.password is None
+                    and not parsed_url.fragment
+                )
+            except ValueError:
+                valid_url = False
+            if not valid_url:
+                raise ValueError("url requires ws or wss without credentials or fragments")
+        if config.headers is not None:
+            if not isinstance(config.headers, Mapping) or any(
+                not isinstance(name, str) or not isinstance(value, str)
+                for name, value in config.headers.items()
+            ):
+                raise TypeError("headers must map strings to strings")
+            config = replace(config, headers=dict(config.headers))
+            self._config = config
         self._input_lock = asyncio.Lock()
         self._input_count = 0
         self._input_bytes = 0
@@ -1154,7 +1190,14 @@ class RealtimeSession:
                 finally:
                     self._credentials = None
                 self._check_live(require_ready=False)
-                result = await self._call("activate", api_key=api_key)
+                result = await self._call(
+                    "activate",
+                    api_key=api_key,
+                    connection_options={
+                        "url": self._config.url,
+                        "headers": self._config.headers,
+                    },
+                )
             finally:
                 api_key = None
             self._call_id = result["call_id"]
@@ -1167,6 +1210,8 @@ class RealtimeSession:
             self._config = replace(
                 self._config,
                 api_key=None,
+                url=None,
+                headers=None,
                 settings=None,
                 transport=self._config.transport if self._start_succeeded else None,
             )
