@@ -456,14 +456,29 @@ async def test_explicit_voice_capture_rejects_source_changed_between_policy_read
             # The public update joins profile synchronization, whose lock the
             # stale capture still holds. Wait only for the native catalog change.
             while True:
-                current_snapshot = json.loads(
-                    await session._native.call("realtime_tool_selection_sdk", "{}")
-                )
+                update_was_done = updating.done()
+                try:
+                    current_snapshot = json.loads(
+                        await session._native.call("realtime_tool_selection_sdk", "{}")
+                    )
+                except RuntimeError as error:
+                    if (
+                        update_was_done
+                        or str(error) != "Realtime source changed during selection snapshot"
+                    ):
+                        raise
+                    await asyncio.sleep(0)
+                    continue
                 if current_snapshot["catalog_generation"] != captured_generation:
                     break
                 if updating.done():
                     await updating
-                    pytest.fail("The tool update did not change its native catalog")
+                    current_snapshot = json.loads(
+                        await session._native.call("realtime_tool_selection_sdk", "{}")
+                    )
+                    if current_snapshot["catalog_generation"] == captured_generation:
+                        pytest.fail("The tool update did not change its native catalog")
+                    break
                 await asyncio.sleep(0)
             resume.set()
             with pytest.raises(

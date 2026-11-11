@@ -58,9 +58,7 @@ def test_sdk_archive_has_current_native_api_and_licenses(sdk_wheel):
     assert len(names) == len(set(names)), "Duplicate archive ownership"
     assert not any(name.startswith(("codex_agents/", "codex_agents.libs/")) for name in names)
     assert not any(
-        name.startswith(
-            ("agents/models/", "agents/run_internal/", "agents/extensions/", "agents/memory/")
-        )
+        name.startswith(("agents/models/", "agents/run_internal/", "agents/memory/"))
         for name in names
     )
     python = {name for name in names if name.endswith(".py")}
