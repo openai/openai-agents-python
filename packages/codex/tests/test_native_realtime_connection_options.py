@@ -84,7 +84,16 @@ async def test_connection_url_is_exact_and_never_inherits_session_credentials(
         wire = peer.upgrades[0]
         assert wire.get("authorization") == expected_authorization
         assert "x-provider-secret" not in wire
-        assert "x-session-id" not in wire
+        if headers is None:
+            assert wire.get("x-session-id")
+            assert wire.get("session-id")
+            assert wire.get("thread-id")
+            assert wire.get("originator")
+            assert wire.get("user-agent")
+        else:
+            for name in ("x-session-id", "session-id", "thread-id", "originator", "user-agent"):
+                assert name not in wire
+        assert "x-codex-turn-metadata" not in wire
         assert wire.get("x-voice") == (headers or {}).get("X-Voice")
         turn = await session.submit("Use the ordinary Session endpoint.")
         assert (await turn.get_result()).final_output == "Session auth survived."
@@ -194,6 +203,43 @@ async def test_existing_call_accepts_exact_url_and_replacement_headers(call_peer
             assert voice.call_id == "rtc_external_sip"
         assert calls == 0
         assert peer.sidebands[-1][1]["x-voice"] == "attachment"
+        assert [call_id for call_id, _ in peer.hangups] == ["rtc_native_1"]
+
+
+@pytest.mark.parametrize("api_key", [None, "explicit-sideband-key"])
+async def test_existing_call_url_only_retains_handshake_without_provider_credentials(
+    call_peer: CallPeer, api_key: str | None
+) -> None:
+    peer = call_peer
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-native-call-key",
+            headers={"X-Provider-Secret": "private-provider-header"},
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+    ):
+        async with session.realtime(config=RealtimeConfig(transport=RealtimeWebRTC(OFFER_SDP))):
+            pass
+        normal_headers = peer.sidebands[0][1]
+        peer.sessions["rtc_external_sip"] = peer.sessions["rtc_native_1"]
+        peer.expected_sideband_authorization = f"Bearer {api_key}" if api_key else None
+        url = (
+            peer.responses.url.replace("http://", "ws://", 1) + "/realtime?call_id=rtc_external_sip"
+        )
+        async with session.realtime(
+            config=RealtimeConfig(
+                transport=RealtimeSIP("rtc_external_sip"), url=url, api_key=api_key
+            )
+        ):
+            headers = peer.sidebands[-1][1]
+            assert headers.get("authorization") == peer.expected_sideband_authorization
+            for name in ("session-id", "thread-id", "originator", "user-agent"):
+                assert headers.get(name) == normal_headers[name]
+            assert "x-provider-secret" not in headers
+            assert "x-codex-turn-metadata" not in headers
         assert [call_id for call_id, _ in peer.hangups] == ["rtc_native_1"]
 
 
