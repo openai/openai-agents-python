@@ -241,6 +241,7 @@ def _responses_client_scope(client: Any) -> tuple[str, str, str | None, str | No
             return None
         if (
             type(client.responses) is not AsyncResponses
+            or client.responses._client is not client
             or getattr(client.responses.compact, "__func__", None) is not AsyncResponses.compact
         ):
             return None

@@ -154,7 +154,8 @@ async def test_compaction_only_transform_precedes_lineage_selection(responses, m
             assert "PRIVATE_FOR_COMPACTION" not in json.dumps(calls[0]["input"])
 
 
-async def test_auto_compaction_keeps_input_for_a_different_borrowed_endpoint(responses):
+@pytest.mark.parametrize("rebound", [False, True])
+async def test_auto_compaction_keeps_input_for_a_different_borrowed_endpoint(responses, rebound):
     from aiohttp import web
     from aiohttp.test_utils import TestServer
 
@@ -187,11 +188,21 @@ async def test_auto_compaction_keeps_input_for_a_different_borrowed_endpoint(res
     app.router.add_post("/v1/responses/compact", compact)
     responses.respond(assistant_output("ACKNOWLEDGED_NATIVE_ENDPOINT"))
     async with TestServer(app) as server:
-        async with AsyncOpenAI(
-            api_key="synthetic-native-agent-key",
-            base_url=str(server.make_url("/v1")),
-            max_retries=0,
-        ) as client:
+        async with (
+            AsyncOpenAI(
+                api_key="synthetic-native-agent-key",
+                base_url=str(server.make_url("/v1")),
+                max_retries=0,
+            ) as foreign,
+            AsyncOpenAI(
+                api_key="synthetic-native-agent-key",
+                base_url=responses.url,
+                max_retries=0,
+            ) as native_client,
+        ):
+            client = native_client if rebound else foreign
+            if rebound:
+                client.responses = foreign.responses
             agent = Agent(
                 provider=provider(responses),
                 model="gpt-5.5",
