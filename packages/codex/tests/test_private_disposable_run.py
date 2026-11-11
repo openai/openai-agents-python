@@ -87,6 +87,7 @@ async def test_disposable_completion_preserves_request_and_detached_views(
         if assert_native_admission(recorded[0], "completed"):
             assert all(recorded[0]["retired"].values())
         else:
+            assert isinstance(result.turn._session, Session)
             assert result.turn._session._closed and result.turn._session._resources_retired
         assert len(peer.requests) == 2
         for request in peer.requests:
@@ -274,10 +275,14 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
             assert len(adopted) == 1 and adopted[0]._closed and adopted[0]._resources_retired
             assert adopted[0]._reader is not None and adopted[0]._reader.done()
             assert len(peer.requests) == 1
+            assert "one private request" in json.dumps(peer.requests[0]["input"])
             monkeypatch.setattr(native, "_prepare_run_conversation", original)
             peer.json_replies.append(json_response("recovered", "recovery", "recovery-item"))
             assert (await agent.run("independent recovery input")).final_output == "recovered"
             assert len(peer.requests) == 2
+            recovery_input = json.dumps(peer.requests[1]["input"])
+            assert "independent recovery input" in recovery_input
+            assert "one private request" not in recovery_input
         finally:
             release.set()
             if not task.done():
@@ -306,6 +311,7 @@ async def test_explicit_websocket_selects_disposable_completion_without_http_pol
             assert result.final_output == "private websocket answer"
             assert len(recorded) == 1
             if not assert_native_admission(recorded[0], "completed"):
+                assert isinstance(result.turn._session, Session)
                 assert result.turn._session._closed and result.turn._session._resources_retired
             assert len(server.requests) == 1
             assert any(

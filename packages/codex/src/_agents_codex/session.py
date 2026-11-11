@@ -8764,6 +8764,8 @@ class Session(Generic[ContextT, OutputT]):
         owners.add(pending)
 
         def finished(task: asyncio.Task[None]) -> None:
+            if task not in owners:
+                return
             error = asyncio.CancelledError() if task.cancelled() else task.exception()
             if not accepted.done():
                 if error is None:
@@ -8784,6 +8786,8 @@ class Session(Generic[ContextT, OutputT]):
             await asyncio.wait((accepted,))
         accepted.result()
         await _join(pending)
+        # A successful join can see a done task before its done callback runs.
+        finished(pending)
 
     async def _try_cancel_child(self, child: Subagent, turn: Turn[str]) -> bool:
         self._check_owner(turn)
