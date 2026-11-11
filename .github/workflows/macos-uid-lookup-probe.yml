@@ -125,6 +125,7 @@ jobs:
                 }
               }
               printf("{\"command\":\"%s\",\"message_id\":%d,\"size\":%u,\"complex\":%s,\"descriptors\":%u,\"recognized_service\":\"%s\"}\n",command,message.h.msgh_id,message.h.msgh_size,(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX)?"true":"false",count,service);
+              if(message.h.msgh_id==0x40000324) printf("{\"command\":\"%s\",\"lookup_header_remote_type\":%u,\"voucher_present\":%s,\"expected_size\":%zu}\n",command,MACH_MSGH_BITS_REMOTE(message.h.msgh_bits),message.h.msgh_voucher_port?"true":"false",sizeof(struct identity_lookup));
               /* Forward only the exact existing read-only libinfo service lookup. */
               if (message.h.msgh_id==0x40000324 && message.h.msgh_size==sizeof(struct identity_lookup) && !(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && message.h.msgh_voucher_port==MACH_PORT_NULL && MACH_MSGH_BITS_REMOTE(message.h.msgh_bits)==MACH_MSG_TYPE_MOVE_SEND_ONCE) {
                 struct identity_lookup *lookup=(void*)&message;
@@ -157,7 +158,7 @@ jobs:
               }
               mach_msg_destroy(&message.h);
             }
-            printf("{\"command\":\"%s\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"timed_out\":%s,\"messages\":%d}\n",command,mode==0?"host":mode==1?"cleared":"capture-deny",WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,timed_out?"true":"false",received);
+            printf("{\"command\":\"%s\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"timed_out\":%s,\"messages\":%d}\n",command,mode==0?"host":mode==1?"cleared":"identity-only",WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,timed_out?"true":"false",received);
             if (mode==2) {
               mach_port_mod_refs(task,sink,MACH_PORT_RIGHT_RECEIVE,-1);
               mach_port_deallocate(task,sink);
@@ -191,7 +192,7 @@ jobs:
           }
           PROBE_SOURCE
           clang -Wall -Wextra -Werror "$RUNNER_TEMP/probe.c" -o "$RUNNER_TEMP/probe"
-      - name: Observe lookup shape without forwarding
+      - name: Observe exact identity lookup route
         shell: bash
         run: |
           "$RUNNER_TEMP/probe"
