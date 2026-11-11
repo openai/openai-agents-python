@@ -149,6 +149,66 @@ async def test_model_stream_reports_typed_integrity_without_running_tools(
     assert closed
 
 
+async def test_model_stream_records_incomplete_usage_before_content_filter() -> None:
+    effects: list[str] = []
+    response_ids: list[str] = []
+
+    @function_tool
+    def record(value: str) -> str:
+        """Record a side effect when the tool is admitted."""
+        effects.append(value)
+        return "recorded"
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            raise AssertionError("streaming request entered complete()")
+
+        async def stream(self, request: ModelRequest) -> AsyncIterator[dict[str, Any]]:
+            response_id = f"filtered-application-stream-{len(response_ids)}"
+            response_ids.append(response_id)
+            yield {"type": "response.created", "response": {"id": response_id}}
+            yield function_call("record", {"value": "must not run"}, "held-call")
+            yield {
+                "type": "response.incomplete",
+                "response": {
+                    "id": response_id,
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "content_filter"},
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 3,
+                        "total_tokens": 14,
+                        "input_tokens_details": {"cached_tokens": 0},
+                        "output_tokens_details": {"reasoning_tokens": 0},
+                    },
+                },
+            }
+
+    async with timeout(20), NativeProvider(model_backend=Model()) as provider:
+        async with Agent(
+            instructions="Respond.",
+            model="custom-model",
+            provider=provider,
+            tools=[record],
+        ).session() as session:
+            turn = await session.submit("Record.")
+            with pytest.raises(NativeError):
+                await turn.get_result()
+            [recorded] = [entry async for entry in session.turns()]
+            assert recorded["id"] == turn.turn_id
+            observations = recorded.get("responses")
+            assert observations
+            assert [observation.get("response_id") for observation in observations] == response_ids
+            for observation in observations:
+                assert observation.get("status") == "incomplete"
+                assert observation.get("incomplete_reason") == "content_filter"
+                usage = observation.get("usage")
+                assert usage is not None
+                assert usage.get("input_tokens") == 11
+                assert usage.get("output_tokens") == 3
+    assert effects == []
+
+
 async def test_model_stream_delivers_text_before_completion() -> None:
     allow_completion = asyncio.Event()
 

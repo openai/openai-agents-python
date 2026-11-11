@@ -1,8 +1,8 @@
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index 625475fa..88a38dec 100644
+index 3f51e655..8756512a 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
-@@ -44,6 +44,7 @@ pub use crate::common::ReasoningContext;
+@@ -45,6 +45,7 @@ pub use crate::common::ReasoningContext;
  pub use crate::common::ReasoningSummaryDelivery;
  pub use crate::common::ResponseCreateWsRequest;
  pub use crate::common::ResponseEvent;
@@ -11,7 +11,7 @@ index 625475fa..88a38dec 100644
  pub use crate::common::ResponseId;
  pub use crate::common::ResponseStream;
 diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
-index fd57546f..84c3251c 100644
+index fd57546f..c430a1d9 100644
 --- a/codex-rs/codex-api/src/received_response_facts.rs
 +++ b/codex-rs/codex-api/src/received_response_facts.rs
 @@ -1,4 +1,6 @@
@@ -21,7 +21,7 @@ index fd57546f..84c3251c 100644
  use codex_protocol::response_facts::{ProbabilityToken, ResponseFact};
  use serde_json::Value;
  
-@@ -131,6 +133,118 @@ pub(crate) fn contains_refusal(item: &Value) -> bool {
+@@ -131,6 +133,121 @@ pub(crate) fn contains_refusal(item: &Value) -> bool {
                  })
              })
  }
@@ -67,6 +67,9 @@ index fd57546f..84c3251c 100644
 +            ));
 +        }
 +        let interrupted = event.kind == "response.incomplete";
++        if let Some(observation) = event.response_observation() {
++            ready.push(ResponseEvent::ResponseObserved(observation));
++        }
 +        ready.extend(
 +            event_facts(&event.raw)
 +                .into_iter()
@@ -140,7 +143,7 @@ index fd57546f..84c3251c 100644
  /// Convert one completed application model response through the provider fact policy.
  /// Validate the complete output before admitting any tool-bearing item.
  pub fn completed_model_response(
-@@ -229,7 +343,10 @@ mod completed_model_response_tests {
+@@ -229,7 +346,10 @@ mod completed_model_response_tests {
      fn malformed_later_item_admits_no_tool() {
          let events = completed_model_response(
              "response".into(),
