@@ -613,9 +613,17 @@
       "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
     },
     {
+      "path": "sdk-registered-auto-compaction-overflow.patch",
+      "sha256": "033b6e451bb217f8aec5968a4a521bd0e1ed4d64fa4033f1b4fdded4cd5a4a99"
+    },
+    {
+      "path": "sdk-registered-manual-compaction-overflow.patch",
+      "sha256": "796b1e927babcc03b15f4fc6dd14097ce9d1afe39aa034905139cc139c020c81"
+    },
+    {
       "path": "0159-sdk-residual-text-guards.patch",
       "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     }
   ],
-  "result_tree": "1240a289fe777ada14ff0474f190d14239c931d8"
+  "result_tree": "3fc07408314c0fc6d85c225c96dc1d39846c1828"
 }
