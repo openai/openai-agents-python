@@ -131,11 +131,15 @@ pub fn build(
     builder.thread_lifecycle_contributor(interception.clone());
     builder.turn_lifecycle_contributor(interception.clone());
     builder.tool_lifecycle_contributor(interception.clone());
+    let registered_plan = config
+        .model_provider_id
+        .starts_with(crate::engine::SIWC_PROVIDER_PREFIX);
     let python_tools = Arc::new(crate::python_tools::PythonContributor {
         managed_calls,
         manager: manager.clone(),
         models_config: config.to_models_manager_config(),
         code_mode_enabled: config.features.enabled(Feature::CodeMode),
+        registered_plan,
     });
     builder.prompt_contributor(python_tools.clone());
     builder.tool_contributor(python_tools.clone());
@@ -274,9 +278,6 @@ pub fn build(
     )));
     builder.model_request_contributor(Arc::new(crate::python_tools::PreparedRequestContributor));
     builder.model_request_contributor(recovery);
-    let registered_plan = config
-        .model_provider_id
-        .starts_with(crate::engine::SIWC_PROVIDER_PREFIX);
     let integrity = Arc::new(crate::response_integrity::Contributor {
         boundary: interception.clone(),
         registered_plan,

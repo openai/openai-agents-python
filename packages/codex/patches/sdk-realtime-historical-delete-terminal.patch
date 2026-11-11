@@ -1,0 +1,73 @@
+--- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
++++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+@@ -329,6 +329,44 @@
+         };
+         let call_id = identity("call_id")?;
+         let approval_request_id = identity("approval_request_id")?;
++        // Lookup establishes external ownership, not completion. In particular,
++        // approval-request completion only means the request was emitted.
++        let completed = value["status"] == "completed";
++        let terminal = match kind {
++            "message" | "function_call" => completed,
++            "function_call_output" => completed || value["output"].is_string(),
++            "mcp_call" | "mcp_tool_call" => {
++                completed || value["output"].is_string() || value["error"].is_object()
++            }
++            "mcp_list_tools" => completed || value["tools"].is_array(),
++            "mcp_approval_response" => value["approve"].is_boolean(),
++            "mcp_approval_request" => self.items.values().any(|other| {
++                other.kind == "mcp_approval_response"
++                    && other.done
++                    && (other.effect_done || other.retrieved_external)
++                    && other.approval_request_id.as_deref() == Some(id)
++            }),
++            _ => false,
++        };
++        if value
++            .get("status")
++            .filter(|status| !status.is_null())
++            .is_some_and(|status| status != "completed")
++        {
++            return Err(invalid());
++        }
++        if let Some(known) = self.items.get(id) {
++            if known.kind != kind
++                || known.call_id != call_id
++                || known.approval_request_id != approval_request_id
++                || (kind == "message" && known.role.as_deref() != value["role"].as_str())
++            {
++                return Err(invalid());
++            }
++            // A same-item completion may have arrived while lookup was pending.
++            // Keep its existing native/approval completion checks and ownership.
++            return self.validate(id);
++        }
+         let supported = match kind {
+             "message" => {
+                 value["status"] == "completed"
+@@ -347,6 +385,7 @@
+             _ => false,
+         };
+         if !supported
++            || !terminal
+             || !Self::valid_id(id)
+             || id == "root"
+             || !self.can_retrieve(id)
+@@ -371,7 +410,7 @@
+                 role: (kind == "message").then(|| value["role"].as_str().unwrap().to_owned()),
+                 call_id,
+                 approval_request_id,
+-                done: value["status"] == "completed",
++                done: true,
+                 effect_done: false,
+                 retrieved_external: true,
+             },
+@@ -414,7 +453,7 @@
+                 && !other.retrieved_external
+                 && !other.effect_done
+         });
+-        if (!supported && !item.retrieved_external) || live_dependency {
++        if (!supported && !(item.retrieved_external && item.done)) || live_dependency {
+             return Err(CodexErr::InvalidRequest(
+                 "Provider item has unresolved work or an unsupported kind".into(),
+             ));

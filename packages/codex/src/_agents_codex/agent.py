@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from .input import UserInput
     from .native_agents import NativeAgents
     from .prepared_request import _PrepareRequest
+    from .realtime_agents import RealtimeAgentConfig, RealtimeHandoff
     from .recovery import ReconciledCall
     from .schema import OutputSpec
     from .session import (
@@ -911,7 +912,9 @@ class Agent(Generic[ContextT, OutputT]):
     instructions: str
     name: str | None
     tools: tuple[Tool[ContextT], ...]
-    handoffs: tuple[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]], ...]
+    handoffs: tuple[
+        Agent[ContextT, OutputT] | RealtimeHandoff | _Callable[[], Agent[ContextT, OutputT]], ...
+    ]
     model: str | None
     model_settings: ModelSettings
     provider: NativeProvider | None
@@ -921,6 +924,7 @@ class Agent(Generic[ContextT, OutputT]):
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
     decisions: DecisionProvider | None
+    realtime: RealtimeAgentConfig | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -941,7 +945,9 @@ class Agent(Generic[ContextT, OutputT]):
             cls: type[TextAgentT],
             *args: Any,
             tools: Sequence[Tool[ContextT]] | None = None,
-            handoffs: Sequence[Agent[ContextT, str] | _Callable[[], Agent[ContextT, str]]]
+            handoffs: Sequence[
+                Agent[ContextT, str] | RealtimeHandoff | _Callable[[], Agent[ContextT, str]]
+            ]
             | None = None,
             output_type: None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
@@ -956,7 +962,9 @@ class Agent(Generic[ContextT, OutputT]):
             *args: Any,
             output_type: OutputSpec[OutputT],
             tools: Sequence[Tool[ContextT]] | None = None,
-            handoffs: Sequence[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]]]
+            handoffs: Sequence[
+                Agent[ContextT, OutputT] | RealtimeHandoff | _Callable[[], Agent[ContextT, OutputT]]
+            ]
             | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
@@ -980,7 +988,9 @@ class Agent(Generic[ContextT, OutputT]):
         instructions: str,
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
-        handoffs: Sequence[Agent[ContextT, str] | _Callable[[], Agent[ContextT, str]]]
+        handoffs: Sequence[
+            Agent[ContextT, str] | RealtimeHandoff | _Callable[[], Agent[ContextT, str]]
+        ]
         | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -991,6 +1001,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        realtime: RealtimeAgentConfig | None = None,
     ) -> None: ...
 
     @overload
@@ -1001,7 +1012,9 @@ class Agent(Generic[ContextT, OutputT]):
         name: str | None = None,
         output_type: OutputSpec[OutputT],
         tools: Sequence[Tool[ContextT]] | None = None,
-        handoffs: Sequence[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]]]
+        handoffs: Sequence[
+            Agent[ContextT, OutputT] | RealtimeHandoff | _Callable[[], Agent[ContextT, OutputT]]
+        ]
         | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1011,6 +1024,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        realtime: RealtimeAgentConfig | None = None,
     ) -> None: ...
 
     def __init__(
@@ -1019,7 +1033,9 @@ class Agent(Generic[ContextT, OutputT]):
         instructions: str,
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
-        handoffs: Sequence[Agent[ContextT, Any] | _Callable[[], Agent[ContextT, Any]]]
+        handoffs: Sequence[
+            Agent[ContextT, Any] | RealtimeHandoff | _Callable[[], Agent[ContextT, Any]]
+        ]
         | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1030,6 +1046,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        realtime: RealtimeAgentConfig | None = None,
     ) -> None:
         if not isinstance(instructions, str):
             raise TypeError("instructions must be a string")
@@ -1047,11 +1064,17 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
             raise TypeError("provider must be a NativeProvider or None")
+        from .realtime_agents import RealtimeAgentConfig, RealtimeHandoff
+
         captured_handoffs = tuple(handoffs or ())
         if any(
-            not isinstance(target, Agent) and not callable(target) for target in captured_handoffs
+            not isinstance(target, (Agent, RealtimeHandoff)) and not callable(target)
+            for target in captured_handoffs
         ):
             raise TypeError("handoffs must contain native Agents or synchronous target resolvers")
+        if realtime is not None and not isinstance(realtime, RealtimeAgentConfig):
+            raise TypeError("realtime must be RealtimeAgentConfig or None")
+        object.__setattr__(self, "realtime", realtime._capture() if realtime is not None else None)
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "tools", tuple(tools or ()))

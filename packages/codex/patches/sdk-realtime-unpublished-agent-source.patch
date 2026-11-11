@@ -1,0 +1,62 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 0a4d122..d6f8523 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1242,6 +1242,15 @@ impl CodexThread {
+             .await
+     }
+ 
++    /// Release an exact source whose host graph was discarded before publication.
++    pub fn release_realtime_agent_profile_source(
++        &self,
++        generation: &str,
++        receipt: &codex_extension_api::AgentProfileReceipt,
++    ) {
++        crate::realtime_conversation::release_voice_agent_source(&self.session, generation, receipt);
++    }
++
+     pub fn release_realtime_agent_profile_sources(&self, generation: &str) {
+         crate::realtime_conversation::release_voice_agent_sources(&self.session, generation);
+     }
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 35d9029..dcf7cd2 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -110,7 +110,7 @@ pub(crate) use tool_task::{RealtimeToolExecutionSource, uses_retained_mcp_bindin
+ pub(crate) use tool_task::{RealtimeToolTask, RealtimeToolsDispatch};
+ pub(crate) use tool_task::{
+     VoiceProfileScope, capture_voice_agent_source, capture_voice_handoff_source,
+-    realtime_source_selection, release_voice_agent_sources,
++    realtime_source_selection, release_voice_agent_source, release_voice_agent_sources,
+ };
+ use tracing::debug;
+ use tracing::error;
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index 525a7bf..4ceb1c3 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -175,6 +175,24 @@ pub(crate) fn retained_voice_agent_source(
+         .cloned()
+ }
+ 
++pub(crate) fn release_voice_agent_source(
++    session: &Arc<Session>,
++    generation: &str,
++    receipt: &codex_extension_api::AgentProfileReceipt,
++) {
++    if let Some(registry) = session
++        .services
++        .thread_extension_data
++        .get::<VoiceProfileSources>()
++    {
++        registry.sources.lock().unwrap().remove(&(
++            generation.to_owned(),
++            receipt.profile_id.clone(),
++            receipt.epoch,
++        ));
++    }
++}
++
+ pub(crate) fn release_voice_agent_sources(session: &Arc<Session>, generation: &str) {
+     if let Some(registry) = session
+         .services

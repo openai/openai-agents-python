@@ -121,7 +121,7 @@ pub(crate) fn validated(reply: &str) -> Option<CallToolResult> {
 #[derive(Debug)]
 enum AcceptedReply {
     Result(CallToolResult),
-    Metadata(serde_json::Map<String, Value>),
+    Metadata(Result<serde_json::Map<String, Value>, ()>),
 }
 
 fn validated_metadata(reply: &str) -> Option<serde_json::Map<String, Value>> {
@@ -801,7 +801,12 @@ impl McpResultControl {
             pending.metadata
         };
         let edited = if metadata {
-            validated_metadata(reply).map(AcceptedReply::Metadata)
+            if reply == "false" {
+                // A denied call settles the metadata receipt without a policy failure.
+                Some(AcceptedReply::Metadata(Err(())))
+            } else {
+                validated_metadata(reply).map(|metadata| AcceptedReply::Metadata(Ok(metadata)))
+            }
         } else {
             validated(reply).map(AcceptedReply::Result)
         };
@@ -1140,7 +1145,7 @@ impl ToolLifecycleContributor for McpResultContributor {
                 );
                 return Err(());
             };
-            let mut accepted = None;
+            let mut accepted = Err(());
             crate::native_interception::publish_mcp_result(
                 input.thread_store,
                 input.turn_store,
@@ -1165,11 +1170,11 @@ impl ToolLifecycleContributor for McpResultContributor {
                                 state.unresolved.remove(input.turn_id);
                             }
                         }
-                        accepted = Some(metadata);
+                        accepted = metadata;
                     }
                 },
             );
-            accepted.map(Some).ok_or(())
+            accepted.map(Some)
         })
     }
 

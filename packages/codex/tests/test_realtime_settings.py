@@ -113,7 +113,15 @@ def test_nonfinite_values_are_not_changed_to_null(value, field):
 
 
 @pytest.mark.parametrize(
-    "choice", ["auto", "none", "required", {"type": "function", "name": "weather"}]
+    "choice",
+    [
+        "auto",
+        "none",
+        "required",
+        {"type": "function", "name": "weather"},
+        {"type": "mcp", "server_label": "docs"},
+        {"type": "mcp", "server_label": "docs", "name": "weather"},
+    ],
 )
 def test_tool_choice_is_sparse_and_detached(choice: Any) -> None:
     choice = dict(choice) if isinstance(choice, dict) else choice
@@ -123,12 +131,22 @@ def test_tool_choice_is_sparse_and_detached(choice: Any) -> None:
     assert "tool_choice" not in serialize_realtime_settings({})
     if isinstance(choice, dict):
         result = serialize_realtime_settings(cast(NativeRealtimeSettings, value))
+        original = dict(choice)
         choice["name"] = "changed"
-        assert result["tool_choice"]["name"] == "weather"
+        assert result["tool_choice"] == original
 
 
 @pytest.mark.parametrize(
-    "choice", [None, "weather", [], {"type": "mcp", "name": "weather"}, {"type": "function"}]
+    "choice",
+    [
+        None,
+        "weather",
+        [],
+        {"type": "mcp", "name": "weather"},
+        {"type": "mcp", "server_label": "docs", "name": None},
+        {"type": "mcp", "server_label": "docs", "unexpected": "field"},
+        {"type": "function"},
+    ],
 )
 def test_invalid_tool_choice_is_rejected_before_native_io(choice: Any) -> None:
     with pytest.raises(ValueError, match="tool_choice"):

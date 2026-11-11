@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio as asyncio
 import json as json
-from collections.abc import Callable as Callable, Coroutine as Coroutine
+from collections.abc import Callable as Callable, Coroutine as Coroutine, Sequence
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field, replace as replace
 from functools import partial as partial
@@ -21,6 +21,7 @@ from ._lifecycle import _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
+    from .agent import Agent
     from .executor import Environment
     from .mcp import _MCP
     from .native_agents import NativeAgents
@@ -96,7 +97,21 @@ class NativeToolCall:
 _Descriptor: TypeAlias = "Environment[Any] | NativeAgents | _MCP[Any]"
 
 
-def _has_interceptors(session: Session[Any, Any]) -> bool:
+def _has_realtime_predicates(
+    session: Session[Any, Any], pending: Sequence[Agent[Any, Any]]
+) -> bool:
+    return any(
+        agent is not None and agent.realtime is not None and agent.realtime.tool_enabled is not None
+        for agent in (
+            session._opening_agent,
+            *(profile.profile.declaration for profile in session._profiles.values()),
+            *(profile.profile.declaration for profile in session._voice_profiles.values()),
+            *pending,
+        )
+    )
+
+
+def _has_interceptors(session: Session[Any, Any], pending: Sequence[Agent[Any, Any]] = ()) -> bool:
     from .mcp import _MCP
 
     return (
@@ -104,11 +119,16 @@ def _has_interceptors(session: Session[Any, Any]) -> bool:
         and session._executor._has_callbacks
         or session._native_agents is not None
         and session._native_agents.approval is not None
+        or _has_realtime_predicates(session, pending)
         or any(server._has_before for server in session._mcp_tools)
         or any(
             isinstance(tool, _MCP) and tool._has_before
-            for profile in session._profiles.values()
-            for tool in profile.profile.declaration.tools
+            for agent in (
+                *(profile.profile.declaration for profile in session._profiles.values()),
+                *(profile.profile.declaration for profile in session._voice_profiles.values()),
+                *pending,
+            )
+            for tool in agent.tools
         )
     )
 
@@ -151,15 +171,16 @@ class _NativeInterception:
         self.reader: asyncio.Task[None] | None = None
         self.closing = False
 
-    def start(self) -> None:
+    def start(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         self.session._native._enable_native_interception(3600.0, "thread_tree")
-        self.refresh()
+        self.refresh(pending)
         self.reader = asyncio.create_task(self._read())
 
-    def refresh(self) -> None:
+    def refresh(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         from .executor import Environment
         from .mcp import _tool_names
         from .native_agents import _COLLABORATION_TOOLS
+        from .session import _split_tools
 
         rules: list[dict[str, Any]] = []
         for descriptor in (self.session._executor, self.session._native_agents):
@@ -204,7 +225,15 @@ class _NativeInterception:
                     }
                     for name in _tool_names((server,))
                 )
-        self.session._native._configure_native_interception(json.dumps(rules))
+        realtime_mcp = None
+        if _has_realtime_predicates(self.session, pending):
+            # A mono source can be captured while its selected MCP subset is
+            # being replaced. Enroll the opening grants; native dispatch still
+            # requires the exact tool in the retained selection.
+            opening = self.session._opening_agent
+            _, allowed_mcp, _ = _split_tools(opening.tools if opening is not None else ())
+            realtime_mcp = json.dumps(_tool_names(allowed_mcp))
+        self.session._native._configure_native_interception(json.dumps(rules), realtime_mcp)
 
     def _select(
         self, call: NativeToolCall, notice: dict[str, Any] | None = None
@@ -435,7 +464,7 @@ class _NativeInterception:
     async def _read(self) -> None:
         from .executor import Environment
         from .mcp import _MCP
-        from .session import NativeError
+        from .session import NativeError, _Submission
         from .telemetry import _create_task, _retain_context
 
         native = self.session._native
@@ -486,8 +515,9 @@ class _NativeInterception:
                             else request["route"]
                         ),
                     )
+                    realtime_mcp = notice.get("realtime_mcp") is True
                     descriptor = self._select(call, notice)
-                    if descriptor is None:
+                    if descriptor is None and not realtime_mcp:
                         native._resolve_native_interception(nonce, '{"action":"continue"}')
                         continue
                     if isinstance(descriptor, _MCP):
@@ -536,6 +566,10 @@ class _NativeInterception:
                         )
                     if state is None or state.stopping or state.failure.done():
                         continue
+                    if realtime_mcp and (
+                        not isinstance(state, _Submission) or state.realtime_tool is None
+                    ):
+                        continue
                     if isinstance(descriptor, Environment):
                         invoke = partial(
                             self.session._invoke_executor_policy, state, nonce, request
@@ -580,7 +614,7 @@ class _NativeInterception:
         state: _CallbackState,
         nonce: int,
         call: NativeToolCall,
-        descriptor: NativeAgents | _MCP[Any],
+        descriptor: NativeAgents | _MCP[Any] | None,
         notice: dict[str, Any] | None = None,
     ) -> None:
         from ._function_tools import ToolContext
@@ -626,6 +660,21 @@ class _NativeInterception:
             ):
                 return
             assert state.handle is not None
+            realtime_notice = (
+                notice if notice is not None and notice.get("realtime_mcp") is True else None
+            )
+            if realtime_notice is not None:
+                enabled = await session._realtime_tool_enabled(
+                    realtime_notice,
+                    session._context,
+                    ToolRef(call.name, call.namespace),
+                    admitted,
+                )
+                if not enabled or not admitted():
+                    return
+            if descriptor is None:
+                reply = '{"action":"continue"}'
+                return
             info = ToolCallInfo(
                 tool=ToolRef(call.name, call.namespace),
                 session_id=session.id,
@@ -725,11 +774,23 @@ class _NativeInterception:
                         descriptor.approval, admitted, call_context(), effective
                     )
                 )
-                if admitted():
-                    if isinstance(value, StopTurn):
-                        await session._stop_policy_turn(state, nonce)
-                    elif type(value) is bool and value:
-                        reply = json.dumps(decision, allow_nan=False)
+                if not admitted():
+                    return
+                if isinstance(value, StopTurn):
+                    await session._stop_policy_turn(state, nonce)
+                    return
+                if value is not True:
+                    return
+                if realtime_notice is not None and (
+                    descriptor.before is not None or descriptor.approval is not None
+                ):
+                    # A hook may have waited while the application disabled this tool.
+                    enabled = await session._realtime_tool_enabled(
+                        realtime_notice, session._context, info.tool, admitted
+                    )
+                    if not enabled or not admitted():
+                        return
+                reply = json.dumps(decision, allow_nan=False)
             else:
                 approval = descriptor.approval
                 assert approval is not None
