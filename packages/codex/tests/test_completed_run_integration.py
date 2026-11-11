@@ -231,32 +231,61 @@ async def test_delivery_cancellation_joins_owner_and_keeps_first_message() -> No
 
 
 @pytest.mark.asyncio
-async def test_implicit_provider_stays_on_ordinary_owned_cleanup(
-    responses: Any,
+@pytest.mark.parametrize("characters", [8, 512 * 1024])
+async def test_implicit_provider_completed_run_joins_before_late_observations(
+    responses: ResponsesFixture,
     monkeypatch: pytest.MonkeyPatch,
+    characters: int,
 ) -> None:
     module = importlib.import_module("_agents_codex.session")
     native = importlib.import_module("agents._native")
-    providers = []
+    providers: list[NativeProvider] = []
+    recorded: list[dict[str, Any]] = []
+    prepare = native._prepare_run_conversation
 
     class LocalOwnedProvider(NativeProvider):
         def __init__(self) -> None:
-            super().__init__(base_url=responses.url, api_key="implicit-completed-key")
+            # Local route injection has been preserving fresh implicit ownership.
+            super().__init__(base_url=responses.url, supports_websockets=False)
             providers.append(self)
 
-    def reject_native_run(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("Implicit owned Provider entered native completed route")
+    class Owner:
+        def __init__(self, actual: Any) -> None:
+            self.actual = actual
 
+        async def run(self) -> Any:
+            result = await self.actual.run()
+            recorded.append(json.loads(result[1]))
+            return result
+
+        def cancel(self) -> None:
+            self.actual.cancel()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "implicit-completed-key")
     monkeypatch.setattr(module, "NativeProvider", LocalOwnedProvider)
-    monkeypatch.setattr(native, "_prepare_run_conversation", reject_native_run)
+    monkeypatch.setattr(
+        native, "_prepare_run_conversation", lambda *a, **k: Owner(prepare(*a, **k))
+    )
     responses.replies.append(text_response("implicit", "answer"))
+    prompt = "owned input " + "x" * characters
     try:
-        result = await Agent(instructions="Answer plainly.").run("implicit provider")
-        assert isinstance(result.turn._session, Session)
+        result = await Agent(instructions="Answer plainly.").run(prompt)
+        expected_owner = _CompletedTurnOwner if sys.platform == "linux" else Session
+        assert isinstance(result.turn._session, expected_owner)
         assert result.final_output == "answer"
-        assert len(providers) == 1 and providers[0]._closed
-        assert result.turn._session._owned_provider is None
+        assert len(recorded) == 1
+        if sys.platform == "linux":
+            assert recorded[0]["status"] == "completed"
+            assert recorded[0]["private_disposable"] is True
+            assert all(recorded[0]["retired"].values())
+        assert len(providers) == 1 and providers[0].api_key is None and providers[0]._closed
         assert len(responses.requests) == 1
+        assert prompt in json.dumps(responses.requests[0]["input"])
+        assert await result.turn.get_result() is result
+        rows = [row async for row in result.turn.events()]
+        assert [row.delta for row in rows if isinstance(row, OutputTextDelta)] == ["answer"]
+        assert sum(isinstance(row, TurnFinished) for row in rows) == 1
+        assert [row async for row in result.turn.events()] == rows
     finally:
         for provider in providers:
             await provider.aclose()

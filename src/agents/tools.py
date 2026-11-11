@@ -41,6 +41,8 @@ from _agents_codex.tools import (
     ToolOutputImage as ToolOutputImage,
     ToolOutputText as ToolOutputText,
     ToolRef as ToolRef,
+    ToolSearch as ToolSearch,
+    ToolSearchResult as ToolSearchResult,
     TypeAdapter as TypeAdapter,
     WebSearch as WebSearch,
     WebSearchImageSettings as WebSearchImageSettings,

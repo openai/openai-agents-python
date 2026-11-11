@@ -721,6 +721,9 @@ fn functions(
             DynamicToolSpec::Computer(tool) => {
                 functions.push((None, Cow::Owned(tool.callback_spec())))
             }
+            DynamicToolSpec::ToolSearch(tool) => {
+                functions.push((None, Cow::Owned(tool.callback_spec())))
+            }
             DynamicToolSpec::Shell(tool) => {
                 functions.push((None, Cow::Owned(tool.callback_spec())))
             }
@@ -739,6 +742,7 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
         specs.iter().all(|spec| match spec {
             DynamicToolSpec::Function(_)
             | DynamicToolSpec::Computer(_)
+            | DynamicToolSpec::ToolSearch(_)
             | DynamicToolSpec::Shell(_) => true,
             DynamicToolSpec::Namespace(ns) => ns.tools.len() == 1,
         }),
@@ -752,17 +756,24 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
 pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
     validate_slots(specs)?;
     for declaration in specs {
-        if let DynamicToolSpec::Computer(computer) = declaration {
-            codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?;
+        match declaration {
+            DynamicToolSpec::Computer(computer) => {
+                codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?;
+            }
+            DynamicToolSpec::ToolSearch(search) => {
+                codex_tools::client_tool_search_spec(search).map_err(anyhow::Error::msg)?;
+            }
+            _ => {}
         }
     }
     let mut seen = HashSet::new();
-    for (namespace, tool) in functions(specs) {
+    for (declaration, (namespace, tool)) in specs.iter().zip(functions(specs)) {
         let key = ToolName::new(namespace.map(|ns| ns.name.clone()), tool.name.clone())
             .with_default_namespace();
         ensure!(seen.insert(key.clone()), "Duplicate Python tool: {key}");
         ensure!(
             !(key.is_default_namespace()
+                && !matches!(declaration, DynamicToolSpec::ToolSearch(_))
                 && matches!(
                     key.name.as_str(),
                     "exec_command"
@@ -2195,24 +2206,29 @@ impl PythonTools {
                 policy.is_none_or(|policy| policy.allows(&key)),
                 "Python tool is excluded by ToolPolicy: {key}"
             );
-            let mut function = dynamic_tool_to_responses_api_tool(&tool)?;
-            function.defer_loading = None;
-            let spec = if let DynamicToolSpec::Computer(computer) = declaration {
-                codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?
-            } else if let DynamicToolSpec::Shell(shell) = declaration {
-                codex_tools::application_shell_spec(shell)
-            } else {
-                match namespace.filter(|_| !key.is_default_namespace()) {
-                    None => ToolSpec::Function(function),
-                    Some(ns) => ToolSpec::Namespace(ResponsesApiNamespace {
-                        name: ns.name.clone(),
-                        description: if ns.description.trim().is_empty() {
-                            default_namespace_description(&ns.name)
-                        } else {
-                            ns.description.clone()
-                        },
-                        tools: vec![ResponsesApiNamespaceTool::Function(function)],
-                    }),
+            let spec = match declaration {
+                DynamicToolSpec::Computer(computer) => {
+                    codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?
+                }
+                DynamicToolSpec::Shell(shell) => codex_tools::application_shell_spec(shell),
+                DynamicToolSpec::ToolSearch(search) => {
+                    codex_tools::client_tool_search_spec(search).map_err(anyhow::Error::msg)?
+                }
+                _ => {
+                    let mut function = dynamic_tool_to_responses_api_tool(&tool)?;
+                    function.defer_loading = None;
+                    match namespace.filter(|_| !key.is_default_namespace()) {
+                        None => ToolSpec::Function(function),
+                        Some(ns) => ToolSpec::Namespace(ResponsesApiNamespace {
+                            name: ns.name.clone(),
+                            description: if ns.description.trim().is_empty() {
+                                default_namespace_description(&ns.name)
+                            } else {
+                                ns.description.clone()
+                            },
+                            tools: vec![ResponsesApiNamespaceTool::Function(function)],
+                        }),
+                    }
                 }
             };
             entries.push(Entry {
@@ -2222,7 +2238,8 @@ impl PythonTools {
                 spec,
                 exposure: if matches!(
                     declaration,
-                    DynamicToolSpec::Computer(_) | DynamicToolSpec::Shell(_)
+                    DynamicToolSpec::Computer(_) | DynamicToolSpec::ToolSearch(_)
+                        | DynamicToolSpec::Shell(_)
                 ) {
                     ToolExposure::DirectModelOnly
                 } else if tool.defer_loading {
@@ -5882,8 +5899,11 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
         ToolCall<'call>: 'a,
     {
         Box::pin(async move {
-            let arguments: Value = serde_json::from_str(call.function_arguments()?)
-                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+            let arguments = match &call.payload {
+                ToolPayload::ClientToolSearch(search) => search.arguments.clone(),
+                _ => serde_json::from_str(call.function_arguments()?)
+                    .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?,
+            };
             let (key, invocation, receiver) = self
                 .tools
                 .enqueue_profile(
@@ -5957,6 +5977,18 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                         arguments,
                         response.response,
                     )?) as Box<dyn ToolOutput>,
+                );
+            }
+            if let ToolPayload::ClientToolSearch(search) = &call.payload {
+                let selection =
+                    codex_tools::ClientToolSearchSelection::from_response(&response.response)?;
+                if selection.catalog_generation.is_some() {
+                    return Err(FunctionCallError::RespondToModel(
+                        "Python tool search cannot select a replacement catalog".into(),
+                    ));
+                }
+                return Ok(
+                    Box::new(selection.resolve(&search.catalog, &[])?) as Box<dyn ToolOutput>
                 );
             }
             if let ToolPayload::Shell { arguments } = &call.payload {
