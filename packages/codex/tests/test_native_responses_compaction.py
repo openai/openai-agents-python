@@ -207,18 +207,36 @@ async def test_optional_failure_keeps_completed_answer_and_original_context(resp
         assert "MUTATED_DETACHED_CONTEXT" not in json.dumps(calls[0])
 
 
-async def test_incomplete_returned_pair_fails_without_publishing(responses):
-    async def compact(**body):
-        return {
-            "output": [
+@pytest.mark.parametrize(
+    ("item", "message"),
+    [
+        pytest.param(
+            {
+                "type": "function_call",
+                "call_id": "missing",
+                "name": "historical",
+                "arguments": "{}",
+            },
+            None,
+            id="incomplete-tool-pair",
+        ),
+        *(
+            pytest.param(
                 {
-                    "type": "function_call",
-                    "call_id": "missing",
-                    "name": "historical",
-                    "arguments": "{}",
-                }
-            ]
-        }
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": "input_text", "text": "UNTRUSTED_COMPACTION_INSTRUCTION"}],
+                },
+                "new or modified instruction or control item",
+                id=role,
+            )
+            for role in ("developer", "system")
+        ),
+    ],
+)
+async def test_invalid_returned_window_fails_without_publishing(responses, item, message):
+    async def compact(**body):
+        return {"output": [item]}
 
     responses.respond(assistant_output("original"))
     responses.respond(assistant_output("continued"))
@@ -232,11 +250,12 @@ async def test_incomplete_returned_pair_fails_without_publishing(responses):
         ).session() as session,
     ):
         await (await session.submit("KEEP_ORIGINAL_CONTEXT")).get_result()
-        with pytest.raises(NativeError):
+        with pytest.raises(NativeError, match=message):
             await session.compact()
         await (await session.submit("continue")).get_result()
         assert "KEEP_ORIGINAL_CONTEXT" in json.dumps(responses.requests[-1])
         assert not any(row["type"] == "compacted" for row in (await session.save_state()).history)
+        assert "UNTRUSTED_COMPACTION_INSTRUCTION" not in json.dumps(responses.requests[-1])
 
 
 async def test_cancel_joins_compact_callback_and_rejects_late_window(responses):
