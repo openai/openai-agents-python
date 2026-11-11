@@ -10,6 +10,79 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.native_storage_fixtures import MemorySessionStore
 
 
+@pytest.mark.parametrize("return_state", [False, True])
+async def test_one_shot_history_can_continue_in_another_session(responses, return_state):
+    calls = []
+
+    @function_tool
+    def lookup(key: str) -> str:
+        calls.append(key)
+        return f"record:{key}"
+
+    responses.respond(function_call("lookup", {"key": "first"}, "detached-lookup"))
+    responses.respond(assistant_output("record loaded"))
+    responses.respond(assistant_output("continued with the record"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
+        producer = Agent(instructions="Look up the record.", tools=[lookup], provider=provider)
+        result = await producer.run(
+            "load my record",
+            initial_messages=[{"role": "user", "content": "my prior request"}],
+            return_history=True,
+            return_state=return_state,
+        )
+        assert result.final_output == "record loaded"
+        assert (result.state is not None) is return_state
+        assert result.history is not None
+
+        consumer = Agent(instructions="Use the previous record.", provider=provider)
+        async with consumer.session() as session:
+            before = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=before.revision, keep=0, items=result.history
+            )
+            continued = await (await session.submit("continue")).get_result()
+            assert continued.final_output == "continued with the record"
+            assert continued.history is None
+
+    assert calls == ["first"]
+    assert len(responses.requests) == 3
+    items = responses.requests[-1]["input"]
+    replayed = [item for item in items if item.get("call_id") == "detached-lookup"]
+    assert [item["type"] for item in replayed] == ["function_call", "function_call_output"]
+    assert "record:first" in json.dumps(replayed[-1])
+    messages = json.dumps([item for item in items if item["type"] == "message"])
+    assert "Look up the record." not in messages
+    assert "Use the previous record." in messages
+    assert messages.index("my prior request") < messages.index("load my record")
+    assert (
+        messages.index("load my record")
+        < messages.index("record loaded")
+        < messages.index("continue")
+    )
+
+
+@pytest.mark.parametrize("declare_approval_tool", [False, True])
+async def test_one_shot_text_history_is_opt_in(responses, declare_approval_tool):
+    @function_tool(needs_approval=True)
+    def lookup(key: str) -> str:
+        raise AssertionError(f"Unexpected call for {key}")
+
+    responses.respond(assistant_output("ordinary output"))
+    responses.respond(assistant_output("captured output"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
+        agent = Agent(
+            instructions="Answer.",
+            provider=provider,
+            tools=[lookup] if declare_approval_tool else (),
+        )
+        ordinary = await agent.run("ordinary input")
+        captured = await agent.run("captured input", return_history=True)
+    assert ordinary.history is None
+    assert captured.history is not None
+    assert "captured input" in json.dumps(captured.history)
+    assert "captured output" in json.dumps(captured.history)
+
+
 async def test_committed_history_flush_failure_retires_live_session(responses):
     class FailCheckpointFlush(MemorySessionStore):
         armed = False

@@ -327,6 +327,20 @@ Matching [source builds](https://github.com/openai/openai-agents-python/blob/fea
 
 `history_snapshot()` has been returning a `CanonicalHistorySnapshot` from `agents.history`, with `revision`, `total`, and a tuple of original JSON object records in `items`. `limit=N` has been selecting the latest N records. `limit=0` has been returning an empty tuple with the full revision and count. The revision and total have been covering all original records, including omitted prefixes and audit-only records. Unknown fields and missing IDs have been remaining unchanged.
 
+For one-shot runs, `return_history=True` has been capturing conversation records in `Completed.history` before the owned Session closes. The captured tuple has been carrying user and assistant messages, tool call pairs, and provider records. The destination Session has been applying its own system and developer instructions. In an async function with configured `agent` and `next_agent`, these calls have been continuing the conversation in a fresh Session.
+
+```python
+result = await agent.run("Look up my order", return_history=True)
+assert result.history is not None
+
+async with next_agent.session() as session:
+    before = await session.history_snapshot(limit=0)
+    await session.transact_history(
+        expected_revision=before.revision, keep=0, items=result.history
+    )
+    continued = await (await session.submit("What can I change about the order?")).get_result()
+```
+
 The following complete script has been replacing history with one user message, appending an application note, checking a stale revision, and restoring accepted state. After installing the matching source build, applications have been running it with `python edit_history.py`. The script has been using a synthetic credential and making no model requests.
 
 ```python

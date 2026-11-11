@@ -25,10 +25,12 @@ await agent.decide(question, *, input, provider=None, choices=None,
 await agent.run(input, *, context=None, on_interaction=None,
                 provider=None, model=None, model_settings=None, environment=None,
                 tools=None, before_step=None, state=None, return_state=False,
+                return_history=False,
                 parent_trace=None, trace_options=None, prepare_request=None, budget=None) -> Completed
 agent.run_sync(input, *, context=None, on_interaction=None,
                provider=None, model=None, model_settings=None, environment=None,
                tools=None, before_step=None, state=None, return_state=False,
+               return_history=False,
                parent_trace=None, trace_options=None, prepare_request=None, budget=None) -> Completed
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
@@ -44,6 +46,7 @@ The call options follow these rules:
 - `instructions` and `input` are required. `input=None` is allowed only when a handler resumes a supported pending manual checkpoint.
 - `on_interaction` returns the exact request's `reply(value)`, directly or through an awaitable. Sending the reply itself and returning `None` is invalid. See [manual requests](approvals.md#answer-interactions-during-a-one-shot-run).
 - `return_state` must be a bool. `True` captures state after successful completion. A capture failure fails the run. Otherwise, `Completed.state` defaults to `None`.
+- `return_history=True` has been capturing conversation records in `Completed.history` after successful completion. See [original history](state.md#read-and-edit-original-history) for replay into another Session.
 - `output_type=None` or bare `str` returns text. `with_output_type(...)` creates a variant. There is no one-shot `output_type` argument. See [structured output](configuration.md#structured-output) for formats, validation and restore limits.
 
 `Agent.decide()` has been returning a boolean by default, a selected value with `choices=...`, or a validated typed value with `output_type=...`. Calls have been requiring explicit `input` and accepting at most one of `choices` and `output_type`. The call's `provider=` has been overriding the Agent's `decisions` provider, independently of the generative connection. These calls have not been starting Agent runs or reading conversation history. The [decision guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md) has been explaining callback helpers, provider ownership, errors and usage.
@@ -165,7 +168,7 @@ A `Subagent` record contains a captured descendant's identity, status, `is_live`
 
 ### Completed
 
-A `Completed` result contains `turn`, `final_output`, `thread_usage`, optional `state` and `repair_attempts`. `turn` is the exact root `Turn` or supported `ChildTurn` view that produced the result. `state` is populated only when a one-shot run requests `return_state=True`.
+A `Completed` result contains `turn`, `final_output`, `thread_usage`, `repair_attempts`, and optional `state` and `history`. `turn` is the exact root `Turn` or supported `ChildTurn` view that produced the result. One-shot runs have been populating `state` with `return_state=True` and `history` with `return_history=True`.
 
 Usage is a cumulative thread snapshot or `None`, not a per-turn cost. Root usage excludes children.
 
