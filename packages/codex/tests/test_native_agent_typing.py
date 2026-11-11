@@ -1183,7 +1183,7 @@ def callback_handoff_contexts() -> None:
     Agent[Application, str](instructions="Route.", handoffs=[edge])
 
 
-def _hosted_handoff_type_contract() -> None:
+def hosted_handoff_type_contract() -> None:
     @function_tool
     def transfer(ticket: int) -> str:
         return str(ticket)

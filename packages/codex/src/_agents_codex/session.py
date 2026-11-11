@@ -3689,29 +3689,33 @@ class Session(Generic[ContextT, OutputT]):
                 _check_restored_tool_context(
                     restored_tools, restored_mcp, saved.operation_tools, context
                 )
+
             # Capture the supported ceiling before acquiring a provider lease.
             # Excluded openings keep their durable zero-turn publication path.
-            _atomic_first_turn = (
-                _atomic_first_turn
-                and initial_messages_json is None
-                and selected is None
-                and not profiles
-                and state is None
-                and storage is None
-                and resume is None
-                and opening.environment is None
-                and not input_guardrails
-                and not output_guardrails
-                and not instruction_files
-                and agent.provider is not None
-                and auth is None
-                and _supports_atomic_first_turn(
-                    agent,
-                    output_mode=output.mode,
-                    programmatic_tool_calling=programmatic_tool_calling,
-                    tools=available,
+            def supports_atomic_opening() -> bool:
+                return (
+                    _atomic_first_turn
+                    and initial_messages_json is None
+                    and selected is None
+                    and not profiles
+                    and state is None
+                    and storage is None
+                    and resume is None
+                    and opening.environment is None
+                    and not input_guardrails
+                    and not output_guardrails
+                    and not instruction_files
+                    and agent.provider is not None
+                    and auth is None
+                    and _supports_atomic_first_turn(
+                        agent,
+                        output_mode=output.mode,
+                        programmatic_tool_calling=programmatic_tool_calling,
+                        tools=available,
+                    )
                 )
-            )
+
+            _atomic_first_turn = supports_atomic_opening()
             environment = opening.environment
         try:
             if environment is not None and not isinstance(environment, Environment):
