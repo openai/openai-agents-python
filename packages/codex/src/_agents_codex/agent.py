@@ -1783,6 +1783,7 @@ class Agent(Generic[ContextT, OutputT]):
         state before close; save_state restrictions and failures still apply.
         return_history=True captures conversation records before close for replay
         through another Session's transact_history. That Session supplies its own instructions.
+        History above 4,096 original records or 8 MiB raises NativeError after completion.
         """
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(

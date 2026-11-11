@@ -5,7 +5,14 @@ import os
 
 import pytest
 
-from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore, function_tool
+from agents import (
+    Agent,
+    CustomStorage,
+    NativeError,
+    NativeProvider,
+    SQLiteSessionStore,
+    function_tool,
+)
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.native_storage_fixtures import MemorySessionStore
 
@@ -67,8 +74,9 @@ async def test_one_shot_text_history_is_opt_in(responses, declare_approval_tool)
     def lookup(key: str) -> str:
         raise AssertionError(f"Unexpected call for {key}")
 
+    captured_output = "captured output" + "x" * (128 * 1024)
     responses.respond(assistant_output("ordinary output"))
-    responses.respond(assistant_output("captured output"))
+    responses.respond(assistant_output(captured_output))
     async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
         agent = Agent(
             instructions="Answer.",
@@ -80,7 +88,17 @@ async def test_one_shot_text_history_is_opt_in(responses, declare_approval_tool)
     assert ordinary.history is None
     assert captured.history is not None
     assert "captured input" in json.dumps(captured.history)
-    assert "captured output" in json.dumps(captured.history)
+    assert captured_output in json.dumps(captured.history)
+
+
+async def test_one_shot_rejects_an_oversized_history_after_completion(responses):
+    responses.respond(assistant_output("completed"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
+        agent = Agent(instructions="Answer.", provider=provider)
+        initial = [{"role": "user", "content": f"Earlier turn {index}"} for index in range(4097)]
+        with pytest.raises(NativeError, match="completed.*history exceeds the result size limit"):
+            await agent.run("finish", initial_messages=initial, return_history=True)
+    assert len(responses.requests) == 1
 
 
 async def test_committed_history_flush_failure_retires_live_session(responses):
