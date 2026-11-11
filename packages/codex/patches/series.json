@@ -682,8 +682,8 @@
     },
     {
       "path": "sdk-tracing-id-annotations.patch",
-      "sha256": "c854ea52fac88bc0b71330ce07f8a4531fc20abe898d5901e32a9b35462f4cf3"
+      "sha256": "fd80731e8375804f80ea4134ce539f2b27aa1fc605b2eb31a6c3e2574577cfc4"
     }
   ],
-  "result_tree": "4187f749d3653d8cda4a6a4af242a8f98b732946"
+  "result_tree": "e59fcc623af01e2f104ae92d79cae3001375d75a"
 }

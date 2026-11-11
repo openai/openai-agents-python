@@ -184,6 +184,7 @@ async def native_case(case):
                         assert child.context.parent_span_id == root.context.span_id
             elif case == "annotations":
                 payload = {"large": "é" * 16000, "nested": {"numbers": list(range(64))}}
+                escaped_payload = {"escaped": "\\" * 16_375}
                 with telemetry.trace(
                     "large-allowed",
                     options=telemetry.TraceOptions(
@@ -191,6 +192,8 @@ async def native_case(case):
                     ),
                 ) as root:
                     root.set_outcome(status="ok", data=payload)
+                    with telemetry.span("escaped-annotation") as escaped:
+                        escaped.set_outcome(status="ok", data=escaped_payload)
                 with telemetry.trace("large-hidden") as hidden:
                     hidden.set_outcome(status="ok", data=payload)
                 with pytest.raises(RuntimeError, match="Native trace span end failed"):
@@ -278,7 +281,13 @@ async def native_case(case):
                     for event in events
                     if event["name"] == "large-hidden" and event["lifecycle"] == "end"
                 )
+                escaped = next(
+                    event
+                    for event in events
+                    if event["name"] == "escaped-annotation" and event["lifecycle"] == "end"
+                )
                 assert json.loads(allowed["attributes"]["sdk.outcome.data"]) == payload
+                assert json.loads(escaped["attributes"]["sdk.outcome.data"]) == escaped_payload
                 assert "sdk.outcome.data" not in hidden["attributes"]
                 assert payload["large"] in json.dumps(received, ensure_ascii=False)
         finally:

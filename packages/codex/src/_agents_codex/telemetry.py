@@ -457,12 +457,12 @@ class TraceOptions:
     parent: SpanContext | None = None
     detached: bool = False
     trace_id: str | None = None
-    span_id: str | None = None
     group_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     disabled: bool | None = None
     include_sensitive_data: bool | None = None
     export_credentials: TraceExportCredentials | None = field(default=None, repr=False)
+    span_id: str | None = None
 
 
 _current: ContextVar[SpanContext | None] = ContextVar("agents_trace_context", default=None)

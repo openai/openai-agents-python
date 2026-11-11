@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
-index 71d0eeb8..9f69d2cd 100644
+index 71d0eeb8..e2278a5d 100644
 --- a/codex-rs/otel/src/sdk_trace.rs
 +++ b/codex-rs/otel/src/sdk_trace.rs
 @@ -15,6 +15,8 @@ use opentelemetry_sdk::trace::ShouldSample;
@@ -118,7 +118,19 @@ index 71d0eeb8..9f69d2cd 100644
          }
      }
      let handle = resolve(key)?;
-@@ -739,13 +789,26 @@ mod tests {
+@@ -693,7 +743,10 @@ mod tests {
+     }
+     #[test]
+     fn bounds_nested_fields() {
+-        assert!(bounded_value(&json!({"x":"a".repeat(4097)}), 0).is_err());
++        let at_limit = json!({"x": "a".repeat(MAX_COMPLETION_DATA_BYTES)});
++        let over_limit = json!({"x": "a".repeat(MAX_COMPLETION_DATA_BYTES + 1)});
++        assert!(bounded_value(&at_limit, 0).is_ok());
++        assert!(bounded_value(&over_limit, 0).is_err());
+         assert!(bounded_value(&json!({"x":[1,2,3]}), 0).is_ok());
+     }
+     #[test]
+@@ -739,13 +792,26 @@ mod tests {
      #[test]
      fn bounds_actual_metadata_attribute_encoding() {
          assert_eq!(
@@ -151,7 +163,7 @@ index 71d0eeb8..9f69d2cd 100644
      #[test]
      fn disabled_sampling_has_no_recording() {
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index c9abc221..1b885023 100644
+index c9abc221..47464945 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -184,7 +184,14 @@ fn attributes(span: &SpanData) -> BTreeMap<String, Value> {
@@ -169,4 +181,26 @@ index c9abc221..1b885023 100644
 +            )),
          };
          attrs.insert(key, val);
+     }
+@@ -232,11 +239,20 @@ fn event(
+     let credential = credential.filter(|_| !s.credentials_closed);
+     // Native fields are copied into an immutable, bounded JSON snapshot. Never copy policy.
+     let attrs = attributes(span);
++    // Completion data is compact JSON carried as a string. Exclude only the
++    // second layer of escaping from the record limit. The queue still charges
++    // the actual encoded bytes below.
++    let completion_escape_bytes = match attrs.get("sdk.outcome.data") {
++        Some(value @ Value::String(data)) => value.to_string().len() - data.len() - 2,
++        _ => 0,
++    };
++    let max_event_bytes =
++        65_536 + completion_escape_bytes.min(crate::sdk_trace::MAX_COMPLETION_DATA_BYTES);
+     let mut value = json!({"sequence":sequence,"processor_ids":s.processors,"lifecycle":lifecycle,"trace_id":span.span_context.trace_id().to_string(),"span_id":span.span_context.span_id().to_string(),"parent_span_id":if span.parent_span_id==opentelemetry::trace::SpanId::INVALID {None}else{Some(span.parent_span_id.to_string())},"name":truncate(&span.name,4096),"kind":format!("{:?}",span.span_kind).to_ascii_lowercase(),"start_time_unix_nanos":span.start_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string(),"end_time_unix_nanos":if lifecycle=="end" {Some(span.end_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string())}else{None},"attributes":attrs,"dropped_attributes_count":span.dropped_attributes_count,"outcome":match span.status { opentelemetry::trace::Status::Error{..}=>"error",opentelemetry::trace::Status::Ok=>"ok",_=>"unset" }});
+     if credential_required {
+         value["credential_required"] = json!(true);
+     }
+-    if serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 {
++    if serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len()) > max_event_bytes {
+         dropped(s, sequence);
+         return;
      }
