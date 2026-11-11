@@ -319,6 +319,12 @@ async def _await_socket_completion(call: Any) -> Any:
                     # EOF persists through repeated cancellation of sock_recv.
             if acknowledgement != b"":
                 raise _NativeCompletionError("Native completion acknowledgement was lost")
+            if cancelled is None:
+                try:
+                    # An already-readable EOF may not deliver pending cancellation.
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError as error:
+                    cancelled = error
             if cancelled is not None:
                 call.discard_result()
                 raise cancelled
