@@ -136,8 +136,8 @@ def test_package_root_has_one_public_surface():
         "tool_batch_call_ids",
         "guardrail_results",
         "history",
-        "raw_usage",
         "items",
+        "raw_usage",
         "run_usage",
     ]
 
@@ -221,3 +221,16 @@ async def test_native_runtime_rejects_retired_environment_fields(tmp_path, respo
     with pytest.raises(RuntimeError, match=field):
         await _native.create_engine(json.dumps(options["config"]), json.dumps(options["runtime"]))
     assert responses.requests == []
+
+
+def test_raw_usage_appends_to_existing_run_parameters() -> None:
+    import inspect
+    from typing import get_overloads
+
+    from agents import Agent
+
+    for method in (Agent.run, Agent.run_sync):
+        for declaration in (method, *get_overloads(method)):
+            parameters = list(inspect.signature(declaration).parameters)
+            assert parameters[-1] == "return_raw_usage"
+            assert parameters.index("parent_trace") < parameters.index("return_raw_usage")

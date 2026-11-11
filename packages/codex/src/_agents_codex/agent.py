@@ -1694,7 +1694,6 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
-        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1703,6 +1702,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1725,7 +1725,6 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
-        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1734,6 +1733,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1756,7 +1756,6 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
-        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1765,6 +1764,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -1791,7 +1791,6 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
-        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1800,6 +1799,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -2257,7 +2257,6 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
-        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2266,6 +2265,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -2288,7 +2288,6 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
-        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2297,6 +2296,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -2319,7 +2319,6 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
-        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2328,6 +2327,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -2354,7 +2354,6 @@ class Agent(Generic[ContextT, OutputT]):
         return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
-        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2363,6 +2362,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+        return_raw_usage: bool = False,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 

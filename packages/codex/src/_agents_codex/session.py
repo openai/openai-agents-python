@@ -948,8 +948,8 @@ class Completed(Generic[OutputT, TurnT]):
     tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
     history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
-    raw_usage: tuple[RawProviderUsage, ...] | None = field(default=None, repr=False, kw_only=True)
     items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)
+    raw_usage: tuple[RawProviderUsage, ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
 
     def __post_init__(self) -> None:
