@@ -58,6 +58,59 @@ def check_values(
     assert "request_controls" not in request
 
 
+async def test_native_function_provider_schemas_survive_checkpoint_restore(
+    responses: ResponsesFixture,
+) -> None:
+    output_schema: dict[str, Any] = {"type": "object", "properties": {"found": {"type": "boolean"}}}
+    seen: list[tuple[str, int | None]] = []
+
+    @function_tool(strict=True, output_schema=output_schema)
+    def lookup(query: str, limit: int | None = None) -> dict[str, bool]:
+        seen.append((query, limit))
+        return {"found": True}
+
+    @function_tool(strict=False)
+    def loose(value: str = "default") -> str:
+        return value
+
+    output_schema["properties"].clear()
+    responses.respond(function_call("lookup", {"query": "order", "limit": None}, "lookup-once"))
+    responses.respond(assistant_output("finished"))
+    responses.respond(assistant_output("restored"))
+
+    async with timeout(30), provider_for(responses) as provider:
+        agent = Agent(
+            model=MODEL, instructions="Look up an order.", provider=provider, tools=[lookup, loose]
+        )
+        async with agent.session() as session:
+            result = await (await session.submit("Find an order")).get_result()
+            assert result.final_output == "finished"
+            saved = await session.save_state()
+        async with agent.session(state=saved) as restored:
+            result = await (await restored.submit("Use the same tools")).get_result()
+            assert result.final_output == "restored"
+
+    assert seen == [("order", None)]
+    for request in (responses.requests[0], responses.requests[2]):
+        declarations = {
+            tool["name"]: tool
+            for spec in request["tools"]
+            for tool in (spec["tools"] if spec["type"] == "namespace" else [spec])
+        }
+        strict = declarations["lookup"]
+        assert strict["strict"] is True
+        assert set(strict["parameters"]["required"]) == {"query", "limit"}
+        assert strict["parameters"]["additionalProperties"] is False
+        assert strict["output_schema"] == {
+            "type": "object",
+            "properties": {"found": {"type": "boolean"}},
+            "required": ["found"],
+            "additionalProperties": False,
+        }
+        assert declarations["loose"]["strict"] is False
+        assert "output_schema" not in declarations["loose"]
+
+
 async def test_native_wire_capture_updates_and_restores_values_and_explicit_clears(
     responses: ResponsesFixture,
 ) -> None:
