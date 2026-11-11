@@ -1,0 +1,471 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 9c4df15e..f48760e9 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3015,8 +3015,10 @@ where
+                     }
+                 }
+                 Ok(mut event) => {
+-                    if let ResponseEvent::ResponseObserved(observation) = &mut event {
+-                        observation.upstream_request_id = upstream_request_id.map(str::to_owned);
++                    if let ResponseEvent::ResponseObserved(observation) = &mut event
++                        && let Some(upstream_request_id) = upstream_request_id
++                    {
++                        observation.upstream_request_id = Some(upstream_request_id.to_owned());
+                     }
+                     if let ResponseEvent::ResponseFact(received) = &mut event {
+                         received.upstream_request_id = upstream_request_id.map(str::to_owned);
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index b766a435..20397284 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -344,6 +344,31 @@ impl CodexThread {
+             .finish(turn_id)
+     }
+ 
++    /// Starts ephemeral provider usage capture for one owned SDK run.
++    pub fn sdk_start_raw_usage(&self) -> crate::SdkRawUsageLink {
++        let capture = crate::session::sdk_raw_usage::SdkRawUsage::default();
++        let child_link = capture.child_link();
++        self.thread_extension_data().insert(capture);
++        child_link
++    }
++
++    /// Links a trusted auxiliary thread to this invocation's capture.
++    pub fn sdk_raw_usage_link(&self) -> Option<crate::SdkRawUsageLink> {
++        self.thread_extension_data()
++            .get::<crate::session::sdk_raw_usage::SdkRawUsage>()
++            .map(|capture| capture.child_link())
++    }
++
++    /// Takes original usage from accepted responses in the completed invocation.
++    pub fn sdk_take_raw_usage(&self, turn_id: &str) -> CodexResult<String> {
++        self.thread_extension_data()
++            .remove::<crate::session::sdk_raw_usage::SdkRawUsage>()
++            .ok_or_else(|| {
++                CodexErr::InvalidRequest("Provider usage capture was not started".into())
++            })?
++            .finish(turn_id)
++    }
++
+     /// Returns extension-owned data attached to this thread runtime.
+     pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
+         &self.session.services.thread_extension_data
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index d43452c1..7d8043a4 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -17,6 +17,8 @@ use crate::hook_runtime::run_pre_compact_hooks;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CompactionTurnMetadata;
+ use crate::session::RequestEffortUsage;
++use crate::session::sdk_raw_usage::RawUsage;
++use crate::session::sdk_raw_usage::SdkRawUsage;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn::get_last_assistant_message_from_turn;
+@@ -543,6 +545,7 @@ async fn run_compact_task_inner_impl(
+     if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
+         compaction_response.output.clear();
+     }
++    let raw_usage = compaction_response.raw_usage.take();
+     publish_compaction_summary(
+         &sess,
+         &source_step_context,
+@@ -553,6 +556,11 @@ async fn run_compact_task_inner_impl(
+         Some((compaction_response, cancellation_token)),
+     )
+     .await?;
++    if let Some(record) = raw_usage
++        && let Some(capture) = sess.services.thread_extension_data.get::<SdkRawUsage>()
++    {
++        capture.record_for_turn(&turn_context, record);
++    }
+ 
+     sess.emit_turn_item_completed(&turn_context, compaction_item)
+         .await;
+@@ -905,6 +913,7 @@ fn build_compacted_history_with_limit(
+ 
+ struct CompactionResponse {
+     response_id: String,
++    raw_usage: Option<RawUsage>,
+     output: Vec<ResponseItem>,
+     interrupted: bool,
+ }
+@@ -962,6 +971,8 @@ async fn drain_to_completed(
+         )
+         .await?;
+     let mut output = Vec::new();
++    let raw_usage_capture = sess.services.thread_extension_data.get::<SdkRawUsage>();
++    let mut pending_raw_usage = None;
+     let mut response_observation_id = None;
+     let mut incomplete_response_id = None;
+     let mut response_fact_budget = codex_protocol::response_facts::ResponseFactBudget::default();
+@@ -1000,6 +1011,9 @@ async fn drain_to_completed(
+                 .await?;
+             }
+             Ok(ResponseEvent::ResponseObserved(observation)) => {
++                if raw_usage_capture.is_some() {
++                    pending_raw_usage = Some(observation.clone());
++                }
+                 incomplete_response_id = (observation.status
+                     == ResponseObservationStatus::Incomplete)
+                     .then(|| observation.response_id.clone())
+@@ -1026,6 +1040,14 @@ async fn drain_to_completed(
+                     .await?;
+                 return Ok(CompactionResponse {
+                     interrupted: incomplete_response_id.as_ref() == Some(&response_id),
++                    raw_usage: pending_raw_usage
++                        .and_then(|observation| {
++                            RawUsage::from_observation(
++                                &observation,
++                                usage_metadata.and_then(|metadata| metadata.metadata),
++                            )
++                        })
++                        .filter(|record| record.matches_response(&response_id)),
+                     response_id,
+                     output,
+                 });
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 591db25d..8801c0e7 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -27,6 +27,8 @@ use crate::responses_retry::ResponsesStreamRequest;
+ use crate::responses_retry::ResponsesStreamRetryState;
+ use crate::responses_retry::handle_response_stream_error;
+ use crate::session::RequestEffortUsage;
++use crate::session::sdk_raw_usage::RawUsage;
++use crate::session::sdk_raw_usage::SdkRawUsage;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
+@@ -491,6 +493,9 @@ async fn collect_compaction_output(
+     let mut compaction_output = None;
+     let mut completed_response_id = None;
+     let mut completed_token_usage = None;
++    let mut completed_usage_metadata = None;
++    let raw_usage_capture = sess.services.thread_extension_data.get::<SdkRawUsage>();
++    let mut pending_raw_usage = None;
+     let mut response_observation_id = None;
+     let mut response_fact_budget = codex_protocol::response_facts::ResponseFactBudget::default();
+     while let Some(event) = stream.next().await {
+@@ -519,6 +524,9 @@ async fn collect_compaction_output(
+                 .await?;
+             }
+             ResponseEvent::ResponseObserved(observation) => {
++                if raw_usage_capture.is_some() {
++                    pending_raw_usage = Some(observation.clone());
++                }
+                 response_observation_id = sess
+                     .record_response_observation(turn_context, observation)
+                     .await?;
+@@ -539,6 +547,7 @@ async fn collect_compaction_output(
+                 .await;
+                 completed_response_id = Some(response_id);
+                 completed_token_usage = token_usage;
++                completed_usage_metadata = usage_metadata;
+                 break;
+             }
+             _ => {}
+@@ -560,6 +569,18 @@ async fn collect_compaction_output(
+     let Some(compaction_output) = compaction_output else {
+         unreachable!("compaction output must exist when count is exactly one");
+     };
++    if let Some(capture) = raw_usage_capture
++        && let Some(record) = pending_raw_usage
++            .and_then(|observation| {
++                RawUsage::from_observation(
++                    &observation,
++                    completed_usage_metadata.and_then(|metadata| metadata.metadata),
++                )
++            })
++            .filter(|record| record.matches_response(&response_id))
++    {
++        capture.record_for_turn(turn_context, record);
++    }
+     Ok(RemoteCompactionV2Output {
+         compaction_output,
+         response_id,
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 1121e68a..aec34988 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -66,6 +66,7 @@ pub use codex_thread::GuardianRootMessage;
+ pub use codex_thread::GuardianRootSnapshot;
+ pub use codex_thread::ThreadConfigSnapshot;
+ pub use owned_question::OwnedQuestion;
++pub use session::sdk_raw_usage::SdkRawUsageLink;
+ pub use session::turn_context::TurnContext;
+ pub use thread_startup_metadata::ThreadStartupMetadata;
+ mod agent;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 39e028aa..628ce9c6 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -265,6 +265,7 @@ pub(crate) mod sdk_produced_items;
+ mod review;
+ mod rollout_budget;
+ mod rollout_reconstruction;
++pub(crate) mod sdk_raw_usage;
+ #[allow(clippy::module_inception)]
+ pub(crate) mod session;
+ pub(crate) mod startup_prewarm;
+diff --git a/codex-rs/core/src/session/sdk_raw_usage.rs b/codex-rs/core/src/session/sdk_raw_usage.rs
+new file mode 100644
+index 00000000..82503709
+--- /dev/null
++++ b/codex-rs/core/src/session/sdk_raw_usage.rs
+@@ -0,0 +1,198 @@
++use crate::session::turn_context::TurnContext;
++use std::io;
++use std::io::Write;
++use std::sync::Arc;
++use std::sync::Mutex;
++use std::sync::Weak;
++
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use codex_protocol::protocol::ResponseObservation;
++use serde::Serialize;
++use serde_json::Value;
++
++const MAX_RECORDS: usize = 4096;
++const MAX_BYTES: usize = 8 * 1024 * 1024;
++
++#[derive(Serialize)]
++pub(crate) struct RawUsage {
++    response_id: String,
++    upstream_request_id: Option<String>,
++    usage: Value,
++}
++
++impl RawUsage {
++    pub(crate) fn from_observation(
++        observation: &ResponseObservation,
++        usage: Option<Value>,
++    ) -> Option<Self> {
++        if observation.status != codex_protocol::protocol::ResponseObservationStatus::Completed {
++            return None;
++        }
++        Some(Self {
++            usage: usage.filter(Value::is_object)?,
++            response_id: observation.response_id.clone()?,
++            upstream_request_id: observation.upstream_request_id.clone(),
++        })
++    }
++
++    pub(crate) fn matches_response(&self, response_id: &str) -> bool {
++        self.response_id == response_id
++    }
++}
++
++struct Capture {
++    turn_id: Option<String>,
++    records: Vec<RawUsage>,
++    remaining_bytes: usize,
++    overflowed: bool,
++    finished: bool,
++}
++
++impl Default for Capture {
++    fn default() -> Self {
++        Self {
++            turn_id: None,
++            records: Vec::new(),
++            remaining_bytes: MAX_BYTES - 2,
++            overflowed: false,
++            finished: false,
++        }
++    }
++}
++
++enum CaptureOwner {
++    Root(Arc<Mutex<Capture>>),
++    Child(Weak<Mutex<Capture>>),
++}
++
++/// A link for an admitted child thread to record usage in the root invocation.
++pub struct SdkRawUsageLink(Weak<Mutex<Capture>>);
++
++impl SdkRawUsageLink {
++    /// Reports whether this existing invocation still accepts capture.
++    pub fn is_active(&self) -> bool {
++        self.0.upgrade().is_some_and(|capture| {
++            !capture.lock().unwrap_or_else(|error| error.into_inner()).finished
++        })
++    }
++
++    /// Attach this invocation's capture without extending its lifetime.
++    pub fn attach(&self, store: &codex_extension_api::ExtensionData) {
++        if self.0.strong_count() == 0 {
++            store.remove::<SdkRawUsage>();
++        } else {
++            store.insert(SdkRawUsage(CaptureOwner::Child(self.0.clone())));
++        }
++    }
++}
++
++pub(crate) struct SdkRawUsage(CaptureOwner);
++
++impl Default for SdkRawUsage {
++    fn default() -> Self {
++        Self(CaptureOwner::Root(Arc::default()))
++    }
++}
++
++impl SdkRawUsage {
++    pub(crate) fn child_link(&self) -> SdkRawUsageLink {
++        match &self.0 {
++            CaptureOwner::Root(capture) => SdkRawUsageLink(Arc::downgrade(capture)),
++            CaptureOwner::Child(capture) => SdkRawUsageLink(capture.clone()),
++        }
++    }
++
++    pub(crate) fn record_for_turn(&self, turn_context: &TurnContext, record: RawUsage) {
++        let root_turn_id = turn_context.turn_metadata_state.root_turn_id();
++        self.record(
++            root_turn_id.as_deref().unwrap_or(&turn_context.sub_id),
++            record.response_id,
++            record.upstream_request_id,
++            record.usage,
++        );
++    }
++
++    pub(crate) fn record(
++        &self,
++        turn_id: &str,
++        response_id: String,
++        upstream_request_id: Option<String>,
++        usage: Value,
++    ) {
++        let (capture, turn_id) = match &self.0 {
++            CaptureOwner::Root(capture) => (Arc::clone(capture), Some(turn_id)),
++            CaptureOwner::Child(link) => {
++                let Some(capture) = link.upgrade() else {
++                    return;
++                };
++                (capture, None)
++            }
++        };
++        let mut capture = capture.lock().unwrap_or_else(|error| error.into_inner());
++        if capture.finished || capture.overflowed {
++            return;
++        }
++        if let Some(turn_id) = turn_id {
++            if capture.turn_id.as_deref().is_some_and(|id| id != turn_id) {
++                return;
++            }
++            capture.turn_id.get_or_insert_with(|| turn_id.to_owned());
++        }
++        let record = RawUsage {
++            response_id,
++            upstream_request_id,
++            usage,
++        };
++        let mut budget = CaptureBudget(capture.remaining_bytes.saturating_sub(1));
++        if capture.records.len() == MAX_RECORDS
++            || serde_json::to_writer(&mut budget, &record).is_err()
++        {
++            capture.overflowed = true;
++            capture.records.clear();
++            return;
++        }
++        capture.remaining_bytes = budget.0;
++        capture.records.push(record);
++    }
++
++    pub(crate) fn finish(&self, turn_id: &str) -> CodexResult<String> {
++        let CaptureOwner::Root(capture) = &self.0 else {
++            return Err(CodexErr::InvalidRequest(
++                "Provider usage belongs to the root invocation".into(),
++            ));
++        };
++        let mut capture = capture.lock().unwrap_or_else(|error| error.into_inner());
++        capture.finished = true;
++        if capture.turn_id.as_deref().is_some_and(|id| id != turn_id) {
++            capture.records.clear();
++            return Err(CodexErr::InvalidRequest(
++                "Provider usage belongs to a different turn".into(),
++            ));
++        }
++        if capture.overflowed {
++            return Err(CodexErr::InvalidRequest(
++                "Provider usage exceeds the SDK capture limit".into(),
++            ));
++        }
++        serde_json::to_string(&std::mem::take(&mut capture.records)).map_err(|_| {
++            CodexErr::InvalidRequest("Unable to encode captured provider usage".into())
++        })
++    }
++}
++
++struct CaptureBudget(usize);
++
++impl Write for CaptureBudget {
++    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++        self.0 = self
++            .0
++            .checked_sub(buf.len())
++            .ok_or(io::ErrorKind::WriteZero)?;
++        Ok(buf.len())
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 712c80eb..16ebf417 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3744,6 +3744,11 @@ async fn try_run_sampling_request(
+     let mut should_emit_turn_diff = false;
+     let mut should_emit_token_count = false;
+     let mut response_observation_id = None;
++    let raw_usage_capture = sess
++        .services
++        .thread_extension_data
++        .get::<super::sdk_raw_usage::SdkRawUsage>();
++    let mut pending_raw_usage = None;
+     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
+     let mut analytics_tool_call_ids = Vec::new();
+     let reasoning_effort = step_context
+@@ -4212,6 +4217,16 @@ async fn try_run_sampling_request(
+                     .await;
+                 }
+                 ResponseEvent::ResponseObserved(observation) => {
++                    if raw_usage_capture.is_some() {
++                        pending_raw_usage = (observation.status
++                            == codex_protocol::protocol::ResponseObservationStatus::Completed)
++                            .then(|| {
++                                (
++                                    observation.response_id.clone(),
++                                    observation.upstream_request_id.clone(),
++                                )
++                            });
++                    }
+                     let result = sess
+                         .record_response_observation(&turn_context, observation)
+                         .await;
+@@ -4284,6 +4299,21 @@ async fn try_run_sampling_request(
+                     if let Err(err) = budget_result {
+                         break Err(err);
+                     }
++                    if let (Some(capture), Some((observed_id, request_id))) =
++                        (&raw_usage_capture, pending_raw_usage.take())
++                        && observed_id.as_deref() == Some(response_id.as_str())
++                        && let Some(usage) = usage_metadata
++                            .and_then(|metadata| metadata.metadata)
++                            .filter(serde_json::Value::is_object)
++                    {
++                        let root_turn_id = turn_context.turn_metadata_state.root_turn_id();
++                        capture.record(
++                            root_turn_id.as_deref().unwrap_or(&turn_context.sub_id),
++                            response_id,
++                            request_id,
++                            usage,
++                        );
++                    }
+                     if let Some(false) = end_turn {
+                         needs_follow_up = true;
+                     }

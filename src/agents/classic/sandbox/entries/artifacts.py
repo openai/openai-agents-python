@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
@@ -40,6 +40,58 @@ _GIT_REG_NAME_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=-]+")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
+_GIT_COPY_SOURCE_BOUNDARY = """case "$source_root" in
+    "$repo_root"|"$repo_root"/*) ;;
+    *) echo 'Git source directory is outside the checkout' >&2; exit 1 ;;
+esac
+"""
+
+_GIT_COPY = (
+    """set -eu
+CDPATH=
+cd -P .
+# Resolve relative PATH entries from the provider's original working directory.
+# Changing to the checkout must not change where copy tools look for helpers.
+remaining_path=${PATH-/usr/bin:/bin}
+copy_path=
+while :; do
+    directory=${remaining_path%%:*}
+    case "$directory" in
+        /*) ;;
+        *) directory="${PWD%/}/${directory:-.}" ;;
+    esac
+    case "$directory" in
+        *:*) ;;
+        *) copy_path="${copy_path:+$copy_path:}$directory" ;;
+    esac
+    case "$remaining_path" in
+        *:*) remaining_path=${remaining_path#*:} ;;
+        *) break ;;
+    esac
+done
+PATH="${copy_path:-/usr/bin:/bin}"
+export PATH
+destination=$3
+case "$destination" in
+    /*) ;;
+    *) destination="$PWD/$destination" ;;
+esac
+cd -P /tmp
+tmp_root=$PWD
+cd -P "$1"
+repo_root=$PWD
+[ "$repo_root" = "$tmp_root/${1##*/}" ] || {
+    echo 'Git checkout is outside its temporary directory' >&2
+    exit 1
+}
+cd -P "./$2"
+source_root=$PWD
+"""
+    + _GIT_COPY_SOURCE_BOUNDARY
+    + """exec cp -R -P -- . "$destination/"
+"""
+)
+
 
 def _absolute_without_symlink_resolution(path: Path) -> Path:
     return Path(os.path.abspath(path))
@@ -55,12 +107,25 @@ def _sha256_handle(handle: io.BufferedReader) -> str:
     return digest.hexdigest()
 
 
-def _validate_git_repo_entry_hosts(entries: Iterable[BaseEntry]) -> None:
+_DOCKER_GIT_REPO_ERROR = "Docker sandboxes do not support GitRepo entries."
+
+
+def _git_repos(entries: Iterable[BaseEntry]) -> Iterator[GitRepo]:
     for entry in entries:
         if isinstance(entry, Dir):
-            _validate_git_repo_entry_hosts(entry.children.values())
-        elif isinstance(entry, GitRepo) and entry._validated_host() is None:
+            yield from _git_repos(entry.children.values())
+        elif isinstance(entry, GitRepo):
+            yield entry
+
+
+def _validate_git_repo_entries(entries: Iterable[BaseEntry], *, supports_git_repo: bool) -> None:
+    has_git_repo = False
+    for entry in _git_repos(entries):
+        if entry._validated_host() is None:
             raise _InvalidGitHostError()
+        has_git_repo = True
+    if has_git_repo and not supports_git_repo:
+        raise ValueError(_DOCKER_GIT_REPO_ERROR)
 
 
 class Dir(BaseEntry):
@@ -96,7 +161,9 @@ class Dir(BaseEntry):
         base_dir: Path,
     ) -> list[MaterializedFile]:
         try:
-            _validate_git_repo_entry_hosts(self.children.values())
+            _validate_git_repo_entries(
+                self.children.values(), supports_git_repo=session._supports_git_repo
+            )
             await session.mkdir(dest, parents=True)
             await self._apply_metadata(session, dest)
             return await session._apply_entry_batch(
@@ -779,9 +846,11 @@ class GitRepo(BaseEntry):
         host = self._validated_host()
         if host is None:
             raise _InvalidGitHostError()
+        if not session._supports_git_repo:
+            raise ValueError(_DOCKER_GIT_REPO_ERROR)
         git_subpath = self._validate_subpath()
 
-        # Ensure git exists in the container.
+        # Check Git in the same environment that will be used to clone.
         git_check = await session.exec("command -v git >/dev/null 2>&1")
         if not git_check.ok():
             context: dict[str, object] = {"repo": self.repo, "ref": self.ref}
@@ -791,6 +860,7 @@ class GitRepo(BaseEntry):
             raise GitMissingInImageError(context=context)
 
         tmp_dir = f"/tmp/sandbox-git-{session.state.session_id.hex}-{uuid.uuid4().hex}"
+        git_src_root = self._git_src_root(tmp_dir, git_subpath)
         url = f"https://{host}/{self.repo}.git"
 
         _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
@@ -814,12 +884,13 @@ class GitRepo(BaseEntry):
                     context={"repo": self.repo, "subpath": self.subpath},
                 )
 
-            git_src_root = self._git_src_root(tmp_dir, git_subpath)
-
             # Copy into destination in the container.
             await session.mkdir(dest, parents=True)
-            copy = await session.exec(
-                "cp", "-R", "--", f"{git_src_root}/.", f"{sandbox_path_str(dest)}/", shell=False
+            copy = await session._exec_git_copy(
+                _GIT_COPY,
+                tmp_dir,
+                git_subpath.as_posix() if git_subpath is not None else ".",
+                sandbox_path_str(dest),
             )
             if not copy.ok():
                 raise GitCopyError(

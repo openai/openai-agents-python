@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import posixpath
 import re
+from collections import deque
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, cast
@@ -25,6 +27,70 @@ def _raise_if_filesystem_root(path: PurePath, *, resolved: bool = False) -> None
     if resolved:
         raise ValueError(_RESOLVED_ROOT_PATH_GRANT_ERROR)
     raise ValueError(_ROOT_PATH_GRANT_ERROR)
+
+
+def _resolve_git_copy_path(
+    path: PurePosixPath,
+    read_link: Callable[[PurePosixPath], str | None],
+    *,
+    excluded_roots: Collection[PurePosixPath] = (),
+) -> PurePosixPath | None:
+    """Resolve a path without entering any workspace or mount that can supply code."""
+    resolved = PurePosixPath("/")
+    if not path.is_absolute() or resolved in excluded_roots:
+        return None
+    pending = deque(path.parts[1:])
+    links = 0
+    while pending:
+        component = pending.popleft()
+        if component == "..":
+            resolved = resolved.parent
+            continue
+        candidate = resolved / component
+        if candidate in excluded_roots:
+            return None
+        target = read_link(candidate)
+        if target is None:
+            return None
+        if not target:
+            resolved = candidate
+            continue
+        links += 1
+        if links > 40:
+            return None
+        target_path = PurePosixPath(target)
+        target_parts = target_path.parts
+        if target_path.is_absolute():
+            resolved = PurePosixPath("/")
+            target_parts = target_parts[1:]
+        pending.extendleft(reversed(target_parts))
+    return resolved
+
+
+def _git_copy_tool_path(
+    directories: Iterable[PurePosixPath],
+    excluded_roots: Collection[PurePosixPath],
+    read_link: Callable[[PurePosixPath], str | None],
+) -> str:
+    copy_path: list[str] = []
+    for directory in directories:
+        if not directory.is_absolute() or ":" in str(directory):
+            continue
+        physical = _resolve_git_copy_path(directory, read_link, excluded_roots=excluded_roots)
+        if physical is None:
+            continue
+        if any(
+            tool in excluded_roots
+            or (
+                read_link(tool) is not None
+                and _resolve_git_copy_path(tool, read_link, excluded_roots=excluded_roots) is None
+            )
+            for tool in (physical / "sh", physical / "cp")
+        ):
+            continue
+        # Keep tool aliases such as BusyBox's sh and cp in the lookup path.
+        copy_path.append(str(directory))
+    return ":".join(copy_path)
 
 
 def coerce_posix_path(path: str | PurePath) -> PurePosixPath:

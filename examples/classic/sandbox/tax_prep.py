@@ -1,3 +1,13 @@
+"""Docker tax preparation with an application-selected local skills bundle.
+
+This example has been copying the selected directory into the sandbox with a
+read-only source grant. The bundle has been providing
+`federal-tax-prep/SKILL.md` and its supporting files.
+
+Usage from the repository root:
+    uv run python examples/classic/sandbox/tax_prep.py --skills-dir /absolute/path/to/skills
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -11,9 +21,9 @@ from openai.types.responses import ResponseTextDeltaEvent
 from agents.classic import Runner
 from agents.classic.items import TResponseInputItem
 from agents.classic.run import RunConfig
-from agents.classic.sandbox import Manifest, SandboxAgent, SandboxRunConfig
+from agents.classic.sandbox import Manifest, SandboxAgent, SandboxPathGrant, SandboxRunConfig
 from agents.classic.sandbox.capabilities import Capabilities, Skills
-from agents.classic.sandbox.entries import Dir, GitRepo, LocalFile
+from agents.classic.sandbox.entries import Dir, LocalDir, LocalFile
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -23,8 +33,6 @@ DATA_PATH = Path(__file__).resolve().parent / "data"
 W2_PATH = DATA_PATH / "sample_w2.pdf"
 FORM_1040_PATH = DATA_PATH / "f1040.pdf"
 DEFAULT_IMAGE = "tax-prep:latest"
-DEFAULT_SKILLS_REPO = "sdcoffey/tax-prep-skills"
-DEFAULT_SKILLS_REF = "main"
 DEFAULT_QUESTION = "Please generate a 1040 for filing year 2025."
 
 INSTRUCTIONS = """
@@ -64,8 +72,9 @@ def _require_docker_dependency():
     return docker_from_env, DockerSandboxClient, DockerSandboxClientOptions
 
 
-def _build_manifest() -> Manifest:
+def _build_manifest(skills_dir: Path) -> Manifest:
     return Manifest(
+        extra_path_grants=(SandboxPathGrant(path=str(skills_dir), read_only=True),),
         entries={
             "taxpayer_data": Dir(
                 children={"sample_w2.pdf": LocalFile(src=W2_PATH)},
@@ -76,11 +85,14 @@ def _build_manifest() -> Manifest:
                 description="Blank tax forms the agent can use as templates.",
             ),
             "output": Dir(description="Write finalized tax documents here."),
-        }
+        },
     )
 
 
-def _build_agent(*, model: str, skills_repo: str, skills_ref: str) -> SandboxAgent:
+def _build_agent(*, model: str, skills_dir: Path) -> SandboxAgent:
+    skills_dir = skills_dir.resolve(strict=True)
+    if not (skills_dir / "federal-tax-prep" / "SKILL.md").is_file():
+        raise ValueError("The skills directory must contain federal-tax-prep/SKILL.md")
     return SandboxAgent(
         name="Tax Prep Assistant",
         model=model,
@@ -89,11 +101,11 @@ def _build_agent(*, model: str, skills_repo: str, skills_ref: str) -> SandboxAge
             "Inspect the workspace before answering. Keep final explanations concise, and make "
             "sure the final filled files are actually written into `output/`."
         ),
-        default_manifest=_build_manifest(),
+        default_manifest=_build_manifest(skills_dir),
         capabilities=Capabilities.default()
         + [
             Skills(
-                from_=GitRepo(repo=skills_repo, ref=skills_ref),
+                from_=LocalDir(src=skills_dir),
             ),
         ],
     )
@@ -180,11 +192,10 @@ async def main(
     image: str,
     question: str,
     output_dir: Path,
-    skills_repo: str,
-    skills_ref: str,
+    skills_dir: Path,
 ) -> None:
+    agent = _build_agent(model=model, skills_dir=skills_dir)
     docker_from_env, DockerSandboxClient, DockerSandboxClientOptions = _require_docker_dependency()
-    agent = _build_agent(model=model, skills_repo=skills_repo, skills_ref=skills_ref)
     client = DockerSandboxClient(docker_from_env())
     sandbox = await client.create(
         manifest=agent.default_manifest,
@@ -229,7 +240,7 @@ async def main(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="gpt-5.6-sol", help="Model name to use.")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Docker image for the sandbox.")
     parser.add_argument("--question", default=DEFAULT_QUESTION, help="Prompt to send to the agent.")
@@ -239,14 +250,10 @@ if __name__ == "__main__":
         help="Local directory where files from sandbox output/ will be copied.",
     )
     parser.add_argument(
-        "--skills-repo",
-        default=DEFAULT_SKILLS_REPO,
-        help="GitHub repo in owner/name form for the skills bundle.",
-    )
-    parser.add_argument(
-        "--skills-ref",
-        default=DEFAULT_SKILLS_REF,
-        help="Git ref for the skills bundle.",
+        "--skills-dir",
+        type=Path,
+        required=True,
+        help="Local skills directory containing federal-tax-prep/SKILL.md.",
     )
     args = parser.parse_args()
 
@@ -256,7 +263,6 @@ if __name__ == "__main__":
             image=args.image,
             question=args.question,
             output_dir=Path(args.output_dir).resolve(),
-            skills_repo=args.skills_repo,
-            skills_ref=args.skills_ref,
+            skills_dir=args.skills_dir,
         )
     )

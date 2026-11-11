@@ -268,6 +268,10 @@ class SandboxSession(BaseSandboxSession):
         return self._inner._runtime_has_protected_mount_authority()
 
     @property
+    def _supports_git_repo(self) -> bool:
+        return self._inner._supports_git_repo
+
+    @property
     def dependencies(self) -> Dependencies:
         return self._inner.dependencies
 
@@ -580,6 +584,21 @@ class SandboxSession(BaseSandboxSession):
         user: str | User | None = None,
     ) -> ExecResult:
         return await self._inner.exec(*command, timeout=timeout, shell=shell, user=user)
+
+    @instrumented_op(
+        "exec",
+        data=lambda session, script, *arguments: _exec_start_data(
+            session, "sh", "-c", script, "sandbox-git-copy", *arguments, shell=False
+        ),
+        finish_data=_exec_finish_data,
+        ok=lambda result: cast(ExecResult, result).ok(),
+        outputs=lambda result: (
+            cast(ExecResult, result).stdout,
+            cast(ExecResult, result).stderr,
+        ),
+    )
+    async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
+        return await self._inner._exec_git_copy(script, *arguments)
 
     async def _exec_internal(
         self,
