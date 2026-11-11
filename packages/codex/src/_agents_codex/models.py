@@ -905,7 +905,12 @@ class ResponsesModel:
                     for key, counter in usage.items()
                 }
             returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
-            if value.get("status") == "completed" and raw_usage is not None:
+            if (
+                value.get("status") == "completed"
+                and isinstance(value.get("id"), str)
+                and value["id"].strip()
+                and raw_usage is not None
+            ):
                 object.__setattr__(
                     returned,
                     "_responses_usage",

@@ -98,8 +98,7 @@ impl PlanStream {
             match upstream.next().await {
                 Some(Ok(event)) => {
                     match &event {
-                        ResponseEvent::ResponseObserved(received) => {
-                            let observation = &received.observation;
+                        ResponseEvent::ResponseObserved(observation) => {
                             self.completed_response =
                                 if observation.status == ResponseObservationStatus::Completed {
                                     observation.response_id.clone()
@@ -348,23 +347,17 @@ mod registered_plan_tests {
             (&exec_command, true, false),
             (&exec_command, false, false),
         ] {
-            let observation = ResponseEvent::ResponseObserved(
-                codex_api::ProviderResponseObservation {
-                    observation: ResponseObservation {
-                        response_id: Some("synthetic-response".into()),
-                        upstream_request_id: None,
-                        status: if completed {
-                            ResponseObservationStatus::Completed
-                        } else {
-                            ResponseObservationStatus::Incomplete
-                        },
-                        incomplete_reason: (!completed)
-                            .then_some(ResponseIncompleteReason::Interrupted),
-                        usage: None,
-                    },
-                    raw_usage: None,
+            let observation = ResponseEvent::ResponseObserved(ResponseObservation {
+                response_id: Some("synthetic-response".into()),
+                upstream_request_id: None,
+                status: if completed {
+                    ResponseObservationStatus::Completed
+                } else {
+                    ResponseObservationStatus::Incomplete
                 },
-            );
+                incomplete_reason: (!completed).then_some(ResponseIncompleteReason::Interrupted),
+                usage: None,
+            });
             let terminal = ResponseEvent::Completed {
                 response_id: "synthetic-response".into(),
                 token_usage: None,

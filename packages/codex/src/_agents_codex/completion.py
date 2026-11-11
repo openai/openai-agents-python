@@ -18,9 +18,10 @@ if TYPE_CHECKING:
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .native_interception import StopTurn as StopTurn
-from .tools import ToolCallInfo as ToolCallInfo
+from .tools import ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput
 
 ContextT = TypeVar("ContextT")
+OutputT = TypeVar("OutputT")
 _DecisionT = TypeVar("_DecisionT")
 
 
@@ -71,6 +72,7 @@ class CompletionContext(Generic[ContextT]):
     model: str
     continuation_count: int
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
+    tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)
     final_output: Any = field(default=None, kw_only=True, repr=False)
 
     @overload
@@ -142,6 +144,41 @@ class CompletionContext(Generic[ContextT]):
 _BeforeComplete: TypeAlias = Callable[
     [CompletionContext[ContextT]],
     ContinueTurn | StopTurn | None | Awaitable[ContinueTurn | StopTurn | None],
+]
+
+
+@dataclass(frozen=True)
+class ToolBatchResult:
+    """The accepted output of a direct function call."""
+
+    call: ToolCallInfo
+    arguments: str = field(repr=False)
+    output: ToolOutput = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ToolBatchCompletionContext(Generic[ContextT]):
+    """Settled direct function results in their original model call order."""
+
+    context: ContextT = field(repr=False)
+    results: tuple[ToolBatchResult, ...]
+    session_id: str
+    turn_id: str
+    subagent_id: str | None
+    model: str
+
+
+@dataclass(frozen=True)
+class FinishToolBatch(Generic[OutputT]):
+    """Propose an application value as the turn's final output."""
+
+    output: OutputT = field(repr=False)
+
+
+_ToolBatchDecision: TypeAlias = FinishToolBatch[OutputT] | ContinueTurn | StopTurn | None
+_ToolBatchCompletion: TypeAlias = Callable[
+    [ToolBatchCompletionContext[ContextT]],
+    _ToolBatchDecision[OutputT] | Awaitable[_ToolBatchDecision[OutputT]],
 ]
 
 

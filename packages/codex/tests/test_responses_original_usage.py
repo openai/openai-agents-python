@@ -54,3 +54,30 @@ async def test_responses_original_usage_has_no_default_serialization() -> None:
         "usage": usage,
     }
     assert calls == [{"mode": "json", "exclude_unset": True}]
+
+
+@pytest.mark.asyncio
+async def test_responses_missing_id_remains_accepted_with_raw_capture() -> None:
+    async def create(**kwargs):
+        return SimpleNamespace(
+            model_dump=lambda: {
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+            }
+        )
+
+    response = await ResponsesModel(
+        SimpleNamespace(responses=SimpleNamespace(create=create))
+    ).complete(
+        ModelRequest(
+            body={"model": "synthetic-routing-hint"},
+            context=None,
+            session_id="session",
+            turn_id="turn",
+        )
+    )
+    captured = json.loads(response._capture(capture_raw_usage=True))
+    assert captured.get("original_usage") is None
+    assert isinstance(captured["response_id"], str)
+    assert captured["usage"]["total_tokens"] == 5

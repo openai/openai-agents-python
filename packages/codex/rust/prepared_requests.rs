@@ -95,6 +95,7 @@ impl PythonTools {
             && !self.context_transform_enabled
             && !self.before_compact_enabled
             && !self.before_complete_enabled
+            && !self.tool_batch_completion_enabled
             && !self
                 .prepared_requests
                 .lock()

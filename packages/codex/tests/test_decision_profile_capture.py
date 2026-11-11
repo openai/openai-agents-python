@@ -68,6 +68,8 @@ def callback_session(root):
     session._closing = False
     session._output_guardrails = ()
     session._uses_siwc = False
+    session._raw_usage_started = False
+    session._include_raw_provider_events = False
     session._opening_agent = profiles[0].declaration
     session._decisions_provider = profiles[0].declaration.decisions
     session._profile_current = ("agent_0", 0)

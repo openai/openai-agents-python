@@ -11,8 +11,8 @@ from agents import Agent, NativeProvider, RawProviderUsage, ResponsesModel
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capture", [False, True])
-async def test_borrowed_responses_original_usage(capture: bool) -> None:
+@pytest.mark.parametrize(("capture", "provider_id"), [(False, True), (True, True), (True, False)])
+async def test_borrowed_responses_original_usage(capture: bool, provider_id: bool) -> None:
     usage = {
         "input_tokens": 3,
         "output_tokens": 2,
@@ -26,7 +26,7 @@ async def test_borrowed_responses_original_usage(capture: bool) -> None:
         body = await request.json()
         return web.json_response(
             {
-                "id": "resp_borrowed_usage",
+                **({"id": "resp_borrowed_usage"} if provider_id else {}),
                 "object": "response",
                 "status": "completed",
                 "created_at": 0,
@@ -71,6 +71,8 @@ async def test_borrowed_responses_original_usage(capture: bool) -> None:
                 usage=usage,
             ),
         )
+        if capture and provider_id
+        else ()
         if capture
         else None
     )
