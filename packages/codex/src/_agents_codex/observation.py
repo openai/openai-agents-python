@@ -145,6 +145,16 @@ class ResponseFactReceived(_SubmissionEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RawProviderEvent(_SubmissionEvent):
+    """A Responses provider JSON object captured before native event decoding."""
+
+    source: Literal["responses"]
+    transport: Literal["sse", "websocket", "json"]
+    payload: dict[str, JsonValue] = field(repr=False)
+    type: Literal["raw_provider_event"] = field(default="raw_provider_event", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class HostedToolCallSummary:
     """Identity and status of a hosted call, without provider payloads."""
 
@@ -353,6 +363,7 @@ Observation: TypeAlias = (
     | SubagentLifecycle
     | OutputTextDelta
     | ResponseFactReceived
+    | RawProviderEvent
     | ModelOutputItemCompleted
     | HostedToolCallProgress
     | UsageUpdated
@@ -471,7 +482,9 @@ class _ObservationBuffer:
             )
         if isinstance(event, ResponseFactReceived):
             size += len(json.dumps(event.record, ensure_ascii=False, separators=(",", ":")))
-        if isinstance(event, HostedToolCallProgress):
+        elif isinstance(event, RawProviderEvent) and self.retention == "bounded":
+            payload_size = len(json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")))
+        elif isinstance(event, HostedToolCallProgress):
             metadata = event.event
             partial = metadata.get("partial_image_b64")
             if metadata.get(
@@ -598,6 +611,25 @@ class EventStream(AsyncIterator[Observation]):
                     event, _, _, details_lost = records[index]
                     if event.sequence > self._after:
                         self._after = event.sequence
+                        if (
+                            isinstance(event, RawProviderEvent)
+                            and not self._include_execution_details
+                        ):
+                            continue
+                        if self._turn is not None and not isinstance(event, EventGap):
+                            owners = {step.submission_id for step in self._turn._steps()}
+                            own_turn = getattr(event, "submission_id", None) in owners
+                            if (
+                                not own_turn
+                                and getattr(event, "parent_submission_id", None) not in owners
+                            ):
+                                continue
+                            if (
+                                own_turn
+                                and isinstance(event, TurnFinished)
+                                and self._turn.child_id is not None
+                            ):
+                                self._closed = True
                         if isinstance(event, ResponseFactReceived):
                             event = replace(
                                 event,
@@ -605,6 +637,8 @@ class EventStream(AsyncIterator[Observation]):
                                 if self._include_execution_details
                                 else _summarize_response_fact(event.record),
                             )
+                        elif isinstance(event, RawProviderEvent):
+                            event = replace(event, payload=deepcopy(event.payload))
                         elif isinstance(event, ModelOutputItemCompleted):
                             model_item = event.item
                             if (
@@ -667,7 +701,7 @@ class EventStream(AsyncIterator[Observation]):
                                     "native_status": item.get("native_status"),
                                 }
                             event = replace(event, item=item)
-                        projected = (
+                        return (
                             EventGap(
                                 session_id=event.session_id,
                                 sequence=event.sequence,
@@ -676,15 +710,6 @@ class EventStream(AsyncIterator[Observation]):
                             if details_lost and self._include_execution_details
                             else event
                         )
-                        if self._turn is None or isinstance(event, EventGap):
-                            return projected
-                        owners = {step.submission_id for step in self._turn._steps()}
-                        if getattr(event, "submission_id", None) in owners:
-                            if isinstance(event, TurnFinished) and self._turn.child_id is not None:
-                                self._closed = True
-                            return projected
-                        if getattr(event, "parent_submission_id", None) in owners:
-                            return projected
                 if self._buffer.closed:
                     break
                 if self._turn is not None:

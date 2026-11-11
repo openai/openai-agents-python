@@ -1299,6 +1299,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1328,6 +1329,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1357,6 +1359,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1386,6 +1389,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1412,6 +1416,9 @@ class Agent(Generic[ContextT, OutputT]):
         retains a limited suffix and reports gaps. This policy is not checkpointed.
         include_model_output_items=True records ordinary assistant messages and
         provider reasoning summaries in the Session's observation stream.
+        include_raw_provider_events=True captures Responses provider JSON. Use
+        include_execution_details=True on the observation reader to receive it.
+        Capture uses the Session's in-memory observation retention policy.
 
         max_function_concurrency bounds automatic Python callbacks per turn owner,
         including validation and hooks through reply settlement. None adds no
@@ -1537,6 +1544,7 @@ class Agent(Generic[ContextT, OutputT]):
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
                 include_model_output_items=include_model_output_items,
+                include_raw_provider_events=include_raw_provider_events,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
@@ -1571,6 +1579,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         discover_agents_md: bool = False,
@@ -1610,6 +1619,7 @@ class Agent(Generic[ContextT, OutputT]):
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
                 include_model_output_items=include_model_output_items,
+                include_raw_provider_events=include_raw_provider_events,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,

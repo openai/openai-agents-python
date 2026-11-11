@@ -876,6 +876,29 @@ async def test_native_sandbox_pure_utilities_preserve_behavior() -> None:
     assert attempts == 2
 
 
+def test_native_sandbox_truncation_exposes_formatted_output_and_original_token_count() -> None:
+    from agents.sandbox import (
+        TruncationPolicy,
+        formatted_truncate_text,
+        formatted_truncate_text_with_token_count,
+        truncate_with_token_budget,
+    )
+
+    text = "a" * 64 + "\n" + "é" * 80 + "\n" + "z" * 64
+    policy = TruncationPolicy.tokens(30)
+    bounded, count = truncate_with_token_budget(text, policy)
+    formatted, formatted_count = formatted_truncate_text_with_token_count(text, 30)
+
+    assert count == formatted_count == 73
+    assert bounded.startswith("a")
+    assert formatted.startswith("Total output lines: 3\n\n")
+    assert formatted == formatted_truncate_text(text, policy)
+    for result in (bounded, formatted):
+        assert result.endswith("z")
+        assert "tokens truncated" in result
+        assert len(result.encode("utf-8")) <= policy.byte_budget()
+
+
 @pytest.mark.parametrize("mode", ["borrowed", "resume"])
 @pytest.mark.parametrize("mismatch", ["root", "topology", "credentials", "environment"])
 async def test_live_mount_authority_must_match_before_gateway_or_resume(mode, mismatch) -> None:
