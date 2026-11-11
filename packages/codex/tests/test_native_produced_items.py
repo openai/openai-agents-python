@@ -2,8 +2,28 @@ from __future__ import annotations
 
 import pytest
 
-from agents import Agent, NativeError, NativeProvider, function_tool
+from agents import Agent, FunctionTool, NativeError, NativeProvider, ProducedItem, function_tool
 from tests.native_fixtures import assistant_output, function_call, responses as responses
+from tests.test_native_manual_tools import LookupArgs
+
+
+async def test_one_shot_items_with_unused_manual_tool(responses):
+    lookup = FunctionTool(
+        name="lookup", description="Look up a record.", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(assistant_output("manual reply was unnecessary"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-produced-items"
+    ) as provider:
+        agent = Agent(instructions="Use lookup if needed.", provider=provider, tools=[lookup])
+        completed = await agent.run("answer directly", return_items=True)
+
+    assert completed.final_output == "manual reply was unnecessary"
+    assert completed.items is not None
+    assert len(completed.items) == 1
+    assert isinstance(completed.items[0], ProducedItem)
+    assert completed.items[0].item["type"] == "message"
+    assert completed.items[0].agent is agent
 
 
 async def test_one_shot_items_keep_the_owned_tool_sequence_and_handoff_agents(responses):

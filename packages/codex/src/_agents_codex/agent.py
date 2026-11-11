@@ -2129,22 +2129,19 @@ class Agent(Generic[ContextT, OutputT]):
                             input, tools=tools, before_step=before_step, **submit_options
                         )
                 if session._interaction_handler is None and pause_manual:
-                    outcome = await session._run_with_interactions(
+                    return await session._run_with_interactions(
                         submission,
                         on_interaction,
                         return_state=return_state,
                         return_history=return_history,
+                        return_items=return_items,
                         pause_manual=pause_manual,
                     )
-                    if not isinstance(outcome, Completed):
-                        return outcome
-                    result = outcome
-                else:
-                    result = await submission.get_result()
-                    if return_state:
-                        result = replace(result, state=await session.save_state())
-                    if return_history:
-                        result = replace(result, history=await session._run_history())
+                result = await submission.get_result()
+                if return_state:
+                    result = replace(result, state=await session.save_state())
+                if return_history:
+                    result = replace(result, history=await session._run_history())
                 if return_items:
                     result = replace(result, items=session._take_produced_items(result.turn))
                 return result

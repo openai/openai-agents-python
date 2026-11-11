@@ -7746,6 +7746,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         return_state: bool = False,
         return_history: bool = False,
+        return_items: bool = False,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
         """Own live replies and Session shutdown for a one-shot run."""
@@ -7867,6 +7868,8 @@ class Session(Generic[ContextT, OutputT]):
                 result = replace(result, state=await self.save_state())
             if return_history:
                 result = replace(result, history=await self._run_history())
+            if return_items:
+                result = replace(result, items=self._take_produced_items(result.turn))
         except BaseException as error:
             await _close_after_error(error, close)
             raise

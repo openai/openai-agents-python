@@ -386,6 +386,7 @@ _MODULES = {
     "TurnStoppedError": ".session",
     "InteractionRequired": ".session",
     "NativeError": ".session",
+    "ProducedItem": ".session",
     "ResponseIntegrityReason": ".session",
     "Session": ".session",
     "SessionBusyError": ".session",

@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "99aec30c872c2819bc694823d3d1a501968e4884",
+  "baseline_commit": "4a4ca2481459f4e8db399de2db405be37deaadf6",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1894,6 +1894,7 @@
       "PendingRequests": "agents.turn.PendingRequests",
       "PreparedRequest": "agents.prepared_request.PreparedRequest",
       "PreparedToolPresentation": "agents.prepared_request.PreparedToolPresentation",
+      "ProducedItem": "agents.session.ProducedItem",
       "PromptedOutput": "agents.schema.PromptedOutput",
       "ReconciledCall": "agents.recovery.ReconciledCall",
       "RedisSessionStore": "agents.canonical_storage.RedisSessionStore",
@@ -4653,6 +4654,7 @@
       "PendingRequests",
       "PreparedRequest",
       "PreparedToolPresentation",
+      "ProducedItem",
       "PromptedOutput",
       "ReconciledCall",
       "RedisSessionStore",
@@ -4726,7 +4728,7 @@
       "from .recovery import LocalRecoveryRequired as LocalRecoveryRequired, ReconciledCall as ReconciledCall, UncertainCall as UncertainCall",
       "from .repl import run_demo_loop as run_demo_loop",
       "from .schema import NativeOutput as NativeOutput, OutputSpec as OutputSpec, OutputValidationError as OutputValidationError, OutputValidationIssue as OutputValidationIssue, PromptedOutput as PromptedOutput",
-      "from .session import Capabilities as Capabilities, CapabilityError as CapabilityError, Completed as Completed, FeatureName as FeatureName, FeatureSupport as FeatureSupport, InteractionExpiredError as InteractionExpiredError, InteractionRequired as InteractionRequired, NativeError as NativeError, ResponseIntegrityReason as ResponseIntegrityReason, Session as Session, SessionBusyError as SessionBusyError, StaleTurnError as StaleTurnError, TurnStoppedError as TurnStoppedError, get_cleanup as get_cleanup",
+      "from .session import Capabilities as Capabilities, CapabilityError as CapabilityError, Completed as Completed, FeatureName as FeatureName, FeatureSupport as FeatureSupport, InteractionExpiredError as InteractionExpiredError, InteractionRequired as InteractionRequired, NativeError as NativeError, ProducedItem as ProducedItem, ResponseIntegrityReason as ResponseIntegrityReason, Session as Session, SessionBusyError as SessionBusyError, StaleTurnError as StaleTurnError, TurnStoppedError as TurnStoppedError, get_cleanup as get_cleanup",
       "from .state import ChecklistState as ChecklistState, ChecklistStep as ChecklistStep, CheckpointStatus as CheckpointStatus, LocalStorage as LocalStorage, NativeGoal as NativeGoal, SessionState as SessionState",
       "from .subagents import Subagent as Subagent",
       "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolOutputFile as ToolOutputFile, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, WebSearch as WebSearch",
