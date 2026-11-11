@@ -24,6 +24,13 @@ use crate::engine::ThreadState;
 const APPLIED: &str = "sdk_reconciliation.applied";
 const NOT_APPLIED: &str = "sdk_reconciliation.not_applied";
 
+pub(crate) fn shell_call_id(fields: &Map<String, Value>) -> Option<&String> {
+    match fields.get("call_id") {
+        Some(Value::String(id)) => Some(id),
+        _ => None,
+    }
+}
+
 pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>)> {
     let call = match item {
         ResponseItem::FunctionCallOutput {
@@ -32,6 +39,9 @@ pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>
         }
         | ResponseItem::CustomToolCallOutput { call_id: call, .. }
         | ResponseItem::ComputerCallOutput { call_id: call, .. } => call,
+        ResponseItem::ShellCallOutput {
+            provider_fields, ..
+        } => shell_call_id(provider_fields)?,
         _ => return None,
     };
     Some((call, item.turn_id()))
@@ -64,6 +74,16 @@ pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseIt
                 call_id: actual, ..
             },
         ) => expected == actual,
+        (
+            ResponseItem::ShellCall {
+                provider_fields: expected,
+                ..
+            },
+            ResponseItem::ShellCallOutput {
+                provider_fields: actual,
+                ..
+            },
+        ) => shell_call_id(expected).is_some_and(|id| shell_call_id(actual) == Some(id)),
         _ => false,
     }
 }

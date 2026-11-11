@@ -251,24 +251,25 @@ impl CanonicalStore {
                 }
                 RolloutItem::ResponseItem(envelope) => {
                     let owner = envelope.item.turn_id().or(turn);
-                    match &envelope.item {
+                    if owner != Some(key.turn.as_str()) {
+                        continue;
+                    }
+                    let call_id = match &envelope.item {
                         ResponseItem::FunctionCall { call_id, .. }
-                        | ResponseItem::ComputerCall { call_id, .. }
-                            if call_id == &key.call && owner == Some(key.turn.as_str()) =>
-                        {
-                            if invocation.replace(&envelope.item).is_some() {
-                                return Err(failure());
-                            }
+                        | ResponseItem::ComputerCall { call_id, .. } => Some(call_id),
+                        ResponseItem::ShellCall {
+                            provider_fields, ..
+                        } => crate::local_reconciliation::shell_call_id(provider_fields),
+                        _ => None,
+                    };
+                    if call_id == Some(&key.call) {
+                        if invocation.replace(&envelope.item).is_some() {
+                            return Err(failure());
                         }
-                        _ => {
-                            if crate::local_reconciliation::output_identity(&envelope.item)
-                                .is_some_and(|(call, _)| {
-                                    call == key.call && owner == Some(key.turn.as_str())
-                                })
-                            {
-                                completed = true;
-                            }
-                        }
+                    } else if crate::local_reconciliation::output_identity(&envelope.item)
+                        .is_some_and(|(call, _)| call == key.call)
+                    {
+                        completed = true;
                     }
                 }
                 _ => {}

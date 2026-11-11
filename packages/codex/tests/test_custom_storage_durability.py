@@ -25,6 +25,10 @@ from agents import (
     NativeGoals,
     NativeProvider,
     SessionStoreCleanup,
+    ShellCall,
+    ShellCommandOutput,
+    ShellExit,
+    ShellOutput,
     SQLiteSessionStore,
     ToolContext,
     ToolOutput,
@@ -32,6 +36,7 @@ from agents import (
     ToolOutputText,
     function_tool,
     get_cleanup,
+    shell_tool,
 )
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -374,6 +379,50 @@ async def test_lost_result_ack_is_reconciled_without_duplicate_effects(responses
     saved = _snapshot(tmp_path, _row(rows, "opened"))
     assert sum(item.get("type") == "function_call" for item in _responses(saved)) == 1
     assert sum(item.get("type") == "function_call_output" for item in _responses(saved)) == 1
+
+
+async def test_application_shell_commits_one_typed_receipt_to_custom_storage(responses, tmp_path):
+    from tests.test_native_application_shell import shell_call
+    from tests.test_native_manual_tools import provider
+
+    calls: list[str] = []
+
+    def execute(_context: ToolContext[None], call: ShellCall) -> ShellOutput:
+        calls.append(call.call_id)
+        return ShellOutput(
+            output=[ShellCommandOutput(stdout="ready", stderr="", outcome=ShellExit(exit_code=0))]
+        )
+
+    responses.respond(shell_call())
+    responses.respond(assistant_output("done"))
+    store = SQLiteSessionStore(tmp_path / "canonical.sqlite")
+    async with timeout(30), provider(responses) as native_provider:
+        agent = Agent(
+            instructions="Use the configured Shell tool.",
+            model="gpt-5",
+            provider=native_provider,
+            tools=[shell_tool(execute)],
+        )
+        async with agent.session(storage=CustomStorage(store)) as session:
+            identity = session.id
+            turn = await session.submit("Run the test command.")
+            assert (await turn.get_result()).final_output == "done"
+
+    assert calls == ["shell-local"]
+    saved = _snapshot(tmp_path, identity)
+    assert saved is not None
+    items = _responses(saved)
+    calls_saved = [item for item in items if item["type"] == "shell_call"]
+    assert [item["call_id"] for item in calls_saved] == calls
+    (receipt,) = [item for item in items if item["type"] == "shell_call_output"]
+    assert receipt["call_id"] == "shell-local"
+    assert receipt["output"] == [
+        {"stdout": "ready", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+    ]
+    (sent,) = [
+        item for item in responses.requests[1]["input"] if item["type"] == "shell_call_output"
+    ]
+    assert sent["call_id"] == receipt["call_id"] and sent["output"] == receipt["output"]
 
 
 async def test_readable_lost_ack_without_confirmation_keeps_session_failed(responses, tmp_path):

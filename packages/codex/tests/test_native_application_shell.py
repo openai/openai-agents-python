@@ -231,3 +231,66 @@ def test_application_shell_rejects_generic_after_replacement() -> None:
 
     with pytest.raises(TypeError, match="Shell tools require typed ShellOutput from the executor"):
         replace(shell_tool(execute), after=lambda *_: ToolOutput.text("unstructured"))
+
+
+@pytest.mark.parametrize("selection", ["call", "output", "both", "neither"])
+async def test_selective_compaction_preserves_application_shell_pairs(
+    responses: ResponsesFixture, selection: str
+) -> None:
+    effects: list[str] = []
+
+    def execute(context: ToolContext[None], call: ShellCall) -> ShellOutput:
+        effects.append(call.call_id)
+        return ShellOutput(
+            output=[
+                ShellCommandOutput(stdout="accepted", stderr="", outcome=ShellExit(exit_code=0))
+            ]
+        )
+
+    responses.respond(shell_call())
+    responses.respond(assistant_output("completed"))
+    agent = Agent(
+        instructions="Use the configured Shell tool.",
+        model="gpt-5",
+        provider=provider(responses),
+        tools=[shell_tool(execute)],
+    )
+    async with timeout(30), agent.session() as session:
+        assert (
+            await (await session.submit("run the test command")).get_result()
+        ).final_output == "completed"
+        snapshot = await session.model_context()
+        pair = [
+            index
+            for index, item in enumerate(snapshot.items)
+            if item.get("type") in {"shell_call", "shell_call_output"}
+        ]
+        assert [snapshot.items[index]["type"] for index in pair] == [
+            "shell_call",
+            "shell_call_output",
+        ]
+        retain = {"call": pair[:1], "output": pair[1:], "both": pair, "neither": []}[selection]
+        before = await session.save_state()
+        request_count = len(responses.requests)
+        if selection in {"call", "output"}:
+            with pytest.raises(RuntimeError, match="retain both original tool call and result"):
+                await session.compact(
+                    summary="Reject a split Shell pair.", snapshot=snapshot, retain=retain
+                )
+            after = await session.save_state()
+            assert after.history[: len(before.history)] == before.history
+            assert not any(row["type"] == "compacted" for row in after.history)
+        else:
+            await session.compact(
+                summary="Keep the selected complete window.", snapshot=snapshot, retain=retain
+            )
+            after = await session.save_state()
+            (compacted,) = (row for row in after.history if row["type"] == "compacted")
+            selected = [
+                item["type"]
+                for item in compacted["payload"]["replacement_history"]
+                if item.get("type") in {"shell_call", "shell_call_output"}
+            ]
+            assert selected == (["shell_call", "shell_call_output"] if selection == "both" else [])
+        assert effects == ["shell-local"]
+        assert len(responses.requests) == request_count
