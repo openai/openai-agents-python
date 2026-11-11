@@ -12,9 +12,11 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from agents import (
+    Agent,
     CustomStorage,
     LocalStorage,
     NativeError,
+    NativeProvider,
     SteeringReceipt,
     TurnNeedsAttention,
     _native,
@@ -33,6 +35,7 @@ from tests.test_native_codex_login import (
     uncompressed_model_requests as uncompressed_model_requests,
 )
 from tests.test_native_sign_in_with_chatgpt import (
+    MODEL,
     access_token,
     plan_agent,
     set_endpoint,
@@ -197,10 +200,13 @@ async def test_registered_auto_compaction_is_terminal_before_eof(
     assert effects == [EFFECT]
 
 
-async def test_registered_auto_compaction_context_overflow_does_not_resend(monkeypatch, responses):
-    set_compaction_thresholds(monkeypatch)
-    set_endpoint(monkeypatch, responses.url)
-    token = access_token()
+@pytest.mark.parametrize("mode", ["registered-auto", "registered-manual", "api-key-manual"])
+async def test_compaction_context_overflow_retry_policy(monkeypatch, responses, mode):
+    automatic = mode == "registered-auto"
+    registered = mode != "api-key-manual"
+    if automatic:
+        set_compaction_thresholds(monkeypatch)
+    token = access_token() if registered else "synthetic-compaction-api-key"
     original_input = "Preserve this original input."
     original_answer = "Seeded history."
     rejected_summary = "synthetic-rejected-overflow-summary"
@@ -218,7 +224,8 @@ async def test_registered_auto_compaction_context_overflow_does_not_resend(monke
                 input_tokens=260_000, output_tokens=1_000, total_tokens=261_000
             )
 
-    responses.before_event = high_usage
+    if automatic:
+        responses.before_event = high_usage
     responses.respond(function_call("record_effect", {}, "effect-once"))
     responses.respond(assistant_output(original_answer))
     responses.respond(
@@ -236,42 +243,65 @@ async def test_registered_auto_compaction_context_overflow_does_not_resend(monke
             },
         },
     )
-    responses.respond(assistant_output("Unexpected retry summary."))
+    retry_summary = "Synthetic successful retry summary."
+    responses.respond(assistant_output(retry_summary))
     responses.respond(assistant_output("Unexpected continuation."))
 
-    agent = plan_agent(token, tools=[record_effect])
+    if registered:
+        set_endpoint(monkeypatch, responses.url)
+        agent = plan_agent(token, tools=[record_effect])
+    else:
+        agent = Agent(
+            instructions="Follow the coding request.",
+            model=MODEL,
+            provider=NativeProvider(base_url=responses.url, api_key=token),
+            tools=[record_effect],
+        )
     async with timeout(25), agent.session() as session:
         seed = await session.submit(original_input)
         assert (await seed.get_result()).final_output == original_answer
-        followup = await session.submit("Continue.")
         terminal = None
         try:
-            await followup.get_result()
+            if automatic:
+                followup = await session.submit("Continue.")
+                await followup.get_result()
+            else:
+                await session.compact()
         except NativeError as error:
             terminal = error
-        assert [COMPACTION_MARKER in json.dumps(row["input"]) for row in responses.requests] == [
-            False,
-            False,
-            True,
-        ]
+
+        expected_requests = [False, False, True] if registered else [False, False, True, True]
+        assert [
+            COMPACTION_MARKER in json.dumps(row["input"]) for row in responses.requests
+        ] == expected_requests
         prompt = responses.requests[2]["input"]
         assert len(prompt) > 1
         assert original_input in json.dumps(prompt)
         assert original_answer in json.dumps(prompt)
-        assert terminal is not None
-        assert terminal.category == "context_length_exceeded"
+
+        context = json.dumps((await session.model_context()).items)
         saved = await session.save_state()
-        assert original_input in saved.to_json()
-        assert original_answer in saved.to_json()
-        assert EFFECT in saved.to_json()
+        assert rejected_summary not in context
         assert rejected_summary not in saved.to_json()
-        assert not any(row["type"] == "compacted" for row in saved.history)
+        if registered:
+            assert terminal is not None
+            assert terminal.category == "context_length_exceeded"
+            for value in (original_input, original_answer, EFFECT):
+                assert value in context and value in saved.to_json()
+            assert not any(row["type"] == "compacted" for row in saved.history)
+        else:
+            assert terminal is None
+            assert retry_summary in context
+            assert any(row["type"] == "compacted" for row in saved.history)
 
     assert all(
-        headers.get("authorization") == f"Bearer {token}"
-        and headers.get("x-openai-internal-codex-responses-lite") == "true"
-        for headers in responses.request_headers
+        headers.get("authorization") == f"Bearer {token}" for headers in responses.request_headers
     )
+    if registered:
+        assert all(
+            headers.get("x-openai-internal-codex-responses-lite") == "true"
+            for headers in responses.request_headers
+        )
     assert effects == [EFFECT]
 
 
