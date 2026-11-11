@@ -84,21 +84,28 @@ async def test_native_hosted_shell_preserves_wire_progress_and_cold_replay(
     responses: ResponsesFixture,
     environment: Any,
 ) -> None:
-    call = {
+    call: dict[str, Any] = {
         "id": "sh_command",
         "type": "shell_call",
+        "created_by": "provider-shell",
         "call_id": "shell-call",
         "status": "completed",
         "action": {"commands": ["printf provider"], "timeout_ms": 1000},
         "future_call": {"keep": True},
     }
-    output = {
+    output: dict[str, Any] = {
         "id": "sh_receipt",
         "type": "shell_call_output",
+        "created_by": "provider-shell",
         "call_id": "shell-call",
         "status": "completed",
         "output": [
-            {"stdout": "provider", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+            {
+                "stdout": "provider",
+                "stderr": "",
+                "outcome": {"type": "exit", "exit_code": 0},
+                "created_by": "provider-command",
+            }
         ],
         "future_output": [1, None],
     }
@@ -190,12 +197,24 @@ async def test_native_hosted_shell_preserves_wire_progress_and_cold_replay(
     responses.respond(assistant_output("replayed"))
     async with timeout(30), agent.session(state=SessionState.from_json(state)) as restored:
         assert (await (await restored.submit("continue")).get_result()).final_output == "replayed"
+        retained = [
+            item["provider_data"]
+            async for item in restored.items()
+            if item["type"] == "shell_call" or item["type"] == "shell_call_output"
+        ]
+        assert retained == [call, output]
     replayed = [
         item
         for item in responses.requests[1]["input"]
         if item.get("type") in {"shell_call", "shell_call_output"}
     ]
-    assert replayed == [call, output]
+    replay_call = {key: value for key, value in call.items() if key != "created_by"}
+    replay_output = {key: value for key, value in output.items() if key != "created_by"}
+    replay_output["output"] = [
+        {key: value for key, value in part.items() if key != "created_by"}
+        for part in output["output"]
+    ]
+    assert replayed == [replay_call, replay_output]
     assert len(responses.requests) == 2
 
 

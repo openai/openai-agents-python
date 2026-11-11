@@ -682,8 +682,8 @@
     },
     {
       "path": "sdk-provider-hosted-shell.patch",
-      "sha256": "67c36c685be00af6cfbeb38ed094c30b35776dd22c67fffcab2879656de59dc2"
+      "sha256": "a796eb6042288a5d374c4ecf155b9c63ee93283d7708f7ed6472289565f8ae23"
     }
   ],
-  "result_tree": "2987f506b7f62ff55925f5384feb5e1603d8e445"
+  "result_tree": "8de33fc28fb024aa9f7f0d1bac4dd8e4c24b3d31"
 }

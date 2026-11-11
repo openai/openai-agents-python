@@ -91,6 +91,39 @@ index 98c18f34c3d4aec1b52ce221e237f3f00500be42..9bfcdbb3ec771463f932636f35d32a9c
              | ResponseItem::ImageGenerationCall { .. }
              | ResponseItem::Compaction { .. }
              | ResponseItem::CompactionTrigger { .. }
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 9c4df15e3abd8000a5fd7323736bc95176fec643..b4e40f4c57bd4c4c14653bbf562284ed9a29bb8d 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1301,6 +1301,28 @@ impl ModelClient {
+             if item.id().is_some_and(|id| !id.is_prefixed()) {
+                 item.set_id(/*new_id*/ None);
+             }
++            match item {
++                ResponseItem::ShellCall {
++                    provider_fields, ..
++                } => {
++                    provider_fields.remove("created_by");
++                }
++                ResponseItem::ShellCallOutput {
++                    provider_fields, ..
++                } => {
++                    provider_fields.remove("created_by");
++                    if let Some(serde_json::Value::Array(output)) =
++                        provider_fields.get_mut("output")
++                    {
++                        for chunk in output {
++                            if let serde_json::Value::Object(chunk) = chunk {
++                                chunk.remove("created_by");
++                            }
++                        }
++                    }
++                }
++                _ => {}
++            }
+             if !self.state.content_item_kinds_enabled {
+                 item.clear_content_item_kinds();
+             }
 diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
 index 7e55734d47d0ea1fcc08432f211fdd803d0ab2db..23a0220e34ae19cabad3169e10ace17123e74d4f 100644
 --- a/codex-rs/core/src/client_common.rs

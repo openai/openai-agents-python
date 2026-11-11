@@ -249,7 +249,7 @@ class _RunErrorFormatterInheritance:
 def _can_reparse_error_arguments(model: type[BaseModel]) -> bool:
     # Ordinary JSON validation and plain models can be reconstructed on failure.
     # User construction hooks, validators, factories and unknown schemas keep snapshots.
-    schema = model.__pydantic_core_schema__
+    schema = cast(Mapping[str, object], model.__pydantic_core_schema__)
     if schema.get("type") != "model" or schema.get("custom_init") or schema.get("post_init"):
         return False
     allowed = {
