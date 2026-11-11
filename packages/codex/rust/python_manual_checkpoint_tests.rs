@@ -133,7 +133,15 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
         assert_eq!(checkpoint["native_continuation"]["pending_manual"][0]["call_id"], "call-A");
         let replies = checkpoint["native_continuation"]["accepted_replies"].as_object().unwrap();
         assert_eq!(replies.len(), 1);
-        assert_eq!(replies["call-B"]["call_id"], "call-B");
+        let reply: codex_history::RolloutItem =
+            serde_json::from_value(replies["call-B"].clone()).unwrap();
+        let codex_history::RolloutItem::ResponseItem(reply) = reply else {
+            panic!("Accepted reply must preserve its canonical envelope");
+        };
+        assert!(matches!(reply.item,
+            codex_protocol::models::ResponseItem::FunctionCallOutput { call_id, .. }
+                if call_id == "call-B"
+        ));
         assert!(replies["call-B"].to_string().contains("known-B"), "{replies:?}");
         assert!(!replies["call-B"].to_string().contains("aborted"), "{replies:?}");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
