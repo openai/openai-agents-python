@@ -32,7 +32,7 @@ jobs:
           extern char **environ;
           extern int posix_spawnattr_setspecialport_np(posix_spawnattr_t *, mach_port_t, int);
           extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t *, uint32_t);
-          extern int xpc_pipe_receive(mach_port_t, xpc_object_t *);
+          extern int xpc_pipe_receive(mach_port_t, xpc_object_t *, uint64_t);
           extern void *xpc_pipe_create_from_port(mach_port_t, uint64_t);
           extern int xpc_pipe_routine(void *,xpc_object_t,xpc_object_t *);
           extern int xpc_pipe_routine_reply(xpc_object_t);
@@ -43,7 +43,7 @@ jobs:
             struct server *s=arg;
             while(!atomic_load(&s->stop)) {
               xpc_object_t request=NULL;
-              int error=xpc_pipe_receive(s->sink,&request);
+              int error=xpc_pipe_receive(s->sink,&request,0);
               if(error) { if(atomic_load(&s->stop))break; printf("{\"decoder_error\":%d}\n",error); usleep(1000); continue; }
               if(!request)continue;
               atomic_fetch_add(&s->count,1);
