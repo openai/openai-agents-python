@@ -37,6 +37,10 @@ class _HistoryItem:
 
 
 _EXECUTION_TYPES = {"command_execution", "mcp_call", "patch_execution"}
+_CALL_TYPES_BY_OUTPUT = {
+    "function_call_output": "function_call",
+    "tool_search_output": "tool_search_call",
+}
 
 
 def _legacy_execution(message: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
@@ -204,7 +208,7 @@ def project_history(
     turns: dict[str, RecordedTurn] = {}
     items: list[_HistoryItem] = []
     identities: dict[tuple[str, str, str], _HistoryItem] = {}
-    latest_calls: dict[tuple[str, str], _HistoryItem] = {}
+    latest_calls: dict[tuple[str, str, str], _HistoryItem] = {}
     usage: dict[str, Any] = {}
     responses: list[tuple[str, RecordedResponse]] = []
     response_facts: list[RecordedResponseFact] = []
@@ -221,7 +225,7 @@ def project_history(
         original_input: JsonValue | None = None,
     ) -> _HistoryItem:
         kind = item["type"]
-        is_output = kind in {"function_call_output", "tool_search_output"}
+        is_output = kind in _CALL_TYPES_BY_OUTPUT
         is_execution = kind in _EXECUTION_TYPES
         # Execution records describe what ran. Keep them separate from the model's call and output.
         identity = (
@@ -230,8 +234,9 @@ def project_history(
             item["id"],
         )
         occurrence = identities.get(identity)
-        call_key = (item["turn_id"], item.get("call_id") or item["id"])
-        call = None if is_execution else latest_calls.get(call_key)
+        call_kind = _CALL_TYPES_BY_OUTPUT.get(kind, kind)
+        call_key = (item["turn_id"], call_kind, item.get("call_id") or item["id"])
+        call = latest_calls.get(call_key)
         if is_output and call is not None:
             if call.output is None:
                 occurrence = None
@@ -351,14 +356,14 @@ def project_history(
                     elif kinds == ["sdk_reconciliation.not_applied"]:
                         reconciliation = "not_applied"
                     if reconciliation is not None:
-                        if (original_turn, call_id) not in latest_calls:
+                        if (original_turn, "function_call", call_id) not in latest_calls:
                             continue
                         turn_id = original_turn
                     elif (
                         turn_id is None
                         and aborted_turn is not None
                         and original_turn == aborted_turn
-                        and (aborted_turn, call_id) in latest_calls
+                        and (aborted_turn, "function_call", call_id) in latest_calls
                     ):
                         turn_id = aborted_turn
             if turn_id:
@@ -569,8 +574,10 @@ def project_history(
                 item_id = f"{item_id}:{index}"
             item["id"] = item_id
             cursor_ids.add(item_id)
+        output = occurrence.output
+        if item["type"] == "tool_search_call" and item["status"] == "in_progress" and output:
+            item["status"] = output.value["status"]
         if item["type"] == "function_call":
-            output = occurrence.output
             computer_call = (
                 isinstance(occurrence.original_input, dict)
                 and occurrence.original_input.get("type") == "computer_call"

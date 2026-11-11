@@ -124,6 +124,7 @@ async def test_one_shot_return_items_include_deferred_tool_search(responses):
     call, output = (record.item for record in result.items[:2])
     assert call["call_id"] == output["call_id"] == "search-1"
     assert call["execution"] == output["execution"] == "client"
+    assert call["status"] == output["status"] == "completed"
     assert call["arguments"] == {"query": "skylark invoice", "limit": 5}
     assert output["tools"] == discovered(responses, "search-1")["tools"]
 
