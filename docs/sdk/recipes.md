@@ -4,7 +4,7 @@ Install the [SDK preview wheel](installation.md) and use examples from the match
 
 ## Runnable task examples
 
-Follow the [example setup](installation.md#examples-and-upgrades) to download the matching source archive and open its root directory. From the matching source archive's root, run a module with `PYTHONPATH=. python -m examples.codex.recipes.NAME`, replacing `NAME` with a name below. Follow each source file's setup notes.
+Download and open the [matching source archive](installation.md#examples-and-upgrades). With your SDK environment active, run `python -m examples.codex.recipes.NAME` from the archive root. Replace `NAME` with a module below and follow its setup notes.
 
 ### Test application logic without a model
 
@@ -20,7 +20,7 @@ These examples use scripted responses and need no API key. Tools still execute, 
 | [`specialist_agents`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/specialist_agents.py) | A function tool calls a separate Agent with explicit catalog context and tools, then returns a typed summary. This nested Session is not a native child for tracking or checkpoints. Python closures can still share permissions and resources. |
 | [`application_memory`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/application_memory.py) | Saves, recalls, and deletes a user's SQLite fact across new Sessions. The example removes its temporary database on exit. Your application owns retention and expiry. |
 
-For example, `PYTHONPATH=. python -m examples.codex.recipes.concurrent_tools` prints `Two Sessions shared one unit without overspending.` Its assertions check the remaining quota and tool results, not just the scripted answer.
+Run `python -m examples.codex.recipes.concurrent_tools` to check the shared quota and both tool results. It prints `Two Sessions shared one unit without overspending.` when the assertions pass.
 
 ### Try a live model
 
