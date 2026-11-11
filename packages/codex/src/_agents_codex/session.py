@@ -894,6 +894,15 @@ class _ManualBoundaryLost(RuntimeError):
     """No settled manual boundary remains at the pre-seal check."""
 
 
+@dataclass(frozen=True, slots=True)
+class ProducedItem:
+    """One accepted assistant or tool item and its producing Agent."""
+
+    item: SessionItem
+    agent: Agent[Any, Any]
+    handoff_target: Agent[Any, Any] | None = None
+
+
 @dataclass(frozen=True)
 class Completed(Generic[OutputT, TurnT]):
     """One completed root or captured child turn.
@@ -925,6 +934,7 @@ class Completed(Generic[OutputT, TurnT]):
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
     history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
+    items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
 
     def __post_init__(self) -> None:
@@ -7180,6 +7190,36 @@ class Session(Generic[ContextT, OutputT]):
             return json.loads(result)
 
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
+
+    def _take_produced_items(self, turn: Turn[Any]) -> tuple[ProducedItem, ...]:
+        turn_id = turn.turn_id
+        if turn_id is None:
+            raise NativeError("Completed turn has no native identity")
+        try:
+            encoded = self._native._take_produced_items(turn_id)
+        except RuntimeError as error:
+            raise NativeError(str(error)) from error
+        captured = json.loads(encoded)
+        records = [
+            {"type": "turn_context", "payload": {"turn_id": turn_id}},
+            *(entry["record"] for entry in captured),
+        ]
+        item_record_indexes: dict[int, int] = {}
+        _, items = project_history(records, self.id, item_record_indexes=item_record_indexes)
+        produced = []
+        for item in items:
+            entry = captured[item_record_indexes[id(item)] - 1]
+            metadata = entry["record"].get("metadata") or {}
+            handoff = metadata.get("sdk_agent_handoff")
+            target = self._profiles.get(handoff["target_profile_id"]) if handoff else None
+            produced.append(
+                ProducedItem(
+                    item,
+                    self._original_agent_for_profile(entry["agent"]),
+                    target.profile.agent if target is not None else None,
+                )
+            )
+        return tuple(produced)
 
     async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
         """Original JSON object records from an idle Session.

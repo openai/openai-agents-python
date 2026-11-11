@@ -178,6 +178,7 @@ if TYPE_CHECKING:
         InteractionExpiredError as InteractionExpiredError,
         InteractionRequired as InteractionRequired,
         NativeError as NativeError,
+        ProducedItem as ProducedItem,
         ResponseIntegrityReason as ResponseIntegrityReason,
         Session as Session,
         SessionBusyError as SessionBusyError,

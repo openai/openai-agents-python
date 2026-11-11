@@ -173,6 +173,7 @@ def project_history(
     subagent_id: str | None = None,
     *,
     uncertain_calls: list[UncertainCall] | None = None,
+    item_record_indexes: dict[int, int] | None = None,
 ) -> tuple[list[RecordedTurn], list[SessionItem]]:
     """Prefer native item events over raw records, retaining first-seen order."""
     projector = EventProjector(session_id, source_id=subagent_id)
@@ -238,7 +239,7 @@ def project_history(
             call.output = occurrence
         return occurrence
 
-    for record in history:
+    for record_index, record in enumerate(history):
         kind, payload = record["type"], record["payload"]
         if kind in {"compacted", "session_meta"}:
             pending_user = None
@@ -355,6 +356,8 @@ def project_history(
                             else None
                         ),
                     )
+                    if item_record_indexes is not None:
+                        item_record_indexes[id(item)] = record_index
                     metadata = payload.get("internal_chat_message_metadata_passthrough")
                     recorded_metadata = record.get("metadata")
                     input_order = (

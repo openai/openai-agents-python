@@ -1,0 +1,274 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -328,6 +328,22 @@
+             .is_elicitation_pending(server, token)
+     }
+ 
++    /// Starts a scoped capture before an SDK one-shot submits or resumes its turn.
++    pub fn sdk_start_produced_items(&self) {
++        self.thread_extension_data()
++            .insert(crate::session::sdk_produced_items::SdkProducedItems::default());
++    }
++
++    /// Drains the accepted produced items for the completed SDK turn.
++    pub fn sdk_take_produced_items(&self, turn_id: &str) -> CodexResult<String> {
++        self.thread_extension_data()
++            .remove::<crate::session::sdk_produced_items::SdkProducedItems>()
++            .ok_or_else(|| {
++                CodexErr::InvalidRequest("Produced item capture was not started".into())
++            })?
++            .finish(turn_id)
++    }
++
+     /// Returns extension-owned data attached to this thread runtime.
+     pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
+         &self.session.services.thread_extension_data
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -261,6 +261,7 @@
+ mod plugin_selection;
+ mod realtime_history;
+ mod retained_context;
++pub(crate) mod sdk_produced_items;
+ mod review;
+ mod rollout_budget;
+ mod rollout_reconstruction;
+@@ -2346,6 +2347,17 @@
+             .trusted_guardian_reviewer
+     }
+ 
++    pub(crate) fn start_sdk_produced_items_turn(&self, turn_context: &TurnContext) {
++        if let Some(capture) = self
++            .services
++            .thread_extension_data
++            .get::<sdk_produced_items::SdkProducedItems>()
++        {
++            let root_turn_id = turn_context.turn_metadata_state.root_turn_id();
++            capture.start(root_turn_id.as_deref().unwrap_or(&turn_context.sub_id));
++        }
++    }
++
+     pub(crate) async fn emit_turn_started(&self, turn_context: &TurnContext) {
+         let event = TurnStartedEvent {
+             turn_id: turn_context.sub_id.clone(),
+@@ -3739,6 +3751,11 @@
+             .iter()
+             .map(|envelope| envelope.item.clone())
+             .collect::<Vec<_>>();
++        let capture = self
++            .services
++            .thread_extension_data
++            .get::<sdk_produced_items::SdkProducedItems>();
++        let rollout_items;
+         {
+             let mut state = self.state.lock().await;
+             state
+@@ -3782,6 +3799,23 @@
+             if let Some(pending_exec) = pending_exec {
+                 pending_exec.mark_delivered();
+             }
++            rollout_items = items
++                .into_iter()
++                .map(RolloutItem::ResponseItem)
++                .collect::<Vec<_>>();
++            if let Some(capture) = capture {
++                let root_turn_id = turn_context.turn_metadata_state.root_turn_id();
++                let profile = state
++                    .session_configuration
++                    .agent_profile
++                    .as_ref()
++                    .map(|profile| &profile.receipt);
++                capture.record(
++                    root_turn_id.as_deref().unwrap_or(&turn_context.sub_id),
++                    profile,
++                    &rollout_items,
++                );
++            }
+         }
+         for image in image_preparations {
+             self.services
+@@ -3791,8 +3825,6 @@
+                     metadata: image,
+                 });
+         }
+-        let rollout_items: Vec<RolloutItem> =
+-            items.into_iter().map(RolloutItem::ResponseItem).collect();
+         if self.persist_rollout_items(&rollout_items).await
+             && let Some(revision) = mcp_revision
+         {
+diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
+--- a/codex-rs/core/src/tasks/regular.rs
++++ b/codex-rs/core/src/tasks/regular.rs
+@@ -114,6 +114,7 @@
+         // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
+         // not wait on startup prewarm resolution.
+         let prewarmed_client_session = async {
++            sess.start_sdk_produced_items_turn(&ctx);
+             sess.emit_turn_started(&ctx).await;
+             // Regular-start contributors run once, after the task is visible and interruptible.
+             let prepares_mcp = sess
+diff --git a/codex-rs/core/src/session/sdk_produced_items.rs b/codex-rs/core/src/session/sdk_produced_items.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/session/sdk_produced_items.rs
+@@ -0,0 +1,158 @@
++use std::io;
++use std::io::Write;
++use std::sync::Mutex;
++
++use codex_history::RolloutItem;
++use codex_protocol::agent_profile::AgentProfileReceipt;
++use codex_protocol::error::CodexErr;
++use codex_protocol::models::ResponseItem;
++use serde::Serialize;
++
++const MAX_ITEMS: usize = 4096;
++const MAX_BYTES: usize = 8 * 1024 * 1024;
++const LIMIT_ERROR: &str = "Produced run items exceed the one-shot result limit";
++
++/// Opt-in capture of accepted items for a single SDK invocation.
++#[derive(Default)]
++pub(crate) struct SdkProducedItems(Mutex<Capture>);
++
++#[derive(Default)]
++struct Capture {
++    turn_id: Option<String>,
++    json: Vec<u8>,
++    count: usize,
++    failed: bool,
++    finished: bool,
++}
++
++#[derive(Serialize)]
++struct ProducedItem<'a> {
++    record: &'a RolloutItem,
++    agent: Option<&'a AgentProfileReceipt>,
++}
++
++impl SdkProducedItems {
++    pub(super) fn start(&self, turn_id: &str) {
++        self.0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .turn_id
++            .get_or_insert_with(|| turn_id.to_owned());
++    }
++
++    pub(super) fn record(
++        &self,
++        turn_id: &str,
++        agent: Option<&AgentProfileReceipt>,
++        items: &[RolloutItem],
++    ) {
++        let mut capture = self
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if capture.failed || capture.finished || capture.turn_id.as_deref() != Some(turn_id) {
++            return;
++        }
++        for record in items {
++            let RolloutItem::ResponseItem(envelope) = record else {
++                continue;
++            };
++            if !is_produced_response(&envelope.item)
++                || envelope
++                    .metadata
++                    .as_ref()
++                    .is_some_and(|metadata| metadata.compaction_output)
++            {
++                continue;
++            }
++
++            let agent = envelope
++                .metadata
++                .as_ref()
++                .and_then(|metadata| metadata.sdk_agent_handoff.as_ref())
++                .map(|handoff| &handoff.source)
++                .or(agent);
++            if capture.count == MAX_ITEMS {
++                capture.failed = true;
++                break;
++            }
++            let delimiter = if capture.count == 0 { b'[' } else { b',' };
++            if capture.json.len() >= MAX_BYTES - 1 {
++                capture.failed = true;
++                break;
++            }
++            capture.json.push(delimiter);
++            let mut writer = BoundedJson(&mut capture.json);
++            if serde_json::to_writer(&mut writer, &ProducedItem { record, agent }).is_err() {
++                capture.failed = true;
++                break;
++            }
++            capture.count += 1;
++        }
++        if capture.failed {
++            capture.json = Vec::new();
++        }
++    }
++
++    pub(crate) fn finish(&self, turn_id: &str) -> Result<String, CodexErr> {
++        let mut capture = self
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        capture.finished = true;
++        if capture.turn_id.as_deref().is_some_and(|id| id != turn_id) {
++            return Err(CodexErr::InvalidRequest(
++                "Produced items belong to a different turn".into(),
++            ));
++        }
++        if capture.failed {
++            return Err(CodexErr::InvalidRequest(LIMIT_ERROR.into()));
++        }
++        if capture.count == 0 {
++            return Ok("[]".into());
++        }
++        let mut json = std::mem::take(&mut capture.json);
++        capture.count = 0;
++        json.push(b']');
++        String::from_utf8(json).map_err(|err| CodexErr::InvalidRequest(err.to_string()))
++    }
++}
++
++fn is_produced_response(item: &ResponseItem) -> bool {
++    match item {
++        ResponseItem::Message { role, .. } => role == "assistant",
++        ResponseItem::Reasoning { .. }
++        | ResponseItem::FunctionCall { .. }
++        | ResponseItem::FunctionCallOutput {
++            call_id: Some(_), ..
++        }
++        | ResponseItem::CustomToolCall { .. }
++        | ResponseItem::CustomToolCallOutput { .. }
++        | ResponseItem::ComputerCall { .. }
++        | ResponseItem::ComputerCallOutput { .. }
++        | ResponseItem::LocalShellCall { .. }
++        | ResponseItem::ToolSearchCall { .. }
++        | ResponseItem::ToolSearchOutput { .. }
++        | ResponseItem::WebSearchCall { .. }
++        | ResponseItem::FileSearchCall { .. }
++        | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ImageGenerationCall { .. } => true,
++        _ => false,
++    }
++}
++
++struct BoundedJson<'a>(&'a mut Vec<u8>);
++
++impl Write for BoundedJson<'_> {
++    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++        if bytes.len() > (MAX_BYTES - 1).saturating_sub(self.0.len()) {
++            return Err(io::Error::other(LIMIT_ERROR));
++        }
++        self.0.extend_from_slice(bytes);
++        Ok(bytes.len())
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
