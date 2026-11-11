@@ -113,9 +113,13 @@ class TraceDeliveryConfig:
     """Per-callback budget; None disables this deadline, including for batched callbacks."""
 
 
-def _trace_delivery_options(value: TraceDeliveryConfig) -> tuple[dict[str, Any], float | None]:
+def _trace_delivery_options(
+    value: TraceDeliveryConfig | Mapping[str, Any],
+) -> tuple[dict[str, Any], float | None]:
+    if isinstance(value, Mapping):
+        value = TraceDeliveryConfig(**value)
     if not isinstance(value, TraceDeliveryConfig):
-        raise TypeError("trace_delivery must be a TraceDeliveryConfig or None")
+        raise TypeError("trace_delivery must be a TraceDeliveryConfig, a mapping, or None")
     options: dict[str, Any] = {}
     for name in ("max_queue_size", "max_queue_bytes", "max_batch_size", "schedule_delay_ms"):
         item = getattr(value, name)
@@ -222,7 +226,7 @@ async def configure(
     tool_result_max_bytes: int = 0,
     processors: Sequence[TraceProcessor] = (),
     diagnostics: ConsoleDiagnostics | None = None,
-    trace_delivery: TraceDeliveryConfig | None = None,
+    trace_delivery: TraceDeliveryConfig | Mapping[str, Any] | None = None,
 ) -> None:
     """Configure once, before opening the first Session.
 

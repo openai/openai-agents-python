@@ -15,8 +15,10 @@ from agents import telemetry
 from tests.test_native_trace_exporter import native_trace_child_env
 
 
+@pytest.mark.parametrize("use_mapping", [False, True], ids=["typed", "mapping"])
 async def test_trace_delivery_configuration_captures_limits_before_initialization(
     monkeypatch: pytest.MonkeyPatch,
+    use_mapping: bool,
 ) -> None:
     from agents import _native
 
@@ -28,16 +30,16 @@ async def test_trace_delivery_configuration_captures_limits_before_initializatio
     monkeypatch.setattr(_native, "configure_telemetry", configure)
     for name in ("_engine_options", "_processor_batch_size", "_processor_callback_timeout"):
         monkeypatch.setattr(runtime_telemetry, name, getattr(runtime_telemetry, name))
-    await telemetry.configure(
-        trace_delivery=telemetry.TraceDeliveryConfig(
-            max_queue_size=2,
-            max_queue_bytes=8192,
-            max_batch_size=8,
-            schedule_delay_ms=100,
-            export_trigger_ratio=0.5,
-            callback_timeout_ms=None,
-        )
-    )
+    options: dict[str, Any] = {
+        "max_queue_size": 2,
+        "max_queue_bytes": 8192,
+        "max_batch_size": 8,
+        "schedule_delay_ms": 100,
+        "export_trigger_ratio": 0.5,
+        "callback_timeout_ms": None,
+    }
+    delivery = options if use_mapping else telemetry.TraceDeliveryConfig(**options)
+    await telemetry.configure(trace_delivery=delivery)
     assert captured[0]["sdk.trace_delivery"] == {
         "max_queue_size": 2,
         "max_queue_bytes": 8192,
