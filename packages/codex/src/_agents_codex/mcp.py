@@ -271,6 +271,7 @@ class MCPResultContext(Generic[ContextT_co]):
     call_id: str
     server_name: str
     tool_name: str
+    arguments: Mapping[str, Any] = field(default_factory=dict, repr=False, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -325,6 +326,8 @@ class _MCP(Generic[ContextT_contra]):
     transform_result_timeout. The latter defaults to 30 seconds when omitted.
     Approval is not a transform deadline. transform_result receives the
     separate MCPResultContext and an MCP result dictionary after the effect.
+    extract_application_data receives a copy of the result and returns a JSON
+    mapping retained by the SDK when native accepts the result.
     HTTP and WebSocket model providers support direct and generated-code
     replacement. Native continuation uses the corrected input and invalidates
     the changed provider item without changing the configured transport.
@@ -340,6 +343,13 @@ class _MCP(Generic[ContextT_contra]):
         Callable[
             [MCPResultContext[ContextT_contra], dict[str, Any]],
             dict[str, Any] | Awaitable[dict[str, Any]],
+        ]
+        | None
+    ) = field(default=None, repr=False)
+    extract_application_data: (
+        Callable[
+            [MCPResultContext[ContextT_contra], dict[str, Any]],
+            Mapping[str, Any] | None | Awaitable[Mapping[str, Any] | None],
         ]
         | None
     ) = field(default=None, repr=False)
@@ -395,13 +405,21 @@ class _MCP(Generic[ContextT_contra]):
                 or not 0 < value <= sys.float_info.max
             ):
                 raise ValueError(f"{name} must be a positive finite number")
-        for name in ("before", "transform_result", "approval", "request_metadata"):
+        for name in (
+            "before",
+            "transform_result",
+            "extract_application_data",
+            "approval",
+            "request_metadata",
+        ):
             callback = getattr(self, name)
             if callback is not None and not callable(callback):
                 raise TypeError(f"MCP {name} must be callable")
         if self.transform_result_timeout is not None:
-            if self.transform_result is None:
-                raise ValueError("transform_result_timeout requires transform_result")
+            if not self._has_result_callback:
+                raise ValueError(
+                    "transform_result_timeout requires transform_result or extract_application_data"
+                )
             if (
                 isinstance(self.transform_result_timeout, bool)
                 or not isinstance(self.transform_result_timeout, (int, float))
@@ -427,6 +445,10 @@ class _MCP(Generic[ContextT_contra]):
     def _has_before(self) -> bool:
         return self.before is not None or self.approval is not None
 
+    @property
+    def _has_result_callback(self) -> bool:
+        return self.transform_result is not None or self.extract_application_data is not None
+
     def _check_context(self, context: object) -> None:
         if context is not None:
             return
@@ -434,6 +456,7 @@ class _MCP(Generic[ContextT_contra]):
 
         for name, context_type in (
             ("transform_result", MCPResultContext),
+            ("extract_application_data", MCPResultContext),
             ("request_metadata", MCPMetadataContext),
             ("before", MCPCallContext),
             ("approval", MCPCallContext),
@@ -933,7 +956,7 @@ def _result_policies(servers: tuple[_MCP[Any], ...], generation: int) -> str:
                     else server.transform_result_timeout,
                 )
                 for server in servers
-                if server.transform_result is not None
+                if server._has_result_callback
             },
         }
     )

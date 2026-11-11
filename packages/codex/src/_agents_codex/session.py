@@ -250,6 +250,7 @@ from .schema import (
     _PreparedOutput as _PreparedOutput,
 )
 from .state import (
+    ApplicationToolOutput as ApplicationToolOutput,
     ChecklistState as ChecklistState,
     CheckpointStatus as CheckpointStatus,
     LocalStorage as LocalStorage,
@@ -276,6 +277,7 @@ from .tools import (
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
     WebSearch as WebSearch,
+    _capture_application_data,
     _capture_hosted_tools,
     _CapturedFunction as _CapturedFunction,
     _hosted_tool_name,
@@ -930,6 +932,11 @@ class Completed(Generic[OutputT, TurnT]):
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_usage", cast("Turn[Any] | ChildTurn", self.turn).run_usage)
 
+    @property
+    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
+        """Detached application data from accepted tool results on this turn."""
+        return cast("Turn[Any] | ChildTurn", self.turn).application_tool_outputs
+
 
 def _future() -> asyncio.Future[Any]:
     future = asyncio.get_running_loop().create_future()
@@ -985,6 +992,9 @@ class _Submission:
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
     terminal_observations: dict[str, ToolStarted] = field(default_factory=dict, repr=False)
+    pending_application_outputs: dict[str, ApplicationToolOutput] = field(
+        default_factory=dict, repr=False
+    )
     completion_continuations: int = 0
     guardrail_results: list[GuardrailRecord] = field(default_factory=list)
     guardrail_input: UserInput | None = field(default=None, repr=False)
@@ -1073,6 +1083,9 @@ class _ChildCallbacks:
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
     terminal_observations: dict[str, ToolStarted] = field(default_factory=dict, repr=False)
+    pending_application_outputs: dict[str, ApplicationToolOutput] = field(
+        default_factory=dict, repr=False
+    )
     completion_continuations: int = 0
     guardrail_results: list[GuardrailRecord] = field(default_factory=list)
     guardrail_input: tuple[dict[str, Any], ...] | None = field(default=None, repr=False)
@@ -2803,6 +2816,7 @@ def _prepare_native_checkpoint(
     payload.pop("operation_tools", None)
     payload.pop("repair_turns", None)
     payload.pop("repair_items", None)
+    payload.pop("application_tool_outputs", None)
     if "_sdk_default_tools" in saved.agent_options:
         restored_defaults = tuple(
             ToolRef(**item) for item in saved.agent_options["_sdk_default_tools"]
@@ -4214,6 +4228,9 @@ class Session(Generic[ContextT, OutputT]):
                 if checkpoint is not None:
                     session._repair_turns = saved.repair_turns
                     session._repair_items = saved.repair_items
+                    session._application_tool_outputs = [
+                        record.model_copy(deep=True) for record in saved.application_tool_outputs
+                    ]
                     recorded_policy = saved.executor_policy_digest
                     if (
                         recorded_policy == _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
@@ -4670,6 +4687,7 @@ class Session(Generic[ContextT, OutputT]):
         self._repair_turns: list[RecordedTurn] = []
         self._repair_receipts_incomplete = False
         self._repair_items: list[SessionItem] = []
+        self._application_tool_outputs: list[ApplicationToolOutput] = []
         self._restored_turn: Turn[OutputT] | None = None
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
         self._child_admissions: set[asyncio.Task[Turn[str]]] = set()
@@ -4730,11 +4748,11 @@ class Session(Generic[ContextT, OutputT]):
             return
         configured = tuple(profile.profile.declaration for profile in self._profiles.values())
         if any(
-            server.transform_result is not None or server.request_metadata is not None
+            server._has_result_callback or server.request_metadata is not None
             for server in self._mcp_tools
         ) or any(
             isinstance(tool, _MCP)
-            and (tool.transform_result is not None or tool.request_metadata is not None)
+            and (tool._has_result_callback or tool.request_metadata is not None)
             for agent in (*configured, *pending)
             for tool in agent.tools
         ):
@@ -6951,6 +6969,7 @@ class Session(Generic[ContextT, OutputT]):
         scope = _Invocation(self)
         token = _invocation.set(scope)
         output: str | None = None
+        application_output: ApplicationToolOutput | None = None
         try:
             if _approval_rejection:
                 output = json.dumps(ToolOutput.error(result).to_native())
@@ -6963,10 +6982,21 @@ class Session(Generic[ContextT, OutputT]):
                     if not self._native._check_manual_tool(request._grant):
                         raise InteractionExpiredError("Manual tool reply expired during validation")
                     output = entry._encode_result(value, expected_json=expected_json)
+                    if isinstance(value, ToolOutput):
+                        application_data = _capture_application_data(value.application_data)
+                        if application_data is not None:
+                            application_output = ApplicationToolOutput(
+                                submission_id=handle.submission_id,
+                                turn_id=request.turn_id,
+                                call_id=request.call_id,
+                                name=entry.name,
+                                namespace=entry.namespace,
+                                application_data=application_data,
+                            )
             else:
                 output = prepared.output
         except Exception:
-            pass
+            output = None
         finally:
             scope.active = False
             _invocation.reset(token)
@@ -6991,6 +7021,8 @@ class Session(Generic[ContextT, OutputT]):
                 )
             ):
                 raise InteractionExpiredError("Manual tool reply is expired or already delivered")
+            if application_output is not None:
+                self._application_tool_outputs.append(application_output)
             self._observations.notify()
             if isinstance(state, _Submission) and state.restored_pending:
                 submission = state
@@ -10219,12 +10251,15 @@ class Session(Generic[ContextT, OutputT]):
             )
         )
 
-    def _release_terminal_observation(self, state: _CallbackState, item: Any) -> None:
+    def _observe_accepted_tool_output(self, state: _CallbackState, item: Any) -> None:
         if not isinstance(item, dict) or item.get("type") != "function_call_output":
             return
         call_id = item.get("call_id")
         if not isinstance(call_id, str):
             return
+        application_output = state.pending_application_outputs.pop(call_id, None)
+        if application_output is not None:
+            self._application_tool_outputs.append(application_output)
         started = state.terminal_observations.pop(call_id, None)
         if started is None:
             return
@@ -10260,6 +10295,7 @@ class Session(Generic[ContextT, OutputT]):
         self._observe_function_finished(started, "completed", output)
 
     def _drain_terminal_observations(self, state: _CallbackState) -> None:
+        state.pending_application_outputs.clear()
         pending = tuple(state.terminal_observations.values())
         state.terminal_observations.clear()
         for started in pending:
@@ -10643,7 +10679,7 @@ class Session(Generic[ContextT, OutputT]):
         if not state.observed.done():
             state.observed.set_result(None)
         if kind == "raw_response_item":
-            self._release_terminal_observation(state, message["item"])
+            self._observe_accepted_tool_output(state, message["item"])
         self._observe_mcp(event, state)
         self._observe_progress(event, state.handle, event["subagent_id"])
         if kind in {"task_complete", "turn_complete", "turn_aborted"}:
@@ -12341,7 +12377,7 @@ class Session(Generic[ContextT, OutputT]):
                     state.failure.set_result(NativeError("Native MCP result policy failed"))
                 elif kind == "raw_response_item" and event["id"] == handle.turn_id:
                     item = message["item"]
-                    self._release_terminal_observation(state, item)
+                    self._observe_accepted_tool_output(state, item)
                     if item.get("type") == "message" and item.get("role") == "assistant":
                         texts = [
                             part["text"]
@@ -12861,7 +12897,8 @@ class Session(Generic[ContextT, OutputT]):
                 if server is None
                 else (server.request_metadata if metadata else server.transform_result)
             )
-            if server is None or callback is None:
+            extractor = None if server is None or metadata else server.extract_application_data
+            if server is None or (callback is None and extractor is None):
                 raise NativeError("Native MCP callback does not match its captured declaration")
             assert state.handle is not None
 
@@ -12875,8 +12912,10 @@ class Session(Generic[ContextT, OutputT]):
 
             if not admitted():
                 return
+            ref = ToolRef(notice["callable_name"], notice["callable_namespace"])
+            application_output: ApplicationToolOutput | None = None
             if metadata:
-                ref = ToolRef(notice["callable_name"], notice["callable_namespace"])
+                assert callback is not None
                 context: Any = MCPMetadataContext(
                     self._context,
                     state.handle,
@@ -12926,8 +12965,24 @@ class Session(Generic[ContextT, OutputT]):
                     notice["call_id"],
                     notice["server_name"],
                     notice["tool_name"],
+                    arguments=MappingProxyType(deepcopy(notice["arguments"])),
                 )
-                value = await _call_callback(callback, admitted, context, notice["result"])
+                value = notice["result"]
+                if callback is not None:
+                    value = await _call_callback(callback, admitted, context, value)
+                if extractor is not None and admitted() and isinstance(value, dict):
+                    application_data = _capture_application_data(
+                        await _call_callback(extractor, admitted, context, deepcopy(value))
+                    )
+                    if application_data is not None:
+                        application_output = ApplicationToolOutput(
+                            submission_id=state.handle.submission_id,
+                            turn_id=notice["turn_id"],
+                            call_id=notice["call_id"],
+                            name=ref.name,
+                            namespace=ref.namespace,
+                            application_data=application_data,
+                        )
             if not admitted():
                 return
             reply = json.dumps(value, allow_nan=False)
@@ -12936,6 +12991,8 @@ class Session(Generic[ContextT, OutputT]):
             )
             if not accepted and not state.stopping:
                 raise NativeError("Native MCP result policy failed")
+            if accepted and application_output is not None:
+                self._application_tool_outputs.append(application_output)
         except BaseException as error:
             if not state.stopping and not state.failure.done():
                 # Callback or result errors may contain the unaccepted peer data.
@@ -13018,6 +13075,8 @@ class Session(Generic[ContextT, OutputT]):
         status: Literal["completed", "failed", "cancelled"] = "cancelled"
         observed_output: ToolOutput | None = None
         deferred_observation = False
+        application_call_id: str | None = None
+        accepted = False
         try:
             request = json.dumps(message)
             marker = message["_sdk_python_tool"]
@@ -13514,6 +13573,18 @@ class Session(Generic[ContextT, OutputT]):
             del response
             if not self._admit_tool(state, request):
                 return
+            if started is not None:
+                application_data = _capture_application_data(output.application_data)
+                if application_data is not None:
+                    application_call_id = started.call_id
+                    state.pending_application_outputs[application_call_id] = ApplicationToolOutput(
+                        submission_id=started.submission_id,
+                        turn_id=started.turn_id,
+                        call_id=application_call_id,
+                        name=started.name,
+                        namespace=started.namespace,
+                        application_data=application_data,
+                    )
             if entry.finish_turn and response_output["success"] and started is not None:
                 if started.call_id in state.terminal_observations:
                     raise NativeError("Repeated terminal tool observation identity")
@@ -13540,6 +13611,8 @@ class Session(Generic[ContextT, OutputT]):
         finally:
             approved = None
             approved_kwargs = None
+            if application_call_id is not None and not accepted:
+                state.pending_application_outputs.pop(application_call_id, None)
             if tracing is not None:
                 tracing.set_outcome(
                     status="ok"
@@ -14350,6 +14423,10 @@ class Session(Generic[ContextT, OutputT]):
                 for turn in self._repair_turns
             ]
             payload["repair_items"] = self._repair_items
+            if self._application_tool_outputs:
+                payload["application_tool_outputs"] = [
+                    record.model_dump(mode="json") for record in self._application_tool_outputs
+                ]
             if active is not None and active.operation_refs is not None:
                 payload["operation_tools"] = [
                     {"name": ref.name, "namespace": ref.namespace} for ref in active.operation_refs
