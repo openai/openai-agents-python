@@ -1231,7 +1231,9 @@ def test_native_build_selection(
         path.write_text(json.dumps({"patches": [], "result_tree": "0" * 40}))
     for name in (
         ".github/actions/setup-native/action.yml",
+        ".github/scripts/install-linux-native-build-tools.sh",
         ".github/scripts/native-dependencies.py",
+        ".github/scripts/use-ubuntu-archive-if-needed.sh",
         ".github/scripts/detect-changes.sh",
     ):
         path = repo / name

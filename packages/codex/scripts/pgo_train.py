@@ -53,7 +53,7 @@ def prepare_imports() -> None:
     for name in proxy_names:
         os.environ.pop(name, None)
     # The temporary Maturin wheel lacks this private Python runtime. Supply only
-    # its matching source; public agents and the extension must remain installed.
+    # its matching source; agents, _agents_shared and the extension must remain installed.
     sys.path.insert(0, str(PRIVATE_SRC))
     agents = importlib.import_module("agents")
     native = importlib.import_module("agents._native")
@@ -67,10 +67,15 @@ def prepare_imports() -> None:
     native_file = Path(native.__file__).resolve()
     assert native_file.parent == public_file.parent
     assert any(native_file.name.endswith(suffix) for suffix in EXTENSION_SUFFIXES)
-    assert any(
-        Path(distribution.locate_file(file)).resolve() == native_file
-        for file in distribution.files or ()
-    )
+    recorded = {file.as_posix() for file in distribution.files or ()}
+    assert native_file.relative_to(public_file.parent.parent).as_posix() in recorded
+    for name, relative in (
+        ("_agents_shared", "_agents_shared/__init__.py"),
+        ("_agents_shared.strict_schema", "_agents_shared/strict_schema.py"),
+    ):
+        assert relative in recorded
+        module = importlib.import_module(name)
+        assert Path(module.__file__).resolve() == public_file.parent.parent / relative
     assert Path(private.__file__).resolve() == PRIVATE_SRC / "_agents_codex/__init__.py"
     sys.path.insert(0, str(ROOT / "packages/codex/tests"))
 

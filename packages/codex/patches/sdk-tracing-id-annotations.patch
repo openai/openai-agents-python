@@ -1,16 +1,17 @@
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 71d0eeb8..9f69d2cd 100644
 --- a/codex-rs/otel/src/sdk_trace.rs
 +++ b/codex-rs/otel/src/sdk_trace.rs
-@@ -14,6 +14,8 @@
- use opentelemetry_sdk::trace::ShouldSample;
+@@ -15,6 +15,8 @@ use opentelemetry_sdk::trace::ShouldSample;
  use serde::{Deserialize, Serialize};
  use serde_json::{Value, json};
-+
-+pub(crate) const MAX_COMPLETION_DATA_BYTES: usize = 32 * 1024;
  
++pub(crate) const MAX_COMPLETION_DATA_BYTES: usize = 32 * 1024;
++
  #[derive(Debug)]
  pub struct ScopePolicy {
-@@ -116,6 +118,23 @@
+     pub disabled: bool,
+@@ -116,6 +118,23 @@ fn retain_policy(span: &SpanContext, policy: Arc<ScopePolicy>) -> Arc<PolicyRegi
      entries.insert(identity, Arc::downgrade(&owner));
      owner
  }
@@ -34,7 +35,7 @@ diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
  pub fn policy_for_span(span: &SpanContext) -> Option<Arc<ScopePolicy>> {
      policy_registration(span).map(|registration| registration.policy.clone())
  }
-@@ -281,6 +300,7 @@
+@@ -281,6 +300,7 @@ struct Options {
      #[serde(default)]
      detached: bool,
      trace_id: Option<String>,
@@ -42,7 +43,7 @@ diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
      group_id: Option<String>,
      metadata: Option<Box<serde_json::value::RawValue>>,
      disabled: Option<bool>,
-@@ -323,12 +343,25 @@
+@@ -323,12 +343,25 @@ fn parse_trace_id(value: &str) -> Result<TraceId, String> {
      }
      Ok(id)
  }
@@ -69,7 +70,7 @@ diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
          Value::Array(values) => {
              if values.len() > 64 {
                  return Err("Tracing arrays may contain at most 64 entries".into());
-@@ -510,7 +543,7 @@
+@@ -510,7 +543,7 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
              .unwrap_or_default()
      };
      let parent_span = parent_context.span().span_context().clone();
@@ -78,7 +79,7 @@ diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
          .trace_id
          .as_deref()
          .map(parse_trace_id)
-@@ -518,10 +551,27 @@
+@@ -518,10 +551,27 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
      if parent_span.is_valid() && trace_id.is_some_and(|id| id != parent_span.trace_id()) {
          return Err("trace_id does not match the selected parent".into());
      }
@@ -106,7 +107,7 @@ diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
      let span = build_span("codex_agents_sdk", builder, &context);
      let context = context.with_span(span);
      let handle = Arc::new(Handle {
-@@ -584,8 +634,8 @@
+@@ -584,8 +634,8 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
      }
      if let Some(data) = &outcome.data {
          bounded_value(data, 0)?;
@@ -117,7 +118,7 @@ diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
          }
      }
      let handle = resolve(key)?;
-@@ -739,13 +789,26 @@
+@@ -739,13 +789,26 @@ mod tests {
      #[test]
      fn bounds_actual_metadata_attribute_encoding() {
          assert_eq!(
@@ -150,9 +151,10 @@ diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
      #[test]
      fn disabled_sampling_has_no_recording() {
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+index c9abc221..1b885023 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
-@@ -184,7 +184,14 @@
+@@ -184,7 +184,14 @@ fn attributes(span: &SpanData) -> BTreeMap<String, Value> {
              opentelemetry::Value::Bool(v) => json!(v),
              opentelemetry::Value::I64(v) => json!(v),
              opentelemetry::Value::F64(v) => json!(v),

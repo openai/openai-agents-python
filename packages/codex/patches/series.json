@@ -673,9 +673,17 @@
       "sha256": "192f9f23ac35e03a1f6b91a5ac14a13b0570397c9846f0e238c08c750460cd9c"
     },
     {
+      "path": "sdk-produced-run-items.patch",
+      "sha256": "c2577104f3f07363b5e3703b0219bd7a71d927c73cb84c4c78ebca23160f2e93"
+    },
+    {
+      "path": "sdk-nested-tool-output-acceptance.patch",
+      "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
+    },
+    {
       "path": "sdk-tracing-id-annotations.patch",
-      "sha256": "b05b7cc933a3d503b1d0c8b91b54580e9104fad8eabdd9a17663a13e7a356bca"
+      "sha256": "c854ea52fac88bc0b71330ce07f8a4531fc20abe898d5901e32a9b35462f4cf3"
     }
   ],
-  "result_tree": "a91a7d27c39037ad76c2c361c46ce32ac44b1fd5"
+  "result_tree": "4187f749d3653d8cda4a6a4af242a8f98b732946"
 }

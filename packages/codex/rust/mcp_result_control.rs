@@ -120,7 +120,10 @@ pub(crate) fn validated(reply: &str) -> Option<CallToolResult> {
 
 #[derive(Debug)]
 enum AcceptedReply {
-    Result(CallToolResult),
+    Result {
+        edited: CallToolResult,
+        assignment: Option<oneshot::Sender<()>>,
+    },
     Metadata(Result<serde_json::Map<String, Value>, ()>),
 }
 
@@ -791,6 +794,29 @@ impl McpResultControl {
     // No error strings derived from a reply cross the bridge. Return false on
     // invalid or expired replies, withhold if the original owner is still live.
     pub fn resolve(&self, nonce: u64, turn_id: &str, call_id: &str, reply: &str) -> bool {
+        self.resolve_reply(nonce, turn_id, call_id, reply, None)
+    }
+
+    pub fn resolve_with_assignment(
+        &self,
+        nonce: u64,
+        turn_id: &str,
+        call_id: &str,
+        reply: &str,
+    ) -> Option<oneshot::Receiver<()>> {
+        let (assignment, receiver) = oneshot::channel();
+        self.resolve_reply(nonce, turn_id, call_id, reply, Some(assignment))
+            .then_some(receiver)
+    }
+
+    fn resolve_reply(
+        &self,
+        nonce: u64,
+        turn_id: &str,
+        call_id: &str,
+        reply: &str,
+        assignment: Option<oneshot::Sender<()>>,
+    ) -> bool {
         // Validation grants no authority. Claim only after it finishes, so a
         // deadline crossed while decoding still belongs to native expiry.
         let metadata = {
@@ -808,7 +834,7 @@ impl McpResultControl {
                 validated_metadata(reply).map(|metadata| AcceptedReply::Metadata(Ok(metadata)))
             }
         } else {
-            validated(reply).map(AcceptedReply::Result)
+            validated(reply).map(|edited| AcceptedReply::Result { edited, assignment })
         };
         let mut state = self.state.lock().expect("MCP result control poisoned");
         if state.revoked
@@ -868,6 +894,7 @@ impl Reservation<'_> {
         result: &mut CallToolResult,
         mut edited: CallToolResult,
         peer_failed: bool,
+        assignment: Option<oneshot::Sender<()>>,
     ) {
         crate::native_interception::publish_mcp_result(thread_store, turn_store, || {
             let mut state = self
@@ -896,6 +923,11 @@ impl Reservation<'_> {
                 }
             }
         });
+        if self.assigned
+            && let Some(assignment) = assignment
+        {
+            let _ = assignment.send(());
+        }
     }
 }
 
@@ -1309,13 +1341,14 @@ impl ToolLifecycleContributor for McpResultContributor {
                     rx.await
                 }
             };
-            if let Ok(Some(AcceptedReply::Result(edited))) = reply {
+            if let Ok(Some(AcceptedReply::Result { edited, assignment })) = reply {
                 reservation.assign_result(
                     input.thread_store,
                     input.turn_store,
                     input.result,
                     edited,
                     peer_failed,
+                    assignment,
                 );
             } else {
                 crate::native_interception::expire_mcp_result(
@@ -1479,7 +1512,7 @@ pub(crate) mod tests {
         let thread = ExtensionData::new("root");
         let turn = ExtensionData::new("same");
         let _owner = crate::native_interception::tests::bind_owner(&thread, &turn);
-        old.assign_result(&thread, &turn, &mut raw, edited, false);
+        old.assign_result(&thread, &turn, &mut raw, edited, false, None);
         assert_eq!(raw.content, withheld().content);
         drop(old);
         let state = control.state.lock().unwrap();
@@ -1801,7 +1834,11 @@ pub(crate) mod tests {
         thread: &'a ExtensionData,
         turn: &'a ExtensionData,
         output: &'a mut CallToolResult,
-    ) -> (Arc<McpResultControl>, impl Future<Output = ()> + 'a) {
+    ) -> (
+        Arc<McpResultControl>,
+        oneshot::Receiver<()>,
+        impl Future<Output = ()> + 'a,
+    ) {
         let control = thread.get_or_init(|| McpResultControl::new("root".into(), true));
         let nonce = control.channel.next_nonce.fetch_add(1, Ordering::Relaxed);
         let args = json!({});
@@ -1826,18 +1863,20 @@ pub(crate) mod tests {
         };
         assert!(control.next(Some(nonce)).await.is_some());
         assert!(control.handoff(nonce));
-        assert!(control.resolve(
-            nonce,
-            turn.level_id(),
-            "call",
-            r#"{"content":[{"type":"text","text":"synthetic-edited"}],"isError":false}"#
-        ));
+        let assignment = control
+            .resolve_with_assignment(
+                nonce,
+                turn.level_id(),
+                "call",
+                r#"{"content":[{"type":"text","text":"synthetic-edited"}],"isError":false}"#,
+            )
+            .unwrap();
         let result_control = control.clone();
-        (result_control, async move {
-            let AcceptedReply::Result(edited) = rx.await.unwrap().unwrap() else {
+        (result_control, assignment, async move {
+            let AcceptedReply::Result { edited, assignment } = rx.await.unwrap().unwrap() else {
                 panic!("expected result reply");
             };
-            reservation.assign_result(thread, turn, output, edited, false);
+            reservation.assign_result(thread, turn, output, edited, false, assignment);
             drop(reservation);
             assert!(control.release(nonce));
         })
@@ -2282,12 +2321,13 @@ pub(crate) mod tests {
         ));
         assert!(!control.has_settled_failure("new-turn"));
         assert!(control.has_settled_failure("old-turn"));
-        let AcceptedReply::Result(edited) = new_receiver.await.unwrap().unwrap() else {
+        let AcceptedReply::Result { edited, assignment } = new_receiver.await.unwrap().unwrap()
+        else {
             panic!("expected result reply")
         };
         assert!(!control.has_settled_failure("new-turn"));
         let mut raw_result = withheld();
-        new.assign_result(&thread, &turn, &mut raw_result, edited, false);
+        new.assign_result(&thread, &turn, &mut raw_result, edited, false, assignment);
         assert_eq!(
             raw_result.content,
             vec![json!({"type": "text", "text": "safe edited result"})]

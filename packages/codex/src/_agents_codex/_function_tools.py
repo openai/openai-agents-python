@@ -12,7 +12,7 @@ from collections.abc import (
     Mapping as Mapping,
     Sequence as Sequence,
 )
-from dataclasses import dataclass as dataclass, field as field
+from dataclasses import dataclass as dataclass, field as field, fields as fields
 from functools import partial as partial
 from types import UnionType as UnionType
 from typing import (
@@ -231,6 +231,102 @@ class ToolContext(Generic[ContextT_co]):
         )
 
 
+_UNSET_ERROR_FUNCTION = cast(
+    Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None, object()
+)
+
+
+@dataclass(frozen=True)
+class _RunErrorFormatterInheritance:
+    allowed: bool
+    has_function: bool
+
+    def __bool__(self) -> bool:
+        return self.allowed
+
+
+def _can_reparse_error_arguments(model: type[BaseModel]) -> bool:
+    # Ordinary JSON validation and plain models can be reconstructed on failure.
+    # User construction hooks, validators, factories and unknown schemas keep snapshots.
+    schema = cast(Mapping[str, object], model.__pydantic_core_schema__)
+    if schema.get("type") != "model" or schema.get("custom_init") or schema.get("post_init"):
+        return False
+    allowed = {
+        "model",
+        "model-fields",
+        "model-field",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "none",
+        "any",
+        "bytes",
+        "list",
+        "dict",
+        "tuple",
+        "set",
+        "frozenset",
+        "nullable",
+        "union",
+        "literal",
+        "default",
+    }
+    pending: list[Any] = [schema["schema"]]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if len(seen) > 1024:
+            return False
+        if isinstance(value, dict):
+            kind = value.get("type")
+            schema_node = isinstance(kind, str)
+            if schema_node and kind not in allowed:
+                return False
+            if kind == "model" and (
+                value.get("custom_init")
+                or value.get("post_init")
+                or value["cls"].__new__ is not BaseModel.__new__
+            ):
+                return False
+            if schema_node and "default_factory" in value:
+                return False
+            if (
+                schema_node
+                and "default" in value
+                and type(value["default"])
+                not in (
+                    type(None),
+                    bool,
+                    int,
+                    float,
+                    str,
+                    bytes,
+                )
+            ):
+                return False
+            if kind == "literal" and any(
+                type(item) not in (type(None), bool, int, float, str, bytes)
+                for item in value["expected"]
+            ):
+                return False
+            pending.extend(
+                child
+                for key, child in value.items()
+                if (
+                    not schema_node
+                    or key not in {"metadata", "config", "default", "expected", "serialization"}
+                )
+                and isinstance(child, (dict, list, tuple))
+            )
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return True
+
+
 @dataclass(frozen=True, kw_only=True)
 class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     """A function that runs a registered callback or takes its result from the app.
@@ -287,7 +383,78 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]
     ) = True
 
+    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
+        default=None, repr=False
+    )
+    _allow_run_error_formatter: bool | _RunErrorFormatterInheritance = field(
+        default=True, repr=False
+    )
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        input_type: type[InputT],
+        output_type: type[ResultT],
+        _bind: BinderT_co | None = None,
+        _requires_context: bool = False,
+        callback_timeout: float | None = None,
+        before: Callable[
+            [ToolContext[Any]],
+            Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments],
+        ]
+        | None = None,
+        after: Callable[
+            [ToolContext[Any], ToolOutput],
+            ToolOutput
+            | BackgroundResult[ToolOutput]
+            | Awaitable[ToolOutput | BackgroundResult[ToolOutput]],
+        ]
+        | None = None,
+        defer_loading: bool = False,
+        strict: bool = False,
+        output_schema: dict[str, Any] | None = None,
+        timeout_behavior: ToolTimeoutBehavior = "raise_exception",
+        timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
+        | None = None,
+        input_error_function: Callable[
+            [ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]
+        ]
+        | None = None,
+        namespace: str | None = None,
+        namespace_description: str | None = None,
+        finish_turn: bool = False,
+        needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+        run_before_approval: bool = False,
+        is_enabled: bool
+        | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+        error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
+        | None = _UNSET_ERROR_FUNCTION,
+        _allow_run_error_formatter: bool | _RunErrorFormatterInheritance | None = None,
+    ) -> None:
+        omitted = error_function is _UNSET_ERROR_FUNCTION
+        if omitted:
+            error_function = None
+        has_function = error_function is not None
+        inheritance = _allow_run_error_formatter
+        if isinstance(inheritance, _RunErrorFormatterInheritance):
+            allowed = (
+                inheritance.allowed if has_function == inheritance.has_function else has_function
+            )
+        elif inheritance is None:
+            allowed = omitted or has_function
+        else:
+            allowed = inheritance
+        _allow_run_error_formatter = _RunErrorFormatterInheritance(allowed, has_function)
+        values = locals()
+        for declaration in fields(FunctionTool):
+            object.__setattr__(self, declaration.name, values[declaration.name])
+        self.__post_init__()
+
     def __post_init__(self) -> None:
+        if self.error_function is not None and not callable(self.error_function):
+            raise TypeError("FunctionTool error_function must be callable or None")
         if not isinstance(self.is_enabled, bool) and not callable(self.is_enabled):
             raise TypeError("FunctionTool is_enabled must be a bool or callable")
         if self.namespace is not None and (
@@ -353,6 +520,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             or self.timeout_behavior != "raise_exception"
             or self.timeout_error_function is not None
             or self.input_error_function is not None
+            or self.error_function is not None
         ):
             raise TypeError("Callback settings require a callback registered with function_tool")
 
@@ -424,7 +592,12 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             )
         if self._bind is not None:
             if context is None:
-                policies: tuple[str, ...] = ("before", "after", "input_error_function")
+                policies: tuple[str, ...] = (
+                    "before",
+                    "after",
+                    "input_error_function",
+                    "error_function",
+                )
                 if self.callback_timeout is not None and self.timeout_behavior == "error_as_result":
                     policies += ("timeout_error_function",)
                 for name in policies:
@@ -530,6 +703,10 @@ _TimeoutFormatter: TypeAlias = Callable[
 ]
 
 
+_BodyErrorFormatter: TypeAlias = Callable[
+    [ToolContext[PolicyContextT], Exception], str | Awaitable[str]
+]
+
 _InputErrorFormatter: TypeAlias = Callable[
     [ToolInputErrorContext[PolicyContextT], Exception, Any], str | Awaitable[str]
 ]
@@ -548,6 +725,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[PolicyContextT],
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _PythonTool[ToolContextT, PolicyContextT]: ...
 
 
@@ -564,6 +742,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[ToolContextT] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[ToolContextT] | None = None,
 ) -> _PythonTool[ToolContextT, ToolContextT]: ...
 
 
@@ -580,6 +759,24 @@ def function_tool(
     input_error_function: _InputErrorFormatter[PolicyContextT],
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[PolicyContextT] | None = None,
+) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
+
+
+@overload
+def function_tool(
+    function: Callable[ParametersT, Any],
+    /,
+    *,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
+    finish_turn: bool = False,
+    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+    run_before_approval: bool = False,
+    input_error_function: _InputErrorFormatter[PolicyContextT] | None = None,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[PolicyContextT],
 ) -> _PythonTool[PolicyContextT, PolicyContextT]: ...
 
 
@@ -596,6 +793,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | None = None,
 ) -> _PythonTool[object, object]: ...
 
 
@@ -620,6 +818,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | None = None,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -646,6 +845,7 @@ def function_tool(
     | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -670,6 +870,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | None = None,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -696,6 +897,7 @@ def function_tool(
     | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -720,6 +922,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[object] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | None = None,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -748,6 +951,7 @@ def function_tool(
     | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[object] | _BodyErrorFormatter[PolicyContextT] | None = None,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -784,6 +988,7 @@ def function_tool(
     input_error_function: _InputErrorFormatter[Any] | None = None,
     is_enabled: bool
     | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+    error_function: _BodyErrorFormatter[Any] | None = _UNSET_ERROR_FUNCTION,
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -902,6 +1107,10 @@ def function_tool(
                 timeout_behavior=declaration.timeout_behavior,
                 timeout_error_function=declaration.timeout_error_function,
                 input_error_function=declaration.input_error_function,
+                error_function=declaration.error_function,
+                _allow_run_error_formatter=bool(declaration._allow_run_error_formatter),
+                _reparse_error_arguments=declaration.error_function is not None
+                and _can_reparse_error_arguments(model),
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,
@@ -928,6 +1137,7 @@ def function_tool(
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             input_error_function=input_error_function,
+            error_function=error_function,
             namespace=namespace,
             namespace_description=namespace_description,
         )

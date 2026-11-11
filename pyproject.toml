@@ -1,6 +1,6 @@
 [project]
 name = "openai-agents"
-version = "0.24.0-alpha.7"  # x-release-please-version
+version = "0.24.0-alpha.8"  # x-release-please-version
 description = "OpenAI Agents SDK"
 readme = "packages/codex/README.md"
 requires-python = ">=3.10"
@@ -236,6 +236,7 @@ path = "packages/codex/scripts/hatch_build.py"
 [tool.maturin]
 manifest-path = "packages/codex/Cargo.toml"
 python-source = "src"
+python-packages = ["agents", "_agents_shared"]
 module-name = "agents._native"
 pgo-command = "python packages/codex/scripts/pgo_train.py"
 pgo-dependency-group = "pgo"
