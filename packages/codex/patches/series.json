@@ -635,7 +635,11 @@
     {
       "path": "sdk-bounded-one-shot-history.patch",
       "sha256": "02da72f8e5bcfab13b3be4680356a62156eb429dcb7497ecc0b9644625c05f98"
+    },
+    {
+      "path": "sdk-raw-provider-events.patch",
+      "sha256": "192f9f23ac35e03a1f6b91a5ac14a13b0570397c9846f0e238c08c750460cd9c"
     }
   ],
-  "result_tree": "fdbd4e60a29f0e6e538413243fe41cccbc3880a9"
+  "result_tree": "3b31f5cd479ddb28d083c844b84f110b2e24bec5"
 }

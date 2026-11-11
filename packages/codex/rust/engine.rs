@@ -2352,7 +2352,7 @@ fn native_event(
     {
         event.msg = retained;
     }
-    let mut value = serde_json::to_value(&event)?;
+    let mut value = event.sdk_json()?;
     if session_reader
         && let EventMsg::RealtimeConversationRealtime(realtime) = &event.msg
         && let codex_protocol::protocol::RealtimeEvent::HandoffRequested(handoff) =
