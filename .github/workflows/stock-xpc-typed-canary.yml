@@ -1,0 +1,61 @@
+name: Stock macOS typed XPC canary
+
+on:
+  push:
+    branches:
+      - diagnostics/nov9-stock-xpc-typed-a12
+    paths:
+      - .github/workflows/stock-xpc-typed-canary.yml
+      - .github/diagnostics/stock-xpc-typed-canary.c
+
+permissions:
+  contents: read
+
+jobs:
+  typed-canary:
+    runs-on: macos-15
+    timeout-minutes: 4
+    steps:
+      - name: Check out the exact diagnostic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify stock typed lookup and fixture port adoption
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          /usr/bin/sw_vers
+          /usr/bin/uname -m
+          test "$(/usr/bin/sw_vers -productVersion)" = 15.8.2
+          test "$(/usr/bin/sw_vers -buildVersion)" = 24H232
+          test "$(/usr/bin/uname -m)" = arm64
+          test "$(/usr/bin/id -u)" -ne 0
+          source=.github/diagnostics/stock-xpc-typed-canary.c
+          printf '%s  %s\n' c7f05969ca2de2bd6fa2ae57d45e89da0312d0bcab5f1e9f47de232446c809e3 "$source" | /usr/bin/shasum -a 256 -c -
+          temp_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-xpc-typed.XXXXXXXX")"
+          trap '/bin/rm -rf -- "$temp_dir"' EXIT
+          /usr/bin/xcrun --sdk macosx clang -std=c11 -D_DARWIN_C_SOURCE \
+            -Wall -Wextra -Werror -Wno-deprecated-declarations \
+            "$source" -lbsm -o "$temp_dir/canary"
+          python3 - "$temp_dir/canary" <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+
+          with subprocess.Popen(
+              [sys.argv[1]], env={"PATH": "/usr/bin:/bin"}, start_new_session=True
+          ) as proc:
+              try:
+                  status = proc.wait(timeout=25)
+              except subprocess.TimeoutExpired:
+                  try:
+                      os.killpg(proc.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+                  proc.wait()
+                  sys.exit("typed canary exceeded its 25-second watchdog")
+              sys.exit(status if status >= 0 else 128 - status)
+          PY
