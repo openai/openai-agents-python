@@ -279,6 +279,28 @@ def project_model_output_item(
     return item
 
 
+def _function_output_fields(
+    output: Any,
+    *,
+    status: str,
+    success: bool | None = None,
+    error: Any = None,
+) -> dict[str, Any]:
+    if success is False:
+        status = "failed"
+    if status == "failed" and error is None:
+        error = (
+            output
+            if isinstance(output, str)
+            else "\n".join(part["text"] for part in output if part["type"] == "input_text")
+        ) or None
+    return {
+        "status": status,
+        "output": output if status == "completed" else None,
+        "error": error,
+    }
+
+
 class EventProjector:
     """Translate native records for canonical-history reconstruction."""
 
@@ -502,12 +524,6 @@ class EventProjector:
                 if content["type"] in {"inputText", "inputImage", "inputFile"}
             ]
         )
-        status = "failed" if native.get("success") is False else native["status"]
-        error = native.get("error")
-        if status == "failed" and error is None:
-            error = (
-                "\n".join(part["text"] for part in output if part["type"] == "input_text") or None
-            )
         return self._event(
             "agent.session.turn.item.added",
             turn_id,
@@ -517,9 +533,12 @@ class EventProjector:
                 "id": f"{native['id']}:output",
                 "turn_id": turn_id,
                 "call_id": native["id"],
-                "status": status,
-                "output": output if status == "completed" else None,
-                "error": error,
+                **_function_output_fields(
+                    output,
+                    status=native["status"],
+                    success=native.get("success"),
+                    error=native.get("error"),
+                ),
             },
         )
 

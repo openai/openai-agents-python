@@ -3459,6 +3459,19 @@ impl NativeThread {
         })
     }
 
+    fn _start_produced_items(&self) -> PyResult<()> {
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        inner.thread.sdk_start_produced_items();
+        Ok(())
+    }
+
+    fn _take_produced_items(&self, turn_id: &str) -> PyResult<String> {
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        inner.thread.sdk_take_produced_items(turn_id).map_err(py_error)
+    }
+
     #[pyo3(signature = (subagent_id=None, *, for_reconciliation=false))]
     fn read_thread_history<'py>(
         &self,
