@@ -295,6 +295,7 @@ from .turn_receipt import (
 )
 from .usage import (
     _MAX_SAFE_INTEGER,
+    RawProviderUsage,
     RunBudget,
     RunUsage,
     TokenUsage,
@@ -925,6 +926,7 @@ class Completed(Generic[OutputT, TurnT]):
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
     history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
+    raw_usage: tuple[RawProviderUsage, ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
 
     def __post_init__(self) -> None:
@@ -3293,6 +3295,7 @@ class Session(Generic[ContextT, OutputT]):
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
+        _capture_raw_usage: bool = False,
         _completed_input: str | None = None,
         _private_text_run: bool = False,
         project_guidance: bool = False,
@@ -4302,6 +4305,8 @@ class Session(Generic[ContextT, OutputT]):
                 if owned_provider:
                     session._owned_provider = provider
                 session._websockets_enabled = websockets_enabled
+                if _capture_raw_usage:
+                    thread._start_raw_usage()
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
                     session._manual_source_digest = hashlib.sha256(
@@ -7211,6 +7216,16 @@ class Session(Generic[ContextT, OutputT]):
 
         return await self._join_mutation(asyncio.create_task(capture()))
 
+    def _take_raw_usage(self, turn: Turn[Any]) -> tuple[RawProviderUsage, ...]:
+        turn_id = turn.turn_id
+        if turn_id is None:
+            raise NativeError("Completed native turn has no provider usage identity")
+        try:
+            records = json.loads(self._native._take_raw_usage(turn_id))
+        except RuntimeError as error:
+            raise NativeError(str(error)) from error
+        return tuple(RawProviderUsage(**record) for record in records)
+
     async def _run_history(self) -> tuple[dict[str, Any], ...]:
         try:
             snapshot = await self._capture_canonical_history(None, for_replay=True)
@@ -7706,6 +7721,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
         """Own live replies and Session shutdown for a one-shot run."""
@@ -7827,6 +7843,8 @@ class Session(Generic[ContextT, OutputT]):
                 result = replace(result, state=await self.save_state())
             if return_history:
                 result = replace(result, history=await self._run_history())
+            if return_raw_usage:
+                result = replace(result, raw_usage=self._take_raw_usage(result.turn))
         except BaseException as error:
             await _close_after_error(error, close)
             raise

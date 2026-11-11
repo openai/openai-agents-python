@@ -13,8 +13,13 @@ from aiohttp.test_utils import TestServer
 from typing_extensions import assert_type
 
 from agents import (
+    ActionReply,
     Agent,
     Completed,
+    FunctionTool,
+    Interaction,
+    InteractionRequired,
+    RawProviderUsage,
     Session,
     SessionState,
     Turn,
@@ -33,6 +38,7 @@ from tests.native_fixtures import (
     tool_output,
 )
 from tests.test_native_agent_observation import collect, provider
+from tests.test_native_manual_tools import LookupArgs
 
 
 async def _report_usage(event: dict[str, Any]) -> None:
@@ -50,6 +56,85 @@ async def _report_usage(event: dict[str, Any]) -> None:
 async def _omit_usage(event: dict[str, Any]) -> None:
     if event["type"] == "response.completed":
         event["response"].pop("usage")
+
+
+@pytest.mark.parametrize("capture", [False, True])
+async def test_native_original_provider_usage_stays_out_of_history_and_checkpoints(
+    responses: ResponsesFixture, capture: bool
+) -> None:
+    @function_tool
+    def lookup(code: str) -> str:
+        """Resolve a code."""
+        return "resolved-" + code
+
+    expected: list[dict[str, Any]] = []
+    sentinel = "synthetic-provider-usage-extension"
+
+    async def report(event: dict[str, Any]) -> None:
+        if event["type"] != "response.completed":
+            return
+        await _report_usage(event)
+        usage = event["response"]["usage"]
+        usage["vendor_extension"] = {
+            "sample": [0, False, None, sentinel],
+            "sequence": len(expected),
+        }
+        expected.append(usage)
+
+    responses.before_event = report
+    responses.respond(function_call("lookup", {"code": "A"}, "raw-usage-a"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(instructions="Use lookup once.", tools=[lookup], provider=provider(responses))
+    async with timeout(30):
+        result = await agent.run(
+            "look up A", return_raw_usage=capture, return_history=True, return_state=True
+        )
+
+    assert result.final_output == "done"
+    assert result.run_usage.requests == 2
+    assert result.run_usage.total_tokens == 48
+    assert len(responses.requests) == 2
+    assert result.state is not None and sentinel not in result.state.to_json()
+    assert result.history is not None and sentinel not in json.dumps(result.history)
+    assert sentinel not in repr(result)
+    if capture:
+        assert result.raw_usage == tuple(
+            RawProviderUsage(response_id=f"resp_{index}", upstream_request_id=None, usage=usage)
+            for index, usage in enumerate(expected, start=1)
+        )
+    else:
+        assert result.raw_usage is None
+
+
+async def test_native_original_provider_usage_on_manual_restore(
+    responses: ResponsesFixture,
+) -> None:
+    lookup = FunctionTool(
+        name="lookup", description="Read a record.", input_type=LookupArgs, output_type=str
+    )
+    agent = Agent(instructions="Use lookup once.", tools=[lookup], provider=provider(responses))
+    responses.before_event = _report_usage
+    responses.respond(function_call("lookup", {"key": "A"}, "raw-usage-manual"))
+
+    def answer(event: Interaction) -> ActionReply[str]:
+        request = lookup.match(event)
+        assert request is not None
+        return request.reply("accepted-A")
+
+    async with timeout(30):
+        with pytest.raises(InteractionRequired) as paused:
+            await agent.run("read A", return_raw_usage=True)
+        saved = paused.value.state
+        assert saved is not None and saved.native_continuation is not None
+        assert "not-for-usage-readers" not in saved.to_json()
+        responses.respond(assistant_output("finished"))
+        result = await agent.run(None, state=saved, on_interaction=answer, return_raw_usage=True)
+
+    assert result.final_output == "finished"
+    assert len(responses.requests) == 2
+    assert result.raw_usage is not None
+    assert [record.response_id for record in result.raw_usage] == ["resp_2"]
+    assert result.raw_usage[0].usage["fixture_secret"] == "not-for-usage-readers"
 
 
 async def check_usage_types(session: Session[object, str], handle: Turn[str]) -> None:

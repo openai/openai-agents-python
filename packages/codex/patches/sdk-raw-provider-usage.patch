@@ -1,0 +1,487 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index a8232d2a..860f2ce1 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -78,10 +78,25 @@ pub struct MemorySummarizeOutput {
+ #[derive(Clone, Debug)]
+ pub struct ResponseId(pub String);
+ 
++/// An in-flight provider observation. Only the typed observation can enter the rollout.
++pub struct ProviderResponseObservation {
++    pub observation: codex_protocol::protocol::ResponseObservation,
++    pub raw_usage: Option<serde_json::Value>,
++}
++
++impl std::fmt::Debug for ProviderResponseObservation {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ProviderResponseObservation")
++            .field("observation", &self.observation)
++            .field("has_raw_usage", &self.raw_usage.is_some())
++            .finish()
++    }
++}
++
+ #[derive(Debug)]
+ pub enum ResponseEvent {
+     ResponseFact(codex_protocol::response_facts::ReceivedResponseFact),
+-    ResponseObserved(codex_protocol::protocol::ResponseObservation),
++    ResponseObserved(ProviderResponseObservation),
+     Created {
+         /// Existing server response ID, when supplied by the stream.
+         response_id: Option<String>,
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+index acf03a3a..e5e9dcaa 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+@@ -98,7 +98,7 @@ async fn complete_received_facts_precede_late_refusal_without_earlier_tool_effec
+         matches!(&events[0], Ok(ResponseEvent::Created {response_id: Some(id)}) if id == "resp-json")
+     );
+     assert!(
+-        matches!(&events[1], Ok(ResponseEvent::ResponseObserved(observation)) if observation.response_id.as_deref()==Some("resp-json") && observation.usage.as_ref().is_some_and(|u| u.total_tokens==Some(14) && u.cached_input_tokens==Some(2)))
++        matches!(&events[1], Ok(ResponseEvent::ResponseObserved(observation)) if observation.observation.response_id.as_deref()==Some("resp-json") && observation.observation.usage.as_ref().is_some_and(|u| u.total_tokens==Some(14) && u.cached_input_tokens==Some(2)))
+     );
+     assert!(
+         matches!(&events[2], Ok(ResponseEvent::ResponseFact(received)) if matches!(&received.fact,
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 535b9366..e2c6e484 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -1177,6 +1177,7 @@ mod tests {
+         else {
+             panic!("missing websocket terminal observation");
+         };
++        let observation = &observation.observation;
+         assert_eq!(observation.response_id.as_deref(), Some("ws-response"));
+         assert_eq!(
+             observation.status,
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 625475fa..9cdd54de 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -34,6 +34,7 @@ pub use crate::auth::auth_header_telemetry;
+ pub use crate::common::AccessPrograms;
+ pub use crate::common::MemorySummarizeInput;
+ pub use crate::common::MemorySummarizeOutput;
++pub use crate::common::ProviderResponseObservation;
+ pub use crate::common::ModelInvocationDeadlineState;
+ pub use crate::common::OpenAiVerbosity;
+ pub use crate::common::PromptCacheOptions;
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index bdba7398..52973e8e 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -265,10 +265,8 @@ impl ResponsesStreamEvent {
+         })
+     }
+ 
+-    /// Read only safe typed facts; malformed or missing counters stay unknown.
+-    pub(crate) fn response_observation(
+-        &self,
+-    ) -> Option<codex_protocol::protocol::ResponseObservation> {
++    /// Keep typed facts and the original completed usage on separate paths.
++    pub(crate) fn response_observation(&self) -> Option<crate::ProviderResponseObservation> {
+         use codex_protocol::protocol::{
+             ReceivedResponseUsage, ResponseIncompleteReason, ResponseObservation,
+             ResponseObservationStatus,
+@@ -280,23 +278,21 @@ impl ResponsesStreamEvent {
+             _ => return None,
+         };
+         let response = self.response.as_ref();
+-        let usage = response
+-            .and_then(|r| r.get("usage"))
+-            .filter(|u| u.is_object())
+-            .map(|u| ReceivedResponseUsage {
+-                input_tokens: u.get("input_tokens").and_then(Value::as_i64),
+-                cached_input_tokens: u
+-                    .pointer("/input_tokens_details/cached_tokens")
+-                    .and_then(Value::as_i64),
+-                cache_write_input_tokens: u
+-                    .pointer("/input_tokens_details/cache_write_tokens")
+-                    .and_then(Value::as_i64),
+-                output_tokens: u.get("output_tokens").and_then(Value::as_i64),
+-                reasoning_output_tokens: u
+-                    .pointer("/output_tokens_details/reasoning_tokens")
+-                    .and_then(Value::as_i64),
+-                total_tokens: u.get("total_tokens").and_then(Value::as_i64),
+-            });
++        let usage_object = response.and_then(|r| r.get("usage")).filter(|u| u.is_object());
++        let usage = usage_object.map(|u| ReceivedResponseUsage {
++            input_tokens: u.get("input_tokens").and_then(Value::as_i64),
++            cached_input_tokens: u
++                .pointer("/input_tokens_details/cached_tokens")
++                .and_then(Value::as_i64),
++            cache_write_input_tokens: u
++                .pointer("/input_tokens_details/cache_write_tokens")
++                .and_then(Value::as_i64),
++            output_tokens: u.get("output_tokens").and_then(Value::as_i64),
++            reasoning_output_tokens: u
++                .pointer("/output_tokens_details/reasoning_tokens")
++                .and_then(Value::as_i64),
++            total_tokens: u.get("total_tokens").and_then(Value::as_i64),
++        });
+         let incomplete_reason = (status == ResponseObservationStatus::Incomplete).then(|| {
+             match response
+                 .and_then(|r| r.pointer("/incomplete_details/reason"))
+@@ -308,15 +304,22 @@ impl ResponsesStreamEvent {
+                 _ => ResponseIncompleteReason::Unknown,
+             }
+         });
+-        Some(ResponseObservation {
+-            upstream_request_id: None,
+-            response_id: response
+-                .and_then(|r| r.get("id"))
+-                .and_then(Value::as_str)
+-                .map(str::to_owned),
+-            status,
+-            incomplete_reason,
+-            usage,
++        let raw_usage = match status {
++            ResponseObservationStatus::Completed => usage_object.cloned(),
++            _ => None,
++        };
++        Some(crate::ProviderResponseObservation {
++            observation: ResponseObservation {
++                upstream_request_id: None,
++                response_id: response
++                    .and_then(|r| r.get("id"))
++                    .and_then(Value::as_str)
++                    .map(str::to_owned),
++                status,
++                incomplete_reason,
++                usage,
++            },
++            raw_usage,
+         })
+     }
+ 
+@@ -969,6 +972,7 @@ mod tests {
+             let Ok(ResponseEvent::ResponseObserved(observation)) = &events[0] else {
+                 panic!("missing observation: {events:?}")
+             };
++            let observation = &observation.observation;
+             assert_eq!(observation.response_id.as_deref(), Some("reused-response"));
+             assert_eq!(observation.status, status);
+             let usage = observation.usage.as_ref().unwrap();
+@@ -1001,7 +1005,7 @@ mod tests {
+                 "type": "response.incomplete", "response": {"usage": usage}
+             }))
+             .unwrap();
+-            let observation = event.response_observation().unwrap();
++            let observation = event.response_observation().unwrap().observation;
+             assert_eq!(observation.response_id, None);
+             assert_eq!(
+                 observation.incomplete_reason,
+@@ -1022,7 +1026,7 @@ mod tests {
+         assert!(event.response_observation().is_none());
+         let failed: ResponsesStreamEvent =
+             serde_json::from_value(json!({"type": "response.failed"})).unwrap();
+-        let observation = failed.response_observation().unwrap();
++        let observation = failed.response_observation().unwrap().observation;
+         assert_eq!(
+             observation.status,
+             codex_protocol::protocol::ResponseObservationStatus::Failed
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index dd81df05..b45faa49 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -49,6 +49,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+             match stream.next().await {
+                 Some(Ok(ResponseEvent::RateLimits(_) | ResponseEvent::ApiRateLimits(_))) => {}
+                 Some(Ok(ResponseEvent::ResponseObserved(observation))) => {
++                    let observation = &observation.observation;
+                     assert_eq!(failure["type"], "response.failed");
+                     assert_eq!(
+                         observation.status,
+diff --git a/codex-rs/codex-api/tests/sse_end_to_end.rs b/codex-rs/codex-api/tests/sse_end_to_end.rs
+index aba43ce9..11b6cf91 100644
+--- a/codex-rs/codex-api/tests/sse_end_to_end.rs
++++ b/codex-rs/codex-api/tests/sse_end_to_end.rs
+@@ -166,6 +166,7 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()>
+ 
+     match &events[2] {
+         ResponseEvent::ResponseObserved(observation) => {
++            let observation = &observation.observation;
+             assert_eq!(observation.response_id.as_deref(), Some("resp1"));
+             assert_eq!(
+                 observation.status,
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 832d20f7..c6f74d3a 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3012,12 +3012,14 @@ where
+                 }
+                 Ok(mut event) => {
+                     if let ResponseEvent::ResponseObserved(observation) = &mut event {
+-                        observation.upstream_request_id = upstream_request_id.map(str::to_owned);
++                        observation.observation.upstream_request_id =
++                            upstream_request_id.map(str::to_owned);
+                     }
+                     if let ResponseEvent::ResponseFact(received) = &mut event {
+                         received.upstream_request_id = upstream_request_id.map(str::to_owned);
+                     }
+                     if let ResponseEvent::ResponseObserved(observation) = &event {
++                        let observation = &observation.observation;
+                         output_limit_reached = explicit_output_cap
+                             && observation.status == codex_protocol::protocol::ResponseObservationStatus::Incomplete
+                             && observation.incomplete_reason == Some(codex_protocol::protocol::ResponseIncompleteReason::MaxOutputTokens);
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 2cac85dd..c903f58b 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -2832,18 +2832,19 @@ async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Resu
+ #[tokio::test]
+ async fn explicit_output_cap_stops_after_retained_typed_limit_but_uncapped_policy_remains() {
+     for explicit_cap in [false, true] {
+-        let mut observation = ResponseEvent::ResponseObserved(
+-            codex_protocol::protocol::ResponseObservation {
++        let mut observation = ResponseEvent::ResponseObserved(codex_api::ProviderResponseObservation {
++            observation: codex_protocol::protocol::ResponseObservation {
+                 response_id: Some("configured-output-cap".into()),
+                 upstream_request_id: None,
+                 status: codex_protocol::protocol::ResponseObservationStatus::Completed,
+                 incomplete_reason: None,
+                 usage: None,
+             },
+-        );
++            raw_usage: None,
++        });
+         if let ResponseEvent::ResponseObserved(value) = &mut observation {
+-            value.status = codex_protocol::protocol::ResponseObservationStatus::Incomplete;
+-            value.incomplete_reason =
++            value.observation.status = codex_protocol::protocol::ResponseObservationStatus::Incomplete;
++            value.observation.incomplete_reason =
+                 Some(codex_protocol::protocol::ResponseIncompleteReason::MaxOutputTokens);
+         }
+         let api_stream = futures::stream::iter([
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index ad7fb7e1..c4de2eb3 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -328,6 +328,22 @@ impl CodexThread {
+             .is_elicitation_pending(server, token)
+     }
+ 
++    /// Starts ephemeral provider usage capture for one owned SDK run.
++    pub fn sdk_start_raw_usage(&self) {
++        self.thread_extension_data()
++            .insert(crate::session::sdk_raw_usage::SdkRawUsage::default());
++    }
++
++    /// Takes original usage from accepted sampling responses in the completed turn.
++    pub fn sdk_take_raw_usage(&self, turn_id: &str) -> CodexResult<String> {
++        self.thread_extension_data()
++            .remove::<crate::session::sdk_raw_usage::SdkRawUsage>()
++            .ok_or_else(|| {
++                CodexErr::InvalidRequest("Provider usage capture was not started".into())
++            })?
++            .finish(turn_id)
++    }
++
+     /// Returns extension-owned data attached to this thread runtime.
+     pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
+         &self.session.services.thread_extension_data
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index d43452c1..17ed0c52 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -999,7 +999,8 @@ async fn drain_to_completed(
+                 )
+                 .await?;
+             }
+-            Ok(ResponseEvent::ResponseObserved(observation)) => {
++            Ok(ResponseEvent::ResponseObserved(received)) => {
++                let observation = received.observation;
+                 incomplete_response_id = (observation.status
+                     == ResponseObservationStatus::Incomplete)
+                     .then(|| observation.response_id.clone())
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 2102d4c7..78f62d3b 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -518,9 +518,9 @@ async fn collect_compaction_output(
+                 )
+                 .await?;
+             }
+-            ResponseEvent::ResponseObserved(observation) => {
++            ResponseEvent::ResponseObserved(received) => {
+                 response_observation_id = sess
+-                    .record_response_observation(turn_context, observation)
++                    .record_response_observation(turn_context, received.observation)
+                     .await?;
+             }
+             ResponseEvent::Completed {
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 54bdeda7..eba2b10d 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -264,6 +264,7 @@ mod retained_context;
+ mod review;
+ mod rollout_budget;
+ mod rollout_reconstruction;
++pub(crate) mod sdk_raw_usage;
+ #[allow(clippy::module_inception)]
+ pub(crate) mod session;
+ pub(crate) mod startup_prewarm;
+diff --git a/codex-rs/core/src/session/sdk_raw_usage.rs b/codex-rs/core/src/session/sdk_raw_usage.rs
+new file mode 100644
+index 00000000..0051b1ee
+--- /dev/null
++++ b/codex-rs/core/src/session/sdk_raw_usage.rs
+@@ -0,0 +1,103 @@
++use std::io;
++use std::io::Write;
++use std::sync::Mutex;
++
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use serde::Serialize;
++use serde_json::Value;
++
++const MAX_RECORDS: usize = 4096;
++const MAX_BYTES: usize = 8 * 1024 * 1024;
++
++#[derive(Serialize)]
++struct RawUsage {
++    response_id: String,
++    upstream_request_id: Option<String>,
++    usage: Value,
++}
++
++struct Capture {
++    turn_id: Option<String>,
++    records: Vec<RawUsage>,
++    remaining_bytes: usize,
++    overflowed: bool,
++}
++
++impl Default for Capture {
++    fn default() -> Self {
++        Self {
++            turn_id: None,
++            records: Vec::new(),
++            remaining_bytes: MAX_BYTES - 2,
++            overflowed: false,
++        }
++    }
++}
++
++#[derive(Default)]
++pub(crate) struct SdkRawUsage(Mutex<Capture>);
++
++impl SdkRawUsage {
++    pub(crate) fn record(
++        &self,
++        turn_id: &str,
++        response_id: String,
++        upstream_request_id: Option<String>,
++        usage: Value,
++    ) {
++        let mut capture = self.0.lock().unwrap_or_else(|error| error.into_inner());
++        if capture.overflowed || capture.turn_id.as_deref().is_some_and(|id| id != turn_id) {
++            return;
++        }
++        capture.turn_id.get_or_insert_with(|| turn_id.to_owned());
++        let record = RawUsage {
++            response_id,
++            upstream_request_id,
++            usage,
++        };
++        let mut budget = CaptureBudget(capture.remaining_bytes.saturating_sub(1));
++        if capture.records.len() == MAX_RECORDS
++            || serde_json::to_writer(&mut budget, &record).is_err()
++        {
++            capture.overflowed = true;
++            capture.records.clear();
++            return;
++        }
++        capture.remaining_bytes = budget.0;
++        capture.records.push(record);
++    }
++
++    pub(crate) fn finish(&self, turn_id: &str) -> CodexResult<String> {
++        let mut capture = self.0.lock().unwrap_or_else(|error| error.into_inner());
++        if capture.turn_id.as_deref().is_some_and(|id| id != turn_id) {
++            return Err(CodexErr::InvalidRequest(
++                "Provider usage belongs to a different turn".into(),
++            ));
++        }
++        if capture.overflowed {
++            return Err(CodexErr::InvalidRequest(
++                "Provider usage exceeds the SDK capture limit".into(),
++            ));
++        }
++        serde_json::to_string(&std::mem::take(&mut capture.records)).map_err(|_| {
++            CodexErr::InvalidRequest("Unable to encode captured provider usage".into())
++        })
++    }
++}
++
++struct CaptureBudget(usize);
++
++impl Write for CaptureBudget {
++    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++        self.0 = self
++            .0
++            .checked_sub(buf.len())
++            .ok_or(io::ErrorKind::WriteZero)?;
++        Ok(buf.len())
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 339a9055..5e6344d3 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3513,6 +3513,11 @@ async fn try_run_sampling_request(
+     let mut should_emit_turn_diff = false;
+     let mut should_emit_token_count = false;
+     let mut response_observation_id = None;
++    let raw_usage_capture = sess
++        .services
++        .thread_extension_data
++        .get::<super::sdk_raw_usage::SdkRawUsage>();
++    let mut pending_raw_usage = None;
+     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
+     let mut analytics_tool_call_ids = Vec::new();
+     let reasoning_effort = step_context
+@@ -3972,7 +3977,17 @@ async fn try_run_sampling_request(
+                         .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
+                         .await;
+                 }
+-                ResponseEvent::ResponseObserved(observation) => {
++                ResponseEvent::ResponseObserved(received) => {
++                    let observation = received.observation;
++                    if raw_usage_capture.is_some() {
++                        pending_raw_usage = received.raw_usage.map(|usage| {
++                            (
++                                observation.response_id.clone(),
++                                observation.upstream_request_id.clone(),
++                                usage,
++                            )
++                        });
++                    }
+                     let result = sess
+                         .record_response_observation(&turn_context, observation)
+                         .await;
+@@ -4045,6 +4060,18 @@ async fn try_run_sampling_request(
+                     if let Err(err) = budget_result {
+                         break Err(err);
+                     }
++                    if let (Some(capture), Some((observed_id, request_id, usage))) =
++                        (&raw_usage_capture, pending_raw_usage.take())
++                        && observed_id.as_deref() == Some(response_id.as_str())
++                    {
++                        let root_turn_id = turn_context.turn_metadata_state.root_turn_id();
++                        capture.record(
++                            root_turn_id.as_deref().unwrap_or(&turn_context.sub_id),
++                            response_id,
++                            request_id,
++                            usage,
++                        );
++                    }
+                     if let Some(false) = end_turn {
+                         needs_follow_up = true;
+                     }

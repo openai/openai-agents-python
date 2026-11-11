@@ -1554,6 +1554,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         discover_agents_md: bool = False,
         _atomic_first_turn: bool = False,
+        _capture_raw_usage: bool = False,
         _completed_input: str | None = None,
         _private_text_run: bool = False,
         project_guidance: bool = False,
@@ -1594,6 +1595,7 @@ class Agent(Generic[ContextT, OutputT]):
                 discover_agents_md=discover_agents_md,
                 parent_trace=parent_trace,
                 _atomic_first_turn=_atomic_first_turn,
+                _capture_raw_usage=_capture_raw_usage,
                 _completed_input=_completed_input,
                 _private_text_run=_private_text_run,
                 **cast(
@@ -1651,6 +1653,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1679,6 +1682,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1707,6 +1711,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1739,6 +1744,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -1793,6 +1799,11 @@ class Agent(Generic[ContextT, OutputT]):
         return_history=True captures conversation records before close for replay
         through another Session's transact_history. That Session supplies its own instructions.
         History above 4,096 original records or 8 MiB raises NativeError after completion.
+
+        return_raw_usage=True returns original usage from accepted Responses requests
+        completed during this invocation, in response order.
+        The SDK keeps these objects out of history and checkpoints. A capture above
+        4,096 responses or 8 MiB raises NativeError after completion.
         """
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(
@@ -1943,10 +1954,13 @@ class Agent(Generic[ContextT, OutputT]):
                 options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
                 options["environment"] = environment
-            if (
+            builtin_session_factory = (
                 isinstance(session_factory, MethodType)
                 and session_factory.__self__ is self
                 and session_factory.__func__ is _BUILTIN_SESSION_FACTORY
+            )
+            if (
+                builtin_session_factory
                 and state is None
                 and initial_messages is None
                 and input is not None
@@ -1963,14 +1977,19 @@ class Agent(Generic[ContextT, OutputT]):
                 # instruction receipt to the first ordinary submission.
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
-                if not return_history and _private_text_run_eligible(
+                if not (return_history or return_raw_usage) and _private_text_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_private_text_run"] = True
-                if not return_history and _completed_run_eligible(
+                if not (return_history or return_raw_usage) and _completed_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_completed_input"] = input
+            capture_before_restore = return_raw_usage and resume_manual and builtin_session_factory
+            if capture_before_restore:
+                session_factory = self._session_context
+                options["_capture_raw_usage"] = True
+                options.setdefault("max_function_concurrency", _MAX_FUNCTION_CONCURRENCY_UNSET)
             async with session_factory(
                 context=cast(SessionContextT, context),
                 **options,
@@ -2101,6 +2120,8 @@ class Agent(Generic[ContextT, OutputT]):
                 session._fail_unhandled_questions = (
                     session._interaction_handler is None and not pause_manual
                 )
+                if return_raw_usage and not capture_before_restore:
+                    session._native._start_raw_usage()
                 if resume_manual:
                     restored = session.restored_turn
                     if restored is None:
@@ -2125,6 +2146,7 @@ class Agent(Generic[ContextT, OutputT]):
                         on_interaction,
                         return_state=return_state,
                         return_history=return_history,
+                        return_raw_usage=return_raw_usage,
                         pause_manual=pause_manual,
                     )
                 result = await submission.get_result()
@@ -2132,6 +2154,8 @@ class Agent(Generic[ContextT, OutputT]):
                     result = replace(result, state=await session.save_state())
                 if return_history:
                     result = replace(result, history=await session._run_history())
+                if return_raw_usage:
+                    result = replace(result, raw_usage=session._take_raw_usage(result.turn))
                 return result
         finally:
             options.pop("trace_options", None)
@@ -2155,6 +2179,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2183,6 +2208,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2211,6 +2237,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2243,6 +2270,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
@@ -2254,7 +2282,8 @@ class Agent(Generic[ContextT, OutputT]):
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
-        on_interaction, state, and return_history follow run(). A sync or async handler
+        on_interaction, state, return_history, and return_raw_usage follow run().
+        A sync or async handler
         returns request.reply(value); the SDK delivers it before closing.
 
         If opening with a managed Environment fails and automatic cleanup leaves
@@ -2283,6 +2312,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["return_state"] = return_state
                 if return_history is not False:
                     options["return_history"] = return_history
+                if return_raw_usage:
+                    options["return_raw_usage"] = return_raw_usage
                 if on_interaction is not None:
                     options["on_interaction"] = on_interaction
                 if provider is not None:
