@@ -433,6 +433,10 @@ class Environment(Generic[ContextT_contra]):
         Selected capability directories can contain directory symlinks to
         readable skill directories. Use this mode only when you trust the
         prompts and tools with the application's files and credentials.
+        On macOS, the sandbox has been isolating commands from host ``launchd``
+        services. Directory-backed account lookup through ``id -F`` and ``ssh``
+        has been failing in that sandbox. Application function tools have been
+        using the host process's directory access for these operations.
 
         On Linux, ``mounts`` adds read-only access to canonical same-path
         directories. Supply each source; destination and ``local_bind`` strategy
