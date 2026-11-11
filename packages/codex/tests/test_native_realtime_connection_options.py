@@ -109,8 +109,65 @@ async def test_replacement_headers_apply_without_url_override(
             assert peer.upgrades[0].get("x-voice") == headers.get("X-Voice")
 
 
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer replacement-header-key"}])
+async def test_replacement_headers_skip_unused_credential_callback(
+    realtime_peer: RealtimePeer, headers: dict[str, str]
+) -> None:
+    peer = realtime_peer
+    calls = 0
+
+    def credential() -> str:
+        nonlocal calls
+        calls += 1
+        raise LookupError("Unused credential source must not run")
+
+    async with (
+        timeout(30),
+        NativeProvider(base_url=peer.responses.url, api_key="session-key") as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+    ):
+        async with session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", headers=headers, api_key=credential)
+        ) as voice:
+            await voice.send_text("Use only the replacement headers.")
+        assert calls == 0
+        assert peer.upgrades[0].get("authorization") == headers.get("Authorization")
+
+
+async def test_url_without_replacement_headers_resolves_credential_callback(
+    realtime_peer: RealtimePeer, connection_endpoint: tuple[str, list[str]]
+) -> None:
+    peer = realtime_peer
+    calls = 0
+
+    def credential() -> str:
+        nonlocal calls
+        calls += 1
+        return "resolved-voice-key"
+
+    async with (
+        timeout(30),
+        NativeProvider(base_url=peer.responses.url, api_key="session-key") as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+    ):
+        async with session.realtime(
+            config=RealtimeConfig(
+                model="fixture-realtime", url=connection_endpoint[0], api_key=credential
+            )
+        ):
+            assert calls == 1
+            assert peer.upgrades[0]["authorization"] == "Bearer resolved-voice-key"
+
+
 async def test_existing_call_accepts_exact_url_and_replacement_headers(call_peer: CallPeer) -> None:
     peer = call_peer
+    calls = 0
+
+    def credential() -> str:
+        nonlocal calls
+        calls += 1
+        raise LookupError("Unused attachment credential source must not run")
+
     async with (
         timeout(30),
         NativeProvider(
@@ -131,9 +188,11 @@ async def test_existing_call_accepts_exact_url_and_replacement_headers(call_peer
                 transport=RealtimeSIP("rtc_external_sip"),
                 url=url,
                 headers={"Authorization": AUTHORIZATION, "X-Voice": "attachment"},
+                api_key=credential,
             )
         ) as voice:
             assert voice.call_id == "rtc_external_sip"
+        assert calls == 0
         assert peer.sidebands[-1][1]["x-voice"] == "attachment"
         assert [call_id for call_id, _ in peer.hangups] == ["rtc_native_1"]
 

@@ -226,9 +226,9 @@ async def _resolve_realtime_policy(
 class RealtimeConfig:
     """Native Realtime configuration; defaults to a server WebSocket.
 
-    ``api_key`` may be a string or a synchronous/asynchronous callback. It is
-    resolved once for this connection and never replaces the Session's auth.
-    Closing during resolution cancels the owned callback before connecting.
+    ``api_key`` may be a string or a synchronous/asynchronous callback. The
+    connection resolves it once when ``headers`` is omitted. The Session keeps
+    its own auth. Closing during resolution cancels the callback before connecting.
 
     ``url`` selects an exact trusted application WebSocket endpoint. An override
     never inherits provider credentials; supply ``api_key`` or ``headers`` when
@@ -1195,13 +1195,14 @@ class RealtimeSession:
             if prepared.get("generation") != self._generation:
                 raise RuntimeError("Native Realtime preparation returned a different generation")
             self._check_live(require_ready=False)
-            self._credentials = asyncio.create_task(self._resolve_api_key())
             api_key: str | None = None
             try:
-                try:
-                    api_key = await self._credentials
-                finally:
-                    self._credentials = None
+                if self._config.headers is None:
+                    self._credentials = asyncio.create_task(self._resolve_api_key())
+                    try:
+                        api_key = await self._credentials
+                    finally:
+                        self._credentials = None
                 self._check_live(require_ready=False)
                 result = await self._call(
                     "activate",
