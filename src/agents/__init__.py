@@ -36,7 +36,13 @@ if TYPE_CHECKING:
         SQLiteSessionStore as SQLiteSessionStore,
     )
     from .compaction import CompactionContext as CompactionContext
-    from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn
+    from .completion import (
+        CompletionContext as CompletionContext,
+        ContinueTurn as ContinueTurn,
+        FinishToolBatch as FinishToolBatch,
+        ToolBatchCompletionContext as ToolBatchCompletionContext,
+        ToolBatchResult as ToolBatchResult,
+    )
     from .computer import (
         Computer as Computer,
         ComputerProvider as ComputerProvider,
@@ -253,6 +259,9 @@ _MODULES = {
     "OutputGuardrail": ".guardrails",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",
+    "FinishToolBatch": ".completion",
+    "ToolBatchCompletionContext": ".completion",
+    "ToolBatchResult": ".completion",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "RunBudget": ".usage",
