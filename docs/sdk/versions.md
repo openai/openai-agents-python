@@ -9,6 +9,8 @@ Match the guides and example files to your installed SDK version. These guides f
 
 See [installation](installation.md) for platform requirements, wheel commands, and matching example files.
 
+To reuse a Classic MCP client in a native Session, use a matching development build. See the adapter's [alpha.7 limitation and alternatives](mcp.md#reuse-an-application-owned-mcp-client).
+
 The release page contains the versioned downloads, checksums, and release notes. This preview is distributed through GitHub Releases; it has not been published to PyPI.
 
 ## Machine-readable topic index

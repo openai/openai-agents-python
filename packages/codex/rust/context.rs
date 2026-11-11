@@ -458,6 +458,16 @@ pub(crate) fn check_pairs(
             ResponseItem::FunctionCall { call_id, .. } => {
                 ("function", Some(call_id.as_str()), true)
             }
+            ResponseItem::ShellCall {
+                provider_fields, ..
+            }
+            | ResponseItem::ShellCallOutput {
+                provider_fields, ..
+            } => (
+                "shell",
+                provider_fields.get("call_id").and_then(Value::as_str),
+                matches!(item, ResponseItem::ShellCall { .. }),
+            ),
             ResponseItem::LocalShellCall { call_id, .. } => ("function", call_id.as_deref(), true),
             ResponseItem::FunctionCallOutput { call_id, .. } => {
                 ("function", call_id.as_deref(), false)
@@ -563,6 +573,27 @@ mod tests {
             original_envelopes(&[short.clone(), short], &[first.clone(), second.clone()]).unwrap();
         assert_eq!(actual[0].metadata, first.metadata);
         assert_eq!(actual[1].metadata, second.metadata);
+    }
+
+    #[test]
+    fn shell_compaction_preserves_both_original_items_or_neither() {
+        let call: ResponseItem = serde_json::from_value(json!({"type":"shell_call", "call_id":"shell", "action":{"commands":["printf sample"]}})).unwrap();
+        let output: ResponseItem = serde_json::from_value(json!({"type":"shell_call_output", "call_id":"shell", "output":[{"stdout":"accepted", "stderr":"", "outcome":{"type":"exit", "exit_code":0}}]})).unwrap();
+        let items = [call.clone(), output.clone()];
+        assert!(check_pairs(&items, &[]).is_ok());
+        assert!(check_pairs(&items, &[0, 1]).is_ok());
+        assert!(check_pairs(&items, &[0]).is_err());
+        assert!(check_pairs(&items, &[1]).is_err());
+        let function_output: ResponseItem = serde_json::from_value(
+            json!({"type":"function_call_output", "call_id":"shell", "output":"accepted"}),
+        )
+        .unwrap();
+        assert!(check_pairs(&[call, function_output], &[0, 1]).is_err());
+        let unidentified: ResponseItem = serde_json::from_value(
+            json!({"type":"shell_call", "action":{"commands":["printf sample"]}}),
+        )
+        .unwrap();
+        assert!(check_pairs(&[unidentified, output], &[]).is_err());
     }
 
     #[test]

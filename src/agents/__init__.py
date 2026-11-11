@@ -205,6 +205,16 @@ if TYPE_CHECKING:
         TurnStoppedError as TurnStoppedError,
         get_cleanup as get_cleanup,
     )
+    from .shell import (
+        ShellAction as ShellAction,
+        ShellCall as ShellCall,
+        ShellCommandOutput as ShellCommandOutput,
+        ShellExit as ShellExit,
+        ShellOutput as ShellOutput,
+        ShellSkill as ShellSkill,
+        ShellTimeout as ShellTimeout,
+        shell_tool as shell_tool,
+    )
     from .state import (
         ApplicationToolOutput as ApplicationToolOutput,
         ChecklistState as ChecklistState,
@@ -400,6 +410,14 @@ _MODULES = {
     "ComputerProvider": ".computer",
     "ComputerSafetyError": ".computer",
     "computer_tool": ".computer",
+    "ShellAction": ".shell",
+    "ShellCall": ".shell",
+    "ShellCommandOutput": ".shell",
+    "ShellExit": ".shell",
+    "ShellOutput": ".shell",
+    "ShellSkill": ".shell",
+    "ShellTimeout": ".shell",
+    "shell_tool": ".shell",
     "FunctionTool": "._function_tools",
     "Tool": "._function_tools",
     "ToolRef": ".tools",

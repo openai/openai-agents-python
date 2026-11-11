@@ -206,13 +206,16 @@ def project_execution_completion(
     return cast(ExecutionItem | None, _execution_item(native, thread_id, turn_id))
 
 
-def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> dict[str, Any] | None:
+def project_hosted_response_item(
+    raw: dict[str, Any], turn_id: str | None, *, item_id: str | None = None
+) -> dict[str, Any] | None:
     """Keep the complete provider payload alongside its public typed fields."""
     raw = {
         key: value
         for key, value in raw.items()
         if key != "internal_chat_message_metadata_passthrough"
     }
+    kind = raw.get("type", "")
     fields = {
         "mcp_list_tools": ("server_label", "tools", "error"),
         "mcp_call": ("server_label", "name", "arguments", "output", "error"),
@@ -221,14 +224,21 @@ def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> di
         "shell_call": ("call_id", "action"),
         "shell_call_output": ("call_id", "output"),
         "image_generation_call": ("result", "revised_prompt"),
-    }.get(raw.get("type", ""))
-    if fields is None or not raw.get("id"):
+    }.get(kind)
+    resolved_id = raw.get("id") or item_id
+    if fields is None or not resolved_id:
         return None
+    if kind in {"shell_call", "shell_call_output"}:
+        status = raw.get("status") or "unknown"
+    elif kind in {"mcp_approval_request", "mcp_approval_response"}:
+        status = raw.get("status", "completed")
+    else:
+        status = raw["status"]
     return {
-        "type": raw["type"],
-        "id": raw["id"],
+        "type": kind,
+        "id": resolved_id,
         "turn_id": turn_id,
-        "status": raw.get("status", "completed"),
+        "status": status,
         "provider_data": raw,
         **{key: raw.get(key) for key in fields},
     }

@@ -667,8 +667,7 @@ pub(crate) struct NativeMediaContext {
 
 struct PendingCall {
     // Captured by native enqueue, never reconstructed from a host reply.
-    computer_arguments: Option<String>,
-    hosted_mcp_request: Option<codex_tools::HostedMcpApprovalRequest>,
+    original_payload: Option<ToolPayload>,
     callback: Option<Arc<CallbackRelease>>,
     // Captured at enqueue; never borrow a successor turn during admission.
     deadline: Option<Arc<codex_extension_api::ModelInvocationDeadlineState>>,
@@ -733,6 +732,9 @@ fn functions(
             DynamicToolSpec::ToolSearch(tool) => {
                 functions.push((None, Cow::Owned(tool.callback_spec())))
             }
+            DynamicToolSpec::Shell(tool) => {
+                functions.push((None, Cow::Owned(tool.callback_spec())))
+            }
             DynamicToolSpec::Namespace(namespace) => {
                 for DynamicToolNamespaceTool::Function(tool) in &namespace.tools {
                     functions.push((Some(Cow::Borrowed(namespace)), Cow::Borrowed(tool)));
@@ -749,7 +751,8 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
             DynamicToolSpec::Function(_)
             | DynamicToolSpec::Computer(_)
             | DynamicToolSpec::HostedMcp(_)
-            | DynamicToolSpec::ToolSearch(_) => true,
+            | DynamicToolSpec::ToolSearch(_)
+            | DynamicToolSpec::Shell(_) => true,
             DynamicToolSpec::Namespace(ns) => ns.tools.len() == 1,
         }),
         "invalid Python tool slot projection"
@@ -2154,32 +2157,31 @@ impl PythonTools {
         key: &PendingKey,
         response: DynamicToolResponse,
     ) -> Result<Option<ResponseItem>> {
-        let (arguments, hosted_mcp) = {
+        let payload = {
             let pending = self.pending.lock().expect("tool replies poisoned");
             let Some(call) = pending.get(key) else {
                 return Ok(None);
             };
-            (
-                call.computer_arguments.clone(),
-                call.hosted_mcp_request.clone(),
-            )
+            call.original_payload.clone()
         };
-        if let Some(request) = hosted_mcp {
-            let output = hosted_mcp_output(response)?;
-            let mut item: ResponseItem = output
-                .to_response_item(&key.call, &ToolPayload::HostedMcpApproval { request })
-                .into();
-            item.set_turn_id_if_missing(&key.turn);
-            return Ok(Some(item));
-        }
-        let Some(arguments) = arguments else {
+        let Some(payload) = payload else {
             return Ok(Some(PythonOutput(response).receipt(key)));
         };
-        let output = codex_tools::ComputerToolOutput::from_dynamic_response(&arguments, response)
-            .map_err(|_| anyhow::anyhow!("Invalid native computer response"))?;
-        let mut item: ResponseItem = output
-            .to_response_item(&key.call, &ToolPayload::Computer { arguments })
-            .into();
+        let output: Box<dyn ToolOutput> = match &payload {
+            ToolPayload::Computer { arguments } => Box::new(
+                codex_tools::ComputerToolOutput::from_dynamic_response(arguments, response)
+                    .map_err(|_| anyhow::anyhow!("Invalid native computer response"))?,
+            ),
+            ToolPayload::HostedMcpApproval { .. } => Box::new(hosted_mcp_output(response)?),
+            ToolPayload::Shell { arguments } => {
+                return crate::local_reconciliation::shell_receipt(
+                    arguments, response, &key.turn, &key.call,
+                )
+                .map(Some);
+            }
+            _ => return Ok(Some(PythonOutput(response).receipt(key))),
+        };
+        let mut item: ResponseItem = output.to_response_item(&key.call, &payload).into();
         if let ResponseItem::ComputerCallOutput {
             internal_chat_message_metadata_passthrough,
             ..
@@ -2192,6 +2194,7 @@ impl PythonTools {
                 },
             );
         }
+        item.set_turn_id_if_missing(&key.turn);
         Ok(Some(item))
     }
 
@@ -2229,6 +2232,7 @@ impl PythonTools {
                 DynamicToolSpec::Computer(computer) => {
                     codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?
                 }
+                DynamicToolSpec::Shell(shell) => codex_tools::application_shell_spec(shell),
                 DynamicToolSpec::ToolSearch(search) => {
                     codex_tools::client_tool_search_spec(search).map_err(anyhow::Error::msg)?
                 }
@@ -2258,7 +2262,9 @@ impl PythonTools {
                     ToolExposure::Hidden
                 } else if matches!(
                     declaration,
-                    DynamicToolSpec::Computer(_) | DynamicToolSpec::ToolSearch(_)
+                    DynamicToolSpec::Computer(_)
+                        | DynamicToolSpec::ToolSearch(_)
+                        | DynamicToolSpec::Shell(_)
                 ) {
                     ToolExposure::DirectModelOnly
                 } else if tool.defer_loading {
@@ -3893,14 +3899,20 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
-                    hosted_mcp_request: matches!(entry.spec, ToolSpec::Mcp(_))
-                        .then(|| serde_json::from_value(request["msg"]["arguments"].clone()))
-                        .transpose()?,
-                    computer_arguments: matches!(
-                        entry.spec,
-                        ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }
-                    )
-                    .then(|| request["msg"]["arguments"].to_string()),
+                    original_payload: match &entry.spec {
+                        ToolSpec::Mcp(_) => Some(ToolPayload::HostedMcpApproval {
+                            request: serde_json::from_value(request["msg"]["arguments"].clone())?,
+                        }),
+                        ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
+                            Some(ToolPayload::Computer {
+                                arguments: request["msg"]["arguments"].to_string(),
+                            })
+                        }
+                        ToolSpec::ApplicationShell { .. } => Some(ToolPayload::Shell {
+                            arguments: request["msg"]["arguments"].to_string(),
+                        }),
+                        _ => None,
+                    },
                     callback,
                     deadline,
                     media,
@@ -5922,28 +5934,49 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 _ => serde_json::from_str(call.function_arguments()?)
                     .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?,
             };
-            let (key, invocation, receiver) = self
-                .tools
-                .enqueue_profile(
-                    &self.thread,
-                    &self.generation,
-                    self.slot,
-                    &call.turn_id,
-                    &call.call_id,
-                    arguments,
-                    &call.source,
-                    Some(&call.model),
-                    false,
-                    self.profile.as_ref(),
-                    Some(NativeMediaContext {
-                        inline_data_url_low_detail_supported: call
-                            .inline_data_url_low_detail_supported,
-                        model_info: Arc::clone(&call.model_info),
-                        profile: call.provider_reference_profile,
-                    }),
-                    call.conversation_history.realtime_tool_call().cloned(),
-                )
-                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+            let shell_calls = self
+                .managed_calls
+                .as_ref()
+                .filter(|_| matches!(call.payload, ToolPayload::Shell { .. }));
+            if let Some(calls) = shell_calls {
+                // The selected application executor is the durable owner.
+                // Publish that identity before enqueue can start the callback.
+                calls
+                    .record_shell_call(&self.thread, &call.turn_id, &call.call_id)
+                    .await
+                    .map_err(|error| FunctionCallError::Fatal(error.to_string()))?;
+            }
+            let pending = self.tools.enqueue_profile(
+                &self.thread,
+                &self.generation,
+                self.slot,
+                &call.turn_id,
+                &call.call_id,
+                arguments,
+                &call.source,
+                Some(&call.model),
+                false,
+                self.profile.as_ref(),
+                Some(NativeMediaContext {
+                    inline_data_url_low_detail_supported: call.inline_data_url_low_detail_supported,
+                    model_info: Arc::clone(&call.model_info),
+                    profile: call.provider_reference_profile,
+                }),
+                call.conversation_history.realtime_tool_call().cloned(),
+            );
+            let (key, invocation, receiver) = match pending {
+                Ok(pending) => pending,
+                Err(error) => {
+                    if let Some(calls) = shell_calls {
+                        // A failed enqueue has not exposed the callback.
+                        calls
+                            .discard_shell_call(&self.thread, &call.turn_id, &call.call_id)
+                            .await
+                            .map_err(|error| FunctionCallError::Fatal(error.to_string()))?;
+                    }
+                    return Err(FunctionCallError::RespondToModel(error.to_string()));
+                }
+            };
             // A rejected enqueue never reaches application code. Keep Core's
             // error output for it instead of recording an unknown effect.
             if let Some(calls) = &self.managed_calls {
@@ -5960,6 +5993,8 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     FunctionCallError::Fatal("Hosted MCP approval cancelled before reply".into())
                 } else if matches!(call.payload, ToolPayload::Computer { .. }) {
                     FunctionCallError::Fatal("Computer call cancelled before reply".into())
+                } else if matches!(call.payload, ToolPayload::Shell { .. }) {
+                    FunctionCallError::Fatal("Shell call cancelled before reply".into())
                 } else {
                     FunctionCallError::RespondToModel(
                         "Python tool call cancelled before reply".into(),
@@ -6020,6 +6055,16 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 return Ok(
                     Box::new(selection.resolve(&search.catalog, &[])?) as Box<dyn ToolOutput>
                 );
+            }
+            if let ToolPayload::Shell { arguments } = &call.payload {
+                return Ok(Box::new(ReplyOutput {
+                    output: codex_tools::ApplicationShellOutput::from_dynamic_response(
+                        arguments,
+                        response.response,
+                    )?,
+                    start_response: response.start_response,
+                    acceptance: response.acceptance,
+                }) as Box<dyn ToolOutput>);
             }
             Ok(Box::new(ReplyOutput {
                 output: PythonOutput(response.response),

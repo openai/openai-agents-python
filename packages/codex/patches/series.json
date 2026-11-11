@@ -693,13 +693,17 @@
       "sha256": "c0b0800e001dd18e9860d3ebc0f8219a75496189aeef2034e664ec248015d70a"
     },
     {
-      "path": "sdk-hosted-mcp-approvals.patch",
-      "sha256": "8406a192f46468133048b237cd4ed27a52f31eb82305a71329097d56d35b2e70"
+      "path": "sdk-application-shell.patch",
+      "sha256": "45f726f28dd4ffdc63ae4b28f773d4ed4558312ca10d001bb974665ad7870612"
     },
     {
-      "path": "sdk-hosted-mcp-review-corrections.patch",
-      "sha256": "51b30a80762760c50075b155a188763da088dddb4fc4dfe8f6e6b74f3a7014d4"
+      "path": "sdk-application-tool-durable-owner.patch",
+      "sha256": "a6e10d1e8a347c5a8623ffd275b858738b848380460cfbdace7f567fa1905705"
+    },
+    {
+      "path": "sdk-hosted-mcp-approvals.patch",
+      "sha256": "4d7e9a0a8e6628c8829283959e4337031dfd3bd0f0fa60de484224349f35d128"
     }
   ],
-  "result_tree": "b3e01825955438082504e25e5d558f648da750a8"
+  "result_tree": "b08ff92f7fb7ebd3a47add319c41438cd12b17e6"
 }
