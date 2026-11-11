@@ -115,6 +115,46 @@ def test_agent_prompt_instructions_and_explicit_empty_tools() -> None:
     assert Agent(instructions="", hosted_prompt={"id": "pmpt_empty"}, tools=[]).instructions == ""
 
 
+@pytest.mark.parametrize("mutation", ["id", "nested", "array"])
+def test_agent_static_prompt_reads_cannot_change_later_capture(mutation: str) -> None:
+    from _agents_codex.agent import Agent
+    from _agents_codex.session import _capture_opening_agent
+
+    expected = {
+        "id": "pmpt_immutable",
+        "variables": {"nested": {"value": "captured"}, "array": ["captured"]},
+    }
+    agent = Agent(hosted_prompt=expected)
+    exposed: Any = agent.hosted_prompt
+    try:
+        if mutation == "id":
+            exposed["id"] = "pmpt_changed"
+        elif mutation == "nested":
+            exposed["variables"]["nested"]["value"] = "changed"
+        else:
+            exposed["variables"]["array"].append("changed")
+    except TypeError:
+        pass
+    for _ in range(2):
+        captured = _capture_opening_agent(
+            agent, provider=None, model=None, model_settings=None, tool_selection=None
+        )
+        assert captured.hosted_prompt == expected
+    assert agent.hosted_prompt == expected
+
+
+@pytest.mark.parametrize("prompt", [None, {"id": "pmpt_other"}])
+def test_agent_validate_rejects_conflicting_prompt_sources(prompt: Any) -> None:
+    from _agents_codex.agent import Agent
+
+    agent = Agent(
+        hosted_prompt={"id": "pmpt_reference"},
+        model_settings={"extra_body": {"prompt": prompt}},
+    )
+    with pytest.raises(ValueError, match="hosted_prompt conflicts"):
+        agent.validate()
+
+
 def test_hosted_instruction_string_reads_keep_presence_through_repeated_capture() -> None:
     from dataclasses import FrozenInstanceError
 

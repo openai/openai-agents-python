@@ -51,7 +51,7 @@ from urllib.parse import urlsplit as urlsplit
 
 from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar
 
-from ._hosted_prompts import _capture_hosted_prompt_source
+from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
 from ._lifecycle import (
     _close_after_error as _close_after_error,
     _join as _join,
@@ -1105,6 +1105,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
@@ -1164,6 +1165,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
@@ -1342,6 +1344,17 @@ class Agent(Generic[ContextT, OutputT]):
         native = importlib.import_module("agents._native")
 
         def check(declaration: Agent[Any, Any]) -> None:
+            _hosted_prompt_controls(
+                declaration.hosted_prompt,
+                model=declaration.model,
+                instructions=(
+                    declaration.instructions
+                    if getattr(declaration, "_hosted_instructions_provided", False)
+                    else None
+                ),
+                tools_provided=getattr(declaration, "_hosted_tools_provided", False),
+                extra_body=declaration.model_settings.get("extra_body"),
+            )
             python_tools, mcp_tools, native_agents = _split_tools(
                 declaration.tools, declaration.programmatic_tool_calling
             )
