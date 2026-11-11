@@ -11,7 +11,7 @@ Keep these files local. Native telemetry may include paths, tool metadata, and o
 ## Run and inspect a trace
 
 ```sh
-PYTHONPATH=. python -m examples.codex.observability.trace_walkthrough --scenario tool-error --view --output synthetic-trace.json
+python -m examples.codex.observability.trace_walkthrough --scenario tool-error --view --output synthetic-trace.json
 ```
 
 The command starts a loopback OpenTelemetry Protocol (OTLP) HTTP JSON receiver, configures native traces and logs, runs the synthetic task, closes its Session, and flushes telemetry.
@@ -31,9 +31,9 @@ The receipt's `turn_id` identifies the submitted turn after it settles. Not ever
 Run each scenario in a **new process**. Configure native telemetry only once per process. These commands require no provider credentials:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.observability.trace_walkthrough --scenario tool --output raised.json
-PYTHONPATH=. python -m examples.codex.observability.trace_walkthrough --scenario validation --output validation.json
-PYTHONPATH=. python -m examples.codex.observability.trace_walkthrough --scenario provider --output provider.json
+python -m examples.codex.observability.trace_walkthrough --scenario tool --output raised.json
+python -m examples.codex.observability.trace_walkthrough --scenario validation --output validation.json
+python -m examples.codex.observability.trace_walkthrough --scenario provider --output provider.json
 ```
 
 | Scenario | Application receipt | What the received records establish |
@@ -58,7 +58,7 @@ If the command reports no receipt, check the exporter endpoint and loopback prox
 The [`trace_context.py`](trace_context.py) example requires `0.24.0-alpha.7` or later. Install a [matching preview wheel and example files](../../../docs/sdk/installation.md#examples-and-upgrades), then run:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.observability.trace_context
+python -m examples.codex.observability.trace_context
 ```
 
 The example supplies an explicit `TraceContext` to the first run. Its Python tool passes `ToolContext.trace_context.to_headers()` to a second Agent through `parent_trace`. Both runs use synthetic model responses and a local collector, so no API key is needed. The command prints `Done` and the number of received native spans; the count can vary.

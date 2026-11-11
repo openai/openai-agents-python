@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -140,14 +141,22 @@ async def run_mount_smoke_test(
         raise
 
     try:
-        await sandbox.start()
-    except MountCommandError as exc:
-        print(f"mount command: {exc.context.get('command')}")
-        print(f"mount stderr: {exc.context.get('stderr')}")
-        raise
-
-    try:
+        try:
+            await sandbox.start()
+        except MountCommandError as exc:
+            print(f"mount command: {exc.context.get('command')}")
+            print(f"mount stderr: {exc.context.get('stderr')}")
+            raise
         for mount_case in mount_cases:
             await _check_case(sandbox, agent, provider, mount_case)
-    finally:
+    except BaseException:
+        try:
+            await client.delete(sandbox)
+        except Exception as exc:
+            print(
+                f"Docker mount sandbox cleanup also failed ({type(exc).__name__}).",
+                file=sys.stderr,
+            )
+        raise
+    else:
         await client.delete(sandbox)

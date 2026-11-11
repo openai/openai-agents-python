@@ -35,6 +35,7 @@ from ._legacy_history import (
 )
 from ._lifecycle import _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
+from .shell import ShellOutput as ShellOutput
 from .tools import ToolOutput as ToolOutput, _capture_application_data
 
 # Register one hook without retaining adapters after their application lifetime.
@@ -152,12 +153,13 @@ class CustomStorage:
             raise TypeError("backend must implement SessionStore")
 
     async def reconcile(
-        self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput
+        self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput | ShellOutput
     ) -> None:
         """Record an externally verified result for an unresolved original call.
 
         Close the Session first. Check authoritative external records, then pass
-        the actual string or ToolOutput result, preserving its original identity.
+        the actual result, preserving its original identity. Use ShellOutput for
+        an application Shell call. Its recorded output limit still applies.
         Structured content and explicit failure retain their original meaning.
         Nonempty application data requires a live Session.
         This operation acquires exclusive ownership and never runs the tool.
@@ -167,16 +169,22 @@ class CustomStorage:
         """
         from agents import _native
 
-        if not isinstance(output, (str, ToolOutput)):
-            raise TypeError("output must be str or ToolOutput")
-        response = ToolOutput.text(output) if isinstance(output, str) else output
-        response._validate()
-        if _capture_application_data(response.application_data) is not None:
-            raise ValueError(
-                "Canonical store reconciliation requires a result without application data"
-            )
+        if isinstance(output, ShellOutput):
+            encoded = output.model_dump_json()
+        else:
+            if not isinstance(output, (str, ToolOutput)):
+                raise TypeError(
+                    "output must be str or ToolOutput for ordinary calls, or ShellOutput for Shell"
+                )
+            response = ToolOutput.text(output) if isinstance(output, str) else output
+            response._validate()
+            if _capture_application_data(response.application_data) is not None:
+                raise ValueError(
+                    "Canonical store reconciliation requires a result without application data"
+                )
+            encoded = json.dumps(response.to_native())
         operation = _native.reconcile_canonical_store(
-            self.backend, session_id, turn_id, call_id, json.dumps(response.to_native())
+            self.backend, session_id, turn_id, call_id, encoded
         )
         cleanup = SessionStoreCleanup(operation)
         try:

@@ -1,0 +1,137 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index adfe48bef4cd52bb629d8b23d3559eb678dcb1ac..f15e80cc10be4fb8bff3ad938e18acde84f75628 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3553,6 +3553,7 @@ async fn handle_assistant_item_done_in_plan_mode(
+             step_context,
+             item,
+             finalized_facts.as_ref(),
++            /*application_tool*/ None,
+         )
+         .await;
+         if let Some(agent_message) = final_last_agent_message {
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 39e356f9b2170f7a07c9c99f7c99a6487d4f387d..8421b9799ce2c268994cc98cde8a59430b24106c 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -4,6 +4,8 @@ use std::sync::Arc;
+ use std::sync::Mutex;
+ 
+ use codex_extension_api::ExtensionData;
++use codex_history::CodexHarnessMetadata;
++use codex_history::ResponseItemEnvelope;
+ use codex_protocol::ResponseItemId;
+ use codex_protocol::config_types::ModeKind;
+ use codex_protocol::items::TurnItem;
+@@ -81,12 +83,14 @@ pub(crate) async fn record_completed_response_item(
+     sess: &Session,
+     step_context: &StepContext,
+     item: &ResponseItem,
++    application_tool: Option<&str>,
+ ) {
+     record_completed_response_item_with_finalized_facts(
+         sess,
+         step_context,
+         item,
+         /*finalized_facts*/ None,
++        application_tool,
+     )
+     .await;
+ }
+@@ -96,14 +100,30 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+     step_context: &StepContext,
+     item: &ResponseItem,
+     finalized_facts: Option<&FinalizedTurnItemFacts>,
++    application_tool: Option<&str>,
+ ) {
+     let turn_context = &step_context.turn;
+-    sess.record_conversation_items(
+-        turn_context,
+-        &step_context.settings.model_info,
+-        std::slice::from_ref(item),
+-    )
+-    .await;
++    if let Some(tool) = application_tool {
++        sess.record_annotated_conversation_items(
++            turn_context,
++            &step_context.settings.model_info,
++            vec![ResponseItemEnvelope {
++                item: item.clone(),
++                metadata: Some(CodexHarnessMetadata {
++                    sdk_application_tool: Some(tool.to_owned()),
++                    ..Default::default()
++                }),
++            }],
++        )
++        .await;
++    } else {
++        sess.record_conversation_items(
++            turn_context,
++            &step_context.settings.model_info,
++            std::slice::from_ref(item),
++        )
++        .await;
++    }
+     if turn_context.config.otel.agent_response_logging_enabled() {
+         turn_context
+             .extension_data
+@@ -403,8 +423,18 @@ pub(crate) async fn handle_output_item_done(
+                 call.tool_name,
+             );
+ 
+-            record_completed_response_item(ctx.sess.as_ref(), ctx.step_context.as_ref(), &item)
+-                .await;
++            let application_tool =
++                matches!(&call.payload, codex_tools::ToolPayload::Shell { .. }).then_some("shell");
++            record_completed_response_item(
++                ctx.sess.as_ref(),
++                ctx.step_context.as_ref(),
++                &item,
++                application_tool,
++            )
++            .await;
++            if application_tool.is_some() {
++                ctx.sess.ensure_rollout_durable().await?;
++            }
+ 
+             let cancellation_token = ctx.cancellation_token.child_token();
+             let tool_future: InFlightFuture<'static> = Box::pin(
+@@ -451,6 +481,7 @@ pub(crate) async fn handle_output_item_done(
+                 ctx.step_context.as_ref(),
+                 &item,
+                 finalized_facts.as_ref(),
++                /*application_tool*/ None,
+             )
+             .await;
+ 
+@@ -469,8 +500,13 @@ pub(crate) async fn handle_output_item_done(
+                     ..Default::default()
+                 },
+             };
+-            record_completed_response_item(ctx.sess.as_ref(), ctx.step_context.as_ref(), &item)
+-                .await;
++            record_completed_response_item(
++                ctx.sess.as_ref(),
++                ctx.step_context.as_ref(),
++                &item,
++                /*application_tool*/ None,
++            )
++            .await;
+             if let Some(response_item) = response_input_to_response_item(&response) {
+                 ctx.sess
+                     .record_conversation_items(
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index dcc172b3cda3d278a8bfc12378dd5246f9ceb859..31e88ee4ed53c31cbf09b72ef33f3885ae44ef2f 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -77,6 +77,10 @@ pub struct CodexHarnessMetadata {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_agent_profile: Option<serde_json::Value>,
+ 
++    /// Application tool routed by Core before dispatch; never sent to the provider.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_application_tool: Option<String>,
++
+     /// Provider/native function correlation; history metadata, never execution authority.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub realtime_tool_call: Option<serde_json::Value>,

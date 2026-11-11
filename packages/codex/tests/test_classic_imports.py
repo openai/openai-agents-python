@@ -58,9 +58,8 @@ import agents
 try:
     import agents.classic
 except ModuleNotFoundError as exc:
-    assert "python -m pip install '.[classic]'" in str(exc)
-    assert 'matching source checkout' in str(exc)
-    assert 'CLASSIC.md#install-from-the-matching-source' in str(exc)
+    assert 'Install the matching SDK with [classic]' in str(exc)
+    assert 'CLASSIC.md#install-the-classic-extra' in str(exc)
     print(str(exc))
 else:
     raise AssertionError('classic imported without dependencies')
