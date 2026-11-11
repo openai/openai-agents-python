@@ -112,7 +112,14 @@ async def test_native_workspace_appendix_preserves_providers_and_replaces_curren
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
 @pytest.mark.parametrize(
     "scenario",
-    ["unicode", "empty_allowlist", "oversized_allowlist", "path_priority", "dense_mounts"],
+    [
+        "unicode",
+        "empty_allowlist",
+        "oversized_allowlist",
+        "path_priority",
+        "dense_mounts",
+        "flat_deep",
+    ],
 )
 async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     tmp_path, monkeypatch, responses, scenario
@@ -156,6 +163,7 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
                 if scenario == "dense_mounts"
                 else {}
             ),
+            **({"flat/pkg/inner/code": Dir()} if scenario == "flat_deep" else {}),
         },
     )
     client = Client([])
@@ -217,13 +225,19 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
         },
     ]
     filesystem = json.loads(text.split("Filesystem layout:\n")[1].split("\n\n")[0])
-    assert filesystem == [
+    expected_filesystem = [
         {
             "path": root + "/src/",
             **({"description": source_description} if scenario != "path_priority" else {}),
         },
         {"path": root + "/src/café.py", "description": file_description},
     ]
+    if scenario == "flat_deep":
+        expected_filesystem.extend(
+            {"path": root + "/" + directory}
+            for directory in ("flat/", "flat/pkg/", "flat/pkg/inner/")
+        )
+    assert filesystem == expected_filesystem
     if scenario in ("empty_allowlist", "oversized_allowlist"):
         assert "Do not run commands on remote-mounted paths." in text
         assert "Only use these commands on remote-mounted paths:" not in text

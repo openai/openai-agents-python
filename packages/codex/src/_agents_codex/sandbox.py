@@ -456,12 +456,21 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
     filesystem_prefix = "Filesystem layout:\n["
     included_filesystem: list[dict[str, str]] = []
     filesystem_rows: list[str] = []
+    workspace_root = Path(captured.root)
+    filesystem_paths: dict[str, str | None] = {}
     for relative_path, entry in captured.iter_entries():
-        if len(relative_path.parts) > 3 or isinstance(entry, Mount):
+        parts = relative_path.parts
+        # Flat manifest keys also imply their parent directories.
+        for depth in range(1, min(4, len(parts))):
+            parent = workspace_root.joinpath(*parts[:depth]).as_posix()
+            filesystem_paths.setdefault(parent + "/", None)
+        if len(parts) > 3 or isinstance(entry, Mount):
             continue
-        path = (Path(captured.root) / relative_path).as_posix()
+        path = (workspace_root / relative_path).as_posix()
         if entry.permissions.directory and path != "/":
             path += "/"
+        filesystem_paths[path] = entry.description
+    for path, description in filesystem_paths.items():
         row = encode({"path": path})
         added_bytes = len(row.encode("utf-8")) + (
             1 if filesystem_rows else len(("\n\n" + filesystem_prefix + "]").encode("utf-8"))
@@ -471,7 +480,7 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
         included_filesystem.append(
             {
                 "path": path,
-                **({"description": entry.description} if entry.description is not None else {}),
+                **({"description": description} if description is not None else {}),
             }
         )
         filesystem_rows.append(row)
