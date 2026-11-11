@@ -65,6 +65,17 @@ def test_native_batch_completion_preserves_legacy_profile_fingerprints() -> None
     # Captured with the released pre-batch native fingerprint implementation.
     expected = "1ee377cb24dd5dd57ebf22fc21c356f7b11e274e747805d28edc2fe81122f12f"
     assert _native._agent_profiles_fingerprint(json.dumps(legacy), "agent_0") == expected
+    # Runtime policy resets and explicit retry declaration compatibility.
+    assert all(row["model"]["request_controls"]["retry"] == {"has_policy": False} for row in legacy)
+    for retry in (
+        {"configured": True, "has_policy": False},
+        {"max_retries": 0, "has_policy": False},
+        {"has_policy": True},
+        {"backoff": {"initial_delay_ms": 500.0}, "has_policy": False},
+    ):
+        declared = json.loads(json.dumps(legacy))
+        declared[0]["model"]["request_controls"]["retry"] = retry
+        assert _native._agent_profiles_fingerprint(json.dumps(declared), "agent_0") != expected
     explicit_false = [{**row, "tool_batch_completion": False} for row in legacy]
     assert _native._agent_profiles_fingerprint(json.dumps(explicit_false), "agent_0") == expected
     enabled = roster(lambda _: ContinueTurn(instructions="continue"))

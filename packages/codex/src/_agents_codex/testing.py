@@ -83,6 +83,33 @@ def text(value: str, *, item_id: str | None = None) -> _ScriptItem:
     )
 
 
+def computer_call(
+    actions: Sequence[Mapping[str, JsonValue]],
+    *,
+    call_id: str,
+    item_id: str | None = None,
+    pending_safety_checks: Sequence[Mapping[str, JsonValue]] = (),
+) -> _ScriptItem:
+    """Emit a GA computer call; native tool policy still authorizes every effect.
+
+    Actions and safety checks are captured now. Use event() for preview calls
+    with a single action or deliberately malformed wire fixtures.
+    """
+    return event(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "computer_call",
+                "id": item_id if item_id is not None else f"cu_{uuid4().hex}",
+                "call_id": call_id,
+                "status": "completed",
+                "actions": [dict(action) for action in actions],
+                "pending_safety_checks": [dict(check) for check in pending_safety_checks],
+            },
+        }
+    )
+
+
 def tool_call(
     name: str,
     arguments: Mapping[str, JsonValue],
