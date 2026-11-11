@@ -259,3 +259,22 @@ jobs:
         shell: bash
         run: |
           "$RUNNER_TEMP/probe"
+      - name: Inspect installed read-only message filter interface
+        shell: python
+        run: |
+          from pathlib import Path
+          count = 0
+          for path in sorted(Path('/System/Library/Sandbox/Profiles').glob('*.sb')):
+              try:
+                  lines = path.read_text().splitlines()
+              except (OSError, UnicodeError):
+                  continue
+              for index, line in enumerate(lines):
+                  if any(word in line for word in ('apply-message-filter', 'mach-message-send', 'message-id')):
+                      print(f'{path.name}:{index+1}: ' + line.strip())
+                      count += 1
+                      if count >= 50:
+                          break
+              if count >= 50:
+                  break
+          print(f'public_os_filter_lines={count}')
