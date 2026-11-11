@@ -534,3 +534,16 @@ jobs:
           POLICY_SOURCE
           clang -Wall -Wextra -Werror "$RUNNER_TEMP/denied-helper.c" -o "$RUNNER_TEMP/denied-helper"
           python3 "$RUNNER_TEMP/launchd-policy-probe.py"
+      - name: Check installed OS message-filter compilation
+        shell: python
+        run: |
+          import json
+          import subprocess
+          candidates = {
+              'operation': '(version 1)(allow default)(deny mach-message-send)',
+              'bootstrap-filter': '(version 1)(allow default)(allow mach-bootstrap (apply-message-filter (deny mach-message-send)(allow mach-message-send (message-id 812))))',
+              'bootstrap-filter-mach-id': '(version 1)(allow default)(allow mach-bootstrap (apply-message-filter (deny mach-message-send)(allow mach-message-send (mach-message-id 812))))',
+          }
+          for name, profile in candidates.items():
+              result = subprocess.run(['/usr/bin/sandbox-exec', '-p', profile, '/usr/bin/true'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=5)
+              print(json.dumps(dict(candidate=name, exit=result.returncode, compiler=result.stderr[:800])))
