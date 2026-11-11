@@ -77,7 +77,12 @@ from .exceptions import MCPToolCancellationError, ModelBehaviorError, ToolTimeou
 from .function_schema import DocstringStyle, function_schema, generate_func_documentation
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
-from .strict_schema import _copy_json_schema, ensure_strict_json_schema
+from .strict_schema import (
+    _copy_json_schema,
+    _json_schema_is_object,
+    _normalize_function_tool_output_json_schema,
+    ensure_strict_json_schema,
+)
 from .tool_context import ToolContext
 from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 from .tracing import SpanError
@@ -2348,28 +2353,6 @@ async def _invoke_function_tool_with_metadata(
         return _FunctionToolInvocationResult(timeout_result)
 
 
-def _json_schema_is_object(schema: dict[str, Any]) -> bool:
-    """Return whether a JSON Schema resolves to an object at its root."""
-    current: Any = schema
-    seen_refs: set[str] = set()
-    while isinstance(current, dict):
-        # JSON Schema allows a one-element type array; treat ["object"] like "object" so
-        # OpenAPI/MCP-style output schemas match the params and strict-schema paths.
-        typ = current.get("type")
-        if typ == "object" or typ == ["object"]:
-            return True
-        ref = current.get("$ref")
-        if not isinstance(ref, str) or not ref.startswith("#/") or ref in seen_refs:
-            return False
-        seen_refs.add(ref)
-        current = schema
-        for part in ref[2:].split("/"):
-            if not isinstance(current, dict):
-                return False
-            current = current.get(part.replace("~1", "/").replace("~0", "~"))
-    return False
-
-
 def _build_function_tool_output_type(
     output_type: Any,
 ) -> tuple[dict[str, Any], TypeAdapter[Any]]:
@@ -2957,21 +2940,6 @@ def _normalize_tool_allowed_callers(
             )
         normalized.append(normalized_caller)
     return normalized
-
-
-def _normalize_function_tool_output_json_schema(
-    output_json_schema: dict[str, Any],
-) -> dict[str, Any]:
-    """Copy and normalize a declared function output schema as a strict object schema."""
-    if not isinstance(output_json_schema, dict) or not _json_schema_is_object(output_json_schema):
-        raise UserError("Function tool output_json_schema must define a JSON object schema.")
-    copied_schema = _copy_json_schema(output_json_schema)
-    try:
-        return ensure_strict_json_schema(copied_schema)
-    except Exception as error:
-        raise UserError(
-            "Function tool output_json_schema must define a strict JSON object schema."
-        ) from error
 
 
 def _is_computer_provider(candidate: object) -> bool:
