@@ -126,6 +126,21 @@ pub(crate) fn same_output_payload(left: &ResponseItem, right: &ResponseItem) -> 
                 ..
             },
         ) => left == right && left_checks == right_checks,
+        (
+            ResponseItem::ShellCallOutput {
+                provider_fields: left,
+                ..
+            },
+            ResponseItem::ShellCallOutput {
+                provider_fields: right,
+                ..
+            },
+        ) => {
+            left.get("output")
+                .zip(right.get("output"))
+                .is_some_and(|(left, right)| left == right)
+                && left.get("max_output_length") == right.get("max_output_length")
+        }
         _ => false,
     }
 }

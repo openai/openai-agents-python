@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from agents import (
     Agent,
     Allow,
+    LocalStorage,
     NativeError,
     ReplaceArguments,
     SessionState,
@@ -120,6 +122,54 @@ async def test_application_shell_gates_execution_and_replays_typed_output(
     assert len(effects) == int(approved)
     replayed = responses.requests[2]["input"]
     assert next(item for item in replayed if item["type"] == "shell_call_output") == output
+
+
+async def test_application_shell_keeps_acknowledged_local_receipt(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def execute(_context: ToolContext[None], call: ShellCall) -> ShellOutput:
+        calls.append(call.call_id)
+        return ShellOutput(
+            max_output_length=5,
+            output=[ShellCommandOutput(stdout="saved", stderr="", outcome=ShellExit(exit_code=0))],
+        )
+
+    responses.respond(shell_call())
+    responses.respond(assistant_output("done"))
+    responses.respond(assistant_output("continued"))
+    agent = Agent(
+        instructions="Use the configured Shell tool.",
+        model="gpt-5",
+        provider=provider(responses),
+        tools=[shell_tool(execute)],
+    )
+    storage = LocalStorage(tmp_path / "profile")
+
+    async with timeout(30), agent.session(storage=storage) as session:
+        thread_id = session.id
+        turn = await session.submit("run the test command")
+        assert (await turn.get_result()).final_output == "done"
+    async with timeout(30), agent.session(storage=storage, resume=thread_id) as restored:
+        turn = await restored.submit("continue")
+        assert (await turn.get_result()).final_output == "continued"
+
+    assert calls == ["shell-local"]
+    assert len(responses.requests) == 3
+    initial = [
+        item for item in responses.requests[1]["input"] if item["type"] == "shell_call_output"
+    ]
+    replayed = [
+        item for item in responses.requests[2]["input"] if item["type"] == "shell_call_output"
+    ]
+    assert len(initial) == 1
+    assert initial[0]["call_id"] == "shell-local"
+    assert initial[0]["max_output_length"] == 5
+    assert initial[0]["output"] == [
+        {"stdout": "saved", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+    ]
+    assert replayed == initial
 
 
 @pytest.mark.parametrize(
