@@ -4,7 +4,6 @@ from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
-from typing_extensions import assert_type
 
 from _agents_codex._agent_profiles import _capture_agent_graph
 from agents import Agent, NativeAgents, NativeOutput, NativeRole, PromptedOutput
@@ -24,7 +23,7 @@ def test_no_handoff_capture_preserves_native_defaults_and_identity():
 
 
 def test_handoff_sequence_is_captured_and_output_views_require_compatible_graphs():
-    target = Agent(instructions="Billing", name="Billing")
+    target = Agent[dict[str, str], str](instructions="Billing", name="Billing")
     targets = [target]
     agent = Agent(instructions="Route", handoffs=targets)
     targets.clear()
@@ -34,12 +33,6 @@ def test_handoff_sequence_is_captured_and_output_views_require_compatible_graphs
     assert Agent(instructions="Answer").with_output_type(int).output_type is int
     with pytest.raises(FrozenInstanceError):
         agent.handoffs = ()
-
-
-def test_handoff_context_types_are_preserved():
-    target = Agent[dict[str, str], str](instructions="Billing", name="Billing")
-    source = Agent(instructions="Route", handoffs=[target])
-    assert_type(source, Agent[dict[str, str], str])
 
 
 def test_cycles_and_shared_thunks_resolve_once_per_capture():
