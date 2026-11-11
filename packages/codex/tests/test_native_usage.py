@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from dataclasses import FrozenInstanceError
 from typing import Any
 
@@ -13,8 +14,15 @@ from aiohttp.test_utils import TestServer
 from typing_extensions import assert_type
 
 from agents import (
+    ActionReply,
     Agent,
     Completed,
+    ContinueTurn,
+    FunctionTool,
+    Interaction,
+    InteractionRequired,
+    PromptedOutput,
+    RawProviderUsage,
     Session,
     SessionState,
     Turn,
@@ -33,6 +41,8 @@ from tests.native_fixtures import (
     tool_output,
 )
 from tests.test_native_agent_observation import collect, provider
+from tests.test_native_manual_tools import LookupArgs
+from tests.test_native_registered_compaction import COMPACTION_MARKER, set_compaction_thresholds
 
 
 async def _report_usage(event: dict[str, Any]) -> None:
@@ -50,6 +60,172 @@ async def _report_usage(event: dict[str, Any]) -> None:
 async def _omit_usage(event: dict[str, Any]) -> None:
     if event["type"] == "response.completed":
         event["response"].pop("usage")
+
+
+@pytest.mark.parametrize("capture", [False, True])
+async def test_native_original_provider_usage_stays_out_of_history_and_checkpoints(
+    responses: ResponsesFixture, capture: bool
+) -> None:
+    @function_tool
+    def lookup(code: str) -> str:
+        """Resolve a code."""
+        return "resolved-" + code
+
+    expected: list[dict[str, Any]] = []
+    sentinel = "synthetic-provider-usage-extension"
+
+    async def report(event: dict[str, Any]) -> None:
+        if event["type"] != "response.completed":
+            return
+        await _report_usage(event)
+        usage = event["response"]["usage"]
+        usage["vendor_extension"] = {
+            "sample": [0, False, None, sentinel],
+            "sequence": len(expected),
+        }
+        expected.append(usage)
+
+    responses.before_event = report
+    responses.respond(function_call("lookup", {"code": "A"}, "raw-usage-a"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(instructions="Use lookup once.", tools=[lookup], provider=provider(responses))
+    async with timeout(30):
+        result = await agent.run(
+            "look up A", return_raw_usage=capture, return_history=True, return_state=True
+        )
+
+    assert result.final_output == "done"
+    assert result.run_usage.requests == 2
+    assert result.run_usage.total_tokens == 48
+    assert len(responses.requests) == 2
+    assert result.state is not None and sentinel not in result.state.to_json()
+    assert result.history is not None and sentinel not in json.dumps(result.history)
+    assert sentinel not in repr(result)
+    if capture:
+        assert result.raw_usage == tuple(
+            RawProviderUsage(response_id=f"resp_{index}", upstream_request_id=None, usage=usage)
+            for index, usage in enumerate(expected, start=1)
+        )
+    else:
+        assert result.raw_usage is None
+
+
+async def test_native_original_provider_usage_includes_automatic_compaction(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_compaction_thresholds(monkeypatch)
+
+    @function_tool
+    def lookup() -> str:
+        """Look up the record."""
+        return "found"
+
+    async def report(event: dict[str, Any]) -> None:
+        await _report_usage(event)
+        if event["type"] == "response.completed":
+            response = event["response"]
+            usage = response["usage"]
+            usage["provider_sequence"] = response["id"]
+            if response["id"] == "resp_1":
+                usage.update(input_tokens=260_000, output_tokens=1_000, total_tokens=261_000)
+
+    responses.before_event = report
+    responses.respond(function_call("lookup", {}, "before-compaction"))
+    responses.respond(assistant_output("The lookup found the record."))
+    responses.respond(assistant_output("done"))
+    agent = Agent(instructions="Look up the record.", tools=[lookup], provider=provider(responses))
+    async with timeout(30):
+        result = await agent.run("Find it.", return_raw_usage=True)
+
+    assert result.final_output == "done"
+    assert len(responses.requests) == 3
+    assert COMPACTION_MARKER in json.dumps(responses.requests[1])
+    assert result.raw_usage is not None
+    assert [
+        (record.response_id, record.usage["provider_sequence"]) for record in result.raw_usage
+    ] == [("resp_1", "resp_1"), ("resp_2", "resp_2"), ("resp_3", "resp_3")]
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+async def test_native_original_provider_usage_on_manual_restore(
+    responses: ResponsesFixture,
+    delegated: bool,
+) -> None:
+    lookup = FunctionTool(
+        name="lookup", description="Read a record.", input_type=LookupArgs, output_type=str
+    )
+
+    class DelegatingAgent(Agent):
+        @asynccontextmanager
+        async def session(self, **options: Any):
+            async with super().session(**options) as session:
+                if options.get("state") is not None:
+                    restored = session.restored_turn
+                    assert restored is not None
+                    await restored.get_result()
+                yield session
+
+    agent_type = DelegatingAgent if delegated else Agent
+    agent = agent_type(
+        instructions="Use lookup once.", tools=[lookup], provider=provider(responses)
+    )
+    responses.before_event = _report_usage
+    responses.respond(function_call("lookup", {"key": "A"}, "raw-usage-manual"))
+
+    def answer(event: Interaction) -> ActionReply[str]:
+        request = lookup.match(event)
+        assert request is not None
+        return request.reply("accepted-A")
+
+    async with timeout(30):
+        with pytest.raises(InteractionRequired) as paused:
+            await agent.run("read A", return_raw_usage=True)
+        saved = paused.value.state
+        assert saved is not None and saved.native_continuation is not None
+        assert "not-for-usage-readers" not in saved.to_json()
+        responses.respond(assistant_output("finished"))
+        result = await agent.run(None, state=saved, on_interaction=answer, return_raw_usage=True)
+
+    assert result.final_output == "finished"
+    assert len(responses.requests) == 2
+    assert result.raw_usage is not None
+    assert [record.response_id for record in result.raw_usage] == ["resp_2"]
+    assert result.raw_usage[0].usage["fixture_secret"] == "not-for-usage-readers"
+
+
+@pytest.mark.parametrize("resample", [False, True])
+async def test_native_original_provider_usage_includes_prompted_output_repair(
+    responses: ResponsesFixture,
+    resample: bool,
+) -> None:
+    def complete(request):
+        if resample and request.text == '{"count": 7}':
+            return ContinueTurn("Count once more.")
+        return None
+
+    responses.before_event = _report_usage
+    responses.respond(assistant_output("invalid JSON"))
+    responses.respond(assistant_output('{"count": 7}'))
+    if resample:
+        responses.respond(assistant_output('{"count": 8}'))
+    agent = Agent(
+        instructions="Return the count.",
+        provider=provider(responses),
+        output_type=PromptedOutput(dict[str, int], max_retries=1),
+        before_complete=complete if resample else None,
+    )
+    async with timeout(30):
+        result = await agent.run("count", return_raw_usage=True, return_state=True)
+
+    assert result.final_output == {"count": 8 if resample else 7}
+    expected_responses = ["resp_1", "resp_2", "resp_3"] if resample else ["resp_1", "resp_2"]
+    assert result.run_usage.requests == len(expected_responses)
+    assert result.raw_usage is not None
+    assert [record.response_id for record in result.raw_usage] == expected_responses
+    assert all(
+        record.usage["fixture_secret"] == "not-for-usage-readers" for record in result.raw_usage
+    )
+    assert result.state is not None and "not-for-usage-readers" not in result.state.to_json()
 
 
 async def check_usage_types(session: Session[object, str], handle: Turn[str]) -> None:

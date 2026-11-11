@@ -2,6 +2,11 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+
+use tokio::sync::{MutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use codex_core::config::ExecutionConfig;
 use pyo3::prelude::*;
@@ -33,6 +38,179 @@ pub(super) struct PreparedRuntime {
     profile: codex_core::config::ManagedExecution,
     home: Home,
     runtime_json: String,
+    last_release: std::sync::Mutex<Instant>,
+    retiring: AtomicBool,
+    expiry: Option<tokio::task::JoinHandle<()>>,
+}
+
+// A read checkout remains with the acquisition lease through joined cleanup.
+const PROCESS_IDLE: Duration = Duration::from_secs(5);
+static PROCESS_EXITING: AtomicBool = AtomicBool::new(false);
+type ProcessSlot = Arc<RwLock<Option<PreparedRuntime>>>;
+
+fn process_slot() -> PyResult<&'static ProcessSlot> {
+    static SLOT: OnceLock<(u32, ProcessSlot)> = OnceLock::new();
+    let (creator, slot) = SLOT.get_or_init(|| (std::process::id(), Arc::new(RwLock::new(None))));
+    if *creator != std::process::id() {
+        return Err(py_error("Implicit runtime belongs to another process"));
+    }
+    Ok(slot)
+}
+
+pub(crate) fn check_process_runtime_pid() -> PyResult<()> {
+    process_slot().map(|_| ())
+}
+
+pub(super) struct ProcessCheckout(Option<OwnedRwLockReadGuard<Option<PreparedRuntime>>>);
+
+impl ProcessCheckout {
+    pub(super) fn release(mut self) {
+        if let Some(entry) = self.0.as_ref().and_then(|slot| slot.as_ref()) {
+            *entry
+                .last_release
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Instant::now();
+        }
+        self.0.take();
+    }
+}
+
+impl Drop for ProcessCheckout {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0.as_ref() {
+            if let Some(entry) = slot.as_ref() {
+                // An unjoined acquisition must never return an admitting parent.
+                entry.retiring.store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
+enum RuntimeSlot<'a> {
+    Provider(MutexGuard<'a, Option<PreparedRuntime>>),
+    Process(OwnedRwLockWriteGuard<Option<PreparedRuntime>>),
+}
+
+impl std::ops::Deref for RuntimeSlot<'_> {
+    type Target = Option<PreparedRuntime>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Provider(slot) => slot,
+            Self::Process(slot) => slot,
+        }
+    }
+}
+
+impl std::ops::DerefMut for RuntimeSlot<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Provider(slot) => slot,
+            Self::Process(slot) => slot,
+        }
+    }
+}
+
+impl RuntimeSlot<'_> {
+    fn retain(self, lease: &Lease) -> PyResult<()> {
+        if let Self::Process(slot) = self {
+            let checkout = OwnedRwLockWriteGuard::downgrade(slot);
+            lease.record.lock().map_err(py_error)?.process_runtime =
+                Some(ProcessCheckout(Some(checkout)));
+        }
+        Ok(())
+    }
+}
+
+async fn close_process_slot(slot: &mut Option<PreparedRuntime>) -> PyResult<()> {
+    if let Some(entry) = slot.as_mut() {
+        entry.retiring.store(true, Ordering::Release);
+        entry.close().await?;
+    }
+    slot.take();
+    Ok(())
+}
+
+// The writer waits for every acquisition and any running expiry cleanup.
+pub(crate) async fn close_process_runtime() -> PyResult<()> {
+    retire_process_slot(process_slot()?.clone().write_owned().await).await
+}
+
+async fn retire_process_slot(
+    mut slot: OwnedRwLockWriteGuard<Option<PreparedRuntime>>,
+) -> PyResult<()> {
+    if let Some(entry) = slot.as_mut() {
+        entry.retiring.store(true, Ordering::Release);
+        if let Some(expiry) = entry.expiry.take() {
+            // Write ownership proves the timer is not running retirement.
+            expiry.abort();
+            let _ = expiry.await;
+        }
+    }
+    close_process_slot(&mut slot).await
+}
+
+pub(crate) fn close_process_runtime_at_exit() {
+    let Ok(pool) = process_slot() else {
+        return;
+    };
+    PROCESS_EXITING.store(true, Ordering::Release);
+    close_idle_at_exit(pool);
+}
+
+fn close_idle_at_exit(pool: &ProcessSlot) {
+    // Never wait for an active acquisition during interpreter shutdown.
+    let Ok(slot) = pool.clone().try_write_owned() else {
+        return;
+    };
+    let Some(entry) = slot.as_ref() else {
+        return;
+    };
+    entry.retiring.store(true, Ordering::Release);
+    let (finished, waiting) = std::sync::mpsc::sync_channel(1);
+    pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        if retire_process_slot(slot).await.is_err() {
+            tracing::warn!("implicit runtime exit cleanup failed; ownership remains retained");
+        }
+        let _ = finished.send(());
+    });
+    // A timeout leaves the task and write guard owning cleanup, without nested block_on.
+    let _ = waiting.recv_timeout(Duration::from_secs(1));
+}
+
+fn schedule_expiry(entry: &mut PreparedRuntime) {
+    entry.expiry = Some(pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        let mut delay = PROCESS_IDLE;
+        loop {
+            tokio::time::sleep(delay).await;
+            let Ok(pool) = process_slot() else {
+                return;
+            };
+            // Do not queue behind a long response and suppress matching checkouts.
+            delay = match pool.clone().try_write_owned() {
+                Ok(mut slot) => {
+                    let Some(entry) = slot.as_ref() else {
+                        return;
+                    };
+                    let idle = entry
+                        .last_release
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .elapsed();
+                    if entry.retiring.load(Ordering::Acquire) || idle >= PROCESS_IDLE {
+                        if close_process_slot(&mut slot).await.is_err() {
+                            tracing::warn!(
+                                "implicit runtime retirement failed; cleanup remains owned"
+                            );
+                        }
+                        return;
+                    }
+                    PROCESS_IDLE - idle
+                }
+                Err(_) => PROCESS_IDLE,
+            };
+        }
+    }));
 }
 
 impl PreparedRuntime {
@@ -190,6 +368,7 @@ impl Lease {
         raw: String,
         api_key: String,
         share: bool,
+        process_runtime: bool,
     ) -> PyResult<(EngineState, Option<super::NativeProviderHome>)> {
         let value: Value = serde_json::from_str(&raw).map_err(py_error)?;
         if value.get("codex_home").is_some() || value.get("cwd").is_some() {
@@ -245,7 +424,35 @@ impl Lease {
             .resource
             .upgrade()
             .ok_or_else(|| py_error("Provider is closed"))?;
-        let mut slot = resource.prepared_runtime.lock().await;
+        let process_runtime = process_runtime && !PROCESS_EXITING.load(Ordering::Acquire);
+        if process_runtime {
+            if let Ok(slot) = process_slot()?.clone().try_read_owned() {
+                if let Some(entry) = slot.as_ref() {
+                    if !entry.retiring.load(Ordering::Acquire) && entry.key == key {
+                        if let Ok(scope) = entry.scope(source.clone()) {
+                            self.record.lock().map_err(py_error)?.process_runtime =
+                                Some(ProcessCheckout(Some(slot)));
+                            return Ok((scope, None));
+                        }
+                        entry.retiring.store(true, Ordering::Release);
+                    }
+                }
+            }
+        }
+        let process_checkout = if process_runtime {
+            process_slot()?
+                .clone()
+                .try_write_owned()
+                .ok()
+                .filter(|slot| slot.is_none())
+        } else {
+            None
+        };
+        let process_runtime = process_checkout.is_some();
+        let mut slot = match process_checkout {
+            Some(slot) => RuntimeSlot::Process(slot),
+            None => RuntimeSlot::Provider(resource.prepared_runtime.lock().await),
+        };
         if let Some(entry) = slot.as_ref() {
             if entry.key == key {
                 if let Ok(scope) = entry.scope(source.clone()) {
@@ -287,6 +494,9 @@ impl Lease {
             profile,
             home: home.inner.clone(),
             runtime_json: runtime,
+            last_release: std::sync::Mutex::new(Instant::now()),
+            retiring: AtomicBool::new(false),
+            expiry: None,
         };
         // Transfer cleanup to the Provider before admitting a scope. No scope gets a Home handle.
         self.record
@@ -295,12 +505,23 @@ impl Lease {
             .homes
             .retain(|owned| !std::sync::Arc::ptr_eq(owned, &home.inner));
         if !entry.key.ambient_matches() {
-            entry.close().await?;
+            if process_runtime {
+                *slot = Some(entry);
+                close_process_slot(&mut slot).await?;
+            } else {
+                entry.close().await?;
+            }
             drop(slot);
             return self.dedicated_generated(source, raw, api_key, pool).await;
         }
         let result = entry.scope(source).map(|scope| (scope, None));
         *slot = Some(entry);
+        if process_runtime {
+            let entry = slot.as_mut().expect("published runtime");
+            entry.retiring.store(result.is_err(), Ordering::Release);
+            schedule_expiry(entry);
+            slot.retain(self)?;
+        }
         result
     }
 }
@@ -333,3 +554,7 @@ async fn dedicated(
     state.model_http_pool = pool;
     Ok(state)
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "runtime_tests.rs"]
+mod tests;

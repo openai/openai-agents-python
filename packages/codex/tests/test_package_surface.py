@@ -137,6 +137,7 @@ def test_package_root_has_one_public_surface():
         "guardrail_results",
         "history",
         "items",
+        "raw_usage",
         "run_usage",
     ]
 
@@ -220,3 +221,32 @@ async def test_native_runtime_rejects_retired_environment_fields(tmp_path, respo
     with pytest.raises(RuntimeError, match=field):
         await _native.create_engine(json.dumps(options["config"]), json.dumps(options["runtime"]))
     assert responses.requests == []
+
+
+def test_raw_usage_appends_to_existing_run_parameters() -> None:
+    import ast
+    import inspect
+
+    import _agents_codex.agent as agent_module
+    from agents import Agent
+
+    agent = next(
+        node
+        for node in ast.parse(inspect.getsource(agent_module)).body
+        if isinstance(node, ast.ClassDef) and node.name == "Agent"
+    )
+    for method in (Agent.run, Agent.run_sync):
+        declarations = [
+            node
+            for node in agent.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == method.__name__
+        ]
+        assert len(declarations) > 1
+        signatures = [list(inspect.signature(method).parameters)]
+        for declaration in declarations:
+            assert declaration.args.kwarg is None
+            signatures.append([argument.arg for argument in declaration.args.kwonlyargs])
+        for parameters in signatures:
+            assert parameters[-1] == "return_raw_usage"
+            assert parameters.index("parent_trace") < parameters.index("return_raw_usage")

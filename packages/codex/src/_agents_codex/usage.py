@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable as Callable
-from dataclasses import dataclass as dataclass
+from dataclasses import dataclass as dataclass, field
 from threading import RLock
 from typing import Any as Any, Literal as Literal
 
 from ._public import preserve_module_identity as _preserve_module_identity
 
 _MAX_SAFE_INTEGER = 2**53 - 1
+
+
+@dataclass(frozen=True, slots=True)
+class RawProviderUsage:
+    """Original usage from one accepted provider response."""
+
+    response_id: str
+    upstream_request_id: str | None
+    usage: dict[str, Any] = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
