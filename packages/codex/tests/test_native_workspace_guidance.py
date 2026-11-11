@@ -118,6 +118,7 @@ async def test_native_workspace_appendix_preserves_providers_and_replaces_curren
         "oversized_allowlist",
         "path_priority",
         "dense_mounts",
+        "near_capacity_mounts",
         "over_capacity_mounts",
         "oversized_mount_identity",
         "flat_deep",
@@ -130,9 +131,15 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     home.mkdir()
     (home / "AGENTS.md").write_text("UNDISCOVERED_GLOBAL_RULE")
     monkeypatch.setenv("CODEX_HOME", str(home))
+    # The 430-mount case leaves room for the required rows and restrictive policy.
+    mount_count = {
+        "dense_mounts": 300,
+        "near_capacity_mounts": 430,
+        "over_capacity_mounts": 600,
+    }.get(scenario, 0)
     commands = (
         Manifest().remote_mount_command_allowlist
-        if scenario in ("dense_mounts", "over_capacity_mounts", "oversized_mount_identity")
+        if mount_count or scenario == "oversized_mount_identity"
         else [f"fixture-mount-{index}" for index in range(2500)]
         if scenario == "oversized_allowlist"
         else []
@@ -160,14 +167,7 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
                     }
                 },
             ),
-            **(
-                {
-                    f"mount-{index:04d}": declaration()
-                    for index in range(600 if scenario == "over_capacity_mounts" else 300)
-                }
-                if scenario in ("dense_mounts", "over_capacity_mounts")
-                else {}
-            ),
+            **{f"mount-{index:04d}": declaration() for index in range(mount_count)},
             **({"📚" * 10_100: declaration()} if scenario == "oversized_mount_identity" else {}),
             **({"flat/pkg/inner/code": Dir()} if scenario == "flat_deep" else {}),
         },
@@ -218,9 +218,13 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
             + "."
         ) in text
         assert "cp" in commands and "cat" in commands
+    if scenario == "near_capacity_mounts":
+        assert "Working directory:" not in text
+        assert "Only use these commands on remote-mounted paths:" not in text
+        assert "Do not run commands on remote-mounted paths." in text
     storage, _ = json.JSONDecoder().raw_decode(text.split("Declared storage access:\n")[1])
-    if scenario == "dense_mounts":
-        assert len(storage) == 302
+    if mount_count:
+        assert len(storage) == mount_count + 2
         assert [{"path": entry["path"], "access": entry["access"]} for entry in storage[:2]] == [
             {"path": root + "/data", "access": "read_only"},
             {"path": root + "/output", "access": "read_write"},
