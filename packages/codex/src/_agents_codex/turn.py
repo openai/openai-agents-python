@@ -95,10 +95,12 @@ class Turn(Generic[OutputT]):
     @property
     def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
         """Detached application data from accepted tool results on this turn."""
+        # A restored root has a fresh submission ID for the same native turn.
+        native_turn_id = self.turn_id if self.child_id is None else None
         return tuple(
             record.model_copy(deep=True)
             for record in self._session._application_tool_outputs
-            if record.submission_id == self.submission_id
+            if record.submission_id == self.submission_id or record.turn_id == native_turn_id
         )
 
     @property

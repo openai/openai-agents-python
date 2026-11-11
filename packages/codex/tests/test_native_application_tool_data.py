@@ -173,6 +173,54 @@ async def test_manual_application_data_belongs_to_the_accepted_reply(
     assert "private-manual-receipt" not in json.dumps(responses.requests)
 
 
+async def test_restored_manual_turn_includes_previously_accepted_application_data(
+    responses: ResponsesFixture,
+) -> None:
+    lookup = FunctionTool(
+        name="lookup", description="Look up a key", input_type=LookupArgs, output_type=ToolOutput
+    )
+    responses.respond(function_call("lookup", {"key": "first"}, "before"))
+    responses.respond(function_call("lookup", {"key": "second"}, "after"))
+    responses.respond(assistant_output("complete"))
+    agent = Agent(
+        instructions="Use lookup.",
+        model="gpt-5.5",
+        tools=[lookup],
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-application-tool-data"),
+    )
+    async with timeout(30), agent.session() as source:
+        original = await source.submit("Look up both keys.")
+        interactions = source.interactions()
+        first = await next_request(interactions, lookup)
+        first_output = ToolOutput.text("first public reply")
+        first_output.application_data = {"receipt": "app-data-before-suspend"}
+        await first.respond(first_output)
+        assert (await next_request(interactions, lookup)).call_id == "after"
+        saved = SessionState.from_json((await source.suspend()).to_json())
+        (accepted,) = saved.application_tool_outputs
+        assert accepted.call_id == "before"
+
+    async with timeout(30), agent.session(state=saved) as restored:
+        resumed = restored.restored_turn
+        assert resumed is not None
+        assert resumed.turn_id == original.turn_id
+        assert resumed.application_tool_outputs == (accepted,)
+        second = await next_request(restored.interactions(), lookup)
+        assert second.call_id == "after"
+        second_output = ToolOutput.text("second public reply")
+        second_output.application_data = {"receipt": "app-data-after-restore"}
+        await second.respond(second_output)
+        completed = await resumed.get_result()
+        assert completed.final_output == "complete"
+        previous, current = completed.application_tool_outputs
+        assert previous == accepted
+        assert current.call_id == "after"
+        assert current.application_data == second_output.application_data
+
+    assert "app-data-before-suspend" not in json.dumps(responses.requests)
+    assert "app-data-after-restore" not in json.dumps(responses.requests)
+
+
 @pytest.mark.parametrize("with_transform", [False, True])
 async def test_mcp_extracts_application_data_from_the_effective_result(
     responses: ResponsesFixture, with_transform: bool
