@@ -27,13 +27,14 @@ class Adapter:
         *,
         with_tool: bool = False,
         sync_tool: bool = False,
+        default_host: bool = False,
     ) -> None:
         set_tracing_disabled(True)
         self.stream = stream
         self.tool_calls = 0
         self.client = AsyncOpenAI(
             api_key="benchmark-placeholder",
-            base_url=base_url,
+            **({} if default_host else {"base_url": base_url}),
             max_retries=0,
             timeout=30,
         )

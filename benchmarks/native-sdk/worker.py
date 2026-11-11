@@ -13,6 +13,7 @@ import json
 import os
 import resource
 import signal
+import socket
 import statistics
 import subprocess
 import sys
@@ -113,12 +114,17 @@ async def exercise(
     *,
     response_mode="streaming",
     native_transport="http",
+    default_host=False,
+    control_base_url=None,
 ):
+    control_base_url = control_base_url or base_url
     owner_cpu_before = time.process_time_ns()
     owner_before = time.perf_counter_ns()
     adapter_options = {"response_mode": "buffered"} if response_mode == "buffered" else {}
     if native_transport == "websocket":
         adapter_options["transport"] = "websocket"
+    if default_host:
+        adapter_options["default_host"] = True
     construction_start = time.perf_counter_ns()
     adapter = Adapter(
         base_url,
@@ -174,7 +180,9 @@ async def exercise(
                     await operation(runners[lane], lane, index, warmup=True)
 
             await asyncio.gather(*[warm_lane(lane) for lane in range(workload.concurrency)])
-            server_before = stats_at(base_url, summary=True) if workload.prefill else initial_stats
+            server_before = (
+                stats_at(control_base_url, summary=True) if workload.prefill else initial_stats
+            )
             calls_before = adapter.tool_calls
             cpu_before = time.process_time_ns()
             begin = time.perf_counter_ns()
@@ -186,7 +194,7 @@ async def exercise(
             await asyncio.gather(*[lane_run(lane) for lane in range(workload.concurrency)])
             end = time.perf_counter_ns()
             cpu_after = time.process_time_ns()
-            server_after = stats_at(base_url, summary=True)
+            server_after = stats_at(control_base_url, summary=True)
             measured_calls = adapter.tool_calls - calls_before
             before_close = time.perf_counter_ns()
         sessions_close_ns = time.perf_counter_ns() - before_close
@@ -359,6 +367,7 @@ def main():
     signal.signal(signal.SIGTERM, stop_requested)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=["v0", "v1"], required=True)
+    parser.add_argument("--default-host-setup", type=Path)
     parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
     parser.add_argument("--response-mode", choices=["streaming", "buffered"], default="streaming")
     parser.add_argument("--case", choices=WORKLOADS, default="oneshot_text")
@@ -371,6 +380,43 @@ def main():
     os.environ.pop("OPENAI_API_KEY", None)
     os.environ["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1"
     os.environ["OPENAI_AGENTS_DISABLE_TRACING"] = "1"
+    setup = None
+    if args.default_host_setup:
+        if not (Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()):
+            parser.error("Default-host benchmark requires an isolated Linux container")
+        selectors = (
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "CODEX_CA_CERTIFICATE",
+            "REQUEST_METHOD",
+            "CODEX_SANDBOX",
+            "OPENAI_BASE_URL",
+            "OPENAI_API_BASE",
+            "OPENAI_ORG_ID",
+            "OPENAI_PROJECT_ID",
+            "OPENAI_ORGANIZATION",
+            "OPENAI_PROJECT",
+            "NO_PROXY",
+            "no_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        )
+        if any(name in os.environ for name in selectors):
+            parser.error(
+                "Clear CA, proxy, sandbox-profile and endpoint selectors for default-host mode"
+            )
+        setup = json.loads(args.default_host_setup.read_text())
+        if setup["api_origin"] != "https://api.openai.com/v1" or not all(
+            hashlib.sha256(Path(name).read_bytes()).hexdigest() == value
+            for name, value in setup["files"].items()
+        ):
+            parser.error("Default-host setup identity mismatch")
+        if {row[4][0] for row in socket.getaddrinfo("api.openai.com", 443)} != {"127.0.0.1"}:
+            parser.error("Default API hostname must resolve only to container loopback")
     # The peer is loopback-only. Ignore inherited outbound proxy settings.
     for name in (
         "HTTP_PROXY",
@@ -379,14 +425,21 @@ def main():
         "http_proxy",
         "https_proxy",
         "all_proxy",
+        "WS_PROXY",
+        "WSS_PROXY",
+        "SOCKS_PROXY",
+        "ws_proxy",
+        "wss_proxy",
+        "socks_proxy",
     ):
         os.environ.pop(name, None)
-    os.environ["NO_PROXY"] = "127.0.0.1,localhost"
-    os.environ["no_proxy"] = "127.0.0.1,localhost"
+    if not setup:
+        os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+        os.environ["no_proxy"] = "127.0.0.1,localhost"
     workload = get_workload(args.case, iterations=args.iterations)
     if args.native_transport == "websocket" and (
         args.engine != "v1"
-        or args.case != "oneshot_text"
+        or (args.case != "oneshot_text" and not setup)
         or args.import_only
         or args.response_mode != "streaming"
     ):
@@ -394,7 +447,16 @@ def main():
     if args.response_mode == "buffered" and not args.import_only:
         if args.engine != "v1" or workload.stream:
             parser.error("Buffered mode requires a native final-result workload")
+    if setup and (
+        args.import_only
+        or workload.mode != "oneshot"
+        or workload.stream
+        or workload.tool_rounds
+        or args.response_mode != "streaming"
+    ):
+        parser.error("Default-host mode requires fresh final-only no-tool streaming calls")
     result = {
+        "default_host": bool(setup),
         "response_mode": args.response_mode
         if args.engine == "v1" and not args.import_only
         else None,
@@ -418,7 +480,7 @@ def main():
         "errors": 0,
     }
     child = None
-    base_url = None
+    base_url = control_base_url = None
     initial_stats = None
     try:
         if not args.import_only:
@@ -439,15 +501,22 @@ def main():
                         str(workload.output_chars),
                         "--delay-ms",
                         str(workload.delay_ms),
+                        *(
+                            ["--tls-cert", setup["tls_cert"], "--tls-key", setup["tls_key"]]
+                            if setup
+                            else []
+                        ),
                     ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                 )
             ready = read_ready_line(child)
-            base_url = json.loads(ready)["base_url"]
+            addresses = json.loads(ready)
+            base_url = addresses["base_url"]
+            control_base_url = addresses.get("control_base_url", base_url)
             if not workload.prefill:
-                initial_stats = stats_at(base_url, summary=True)
+                initial_stats = stats_at(control_base_url, summary=True)
         start = time.perf_counter_ns()
         module = importlib.import_module(f"{args.engine}_adapter")
         result["import_ms"] = (time.perf_counter_ns() - start) / 1e6
@@ -465,15 +534,23 @@ def main():
                         initial_stats,
                         response_mode=args.response_mode,
                         native_transport=args.native_transport,
+                        default_host=bool(setup),
+                        control_base_url=control_base_url,
                     )
                 )
             )
             if profiler:
                 profiler.disable()
                 profiler.dump_stats(str(args.profile))
-            stats = stats_at(base_url, retired=args.native_transport == "websocket")
+            stats = stats_at(control_base_url, retired=args.native_transport == "websocket")
             result["server"] = stats
             validate_receipts(workload, result, stats)
+            if setup and any(
+                row.get("request_host") not in {"api.openai.com", "api.openai.com:443"}
+                or row.get("tls_sni") != "api.openai.com"
+                for row in stats["receipts"]
+            ):
+                raise ValueError("Default-host request lost actual Host/SNI")
             validate_transport(
                 workload,
                 stats,
@@ -509,7 +586,7 @@ def main():
             if child is not None:
                 if base_url is not None and "server" not in result:
                     try:
-                        result["server"] = stats_at(base_url)
+                        result["server"] = stats_at(control_base_url)
                     except Exception as error:
                         result["stats_error"] = str(error)
                 terminate_child(child)

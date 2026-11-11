@@ -90,8 +90,11 @@ def validate_sample(
     v1_response_mode="streaming",
     reference_engine="v0",
     native_transport="http",
+    default_host=False,
 ):
     """Check scheduling, declared identities and existing worker count receipts."""
+    if bool(row.get("default_host", False)) != default_host:
+        raise ValueError("Default-host profile differs from its schedule")
     if row.get("errors") != 0:
         raise ValueError("Worker validation failed")
     if (
@@ -104,7 +107,7 @@ def validate_sample(
     if reference_engine not in ("v0", "v1") or native_transport not in ("http", "websocket"):
         raise ValueError("Unknown scheduled reference engine or native transport")
     if native_transport == "websocket" and (
-        case != "oneshot_text" or v1_response_mode != "streaming"
+        (case != "oneshot_text" and not default_host) or v1_response_mode != "streaming"
     ):
         raise ValueError("WebSocket reproduction requires native final-only oneshot_text")
     if engine == "v1" and row.get("native_transport", "http") != native_transport:
@@ -253,6 +256,8 @@ def summarize(
     v1_response_mode="streaming",
     reference_engine="v0",
     native_transport="http",
+    reference_transport=None,
+    default_host=False,
 ):
     summary, identities = {}, {}
     for case, sides in records.items():
@@ -282,7 +287,10 @@ def summarize(
                     iterations=iterations,
                     v1_response_mode=v1_response_mode,
                     reference_engine=reference_engine,
-                    native_transport=native_transport,
+                    native_transport=reference_transport
+                    if side == "v0" and reference_transport
+                    else native_transport,
+                    default_host=default_host,
                 )
         fields = ["import_ms"]
         if case != "startup_import":
@@ -337,6 +345,16 @@ def summarize(
 def main():
     reject_inherited_overrides()
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--default-host-setup",
+        type=Path,
+        help="Container setup JSON; omit endpoint/transport overrides and verify actual Host/SNI",
+    )
+    parser.add_argument(
+        "--reference-transport",
+        choices=["http", "websocket"],
+        help="Expected wire for a v1 reference arm in default-host mode",
+    )
     parser.add_argument("--reference-engine", choices=["v0", "v1"], default="v0")
     parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
     parser.add_argument("--v0-python", type=Path, required=True)
@@ -353,7 +371,7 @@ def main():
         "--cases",
         nargs="+",
         choices=["startup_import", *WORKLOADS],
-        default=["startup_import", *WORKLOADS],
+        default=["startup_import", *[case for case in WORKLOADS if case != "input_512k"]],
     )
     parser.add_argument("--iterations", type=int)
     parser.add_argument("--timeout", type=float, default=600)
@@ -370,8 +388,24 @@ def main():
         or not args.v1_version.strip()
     ):
         parser.error("Use positive counts/timeout, distinct cases and explicit expected versions")
-    if args.native_transport == "websocket" and (
-        args.cases != ["oneshot_text"] or args.v1_response_mode != "streaming"
+    if args.reference_transport and (not args.default_host_setup or args.reference_engine != "v1"):
+        parser.error("Reference transport requires default-host mode with a v1 reference")
+    if args.default_host_setup:
+        args.default_host_setup = args.default_host_setup.resolve()
+        if args.v1_response_mode != "streaming" or any(
+            case == "startup_import"
+            or WORKLOADS[case].mode != "oneshot"
+            or WORKLOADS[case].stream
+            or WORKLOADS[case].tool_rounds
+            for case in args.cases
+        ):
+            parser.error("Default-host mode requires explicit fresh final-only no-tool cases")
+        if args.reference_engine == "v1" and not args.reference_transport:
+            parser.error("Declare the v1 reference arm's expected transport")
+    if (
+        args.native_transport == "websocket"
+        and not args.default_host_setup
+        and (args.cases != ["oneshot_text"] or args.v1_response_mode != "streaming")
     ):
         parser.error("WebSocket reproduction requires --cases oneshot_text and streaming mode")
     if args.v1_response_mode == "buffered" and any(
@@ -393,6 +427,17 @@ def main():
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(directory.glob("*.py"))
     }
+    if args.default_host_setup:
+        manifest.update(
+            {
+                "container-default-host/" + path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted((directory / "container-default-host").glob("*"))
+                if path.is_file()
+            }
+        )
+        manifest[str(args.default_host_setup)] = hashlib.sha256(
+            args.default_host_setup.read_bytes()
+        ).hexdigest()
     metadata = {
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "command": sys.argv,
@@ -412,6 +457,8 @@ def main():
         "expected_sdk_versions": expected_versions,
         "reference_engine": args.reference_engine,
         "native_transport": args.native_transport,
+        "reference_transport": args.reference_transport,
+        "default_host_setup": str(args.default_host_setup) if args.default_host_setup else None,
         "v1_response_mode": args.v1_response_mode,
         "completed": False,
         "rss_scope": "Unqualified raw process ru_maxrss only; no RSS comparison or verdict",
@@ -437,9 +484,16 @@ def main():
         "http_proxy",
         "https_proxy",
         "all_proxy",
+        "WS_PROXY",
+        "WSS_PROXY",
+        "SOCKS_PROXY",
+        "ws_proxy",
+        "wss_proxy",
+        "socks_proxy",
     ):
         environment.pop(name, None)
-    environment["NO_PROXY"] = environment["no_proxy"] = "127.0.0.1,localhost"
+    if not args.default_host_setup:
+        environment["NO_PROXY"] = environment["no_proxy"] = "127.0.0.1,localhost"
     environment["OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX"] = "1"
     environment["PYTHONHASHSEED"] = "0"
     try:
@@ -461,8 +515,15 @@ def main():
                         str(sample),
                     ]
                     engine = args.reference_engine if side == "v0" else "v1"
-                    if engine == "v1" and args.native_transport != "http":
-                        command += ["--native-transport", args.native_transport]
+                    scheduled_transport = (
+                        args.reference_transport
+                        if side == "v0" and args.reference_transport
+                        else args.native_transport
+                    )
+                    if engine == "v1" and scheduled_transport != "http":
+                        command += ["--native-transport", scheduled_transport]
+                    if args.default_host_setup:
+                        command += ["--default-host-setup", str(args.default_host_setup)]
                     if engine == "v1" and args.v1_response_mode == "buffered":
                         command += ["--response-mode", "buffered"]
                     if case == "startup_import":
@@ -547,7 +608,8 @@ def main():
                         iterations=args.iterations,
                         v1_response_mode=args.v1_response_mode,
                         reference_engine=args.reference_engine,
-                        native_transport=args.native_transport,
+                        native_transport=scheduled_transport,
+                        default_host=bool(args.default_host_setup),
                     )
                     records[case][side].append(data)
                     value = data.get("latency_p50_ms", data["import_ms"])
@@ -563,6 +625,8 @@ def main():
                 v1_response_mode=args.v1_response_mode,
                 reference_engine=args.reference_engine,
                 native_transport=args.native_transport,
+                reference_transport=args.reference_transport,
+                default_host=bool(args.default_host_setup),
             )
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             primary = summary[case]["primary"]
@@ -588,6 +652,19 @@ def main():
                     path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(directory.glob("*.py"))
                 }
+                if args.default_host_setup:
+                    after.update(
+                        {
+                            "container-default-host/" + path.name: hashlib.sha256(
+                                path.read_bytes()
+                            ).hexdigest()
+                            for path in sorted((directory / "container-default-host").glob("*"))
+                            if path.is_file()
+                        }
+                    )
+                    after[str(args.default_host_setup)] = hashlib.sha256(
+                        args.default_host_setup.read_bytes()
+                    ).hexdigest()
                 metadata["harness_sha256_end"] = after
                 metadata["harness_unchanged"] = after == manifest
                 metadata["deferred_postflight_signals"] = list(final_signals)
