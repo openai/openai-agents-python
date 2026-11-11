@@ -3403,6 +3403,18 @@ def _capture_opening_agent(
     )
 
 
+def _private_default_opening_candidates(
+    agent: Agent[Any, Any],
+    *,
+    atomic_first_turn: bool,
+    private_text_run: bool,
+    tools: Sequence[Tool[Any]],
+) -> tuple[bool, bool]:
+    """Capture default-provider candidates before narrowing atomic opening intent."""
+    eligible = atomic_first_turn and private_text_run and agent.provider is None
+    return eligible and bool(tools), eligible and not tools
+
+
 def _default_private_tls_profile(
     provider: NativeProvider, provider_config: Mapping[str, Any], websockets_enabled: bool
 ) -> bool:
@@ -3838,18 +3850,12 @@ class Session(Generic[ContextT, OutputT]):
                     tools=available,
                 )
             )
-            _private_wss_candidate = (
-                _atomic_first_turn
-                and _private_text_run
-                and agent.provider is None
-                and bool(available)
-            )
             # Owned defaults keep ordinary startup and its existing close custody.
-            _private_default_opening = (
-                _atomic_first_turn
-                and _private_text_run
-                and agent.provider is None
-                and not available
+            _private_wss_candidate, _private_default_opening = _private_default_opening_candidates(
+                agent,
+                atomic_first_turn=_atomic_first_turn,
+                private_text_run=_private_text_run,
+                tools=available,
             )
             _atomic_first_turn = _atomic_first_turn and agent.provider is not None
             environment = opening.environment
