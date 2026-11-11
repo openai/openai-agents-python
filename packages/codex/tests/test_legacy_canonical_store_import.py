@@ -256,13 +256,22 @@ async def test_imports_v0_mongo_items_and_batches_from_active_generation(generat
             [
                 {
                     "session_id": "old-session",
-                    "seq": 3,
+                    "seq": 6,
                     "generation": generation,
                     "message_data": [json.dumps(item) for item in V0_ITEMS[1:]],
                 },
+                *(
+                    {
+                        "session_id": "old-session",
+                        "seq": seq,
+                        "message_data": [],
+                        **legacy_generation,
+                    }
+                    for seq in range(2, 6)
+                ),
                 {
                     "session_id": "old-session",
-                    "seq": 4,
+                    "seq": 7,
                     "generation": generation + 1,
                     "message_data": json.dumps({"role": "user", "content": "retired generation"}),
                 },
@@ -275,7 +284,10 @@ async def test_imports_v0_mongo_items_and_batches_from_active_generation(generat
             ]
         )
         items = await store.read_legacy_history(
-            "old-session", sessions_collection="heads", messages_collection="messages"
+            "old-session",
+            sessions_collection="heads",
+            messages_collection="messages",
+            max_items=len(V0_ITEMS),
         )
         await verify_import_limits(
             partial(

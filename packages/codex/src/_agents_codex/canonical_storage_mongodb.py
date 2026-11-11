@@ -351,6 +351,8 @@ class MongoDBSessionStore:
                     generation if isinstance(generation, int) and generation else {"$in": [0, None]}
                 )
 
+                # A v0 pop can leave an empty batch after claiming its last item.
+                selector["message_data"] = {"$not": {"$size": 0}}
                 cursor = (
                     messages.find(selector, {"message_data": 1})
                     .sort("seq", 1)
@@ -363,8 +365,6 @@ class MongoDBSessionStore:
                     while rows := self._driver.call(cursor.to_list, length=1):
                         batch = rows[0]["message_data"]
                         records = batch if isinstance(batch, list) else [batch]
-                        if not records:
-                            raise ValueError("A v0 MongoDB history batch must contain an item")
                         count = len(items) + len(records)
                         check_legacy_history_size(count, encoded_bytes, max_items, max_bytes)
                         for item in records:
