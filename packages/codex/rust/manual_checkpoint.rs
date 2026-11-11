@@ -788,6 +788,7 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
     // as history, never as a pending effect or a destination grant.
     let mut search_receipts = HashSet::new();
     let mut patch_receipts = HashSet::new();
+    let mut patch_calls = HashSet::new();
     for item in history.iter().rev() {
         if matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))) {
             break;
@@ -814,6 +815,7 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
             }
             ResponseItem::ApplyPatchCall { call_id, .. } => {
                 if !crate::local_reconciliation::owns_application_patch(envelope)
+                    || !patch_calls.insert(call_id)
                     || !patch_receipts.remove(call_id)
                 {
                     return false;
@@ -1640,7 +1642,9 @@ mod apply_patch_portability_tests {
                 "operation":{"type":"delete_file","path":"application-owned"}
             }
         });
-        if owned { call["metadata"] = serde_json::json!({"sdk_application_tool":"apply_patch"}); }
+        if owned {
+            call["metadata"] = serde_json::json!({"sdk_application_tool":"apply_patch"});
+        }
         serde_json::from_value(serde_json::json!([
             call,
             {"type":"response_item","payload":{
@@ -1668,5 +1672,8 @@ mod apply_patch_portability_tests {
         history.push(output.clone());
         history.push(output);
         assert!(!portable_manual_actions(&history));
+        let mut duplicate_pairs = records(true);
+        duplicate_pairs.extend(records(true));
+        assert!(!portable_manual_actions(&duplicate_pairs));
     }
 }
