@@ -1,7 +1,9 @@
 """Optional speech pipelines with native Session execution.
 
 Speech input, synthesis and lifecycle types reuse the retained speech engine.
-Native speech begins only after output validation and completion acceptance.
+By default, native speech begins only after output validation and completion
+acceptance. Set ``NativeSessionVoiceWorkflow(..., early_speech=True)`` to stream
+text before validation. Playback can include text that later fails validation.
 Install the ``voice`` extra from the matching SDK source or preview wheel.
 For a native two-way speech session, use ``Session.realtime()`` and the types
 in ``agents.realtime``.
@@ -10,6 +12,7 @@ in ``agents.realtime``.
 from ..classic.voice import (
     AudioInput,
     OpenAISTTModel,
+    OpenAISTTTranscriptionSession,
     OpenAITTSModel,
     OpenAIVoiceModelProvider,
     StreamedAudioInput,
@@ -17,6 +20,7 @@ from ..classic.voice import (
     StreamedTranscriptionSession,
     STTModel,
     STTModelSettings,
+    STTWebsocketConnectionError,
     TTSCustomVoice,
     TTSModel,
     TTSModelSettings,
@@ -37,10 +41,12 @@ __all__ = [
     "AudioInput",
     "NativeSessionVoiceWorkflow",
     "OpenAISTTModel",
+    "OpenAISTTTranscriptionSession",
     "OpenAITTSModel",
     "OpenAIVoiceModelProvider",
     "STTModel",
     "STTModelSettings",
+    "STTWebsocketConnectionError",
     "StreamedAudioInput",
     "StreamedAudioResult",
     "StreamedTranscriptionSession",

@@ -571,7 +571,9 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
         ("true", "false", "success", "skipped", "skipped", False, False),
     ],
 )
+@pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
 def test_global_publication_failure_blocks_every_sdk_entry(
+    event: str,
     code: str,
     windows: str,
     linux_result: str,
@@ -585,6 +587,7 @@ def test_global_publication_failure_blocks_every_sdk_entry(
     ]
     values = {
         "inputs.native_only": False,
+        "github.event_name": event,
         "needs.changes.result": "success",
         "needs.changes.outputs.code": code,
         "needs.changes.outputs.windows": windows,
@@ -597,6 +600,30 @@ def test_global_publication_failure_blocks_every_sdk_entry(
     for name in ("native-linux", "native-macos"):
         assert _condition(jobs[name]["if"], values) is native
     assert _condition(jobs["native-windows"]["if"], values) is (native and windows == "true")
+
+
+@pytest.mark.parametrize("event", ["pull_request", "merge_group"])
+@pytest.mark.parametrize("windows_result", ["failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("failed_platform", [None, "linux", "macos"])
+def test_review_entries_tolerate_only_windows_publication_failure(
+    event: str, windows_result: str, failed_platform: str | None
+) -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    values = {
+        "github.event_name": event,
+        "inputs.native_only": False,
+        "needs.changes.result": "success",
+        "needs.changes.outputs.code": "true",
+        "needs.changes.outputs.windows": "true",
+        "needs.produce-linux.result": "failure" if failed_platform == "linux" else "success",
+        "needs.produce-macos.result": "failure" if failed_platform == "macos" else "success",
+        "needs.produce-windows.result": windows_result,
+    }
+    for name in ("lint", "build-docs", "native-linux", "native-macos"):
+        assert _condition(jobs[name]["if"], values) is (failed_platform is None)
+    assert not _condition(jobs["native-windows"]["if"], values)
 
 
 def test_qualification_repack_receives_verified_overlay_in_its_environment(
@@ -1042,6 +1069,7 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         )
         conditions = {
             "inputs.native_only": False,
+            "github.event_name": "workflow_dispatch",
             "needs.changes.result": "success",
             "needs.changes.outputs.code": "true",
             "needs.changes.outputs.windows": "true",

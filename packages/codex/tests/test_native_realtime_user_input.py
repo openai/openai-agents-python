@@ -145,12 +145,18 @@ async def test_response_overrides_follow_the_coalesced_request_once(realtime_pee
 
         await peer.socket.send_json({"type": "response.done", "response": {"id": "active"}})
         configured = await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
-        assert configured["response"] == {
+        configured_response = dict(configured["response"])
+        metadata = configured_response.pop("metadata")
+        assert set(metadata) == {"codex_response_id"}
+        assert isinstance(metadata["codex_response_id"], str) and metadata["codex_response_id"]
+        assert configured_response == {
             "instructions": "Greet the caller.",
             "output_modalities": ["text"],
             "max_output_tokens": 40,
         }
-        await peer.socket.send_json({"type": "response.created", "response": {"id": "configured"}})
+        await peer.socket.send_json(
+            {"type": "response.created", "response": {"id": "configured", "metadata": metadata}}
+        )
         await peer.socket.send_json({"type": "response.done", "response": {"id": "configured"}})
         await owner.request_response()
         default = await peer.frame(

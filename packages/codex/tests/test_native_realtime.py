@@ -87,12 +87,16 @@ class RealtimePeer:
                 elif payload["type"] == "response.create":
                     self.response_count += 1
                     response_id = f"voice-response-{self.response_count}"
-                    await socket.send_json(
-                        {"type": "response.created", "response": {"id": response_id}}
-                    )
-                    await socket.send_json(
-                        {"type": "response.done", "response": {"id": response_id}}
-                    )
+                    response = {
+                        "id": response_id,
+                        "conversation_id": None
+                        if payload.get("response", {}).get("conversation") == "none"
+                        else "fixture-conversation",
+                    }
+                    if "metadata" in payload.get("response", {}):
+                        response["metadata"] = deepcopy(payload["response"]["metadata"])
+                    await socket.send_json({"type": "response.created", "response": response})
+                    await socket.send_json({"type": "response.done", "response": response})
         finally:
             self.socket = None
             self.disconnected.set()
@@ -128,14 +132,17 @@ class RealtimePeer:
         response_done: bool = True,
     ) -> None:
         assert self.socket is not None
-        if response_id is not None:
-            await self.socket.send_json(
-                {"type": "response.created", "response": {"id": response_id}}
-            )
+        response_id = response_id or f"response-{call_id}"
+        await self.socket.send_json(
+            {
+                "type": "response.created",
+                "response": {"id": response_id, "conversation_id": "fixture-conversation"},
+            }
+        )
         await self.socket.send_json(
             {
                 "type": "conversation.item.done",
-                **({"response_id": response_id} if response_id is not None else {}),
+                "response_id": response_id,
                 "item": {
                     "id": f"item-{call_id}",
                     "type": "function_call",
@@ -145,7 +152,7 @@ class RealtimePeer:
                 },
             }
         )
-        if response_id is not None and response_done:
+        if response_done:
             await self.socket.send_json({"type": "response.done", "response": {"id": response_id}})
 
     async def function(self, name: str, arguments: dict[str, Any], call_id: str) -> None:

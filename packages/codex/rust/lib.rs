@@ -768,11 +768,20 @@ impl NativeThread {
             .is_some_and(|control| control.check(nonce)))
     }
 
-    fn _configure_native_interception(&self, rules: &str) -> PyResult<()> {
+    #[pyo3(signature = (rules, realtime_mcp_tools = None))]
+    fn _configure_native_interception(
+        &self,
+        rules: &str,
+        realtime_mcp_tools: Option<&str>,
+    ) -> PyResult<()> {
         let rules = serde_json::from_str(rules).map_err(py_error)?;
+        let realtime_mcp_tools = realtime_mcp_tools
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(py_error)?;
         self.native_interception()?
             .ok_or_else(|| py_error("Codex thread is closed"))?
-            .configure_tools(rules)
+            .configure_tools_with_realtime(rules, realtime_mcp_tools)
             .map_err(py_error)
     }
 
@@ -1985,6 +1994,97 @@ impl NativeThread {
             .await
             .map_err(py_error)?;
             serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _admit_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        roster_json: String,
+        root_id: String,
+        expected_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let expected = serde_json::from_str(&expected_json).map_err(py_error)?;
+            let receipt = agent_profiles::admit_realtime_graph(
+                &inner,
+                &generation,
+                &roster_json,
+                &root_id,
+                expected,
+            )
+            .await;
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let Some(tools) = inner
+                        .thread
+                        .thread_extension_data()
+                        .get::<python_tools::PythonTools>()
+                    else {
+                        return Err(py_error(error));
+                    };
+                    serde_json::json!({
+                        "error": error.to_string(),
+                        "generation_high_water": tools.generation_high_water(),
+                    })
+                }
+            };
+            serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _discard_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        receipt_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = serde_json::from_str(&receipt_json).map_err(py_error)?;
+            agent_profiles::discard_realtime_graph(&inner.thread, &generation, &receipt)
+                .map_err(py_error)
+        })
+    }
+
+    fn _restore_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = agent_profiles::restore_realtime_graph(&inner.thread, &generation)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _realtime_agent_source<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        receipt_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = serde_json::from_str(&receipt_json).map_err(py_error)?;
+            let snapshot = agent_profiles::realtime_source(&inner.thread, &generation, receipt)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&snapshot).map_err(py_error)
         })
     }
 

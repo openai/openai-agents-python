@@ -23,6 +23,7 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
+from agents.realtime import realtime_handoff
 from examples.codex.validated_artifact import ArtifactContext, publish_xml
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -61,6 +62,58 @@ def declared_names(request: dict[str, Any]) -> set[str]:
         elif "name" in group:
             names.add(group["name"])
     return names
+
+
+async def test_code_mode_excludes_handoffs_but_keeps_direct_profile_transition(
+    responses: ResponsesFixture,
+) -> None:
+    class TransferInput(BaseModel):
+        reason: str
+
+    effects: list[str] = []
+    first = Agent(name="B", instructions="Destination B", programmatic_tool_calling=True)
+    second = Agent(name="C", instructions="Destination C", programmatic_tool_calling=True)
+    source = Agent(
+        name="A",
+        instructions="Original source",
+        provider=provider(responses),
+        programmatic_tool_calling=True,
+        handoffs=[
+            realtime_handoff(
+                first,
+                name="route_b",
+                input_type=TransferInput,
+                on_handoff=lambda _context, _payload: effects.append("B"),
+            ),
+            realtime_handoff(
+                second,
+                name="route_c",
+                input_type=TransferInput,
+                on_handoff=lambda _context, _payload: effects.append("C"),
+            ),
+        ],
+    )
+    responses.respond(
+        code_call(
+            'for (const name of ["route_b", "route_c"]) { '
+            'try { await tools[name]({reason:"nested"}); } '
+            "catch (error) { text(String(error)); } }",
+            "nested-handoffs",
+        )
+    )
+    responses.respond(assistant_output("Source response"))
+    responses.respond(function_call("route_b", {"reason": "direct"}, "direct-handoff"))
+    responses.respond(assistant_output("Destination response"))
+    async with timeout(45), source.session() as session:
+        result = await (await session.submit("Try both nested handoffs")).get_result()
+        assert result.final_output == "Source response"
+        assert await session.get_active_agent() is source
+        assert effects == []
+
+        direct = await (await session.submit("Transfer directly to B")).get_result()
+        assert direct.final_output == "Destination response"
+        assert await session.get_active_agent() is first
+        assert effects == ["B"]
 
 
 async def test_code_mode_python_validation_runs_before_immediate_code_consumers(
