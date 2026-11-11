@@ -1,10 +1,13 @@
 #include <bsm/libbsm.h>
 #include <dispatch/dispatch.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/task_special_ports.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +16,18 @@
 #include <unistd.h>
 #include <xpc/xpc.h>
 
-enum { canary_id = -2047655148, registered_slot_limit = 3 };
+enum {
+    canary_id = -2047655148,
+    rendezvous_id = -2047655147,
+    control_id = -2047655146,
+    transfer_id = -2047655145,
+    registered_slot_limit = 3,
+    stock_request_size = 200,
+    startup_timeout = 4000,
+    observation_window = 3000,
+    send_timeout = 500,
+    sink_timeout = 15000,
+};
 
 struct registry_readback {
     kern_return_t status;
@@ -31,7 +45,8 @@ struct shape {
     unsigned matched;
     unsigned first_size;
     bool first_complex;
-    bool first_reply;
+    mach_msg_type_name_t disposition;
+    mach_port_t reply;
     bool invalid;
 };
 
@@ -121,31 +136,150 @@ static void send_canary(mach_port_t replacement) {
                      MACH_PORT_NULL) == MACH_MSG_SUCCESS, "canary send");
 }
 
-static void stock_child(const char *mode, int report, int gate) {
-    const bool baseline = strncmp(mode, "baseline-", 9) == 0;
-    const bool canary = strcmp(mode, "canary") == 0;
-    mach_port_t replacement = baseline ? MACH_PORT_NULL : check_replacement();
-    if (!baseline && !canary) {
+
+struct port_message {
+    mach_msg_header_t header;
+    mach_msg_body_t body;
+    mach_msg_port_descriptor_t port;
+};
+
+_Static_assert(offsetof(struct port_message, port) ==
+               sizeof(mach_msg_header_t) + sizeof(mach_msg_body_t),
+               "single port descriptor layout");
+_Static_assert(sizeof(struct port_message) ==
+               sizeof(mach_msg_header_t) + sizeof(mach_msg_body_t) +
+                   sizeof(mach_msg_port_descriptor_t),
+               "single port descriptor message size");
+
+union received_message {
+    mach_msg_header_t header;
+    mach_msg_audit_trailer_t alignment;
+    struct port_message port;
+    unsigned char bytes[8192];
+};
+
+struct fixture {
+    pid_t pid;
+    int report;
+    int gate;
+    int pre_exec;
+};
+
+static unsigned long long milliseconds(void) {
+    struct timespec now;
+    require(clock_gettime(CLOCK_MONOTONIC, &now) == 0, "clock");
+    return (unsigned long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static mach_port_t make_receiver(void) {
+    mach_port_t receive = MACH_PORT_NULL;
+    require(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &receive) ==
+                KERN_SUCCESS, "fixture receive port");
+    return receive;
+}
+
+static mach_msg_return_t send_message(mach_msg_header_t *header) {
+    return mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT | MACH_SEND_INTERRUPT,
+                    header->msgh_size, 0, MACH_PORT_NULL, send_timeout, MACH_PORT_NULL);
+}
+
+static mach_msg_return_t send_port(mach_port_t destination, mach_msg_id_t id,
+                                  mach_port_t right, mach_msg_type_name_t disposition) {
+    struct port_message message = {
+        .header = {
+            .msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) | MACH_MSGH_BITS_COMPLEX,
+            .msgh_size = sizeof(message),
+            .msgh_remote_port = destination,
+            .msgh_id = id,
+        },
+        .body = {.msgh_descriptor_count = 1},
+        .port = {.name = right, .disposition = disposition, .type = MACH_MSG_PORT_DESCRIPTOR},
+    };
+    return send_message(&message.header);
+}
+
+static mach_msg_return_t receive_message(union received_message *message, mach_port_t port,
+                                         mach_msg_timeout_t timeout) {
+    return mach_msg(&message->header,
+                    MACH_RCV_MSG | MACH_RCV_TIMEOUT | MACH_RCV_LARGE |
+                        MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |
+                        MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),
+                    0, sizeof(*message), port, timeout, MACH_PORT_NULL);
+}
+
+static bool has_sender(const union received_message *message, pid_t expected) {
+    const size_t size = message->header.msgh_size;
+    const size_t aligned_size = (size + 3u) & ~(size_t)3u;
+    if (size < sizeof(message->header) ||
+        aligned_size > sizeof(*message) - sizeof(mach_msg_audit_trailer_t)) {
+        return false;
+    }
+    mach_msg_audit_trailer_t trailer;
+    memcpy(&trailer, message->bytes + aligned_size, sizeof(trailer));
+    return trailer.msgh_trailer_type == MACH_MSG_TRAILER_FORMAT_0 &&
+           trailer.msgh_trailer_size >= sizeof(trailer) &&
+           audit_token_to_pid(trailer.msgh_audit) == expected;
+}
+
+static bool fixture_port_message(const union received_message *message, pid_t sender,
+                                 mach_msg_id_t id, mach_msg_type_name_t disposition) {
+    const struct port_message *port = &message->port;
+    return has_sender(message, sender) && port->header.msgh_size == sizeof(*port) &&
+           port->header.msgh_id == id && (port->header.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+           port->header.msgh_remote_port == MACH_PORT_NULL &&
+           MACH_MSGH_BITS_REMOTE(port->header.msgh_bits) == 0 &&
+           port->header.msgh_voucher_port == MACH_PORT_NULL &&
+           MACH_MSGH_BITS_VOUCHER(port->header.msgh_bits) == 0 &&
+           port->body.msgh_descriptor_count == 1 && port->port.type == MACH_MSG_PORT_DESCRIPTOR &&
+           port->port.disposition == disposition && MACH_PORT_VALID(port->port.name);
+}
+
+static bool live_right(const char *phase, mach_port_t port, mach_port_type_t expected) {
+    mach_port_type_t type = 0;
+    kern_return_t status = mach_port_type(mach_task_self(), port, &type);
+    fprintf(stderr, "%s right_type_status=%d right_type=%#x right_dead=%d\n",
+            phase, status, type, (type & MACH_PORT_TYPE_DEAD_NAME) != 0);
+    const mach_port_type_t rights = MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE |
+                                    MACH_PORT_TYPE_RECEIVE | MACH_PORT_TYPE_DEAD_NAME;
+    return status == KERN_SUCCESS && (type & rights) == expected;
+}
+
+static void inert_sink(int report, pid_t observer) {
+    mach_port_t bootstrap = check_replacement();
+    mach_port_t receive = make_receiver();
+    require(send_port(bootstrap, rendezvous_id, receive, MACH_MSG_TYPE_MAKE_SEND) ==
+                MACH_MSG_SUCCESS, "sink rendezvous send");
+
+    union received_message message;
+    mach_msg_return_t status = receive_message(&message, receive, sink_timeout);
+    fprintf(stderr, "sink receive_status=%#x\n", (unsigned)status);
+    bool received = status == MACH_MSG_SUCCESS;
+    bool verified = received &&
+                    fixture_port_message(&message, observer, transfer_id, MACH_MSG_TYPE_PORT_SEND_ONCE) &&
+                    live_right("sink", message.port.port.name, MACH_PORT_TYPE_SEND_ONCE);
+    if (received) {
+        mach_msg_destroy(&message.header);
+    }
+    mach_port_destroy(mach_task_self(), receive);
+    require(verified, "sink receipt");
+    signal_phase(report, 'D');
+}
+
+static void request_child(bool stock, int report, int gate) {
+    mach_port_t replacement = check_replacement();
+    if (stock) {
         send_canary(replacement);
     }
     signal_phase(report, 'R');
     char go;
-    if (read(gate, &go, 1) != 1) {
-        _exit(2);
-    }
+    require(read(gate, &go, 1) == 1 && go == 'G', "request gate");
     signal_phase(report, 'E');
-    if (canary) {
-        send_canary(replacement);
-        _exit(0);
-    }
-    if (strcmp(mode, "idle") != 0) {
+    mach_port_t control_reply = MACH_PORT_NULL;
+    if (stock) {
         char name[96];
         snprintf(name, sizeof(name), "org.example.stock-xpc-observation.%08x.%08x",
                  arc4random(), arc4random());
-        const size_t length = strlen(mode);
-        const bool privileged = length >= 10 && strcmp(mode + length - 10, "privileged") == 0;
-        xpc_connection_t connection = xpc_connection_create_mach_service(
-            name, NULL, privileged ? XPC_CONNECTION_MACH_SERVICE_PRIVILEGED : 0);
+        xpc_connection_t connection = xpc_connection_create_mach_service(name, NULL, 0);
         require(connection != NULL, "public named XPC connection");
         xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
             if (event == XPC_ERROR_CONNECTION_INVALID) {
@@ -153,55 +287,157 @@ static void stock_child(const char *mode, int report, int gate) {
             }
         });
         xpc_connection_resume(connection);
-        signal_phase(report, 'A');
+    } else {
+        control_reply = make_receiver();
+        mach_msg_header_t message = {
+            .msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE),
+            .msgh_size = sizeof(message),
+            .msgh_remote_port = replacement,
+            .msgh_local_port = control_reply,
+            .msgh_id = control_id,
+        };
+        require(send_message(&message) == MACH_MSG_SUCCESS, "generic Mach request send");
     }
-    for (;;) {
-        pause();
+    signal_phase(report, 'A');
+
+    // The observer holds its gate open until settlement. EOF also handles observer exit.
+    require(read(gate, &go, 1) == 0, "request settlement");
+    if (MACH_PORT_VALID(control_reply)) {
+        mach_port_destroy(mach_task_self(), control_reply);
     }
 }
 
-static void observe(mach_port_t sink, pid_t child, struct shape *shape) {
-    union {
-        mach_msg_header_t header;
-        mach_msg_audit_trailer_t alignment;
-        unsigned char bytes[8192];
-    } message;
-    mach_msg_return_t result = mach_msg(
-        &message.header,
-        MACH_RCV_MSG | MACH_RCV_TIMEOUT | MACH_RCV_LARGE |
-            MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |
-            MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),
-        0, sizeof(message), sink, 25, MACH_PORT_NULL);
-    if (result == MACH_RCV_TIMED_OUT) {
+static struct fixture spawn_fixture(const char *binary, const char *role) {
+    int report[2], gate[2], pre_exec[2];
+    require(pipe(report) == 0 && pipe(gate) == 0 && pipe(pre_exec) == 0 &&
+            fcntl(report[0], F_SETFL, O_NONBLOCK) == 0 &&
+            fcntl(report[0], F_SETFD, FD_CLOEXEC) == 0 &&
+            fcntl(gate[1], F_SETFD, FD_CLOEXEC) == 0 &&
+            fcntl(pre_exec[0], F_SETFD, FD_CLOEXEC) == 0, "fixture control pipes");
+    char report_arg[16], gate_arg[16], observer_arg[16];
+    snprintf(report_arg, sizeof(report_arg), "%d", report[1]);
+    snprintf(gate_arg, sizeof(gate_arg), "%d", gate[0]);
+    snprintf(observer_arg, sizeof(observer_arg), "%d", getpid());
+
+    pid_t child = fork();
+    require(child >= 0, "fixture fork");
+    if (child == 0) {
+        close(report[0]);
+        close(gate[1]);
+        close(pre_exec[0]);
+        struct pre_exec_readback readback = {
+            .clear = mach_ports_register(mach_task_self(), NULL, 0),
+        };
+        bool clean = readback.clear == KERN_SUCCESS &&
+                     inspect_registry(&readback.registry, MACH_PORT_NULL);
+        if (write(pre_exec[1], &readback, sizeof(readback)) != (ssize_t)sizeof(readback) ||
+            !clean) {
+            _exit(3);
+        }
+        close(pre_exec[1]);
+        execl(binary, binary, role, report_arg, gate_arg, observer_arg, (char *)NULL);
+        _exit(4);
+    }
+    close(report[1]);
+    close(gate[0]);
+    close(pre_exec[1]);
+    return (struct fixture){.pid = child, .report = report[0], .gate = gate[1], .pre_exec = pre_exec[0]};
+}
+
+static bool read_within(int fd, void *buffer, size_t size, int timeout) {
+    struct pollfd input = {.fd = fd, .events = POLLIN};
+    return poll(&input, 1, timeout) == 1 && (input.revents & POLLIN) &&
+           read(fd, buffer, size) == (ssize_t)size;
+}
+
+static bool check_pre_exec(struct fixture *fixture, const char *role) {
+    struct pre_exec_readback readback;
+    bool reported = read_within(fixture->pre_exec, &readback, sizeof(readback), startup_timeout);
+    close(fixture->pre_exec);
+    if (!reported) {
+        fprintf(stderr, "%s registered pre-exec readback missing\n", role);
+        return false;
+    }
+    fprintf(stderr, "%s registered pre-exec clear status=%d\n", role, readback.clear);
+    if (readback.clear != KERN_SUCCESS) {
+        return false;
+    }
+    print_registry("pre-exec", &readback.registry);
+    return readback.registry.status == KERN_SUCCESS &&
+           readback.registry.count == registered_slot_limit &&
+           memcmp(readback.registry.slots, "NNN", registered_slot_limit) == 0;
+}
+
+static bool finish_fixture(struct fixture fixture, const char *role) {
+    close(fixture.gate);
+    int status;
+    unsigned long long deadline = milliseconds() + 1000;
+    for (;;) {
+        pid_t result = waitpid(fixture.pid, &status, WNOHANG);
+        if (result == fixture.pid) {
+            break;
+        }
+        require(result == 0 || errno == EINTR, "wait for fixture");
+        if (milliseconds() >= deadline) {
+            kill(fixture.pid, SIGKILL);
+            do {
+                result = waitpid(fixture.pid, &status, 0);
+            } while (result < 0 && errno == EINTR);
+            require(result == fixture.pid, "join fixture");
+            break;
+        }
+        struct timespec delay = {.tv_nsec = 10000000};
+        nanosleep(&delay, NULL);
+    }
+    close(fixture.report);
+    fprintf(stderr, "%s exited=%d status=%d signal=%d\n", role, WIFEXITED(status),
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+            WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static void observe(mach_port_t port, pid_t sender, bool stock, bool collect_reply,
+                    struct shape *shape, mach_msg_timeout_t timeout) {
+    union received_message message;
+    mach_msg_return_t status = receive_message(&message, port, timeout);
+    if (status == MACH_RCV_TIMED_OUT) {
         return;
     }
-    if (result != MACH_MSG_SUCCESS) {
+    if (status != MACH_MSG_SUCCESS) {
+        fprintf(stderr, "observer receive_status=%#x\n", (unsigned)status);
         shape->invalid = true;
         return;
     }
 
-    const size_t size = message.header.msgh_size;
-    const size_t aligned_size = (size + 3u) & ~(size_t)3u;
-    if (size < sizeof(message.header) ||
-        aligned_size > sizeof(message) - sizeof(mach_msg_audit_trailer_t)) {
+    mach_msg_header_t *header = &message.header;
+    bool complex = (header->msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0;
+    if (!has_sender(&message, sender)) {
         shape->invalid = true;
-    } else {
-        mach_msg_audit_trailer_t trailer;
-        memcpy(&trailer, message.bytes + aligned_size, sizeof(trailer));
-        if (trailer.msgh_trailer_size < sizeof(trailer) ||
-            audit_token_to_pid(trailer.msgh_audit) != child) {
-            shape->invalid = true;
-        } else if (message.header.msgh_id == canary_id && size == sizeof(message.header) &&
-                   !(message.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
-                   !MACH_PORT_VALID(message.header.msgh_remote_port)) {
+    } else if (header->msgh_id == canary_id) {
+        if (stock && !collect_reply && header->msgh_size == sizeof(*header) && !complex &&
+            header->msgh_remote_port == MACH_PORT_NULL && MACH_MSGH_BITS_REMOTE(header->msgh_bits) == 0 &&
+            header->msgh_voucher_port == MACH_PORT_NULL && MACH_MSGH_BITS_VOUCHER(header->msgh_bits) == 0) {
             ++shape->canary;
-        } else if (shape->matched++ == 0) {
-            shape->first_size = message.header.msgh_size;
-            shape->first_complex = (message.header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0;
-            shape->first_reply = MACH_PORT_VALID(message.header.msgh_remote_port);
+        } else {
+            shape->invalid = true;
+        }
+    } else if (shape->matched++ == 0) {
+        shape->first_size = header->msgh_size;
+        shape->first_complex = complex;
+        shape->disposition = MACH_MSGH_BITS_REMOTE(header->msgh_bits);
+        bool expected = stock ? header->msgh_size == stock_request_size
+                              : header->msgh_id == control_id && header->msgh_size == sizeof(*header);
+        if (collect_reply && expected && !complex &&
+            header->msgh_voucher_port == MACH_PORT_NULL &&
+            MACH_MSGH_BITS_VOUCHER(header->msgh_bits) == 0 &&
+            shape->disposition == MACH_MSG_TYPE_PORT_SEND_ONCE &&
+            MACH_PORT_VALID(header->msgh_remote_port)) {
+            shape->reply = header->msgh_remote_port;
+            header->msgh_remote_port = MACH_PORT_NULL;
+            header->msgh_bits &= ~MACH_MSGH_BITS_REMOTE_MASK;
         }
     }
-    mach_msg_destroy(&message.header);
+    mach_msg_destroy(header);
 }
 
 static void read_progress(int fd, struct progress *progress) {
@@ -217,129 +453,148 @@ static void read_progress(int fd, struct progress *progress) {
     }
 }
 
-static unsigned long long milliseconds(void) {
-    struct timespec now;
-    require(clock_gettime(CLOCK_MONOTONIC, &now) == 0, "clock");
-    return (unsigned long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
-}
-
-static void receive_for(mach_port_t sink, pid_t child, int report,
+static void receive_for(mach_port_t port, struct fixture source, bool stock, bool collect_reply,
                         struct progress *progress, struct shape *shape,
                         unsigned duration, bool until_ready) {
     unsigned long long end = milliseconds() + duration;
     while (!shape->invalid && milliseconds() < end) {
-        read_progress(report, progress);
+        read_progress(source.report, progress);
         if (until_ready && progress->ready) {
             break;
         }
-        observe(sink, child, shape);
+        observe(port, source.pid, stock, collect_reply, shape, 25);
     }
-    read_progress(report, progress);
+    read_progress(source.report, progress);
 }
 
-static void print_shape(const char *phase, struct shape shape) {
-    printf(" %s=%u/%u/%d/%d", phase, shape.matched, shape.first_size,
-           shape.first_complex, shape.first_reply);
+static mach_port_t receive_rendezvous(mach_port_t port, pid_t sink) {
+    union received_message message;
+    mach_msg_return_t status = receive_message(&message, port, startup_timeout);
+    fprintf(stderr, "rendezvous receive_status=%#x\n", (unsigned)status);
+    if (status != MACH_MSG_SUCCESS) {
+        return MACH_PORT_NULL;
+    }
+    mach_port_t destination = MACH_PORT_NULL;
+    if (fixture_port_message(&message, sink, rendezvous_id, MACH_MSG_TYPE_PORT_SEND) &&
+        live_right("rendezvous", message.port.port.name, MACH_PORT_TYPE_SEND)) {
+        destination = message.port.port.name;
+        message.port.port.name = MACH_PORT_NULL;
+    }
+    mach_msg_destroy(&message.header);
+    return destination;
 }
 
-static bool run(const char *binary, const char *mode) {
-    mach_port_t sink = MACH_PORT_NULL;
-    require(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sink)
-                == KERN_SUCCESS &&
-            mach_port_insert_right(mach_task_self(), sink, sink, MACH_MSG_TYPE_MAKE_SEND)
-                == KERN_SUCCESS, "inert receive port");
-
-    int report[2], gate[2], pre_exec[2];
-    require(pipe(report) == 0 && pipe(gate) == 0 && pipe(pre_exec) == 0 &&
-            fcntl(report[0], F_SETFL, O_NONBLOCK) == 0, "control pipes");
-    char report_arg[16], gate_arg[16];
-    snprintf(report_arg, sizeof(report_arg), "%d", report[1]);
-    snprintf(gate_arg, sizeof(gate_arg), "%d", gate[0]);
-
-    const bool baseline = strncmp(mode, "baseline-", 9) == 0;
-    const bool canary = strcmp(mode, "canary") == 0;
-    const bool idle = strcmp(mode, "idle") == 0;
-    // XNU inherits the bootstrap slot, but not an arbitrary parent port name.
-    require(task_set_bootstrap_port(mach_task_self(), sink) == KERN_SUCCESS,
-            "assign inert task bootstrap port");
-    pid_t child = fork();
-    require(child >= 0, "fork");
-    if (child == 0) {
-        close(report[0]);
-        close(gate[1]);
-        close(pre_exec[0]);
-        struct pre_exec_readback readback = {
-            .clear = mach_ports_register(mach_task_self(), NULL, 0),
-        };
-        bool clean = readback.clear == KERN_SUCCESS &&
-                     inspect_registry(&readback.registry, MACH_PORT_NULL);
-        // Keep stdio out of the forked child until exec.
-        if (write(pre_exec[1], &readback, sizeof(readback)) != (ssize_t)sizeof(readback) ||
-            !clean) {
-            _exit(3);
-        }
-        close(pre_exec[1]);
-        execl(binary, binary, mode, report_arg, gate_arg, (char *)NULL);
-        _exit(4);
-    }
-    close(report[1]);
-    close(gate[0]);
-    close(pre_exec[1]);
-
+static int observe_request(const char *binary, const char *role, bool stock, mach_port_t port,
+                           struct fixture sink, mach_port_t destination) {
+    struct fixture source = spawn_fixture(binary, role);
     struct progress progress = {0};
-    struct shape startup = {0}, lookup = {0};
-    receive_for(sink, child, report[0], &progress, &startup, 4000, true);
-    if (progress.ready && !startup.invalid) {
-        receive_for(sink, child, report[0], &progress, &startup, 200, false);
-        unsigned expected_canary = baseline || canary ? 0 : 1;
-        if (!startup.invalid && startup.canary == expected_canary &&
-            write(gate[1], "G", 1) == 1) {
-            receive_for(sink, child, report[0], &progress, &lookup,
-                        canary || idle ? 900 : 3000, false);
+    struct shape startup = {0}, lookup = {0}, settlement = {0};
+    if (check_pre_exec(&source, role)) {
+        receive_for(port, source, stock, false, &progress, &startup, startup_timeout, true);
+        if (progress.ready && !startup.invalid) {
+            receive_for(port, source, stock, false, &progress, &startup, 200, false);
+            if (!startup.invalid && startup.canary == (stock ? 1u : 0u) &&
+                startup.matched == 0 && write(source.gate, "G", 1) == 1) {
+                receive_for(port, source, stock, true, &progress, &lookup, observation_window, false);
+            }
         }
     }
-    close(gate[1]);
-    kill(child, SIGKILL);
+
+    fprintf(stderr,
+            "%s ready=%d entered=%d resumed=%d unavailable=%d startup_canary=%u startup_other=%u "
+            "lookup_count=%u lookup_canary=%u lookup_size=%u complex=%d disposition=%u invalid=%d\n",
+            role, progress.ready, progress.entered, progress.resumed, progress.unavailable,
+            startup.canary, startup.matched, lookup.matched, lookup.canary, lookup.first_size,
+            lookup.first_complex, lookup.disposition, startup.invalid || lookup.invalid);
+    int outcome = 1;
+    if (progress.ready && progress.entered && progress.resumed && !startup.invalid &&
+        !lookup.invalid && lookup.matched == 1 && lookup.canary == 0 && MACH_PORT_VALID(lookup.reply) &&
+        live_right("observer", lookup.reply, MACH_PORT_TYPE_SEND_ONCE)) {
+        fprintf(stderr, "%s transfer_attempt=1\n", role);
+        mach_msg_return_t status = send_port(destination, transfer_id, lookup.reply,
+                                             MACH_MSG_TYPE_MOVE_SEND_ONCE);
+        fprintf(stderr, "%s transfer_status=%#x\n", role, (unsigned)status);
+        // Task exit cleans up any residual name after a failed send.
+        if (status == MACH_MSG_SUCCESS) {
+            char ack;
+            bool dropped = read_within(sink.report, &ack, 1, 1500) && ack == 'D';
+            receive_for(port, source, stock, false, &progress, &settlement, 200, false);
+            fprintf(stderr, "%s sink_drop_ack=%d settlement_extra=%u invalid=%d\n",
+                    role, dropped, settlement.canary + settlement.matched, settlement.invalid);
+            outcome = dropped && !settlement.invalid &&
+                      settlement.canary == 0 && settlement.matched == 0 ? 0 : 1;
+        } else if (status == MACH_SEND_INVALID_RIGHT) {
+            fprintf(stderr, "%s result=kernel_invalid_right\n", role);
+            outcome = 10;
+        } else if (status == MACH_SEND_TIMED_OUT) {
+            fprintf(stderr, "%s result=send_timeout\n", role);
+        }
+    }
+    bool source_exited = finish_fixture(source, role);
+    return !source_exited ? 1 : outcome;
+}
+
+static int run_arm(const char *binary, const char *role, bool stock) {
+    mach_port_t port = make_receiver();
+    require(mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND) ==
+                KERN_SUCCESS, "fixture bootstrap send right");
+    require(task_set_bootstrap_port(mach_task_self(), port) == KERN_SUCCESS,
+            "assign inert task bootstrap port");
+    struct fixture sink = spawn_fixture(binary, "sink");
+    mach_port_t destination = MACH_PORT_NULL;
+    if (check_pre_exec(&sink, "sink")) {
+        destination = receive_rendezvous(port, sink.pid);
+    }
+    int outcome = MACH_PORT_VALID(destination)
+                      ? observe_request(binary, role, stock, port, sink, destination)
+                      : 1;
+    if (MACH_PORT_VALID(destination)) {
+        mach_port_deallocate(mach_task_self(), destination);
+    }
+    bool sink_exited = finish_fixture(sink, "sink");
+    mach_port_destroy(mach_task_self(), port);
+    return outcome == 0 && !sink_exited ? 1 : outcome;
+}
+
+static int supervise(const char *binary, const char *role, bool stock) {
+    pid_t observer = fork();
+    require(observer >= 0, "observer fork");
+    if (observer == 0) {
+        _exit(run_arm(binary, role, stock));
+    }
     int status;
-    require(waitpid(child, &status, 0) == child, "join probe child");
-    read_progress(report[0], &progress);
-    close(report[0]);
-    mach_port_destroy(mach_task_self(), sink);
-
-    struct pre_exec_readback readback;
-    bool reported = read(pre_exec[0], &readback, sizeof(readback)) == (ssize_t)sizeof(readback);
-    close(pre_exec[0]);
-    if (reported) {
-        fprintf(stderr, "registered pre-exec clear status=%d\n", readback.clear);
-        if (readback.clear == KERN_SUCCESS) {
-            print_registry("pre-exec", &readback.registry);
-        }
-    } else {
-        fprintf(stderr, "registered pre-exec readback missing\n");
-    }
-
-    printf("%s ready=%d entered=%d resumed=%d unavailable=%d invalid_shape=%d", mode,
-           progress.ready, progress.entered, progress.resumed, progress.unavailable,
-           startup.invalid || lookup.invalid);
-    printf(" canary=%u/%u", startup.canary, lookup.canary);
-    print_shape("startup", startup);
-    print_shape("lookup", lookup);
-    putchar('\n');
-    fflush(stdout);
-
-    return reported && progress.ready && progress.entered && progress.resumed &&
-           !startup.invalid && !lookup.invalid && startup.canary == 1 &&
-           lookup.canary == 0 && lookup.matched > 0;
+    pid_t result;
+    do {
+        result = waitpid(observer, &status, 0);
+    } while (result < 0 && errno == EINTR);
+    require(result == observer, "join observer");
+    fprintf(stderr, "%s observer_exited=%d status=%d signal=%d\n", role, WIFEXITED(status),
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+            WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc == 4) {
-        require(strcmp(argv[1], "ordinary") == 0, "ordinary probe mode");
-        stock_child(argv[1], atoi(argv[2]), atoi(argv[3]));
+    require(argv[0][0] == '/' && getuid() != 0, "unprivileged launcher");
+    if (argc == 5) {
+        int report = atoi(argv[2]), gate = atoi(argv[3]);
+        pid_t observer = atoi(argv[4]);
+        require(observer > 1 && observer == getppid(), "fixture observer");
+        if (strcmp(argv[1], "sink") == 0) {
+            inert_sink(report, observer);
+        } else {
+            bool stock = strcmp(argv[1], "ordinary") == 0;
+            require(stock || strcmp(argv[1], "generic") == 0, "fixture role");
+            request_child(stock, report, gate);
+        }
+        return 0;
     }
-    require(argc == 1 && argv[0][0] == '/' && getuid() != 0, "unprivileged launcher");
+    require(argc == 1, "launcher arguments");
     signal(SIGPIPE, SIG_IGN);
-    puts("shape=message_count/first_size/first_complex/first_reply");
-    puts("registered=N:null D:dead A:task-port-alias L:live ?:unclassified");
-    return run(argv[0], "ordinary") ? 0 : 1;
+    int control = supervise(argv[0], "generic", false);
+    if (control != 0) {
+        fprintf(stderr, "ordinary skipped: generic receipt gate failed\n");
+        return 1;
+    }
+    return supervise(argv[0], "ordinary", true);
 }

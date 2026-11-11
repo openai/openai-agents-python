@@ -1,4 +1,4 @@
-name: Stock XPC observation after fork
+name: Stock XPC reply-right transfer proof
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Observe stock XPC lookup after the child clears registered ports
+      - name: Verify a fixture Mach transfer and classify the stock XPC reply right
         shell: bash
         run: |
           set -euo pipefail
@@ -33,7 +33,7 @@ jobs:
           test "$(/usr/bin/uname -m)" = arm64
           test "$(/usr/bin/id -u)" -ne 0
           source=.github/diagnostics/stock-xpc-observe.c
-          printf '%s  %s\n' 66f0f5aeb718826be7bde54e1df3d652e5850e04f648580d78f272e07dded6ae "$source" | /usr/bin/shasum -a 256 -c -
+          printf '%s  %s\n' 25c4d0d2f011d77aac4b94ca73ed95eb05763d6cf1dd0a10c3bf71bd521ef693 "$source" | /usr/bin/shasum -a 256 -c -
           temp_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-xpc.XXXXXXXX")"
           trap '/bin/rm -rf -- "$temp_dir"' EXIT
           /usr/bin/xcrun --sdk macosx clang -std=c11 -D_DARWIN_C_SOURCE -fblocks \
