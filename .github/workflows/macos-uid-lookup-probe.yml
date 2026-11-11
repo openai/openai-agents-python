@@ -18,6 +18,10 @@ jobs:
           #include <mach/ndr.h>
           #include <mach/task_special_ports.h>
           #include <servers/bootstrap.h>
+          #include <spawn.h>
+          extern char **environ;
+          extern int posix_spawnattr_setspecialport_np(posix_spawnattr_t *, mach_port_t, int);
+          extern int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *, mach_port_t *, uint32_t);
           #include <errno.h>
           #include <fcntl.h>
           #include <signal.h>
@@ -56,41 +60,26 @@ jobs:
           }
           static void witness(const char *command, int mode) {
             mach_port_t task=mach_task_self(), sink=MACH_PORT_NULL;
-            mach_port_array_t old=NULL; mach_msg_type_number_t old_count=0;
-            if (mode==2) {
-              if (mach_port_allocate(task,MACH_PORT_RIGHT_RECEIVE,&sink)!=KERN_SUCCESS ||
-                  mach_port_insert_right(task,sink,sink,MACH_MSG_TYPE_MAKE_SEND)!=KERN_SUCCESS ||
-                  mach_ports_lookup(task,&old,&old_count)!=KERN_SUCCESS) exit(120);
-              mach_port_t registered[3]={sink,MACH_PORT_NULL,MACH_PORT_NULL};
-              if (mach_ports_register(task,registered,3)!=KERN_SUCCESS) exit(121);
+            if (mode==2 && (mach_port_allocate(task,MACH_PORT_RIGHT_RECEIVE,&sink)!=KERN_SUCCESS ||
+                mach_port_insert_right(task,sink,sink,MACH_MSG_TYPE_MAKE_SEND)!=KERN_SUCCESS)) exit(120);
+            posix_spawnattr_t attr; posix_spawn_file_actions_t files;
+            if(posix_spawnattr_init(&attr) || posix_spawn_file_actions_init(&files)) exit(121);
+            if(posix_spawnattr_setflags(&attr,POSIX_SPAWN_SETPGROUP) || posix_spawnattr_setpgroup(&attr,0)) exit(122);
+            if(mode!=0) {
+              mach_port_t empty[3]={MACH_PORT_NULL,MACH_PORT_NULL,MACH_PORT_NULL};
+              int ports=posix_spawnattr_set_registered_ports_np(&attr,empty,3);
+              int bootstrap=posix_spawnattr_setspecialport_np(&attr,mode==2?sink:MACH_PORT_NULL,TASK_BOOTSTRAP_PORT);
+              if(ports || bootstrap) { printf("{\"spawn_registered_error\":%d,\"spawn_bootstrap_error\":%d}\n",ports,bootstrap); exit(123); }
             }
-            fflush(stdout);
-            pid_t child=fork();
-            if (child==0) {
-              setpgid(0,0);
-              mach_port_t endpoint=MACH_PORT_NULL;
-              if (mode==2) {
-                mach_port_array_t inherited=NULL; mach_msg_type_number_t count=0;
-                if (mach_ports_lookup(mach_task_self(),&inherited,&count)!=KERN_SUCCESS ||
-                    count<1 || inherited[0]==MACH_PORT_NULL) _exit(122);
-                endpoint=inherited[0];
-                /* Keep this copied send right while clearing all registered slots. */
-              }
-              if (mode!=0) {
-                mach_port_t empty[3]={MACH_PORT_NULL,MACH_PORT_NULL,MACH_PORT_NULL};
-                if (mach_ports_register(mach_task_self(),empty,3)!=KERN_SUCCESS ||
-                    task_set_special_port(mach_task_self(),TASK_BOOTSTRAP_PORT,endpoint)!=KERN_SUCCESS) _exit(123);
-              }
-              if (mode==2) execl(self,self,"--post-exec",command,(char*)NULL);
-              int null=open("/dev/null",O_RDWR);
-              if (null<0 || dup2(null,STDOUT_FILENO)<0 || dup2(null,STDERR_FILENO)<0) _exit(124);
-              if (null>2) close(null);
-              if (!strcmp(command,"id")) execl("/usr/bin/id","id","-F",(char*)NULL);
-              else execl("/usr/bin/ssh","ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",(char*)NULL);
-              _exit(125);
-            }
-            if (mode==2 && mach_ports_register(task,old,old_count)!=KERN_SUCCESS) exit(126);
-            if (child<0) exit(127);
+            if(mode!=2 && (posix_spawn_file_actions_addopen(&files,1,"/dev/null",O_RDWR,0) || posix_spawn_file_actions_addopen(&files,2,"/dev/null",O_RDWR,0))) exit(124);
+            char *id_args[]={"/usr/bin/id","-F",NULL};
+            char *ssh_args[]={"/usr/bin/ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",NULL};
+            char *captured_args[]={(char*)self,"--post-exec",(char*)command,NULL};
+            char **args=mode==2?captured_args:!strcmp(command,"id")?id_args:ssh_args;
+            fflush(stdout); pid_t child;
+            int spawn=posix_spawn(&child,args[0],&files,&attr,args,environ);
+            posix_spawn_file_actions_destroy(&files); posix_spawnattr_destroy(&attr);
+            if(spawn) { printf("{\"spawn_error\":%d}\n",spawn); exit(125); }
             int status=0, received=0; bool timed_out=false;
             int64_t deadline=millis()+3000;
             while (waitpid(child,&status,WNOHANG)==0) {
@@ -100,7 +89,7 @@ jobs:
               memset(&message,0,sizeof(message));
               kern_return_t kr=mach_msg(&message.h,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(message),sink,50,MACH_PORT_NULL);
               if (kr==MACH_RCV_TIMED_OUT) continue;
-              if (kr!=KERN_SUCCESS) { printf("{\"receive_error\":%d}\n",kr); break; }
+              if (kr!=KERN_SUCCESS) { printf("{\"receive_error\":%d}\n",kr); kill(-child,SIGKILL); kill(child,SIGKILL); waitpid(child,&status,0); break; }
               received++;
               unsigned count=0; const char *service=identity(message.bytes,message.h.msgh_size);
               if (message.h.msgh_id==sentinel_id && message.h.msgh_size==sizeof(struct sentinel)) {
@@ -148,8 +137,7 @@ jobs:
             if (mode==2) {
               mach_port_mod_refs(task,sink,MACH_PORT_RIGHT_RECEIVE,-1);
               mach_port_deallocate(task,sink);
-              for (mach_msg_type_number_t i=0;i<old_count;i++) if(old[i]) mach_port_deallocate(task,old[i]);
-              if(old) vm_deallocate(task,(vm_address_t)old,old_count*sizeof(mach_port_t));
+          
             }
           }
           int main(int argc, char **argv) {
