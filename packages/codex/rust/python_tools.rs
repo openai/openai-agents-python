@@ -730,6 +730,9 @@ fn functions(
                 })),
                 Cow::Owned(tool.callback_spec()),
             )),
+            DynamicToolSpec::ToolSearch(tool) => {
+                functions.push((None, Cow::Owned(tool.callback_spec())))
+            }
             DynamicToolSpec::Namespace(namespace) => {
                 for DynamicToolNamespaceTool::Function(tool) in &namespace.tools {
                     functions.push((Some(Cow::Borrowed(namespace)), Cow::Borrowed(tool)));
@@ -745,7 +748,8 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
         specs.iter().all(|spec| match spec {
             DynamicToolSpec::Function(_)
             | DynamicToolSpec::Computer(_)
-            | DynamicToolSpec::HostedMcp(_) => true,
+            | DynamicToolSpec::HostedMcp(_)
+            | DynamicToolSpec::ToolSearch(_) => true,
             DynamicToolSpec::Namespace(ns) => ns.tools.len() == 1,
         }),
         "invalid Python tool slot projection"
@@ -758,12 +762,18 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
 pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
     validate_slots(specs)?;
     for declaration in specs {
-        if let DynamicToolSpec::Computer(computer) = declaration {
-            codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?;
+        match declaration {
+            DynamicToolSpec::Computer(computer) => {
+                codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?;
+            }
+            DynamicToolSpec::ToolSearch(search) => {
+                codex_tools::client_tool_search_spec(search).map_err(anyhow::Error::msg)?;
+            }
+            _ => {}
         }
     }
     let mut seen = HashSet::new();
-    for (namespace, tool) in functions(specs) {
+    for (declaration, (namespace, tool)) in specs.iter().zip(functions(specs)) {
         let key = ToolName::new(
             namespace.as_ref().map(|ns| ns.name.clone()),
             tool.name.clone(),
@@ -772,6 +782,7 @@ pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
         ensure!(seen.insert(key.clone()), "Duplicate Python tool: {key}");
         ensure!(
             !(key.is_default_namespace()
+                && !matches!(declaration, DynamicToolSpec::ToolSearch(_))
                 && matches!(
                     key.name.as_str(),
                     "exec_command"
@@ -2210,27 +2221,32 @@ impl PythonTools {
                 policy.is_none_or(|policy| policy.allows(&key)),
                 "Python tool is excluded by ToolPolicy: {key}"
             );
-            let mut function = dynamic_tool_to_responses_api_tool(&tool)?;
-            function.defer_loading = None;
-            let spec = if let DynamicToolSpec::HostedMcp(hosted) = declaration {
-                ToolSpec::Mcp(codex_tools::HostedMcpTool {
+            let spec = match declaration {
+                DynamicToolSpec::HostedMcp(hosted) => ToolSpec::Mcp(codex_tools::HostedMcpTool {
                     server_label: hosted.server_label.clone(),
                     provider_data: Default::default(),
-                })
-            } else if let DynamicToolSpec::Computer(computer) = declaration {
-                codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?
-            } else {
-                match namespace.filter(|_| !key.is_default_namespace()) {
-                    None => ToolSpec::Function(function),
-                    Some(ns) => ToolSpec::Namespace(ResponsesApiNamespace {
-                        name: ns.name.clone(),
-                        description: if ns.description.trim().is_empty() {
-                            default_namespace_description(&ns.name)
-                        } else {
-                            ns.description.clone()
-                        },
-                        tools: vec![ResponsesApiNamespaceTool::Function(function)],
-                    }),
+                }),
+                DynamicToolSpec::Computer(computer) => {
+                    codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?
+                }
+                DynamicToolSpec::ToolSearch(search) => {
+                    codex_tools::client_tool_search_spec(search).map_err(anyhow::Error::msg)?
+                }
+                _ => {
+                    let mut function = dynamic_tool_to_responses_api_tool(&tool)?;
+                    function.defer_loading = None;
+                    match namespace.filter(|_| !key.is_default_namespace()) {
+                        None => ToolSpec::Function(function),
+                        Some(ns) => ToolSpec::Namespace(ResponsesApiNamespace {
+                            name: ns.name.clone(),
+                            description: if ns.description.trim().is_empty() {
+                                default_namespace_description(&ns.name)
+                            } else {
+                                ns.description.clone()
+                            },
+                            tools: vec![ResponsesApiNamespaceTool::Function(function)],
+                        }),
+                    }
                 }
             };
             entries.push(Entry {
@@ -2240,7 +2256,10 @@ impl PythonTools {
                 spec,
                 exposure: if matches!(declaration, DynamicToolSpec::HostedMcp(_)) {
                     ToolExposure::Hidden
-                } else if matches!(declaration, DynamicToolSpec::Computer(_)) {
+                } else if matches!(
+                    declaration,
+                    DynamicToolSpec::Computer(_) | DynamicToolSpec::ToolSearch(_)
+                ) {
                     ToolExposure::DirectModelOnly
                 } else if tool.defer_loading {
                     ToolExposure::Deferred
@@ -5899,6 +5918,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
             let arguments: Value = match &call.payload {
                 ToolPayload::HostedMcpApproval { request } => serde_json::to_value(request)
                     .map_err(|_| FunctionCallError::Fatal("Invalid hosted MCP request".into()))?,
+                ToolPayload::ClientToolSearch(search) => search.arguments.clone(),
                 _ => serde_json::from_str(call.function_arguments()?)
                     .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?,
             };
@@ -5985,6 +6005,18 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                         arguments,
                         response.response,
                     )?) as Box<dyn ToolOutput>,
+                );
+            }
+            if let ToolPayload::ClientToolSearch(search) = &call.payload {
+                let selection =
+                    codex_tools::ClientToolSearchSelection::from_response(&response.response)?;
+                if selection.catalog_generation.is_some() {
+                    return Err(FunctionCallError::RespondToModel(
+                        "Python tool search cannot select a replacement catalog".into(),
+                    ));
+                }
+                return Ok(
+                    Box::new(selection.resolve(&search.catalog, &[])?) as Box<dyn ToolOutput>
                 );
             }
             Ok(Box::new(ReplyOutput {

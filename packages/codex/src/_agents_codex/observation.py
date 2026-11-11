@@ -32,7 +32,9 @@ from ._events import (
     ExecutionItem as ExecutionItem,
     FileSearchCallItem,
     FunctionCallStatus as FunctionCallStatus,
+    HostedMcpCallItem,
     ImageGenerationCallItem,
+    McpListToolsItem,
     MessageItem,
     ReasoningItem,
     WebSearchCallItem,
@@ -158,7 +160,13 @@ class RawProviderEvent(_SubmissionEvent):
 class HostedToolCallSummary:
     """Identity and status of a hosted call, without provider payloads."""
 
-    type: Literal["file_search_call", "code_interpreter_call", "image_generation_call"]
+    type: Literal[
+        "file_search_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "mcp_list_tools",
+        "mcp_call",
+    ]
     id: str
     turn_id: str
     status: str
@@ -182,6 +190,8 @@ class ModelOutputItemCompleted(_SubmissionEvent):
         MessageItem
         | ReasoningItem
         | WebSearchCallItem
+        | McpListToolsItem
+        | HostedMcpCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ImageGenerationCallItem
@@ -645,7 +655,9 @@ class EventStream(AsyncIterator[Observation]):
                                 not self._include_execution_details
                                 and not isinstance(model_item, HostedToolCallSummary)
                                 and (
-                                    model_item["type"] == "file_search_call"
+                                    model_item["type"] == "mcp_list_tools"
+                                    or model_item["type"] == "mcp_call"
+                                    or model_item["type"] == "file_search_call"
                                     or model_item["type"] == "code_interpreter_call"
                                     or model_item["type"] == "image_generation_call"
                                 )

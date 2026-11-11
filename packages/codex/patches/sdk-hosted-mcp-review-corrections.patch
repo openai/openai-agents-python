@@ -1,0 +1,72 @@
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index 9f642ff5..76df4035 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -253,14 +253,15 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+                 results: results.clone(),
+             }))
+         }
+-        ResponseItem::FileSearchCall { id, .. } | ResponseItem::CodeInterpreterCall { id, .. } => {
+-            Some(TurnItem::HostedToolCall(
+-                codex_protocol::items::HostedToolCallItem {
+-                    id: id.as_deref()?.to_string(),
+-                    item: item.clone(),
+-                },
+-            ))
+-        }
++        ResponseItem::FileSearchCall { id, .. }
++        | ResponseItem::CodeInterpreterCall { id, .. }
++        | ResponseItem::McpListTools { id, .. }
++        | ResponseItem::McpCall { id, .. } => Some(TurnItem::HostedToolCall(
++            codex_protocol::items::HostedToolCallItem {
++                id: id.as_deref()?.to_string(),
++                item: item.clone(),
++            },
++        )),
+         ResponseItem::ImageGenerationCall {
+             id,
+             status,
+diff --git a/codex-rs/core/src/session/sdk_produced_items.rs b/codex-rs/core/src/session/sdk_produced_items.rs
+index 5366d7ca..9a74828d 100644
+--- a/codex-rs/core/src/session/sdk_produced_items.rs
++++ b/codex-rs/core/src/session/sdk_produced_items.rs
+@@ -157,7 +157,9 @@ fn is_produced_response(item: &ResponseItem) -> bool {
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
+-        | ResponseItem::ImageGenerationCall { .. } => true,
++        | ResponseItem::ImageGenerationCall { .. }
++        | ResponseItem::McpListTools { .. }
++        | ResponseItem::McpCall { .. } => true,
+         _ => false,
+     }
+ }
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 2586d2b2..cb45f8f8 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -483,6 +483,8 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::Message { .. }
+         | ResponseItem::Reasoning { .. }
+         | ResponseItem::WebSearchCall { .. }
++        | ResponseItem::McpListTools { .. }
++        | ResponseItem::McpCall { .. }
+         | ResponseItem::FileSearchCall { .. }
+         | ResponseItem::CodeInterpreterCall { .. }
+         | ResponseItem::ImageGenerationCall { .. } => {
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index d77c9401..c45ea3c7 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -73,6 +73,11 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
+     let item: ResponseItem =
+         serde_json::from_str(value).map_err(|_| "Invalid canonical history item".to_string())?;
+     Ok(match item {
++        ResponseItem::McpApprovalResponse { approve: true, .. } => {
++            return Err(
++                "Imported hosted MCP approvals require live SDK approval authority".to_string(),
++            );
++        }
+         ResponseItem::Other
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::CompactionTrigger { .. } => None,

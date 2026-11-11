@@ -8,6 +8,7 @@ use codex_agent_graph_store::ThreadSpawnEdgeStatus;
 use codex_core_api::{AbsolutePathBuf, CodexThread, InitialHistory, ThreadId};
 use codex_history::{ResumedHistory, RolloutItem};
 use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::{
     AgentStatus, EventMsg, SessionMeta, ThreadMemoryMode, ThreadSettingsSnapshot, TurnAbortReason,
     TurnAbortedEvent,
@@ -753,6 +754,46 @@ pub(crate) fn validate_imported_history(history: &[RolloutItem]) -> anyhow::Resu
     Ok(())
 }
 
+// Portable history can carry data, but cannot reissue a provider approval under
+// freshly supplied credentials. Trusted exports and storage decoding stay separate.
+pub(crate) fn validate_external_response_item(item: &ResponseItem) -> anyhow::Result<()> {
+    ensure!(
+        !matches!(
+            item,
+            ResponseItem::McpApprovalResponse { approve: true, .. }
+        ),
+        "Imported hosted MCP approvals require live SDK approval authority"
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_external_mcp_approvals(history: &[RolloutItem]) -> anyhow::Result<()> {
+    use codex_history::sdk_originals::SdkOriginalHistoryCheckpoint;
+    for record in history {
+        match record {
+            RolloutItem::ResponseItem(envelope) => validate_external_response_item(&envelope.item)?,
+            RolloutItem::Compacted(compacted) => {
+                if let Some(items) = &compacted.replacement_history {
+                    for envelope in items {
+                        validate_external_response_item(&envelope.item)?;
+                    }
+                }
+                if let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) =
+                    &compacted.sdk_originals
+                {
+                    for item in &originals.items {
+                        if let Some(envelope) = &item.projection {
+                            validate_external_response_item(&envelope.item)?;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub async fn restore(
     engine: &Arc<EngineState>,
     mut checkpoint: Checkpoint,
@@ -761,6 +802,10 @@ pub async fn restore(
 ) -> anyhow::Result<NativeThread> {
     let _lifecycle = engine.lifecycle.lock().await;
     checkpoint.check_revision()?;
+    validate_external_mcp_approvals(&checkpoint.history)?;
+    for child in &checkpoint.descendants {
+        validate_external_mcp_approvals(&child.history)?;
+    }
     EngineState::validate_siwc_resume_provider(
         &checkpoint.root_metadata.model_provider,
         &engine.service_config.model_provider_id,

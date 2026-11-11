@@ -11,11 +11,12 @@ from typing import Any, cast
 
 from ._function_tools import FunctionTool
 from .agent import Agent
+from .hosted_mcp import HostedMCP
 from .mcp import _MCP
 from .native_agents import NativeAgents
 from .realtime_agents import RealtimeHandoff, _handoff_tool
 from .schema import OutputSpec, _prepare_spec
-from .tools import ToolRef
+from .tools import ToolRef, ToolSearch
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,14 @@ def _check_handoff_tool_names(refs: Iterable[ToolRef], handoffs: Mapping[str, st
         raise ValueError("A native handoff name collides with an ordinary function tool")
 
 
+def _python_tool_slot(tool: object) -> FunctionTool[Any, Any, Any] | None:
+    if isinstance(tool, HostedMCP):
+        return cast(FunctionTool[Any, Any, Any], tool._binding)
+    if isinstance(tool, ToolSearch) and tool._manual is not None:
+        return tool._manual
+    return tool if isinstance(tool, FunctionTool) else None
+
+
 def _capture_agent_graph(
     root: Agent[Any, Any],
     *,
@@ -55,7 +64,7 @@ def _capture_agent_graph(
     root_output = _prepare_spec(opening.output_type)
     root_roles = tuple(tool for tool in opening.tools if isinstance(tool, NativeAgents))
     runtime_tools = tuple(
-        tool for tool in opening.tools if not isinstance(tool, (FunctionTool, _MCP))
+        tool for tool in opening.tools if not isinstance(tool, (FunctionTool, _MCP, HostedMCP))
     )
     indices = {id(root): 0}
     resolved: dict[int, tuple[Callable[[], Agent[Any, Any]], Agent[Any, Any]]] = {}
@@ -96,7 +105,11 @@ def _capture_agent_graph(
         if roles != root_roles:
             raise ValueError("Handoff profiles must share native child-role configuration")
         if (
-            tuple(tool for tool in declaration.tools if not isinstance(tool, (FunctionTool, _MCP)))
+            tuple(
+                tool
+                for tool in declaration.tools
+                if not isinstance(tool, (FunctionTool, _MCP, HostedMCP))
+            )
             != runtime_tools
         ):
             raise ValueError("Handoff profiles must share native runtime tool configuration")
@@ -104,6 +117,7 @@ def _capture_agent_graph(
         callbacks: dict[str, int] = {}
         options: dict[str, RealtimeHandoff] = {}
         callback_tools: list[FunctionTool[Any, Any, Any]] = []
+        python_slots = sum(_python_tool_slot(tool) is not None for tool in declaration.tools)
         for reference in declaration.handoffs:
             if isinstance(reference, RealtimeHandoff):
                 target = reference.agent
@@ -144,9 +158,7 @@ def _capture_agent_graph(
             targets[name] = target_id
             if isinstance(reference, RealtimeHandoff):
                 options[name] = reference
-                callbacks[name] = len(
-                    tuple(tool for tool in declaration.tools if isinstance(tool, FunctionTool))
-                ) + len(callback_tools)
+                callbacks[name] = python_slots + len(callback_tools)
                 callback_tools.append(_handoff_tool(reference, agent, name))
         _check_handoff_tool_names(
             (tool.ref for tool in declaration.tools if isinstance(tool, FunctionTool)), targets

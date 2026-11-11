@@ -31,11 +31,13 @@ from .realtime_result import BackgroundResult as BackgroundResult
 
 if TYPE_CHECKING:
     from ._function_tools import (
+        FunctionTool,
         ToolContext,
         ToolInputErrorContext,
         ToolTimeoutBehavior,
         ToolTimeoutError,
     )
+    from .manual import ActionRequested
     from .native_interception import Allow, Deny, ReplaceArguments
 
 _TOOL_RESPONSE = TypeAdapter(FunctionCallResponse)
@@ -248,15 +250,78 @@ class ImageGeneration:
     """Additional provider fields; declared fields and tool identity cannot be replaced."""
 
 
-_HOSTED_TOOLS = (FileSearch, CodeInterpreter, ImageGeneration)
+@dataclass(frozen=True, kw_only=True)
+class ToolSearch:
+    """Configure Responses tool search for deferred tools in this Session.
+
+    Client execution issues a manual request. Use match() to identify requests
+    for this declaration, then respond with the admitted tools to return.
+    """
+
+    execution: Literal["server", "client"] | None = None
+    description: str | None = None
+    parameters: object | None = None
+    provider_data: dict[str, Any] | None = None
+    _manual: FunctionTool[Any, ToolSearchResult, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        if self.execution not in (None, "server", "client"):
+            raise ValueError("ToolSearch execution must be server or client")
+        if self.execution == "client":
+            from ._function_tools import _ClientToolSearch
+
+            object.__setattr__(self, "_manual", _ClientToolSearch(self))
+
+    @property
+    def ref(self) -> ToolRef:
+        """Select this declaration by its native identity."""
+        return ToolRef("tool_search", None if self._manual is not None else "functions")
+
+    def match(self, event: object) -> ActionRequested[Any, ToolSearchResult] | None:
+        """Narrow a live client-search request for this exact declaration."""
+        return self._manual.match(event) if self._manual is not None else None
+
+    def _provider_spec(self) -> dict[str, Any]:
+        return _hosted_tool_spec(
+            "tool_search",
+            {
+                "execution": self.execution,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+            self.provider_data,
+        )
 
 
-def _hosted_tool_name(tool: FileSearch | CodeInterpreter | ImageGeneration) -> str:
+_HOSTED_TOOLS = (FileSearch, CodeInterpreter, ImageGeneration, ToolSearch)
+
+
+def _hosted_tool_name(tool: FileSearch | CodeInterpreter | ImageGeneration | ToolSearch) -> str:
     if isinstance(tool, FileSearch):
         return "file_search"
     if isinstance(tool, CodeInterpreter):
         return "code_interpreter"
+    if isinstance(tool, ToolSearch):
+        return "tool_search"
     return "image_generation"
+
+
+def _hosted_tool_spec(
+    name: str, fields: dict[str, Any], provider_data: dict[str, Any] | None
+) -> dict[str, Any]:
+    if provider_data is None:
+        provider_data = {}
+    if not isinstance(provider_data, dict):
+        raise TypeError("Hosted tool provider_data must be an object")
+    if set(provider_data) & ({"type", "provider_data"} | fields.keys()):
+        raise ValueError("Hosted tool provider_data cannot replace declared fields")
+    return {
+        **provider_data,
+        "type": name,
+        **{key: value for key, value in fields.items() if value is not None},
+    }
 
 
 def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
@@ -264,29 +329,32 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
 
     # Capture nested mutable configuration before opening can await.
     specs: list[dict[str, Any]] = []
+    hosted_servers: dict[str, dict[str, Any]] = {}
     from .hosted_mcp import HostedMCP, _live_config
 
     for tool in tools:
         if isinstance(tool, HostedMCP):
-            specs.append(_live_config(tool))
+            config = _live_config(tool)
+            label = config["server_label"]
+            previous = hosted_servers.get(label)
+            if previous is not None:
+                if previous != config:
+                    raise ValueError(
+                        "Hosted MCP profiles must share configuration for the same server label"
+                    )
+                continue
+            hosted_servers[label] = config
+            specs.append(config)
             continue
         if not isinstance(tool, _HOSTED_TOOLS):
             continue
+        if isinstance(tool, ToolSearch):
+            if tool.execution != "client":
+                specs.append(tool._provider_spec())
+            continue
         fields = asdict(tool)
         provider_data = fields.pop("provider_data")
-        if provider_data is None:
-            provider_data = {}
-        if not isinstance(provider_data, dict):
-            raise TypeError("Hosted tool provider_data must be an object")
-        if set(provider_data) & ({"type", "provider_data"} | fields.keys()):
-            raise ValueError("Hosted tool provider_data cannot replace declared fields")
-        specs.append(
-            {
-                **provider_data,
-                "type": _hosted_tool_name(tool),
-                **{key: value for key, value in fields.items() if value is not None},
-            }
-        )
+        specs.append(_hosted_tool_spec(_hosted_tool_name(tool), fields, provider_data))
     return cast(list[dict[str, Any]], json.loads(json.dumps(specs, allow_nan=False)))
 
 
@@ -296,6 +364,21 @@ class ToolRef:
 
     name: str
     namespace: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class ToolSearchResult:
+    """Ordered references to tools admitted for a native client-search request."""
+
+    tool_refs: tuple[ToolRef, ...] = ()
+
+    def __post_init__(self) -> None:
+        refs = tuple(self.tool_refs)
+        if any(not isinstance(ref, ToolRef) for ref in refs):
+            raise TypeError("ToolSearchResult requires ToolRef values")
+        if len({(ref.namespace or "functions", ref.name) for ref in refs}) != len(refs):
+            raise ValueError("ToolSearchResult requires distinct tool references")
+        object.__setattr__(self, "tool_refs", refs)
 
 
 @dataclass(frozen=True)

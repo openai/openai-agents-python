@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,10 +19,12 @@ from agents import (
     NativeProvider,
     TurnStoppedError,
 )
+from agents.realtime import realtime_handoff
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
     assistant_output,
+    function_call,
     responses as responses,
 )
 
@@ -82,6 +85,46 @@ def test_hosted_mcp_catalog_keeps_only_identity_and_captures_each_session_separa
     second = _capture_tools(1, functions, None)
     assert first.tools[0].config["allowed_tools"] == ["lookup"]
     assert second.tools[0].config["allowed_tools"] == ["lookup", "later"]
+
+
+@pytest.mark.asyncio
+async def test_native_hosted_mcp_handoff_callback_uses_captured_tool_slot(
+    responses: ResponsesFixture,
+) -> None:
+    docs = declaration(require_approval="never")
+    fixture = Path(__file__).with_name("fixtures") / "request-control-models.json"
+    catalog = json.loads(fixture.read_text())
+    full_responses_model = next(
+        model["slug"] for model in catalog["models"] if not model.get("use_responses_lite")
+    )
+    target = Agent(
+        name="target",
+        instructions="Respond as the target.",
+        model=full_responses_model,
+        tools=[docs],
+    )
+    accepted: list[str] = []
+
+    def on_handoff(_: object) -> None:
+        accepted.append("handoff")
+
+    responses.respond(function_call("transfer_to_target", {}, "transfer-to-target"))
+    responses.respond(assistant_output("Target completed."))
+    async with timeout(30), provider(responses) as native:
+        result = await Agent(
+            instructions="Transfer to the target.",
+            provider=native,
+            model=full_responses_model,
+            tools=[docs],
+            handoffs=[realtime_handoff(target, on_handoff=on_handoff)],
+        ).run("Transfer.")
+
+    assert result.final_output == "Target completed."
+    assert accepted == ["handoff"]
+    assert [
+        [tool["server_label"] for tool in request.get("tools", []) if tool["type"] == "mcp"]
+        for request in responses.requests
+    ] == [["docs"], ["docs"]]
 
 
 @pytest.mark.asyncio
@@ -252,7 +295,7 @@ async def test_native_hosted_mcp_provider_receipts_are_progress_without_local_di
         item["tools"] = [{"name": "lookup", "input_schema": {"type": "object"}}]
     responses.respond({"type": "response.output_item.done", "item": item})
     async with timeout(30), provider(responses) as native:
-        result = await Agent(
+        agent = Agent(
             instructions="Use docs.",
             model="gpt-5.2",
             provider=native,
@@ -261,9 +304,23 @@ async def test_native_hosted_mcp_provider_receipts_are_progress_without_local_di
                     callback=lambda request: calls.append(request), require_approval="never"
                 )
             ],
-        ).run("Lookup.")
+        )
+        result = await agent.run("Lookup.", return_items=True, return_history=True)
     assert result.final_output == ""
     assert calls == [] and len(responses.requests) == 1
+
+    assert result.items is not None and len(result.items) == 1
+    assert result.items[0].agent is agent
+    assert result.items[0].item["type"] == kind
+    assert result.items[0].item["provider_data"] == item
+    assert result.history is not None
+    raw = next(entry for entry in result.history if entry["type"] == kind)
+    assert {
+        key: value
+        for key, value in raw.items()
+        if key != "internal_chat_message_metadata_passthrough"
+    } == item
+    assert raw["internal_chat_message_metadata_passthrough"]["turn_id"] == result.turn.turn_id
 
 
 @pytest.mark.asyncio
@@ -475,6 +532,12 @@ async def test_native_hosted_mcp_completed_decision_restores_without_credentials
             encoded = (await session.save_state()).to_json()
             assert "private-hosted-credential" not in encoded
             state = SessionState.from_json(encoded)
+        if approved:
+            with pytest.raises(RuntimeError, match="live SDK approval authority"):
+                async with agent.session(state=state):
+                    raise AssertionError("Portable approval acquired fresh authority")
+            assert calls == ["approval_1"] and len(responses.requests) == 2
+            return
         responses.respond(assistant_output("Restored."))
         async with agent.session(state=state) as restored:
             assert (
@@ -488,3 +551,354 @@ async def test_native_hosted_mcp_completed_decision_restores_without_credentials
     assert restored_replies[0]["approval_request_id"] == "approval_1"
     assert restored_replies[0]["approve"] is approved
     assert restored_replies[0]["caller"] == {"type": "direct"}
+
+
+async def test_native_hosted_mcp_never_approval_without_callback_accepts_a_run_budget(
+    responses: ResponsesFixture,
+) -> None:
+    from agents import RunBudget
+
+    tool = declaration(require_approval="never")
+    responses.respond(assistant_output("Budgeted."))
+    async with timeout(30), provider(responses) as native:
+        result = await Agent(
+            instructions="Respond.", provider=native, model="gpt-5.2", tools=[tool]
+        ).run("Respond.", budget=RunBudget(max_requests=1))
+    assert result.final_output == "Budgeted."
+    assert len(responses.requests) == 1
+    assert responses.requests[0]["tools"][0] == dict(tool.tool_config)
+
+
+@pytest.mark.parametrize("manual", [False, True])
+@pytest.mark.parametrize("caller_type", ["program", "unknown"])
+async def test_native_hosted_mcp_caller_policy_rejects_before_callback_or_manual_exposure(
+    responses: ResponsesFixture, manual: bool, caller_type: str
+) -> None:
+    observed: list[Any] = []
+
+    def decide(request: Any) -> dict[str, bool]:
+        observed.append(request)
+        return {"approve": True}
+
+    tool = declaration(callback=None if manual else decide, allowed_callers=["direct"])
+    event = approval()
+    event["item"]["caller"] = {"type": caller_type}
+    responses.respond(event)
+    responses.respond(assistant_output("Unapproved caller must not execute."))
+
+    def answer(event: Any) -> Any:
+        request = tool.match(event)
+        assert request is not None
+        observed.append(request)
+        return request.reply({"approve": True})
+
+    async with timeout(30), provider(responses) as native:
+        with pytest.raises((ValueError, NativeError)):
+            await Agent(
+                instructions="Use docs.", provider=native, model="gpt-5.2", tools=[tool]
+            ).run("Lookup.", on_interaction=answer if manual else None)
+    assert observed == []
+    assert len(responses.requests) == 1
+    assert replies(responses) == []
+
+
+async def test_native_hosted_mcp_portable_state_cannot_turn_a_decline_into_approval(
+    responses: ResponsesFixture,
+) -> None:
+    from agents import SessionState
+
+    calls: list[str] = []
+
+    def decide(request: Any) -> dict[str, bool]:
+        calls.append(request.request_id)
+        return {"approve": False}
+
+    responses.respond(approval())
+    responses.respond(assistant_output("Declined."))
+    async with timeout(30), provider(responses) as native:
+        agent = Agent(
+            instructions="Use docs.",
+            provider=native,
+            model="gpt-5.2",
+            tools=[declaration(callback=decide)],
+        )
+        async with agent.session() as session:
+            assert (
+                await (await session.submit("Lookup.")).get_result()
+            ).final_output == "Declined."
+            portable = json.loads((await session.save_state()).to_json())
+        changed = 0
+
+        def replace_decision(value: Any) -> None:
+            nonlocal changed
+            if isinstance(value, dict):
+                if value.get("type") == "mcp_approval_response":
+                    assert value["approve"] is False
+                    value["approve"] = True
+                    changed += 1
+                for child in value.values():
+                    replace_decision(child)
+            elif isinstance(value, list):
+                for child in value:
+                    replace_decision(child)
+
+        replace_decision(portable)
+        assert changed > 0
+        state = SessionState.from_json(json.dumps(portable))
+        before = len(responses.requests)
+        responses.respond(assistant_output("Restored safely."))
+        try:
+            async with agent.session(state=state) as restored:
+                await (await restored.submit("Continue.")).get_result()
+        except (ValueError, RuntimeError):
+            pass
+    assert calls == ["approval_1"]
+    assert not any(
+        item.get("type") == "mcp_approval_response" and item.get("approve") is True
+        for request in responses.requests[before:]
+        for item in request["input"]
+    )
+
+
+async def test_native_hosted_mcp_handoff_captures_target_only_server_configuration(
+    responses: ResponsesFixture,
+) -> None:
+    from tests.native_fixtures import function_call
+
+    called: list[str] = []
+
+    def decide(request: Any) -> dict[str, bool]:
+        called.append(request.server_label)
+        return {"approve": False}
+
+    tool = declaration("target_docs", callback=decide)
+    catalog = json.loads(
+        (Path(__file__).with_name("fixtures") / "request-control-models.json").read_text()
+    )
+    full_model = next(
+        model["slug"] for model in catalog["models"] if not model.get("use_responses_lite")
+    )
+    responses.respond(function_call("transfer_to_specialist", {}, "handoff_1"))
+    responses.respond(approval(label="target_docs"))
+    responses.respond(assistant_output("Target response."))
+    async with timeout(30), provider(responses) as native:
+        target = Agent(name="specialist", instructions="Use docs.", model=full_model, tools=[tool])
+        agent = Agent(
+            instructions="Transfer.", provider=native, model=full_model, handoffs=[target]
+        )
+        result = await agent.run("Transfer.")
+    assert result.final_output == "Target response."
+    assert called == ["target_docs"]
+    assert not any(item["type"] == "mcp" for item in responses.requests[0]["tools"])
+    assert [item for item in responses.requests[1]["tools"] if item["type"] == "mcp"] == [
+        dict(tool.tool_config)
+    ]
+
+
+async def test_native_hosted_mcp_handoff_rejects_divergent_configuration_before_provider_use(
+    responses: ResponsesFixture,
+) -> None:
+    first = declaration(callback=lambda _: {"approve": False})
+    second = declaration(
+        callback=lambda _: {"approve": False}, server_url="https://different-hosted-mcp.invalid"
+    )
+    async with timeout(30), provider(responses) as native:
+        target = Agent(name="specialist", instructions="Use docs.", tools=[second])
+        agent = Agent(
+            instructions="Transfer.",
+            provider=native,
+            model="gpt-5.2",
+            tools=[first],
+            handoffs=[target],
+        )
+        with pytest.raises(ValueError, match="same server label"):
+            async with agent.session():
+                raise AssertionError("Divergent hosted configuration opened a Session")
+    assert responses.requests == []
+
+
+@pytest.mark.parametrize("manual", [False, True])
+async def test_native_hosted_mcp_programmatic_caller_explicitly_allowed(
+    responses: ResponsesFixture, manual: bool
+) -> None:
+    observed: list[Any] = []
+
+    def decide(request: Any) -> dict[str, bool]:
+        observed.append(request)
+        return {"approve": False}
+
+    tool = declaration(callback=None if manual else decide, allowed_callers=["programmatic"])
+    event = approval()
+    caller = {"type": "program", "tool_id": "interpreter_1"}
+    event["item"]["caller"] = caller
+    responses.respond(event)
+    responses.respond(assistant_output("Allowed caller."))
+
+    def answer(event: Any) -> Any:
+        request = tool.match(event)
+        assert request is not None
+        observed.append(request)
+        return request.reply({"approve": False})
+
+    async with timeout(30), provider(responses) as native:
+        result = await Agent(
+            instructions="Use docs.", provider=native, model="gpt-5.2", tools=[tool]
+        ).run("Lookup.", on_interaction=answer if manual else None)
+    assert result.final_output == "Allowed caller."
+    assert len(observed) == 1
+    assert replies(responses)[0]["caller"] == caller
+
+
+@pytest.mark.parametrize("representation", ["replacement", "original_projection", "audit_only"])
+async def test_native_hosted_mcp_compacted_import_cannot_authorize_positive_receipts(
+    responses: ResponsesFixture, representation: str
+) -> None:
+    from agents import SessionState
+
+    responses.respond(approval())
+    responses.respond(assistant_output("Declined."))
+    async with timeout(30), provider(responses) as native:
+        agent = Agent(
+            instructions="Respond.",
+            provider=native,
+            model="gpt-5.2",
+            tools=[declaration(callback=lambda _: {"approve": False})],
+        )
+        async with agent.session() as session:
+            await (await session.submit("Lookup.")).get_result()
+            portable = json.loads((await session.save_state()).to_json())
+
+        def checkpoint(value: Any) -> dict[str, Any] | None:
+            if isinstance(value, dict):
+                if "source_session_id" in value and "history" in value:
+                    return value
+                for child in value.values():
+                    found = checkpoint(child)
+                    if found is not None:
+                        return found
+            elif isinstance(value, list):
+                for child in value:
+                    found = checkpoint(child)
+                    if found is not None:
+                        return found
+            return None
+
+        captured = checkpoint(portable)
+        assert captured is not None
+        receipt = next(
+            record["payload"]
+            for record in captured["history"]
+            if record["type"] == "response_item"
+            and record["payload"].get("type") == "mcp_approval_response"
+        )
+        receipt["approve"] = True
+        captured["history"] = [
+            record
+            for record in captured["history"]
+            if record["type"] != "response_item"
+            or record["payload"].get("type") != "mcp_approval_response"
+        ]
+        replacement = [
+            record["payload"] for record in captured["history"] if record["type"] == "response_item"
+        ]
+        compacted: dict[str, Any] = {
+            "message": "Imported compacted history.",
+            "replacement_history": replacement,
+        }
+        if representation == "replacement":
+            replacement.append(receipt)
+        else:
+            compacted["sdk_originals"] = {
+                "format_version": 1,
+                "items": [
+                    {
+                        "original": json.dumps(receipt),
+                        "projection": {"item": receipt, "metadata": None}
+                        if representation == "original_projection"
+                        else None,
+                    }
+                ],
+            }
+        captured["history"].append({"type": "compacted", "payload": compacted})
+        state = SessionState.from_json(json.dumps(portable))
+        if representation == "audit_only":
+            responses.respond(assistant_output("Audit preserved."))
+            async with agent.session(state=state) as restored:
+                assert (
+                    await (await restored.submit("Continue.")).get_result()
+                ).final_output == "Audit preserved."
+            assert not any(item.get("approve") is True for item in responses.requests[-1]["input"])
+        else:
+            with pytest.raises(RuntimeError, match="live SDK approval authority"):
+                async with agent.session(state=state):
+                    raise AssertionError("Imported compacted receipt acquired approval authority")
+            assert len(responses.requests) == 2
+
+
+async def test_native_hosted_mcp_history_transaction_rejects_positive_approval_atomically(
+    responses: ResponsesFixture,
+) -> None:
+    async with timeout(30), provider(responses) as native:
+        async with Agent(
+            instructions="Respond.",
+            provider=native,
+            model="gpt-5.2",
+            tools=[declaration(require_approval="never")],
+        ).session() as session:
+            before = await session.history_snapshot()
+            with pytest.raises(RuntimeError, match="Invalid canonical history item"):
+                await session.transact_history(
+                    expected_revision=before.revision,
+                    keep=0,
+                    items=[
+                        {
+                            "type": "mcp_approval_response",
+                            "approval_request_id": "imported_request",
+                            "approve": True,
+                        }
+                    ],
+                )
+            after = await session.history_snapshot()
+            assert after.revision == before.revision and after.items == before.items
+    assert responses.requests == []
+
+
+@pytest.mark.parametrize("kind", ["mcp_list_tools", "mcp_call"])
+@pytest.mark.parametrize("details", [False, True])
+async def test_native_hosted_mcp_public_observations_keep_typed_items_and_default_redaction(
+    responses: ResponsesFixture,
+    kind: str,
+    details: bool,
+) -> None:
+    from agents.observation import HostedToolCallSummary, ModelOutputItemCompleted
+
+    item: dict[str, Any] = {"type": kind, "id": "remote_item", "server_label": "docs"}
+    if kind == "mcp_call":
+        item.update(
+            name="lookup", arguments="{}", output="Private remote result.", status="completed"
+        )
+    else:
+        item["tools"] = [{"name": "lookup", "input_schema": {"type": "object"}}]
+    responses.respond({"type": "response.output_item.done", "item": item})
+    async with (
+        timeout(30),
+        provider(responses) as native,
+        Agent(
+            instructions="Use docs.",
+            provider=native,
+            model="gpt-5.2",
+            tools=[declaration(require_approval="never")],
+        ).session() as session,
+    ):
+        turn = await session.submit("Lookup.")
+        events = [event async for event in turn.events(include_execution_details=details)]
+        await turn.get_result()
+        observed = [event.item for event in events if isinstance(event, ModelOutputItemCompleted)]
+        assert len(observed) == 1
+        if details:
+            assert isinstance(observed[0], dict) and observed[0]["provider_data"] == item
+        else:
+            assert isinstance(observed[0], HostedToolCallSummary)
+            assert observed[0].type == kind and observed[0].status == "completed"
+        recorded = [entry async for entry in session.items() if entry["type"] == kind]
+        assert len(recorded) == 1 and recorded[0]["provider_data"] == item

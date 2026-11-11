@@ -214,6 +214,8 @@ def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> di
         if key != "internal_chat_message_metadata_passthrough"
     }
     fields = {
+        "mcp_list_tools": ("server_label", "tools", "error"),
+        "mcp_call": ("server_label", "name", "arguments", "output", "error"),
         "file_search_call": ("queries", "results"),
         "code_interpreter_call": ("container_id", "code", "outputs"),
         "image_generation_call": ("result", "revised_prompt"),
@@ -224,7 +226,7 @@ def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> di
         "type": raw["type"],
         "id": raw["id"],
         "turn_id": turn_id,
-        "status": raw["status"],
+        "status": raw.get("status", "completed"),
         "provider_data": raw,
         **{key: raw.get(key) for key in fields},
     }

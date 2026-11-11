@@ -598,6 +598,22 @@ class _HostedCallItem(TypedDict):
     """The complete provider item, including fields unknown to this SDK."""
 
 
+class McpListToolsItem(_HostedCallItem):
+    type: Literal["mcp_list_tools"]
+    server_label: str
+    tools: list[JsonValue]
+    error: JsonValue | None
+
+
+class HostedMcpCallItem(_HostedCallItem):
+    type: Literal["mcp_call"]
+    server_label: str
+    name: str
+    arguments: str
+    output: JsonValue | None
+    error: JsonValue | None
+
+
 class FileSearchCallItem(_HostedCallItem):
     type: Literal["file_search_call"]
     queries: list[str]
@@ -763,6 +779,8 @@ OutputItem = _PublicTypeAliasType(
         | CloseSubagentCallItem
         | WaitForSubagentsCallItem
         | WebSearchCallItem
+        | McpListToolsItem
+        | HostedMcpCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ImageGenerationCallItem

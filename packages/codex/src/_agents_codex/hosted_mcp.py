@@ -64,6 +64,8 @@ class HostedMCP(Generic[ContextT_contra]):
     arguments contain the original request and whose reply takes the same
     decision. Provider request IDs and caller metadata cannot be replaced by
     application replies. Credentials are excluded from portable tool identities.
+    Portable state containing a positive MCP approval cannot be restored: imported
+    data cannot authorize a provider operation with newly supplied credentials.
     """
 
     tool_config: Mapping[str, Any] = field(repr=False)
@@ -117,6 +119,12 @@ def _capture_config(value: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(names, list) or not all(isinstance(name, str) for name in names)
     ):
         raise ValueError("Hosted MCP tool filter must contain string tool names")
+    callers = config.get("allowed_callers")
+    if callers is not None and (
+        not isinstance(callers, list)
+        or any(caller not in ("direct", "programmatic") for caller in callers)
+    ):
+        raise ValueError("Hosted MCP allowed_callers must contain direct or programmatic")
     return cast(dict[str, Any], config)
 
 
@@ -136,6 +144,18 @@ def _check_request(config: Mapping[str, Any], request: Mapping[str, Any]) -> Non
         if isinstance(allowed, list)
         else (allowed.get("tool_names") if isinstance(allowed, dict) else None)
     )
+    caller = request.get("caller")
+    caller_type = "direct" if caller is None else caller.get("type")
+    caller_kind = (
+        "direct"
+        if caller_type == "direct"
+        else ("programmatic" if caller_type == "program" else None)
+    )
+    allowed_callers = config.get("allowed_callers")
+    if allowed_callers is None:
+        allowed_callers = ["direct"]
+    if caller_kind is None or caller_kind not in allowed_callers:
+        raise ValueError("Hosted MCP approval is outside the captured caller policy")
     if names is not None and request["name"] not in names:
         raise ValueError("Hosted MCP approval is outside the captured tool filter")
 

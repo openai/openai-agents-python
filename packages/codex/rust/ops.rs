@@ -1403,6 +1403,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
         "append_rollout_items" => {
             let p: RolloutParams = decode(params)?;
             crate::checkpoint::validate_imported_history(&p.items)?;
+            crate::checkpoint::validate_external_mcp_approvals(&p.items)?;
             thread.append_rollout_items(&p.items).await?;
             return Ok(Value::Null);
         }
@@ -1414,11 +1415,17 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
         }
         "inject_response_items" => {
             let p: ItemsParams = decode(params)?;
+            for item in &p.items {
+                crate::checkpoint::validate_external_response_item(item)?;
+            }
             thread.inject_response_items(p.items).await?;
             return Ok(Value::Null);
         }
         "inject_if_running" => {
             let p: ItemsParams = decode(params)?;
+            for item in &p.items {
+                crate::checkpoint::validate_external_response_item(item)?;
+            }
             return Ok(match thread.inject_if_running(p.items).await {
                 Ok(()) => json!({"injected": true}),
                 Err(items) => json!({"injected": false, "items": items}),

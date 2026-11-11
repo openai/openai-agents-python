@@ -61,7 +61,8 @@ class _CapturedHostedMCPApproval(_CapturedFunction):
         value = parsed.model_dump(mode="json")
         _check_request(self.config, value)
         callback = self.declaration.on_approval_request
-        assert callback is not None
+        if callback is None:
+            raise ValueError("Hosted MCP unexpectedly requested approval without a callback")
         result = callback(
             HostedMCPApprovalRequest(
                 context=context,
@@ -88,7 +89,10 @@ class _HostedMCPBinding(FunctionTool[Any, Any, Any]):
 
     def _capture(self, context: object) -> Any:
         config = _live_config(self.declaration)
-        if self.declaration.on_approval_request is None:
+        if (
+            self.declaration.on_approval_request is None
+            and config.get("require_approval") != "never"
+        ):
             return _CapturedHostedMCPManual(
                 name=self.name,
                 spec_json=self._spec_json(),
@@ -127,6 +131,11 @@ def _binding(declaration: HostedMCP[Any]) -> FunctionTool[Any, Any, Any]:
         description="Hosted MCP approval",
         input_type=_ApprovalArguments,
         output_type=dict,
-        _bind=_bind if declaration.on_approval_request is not None else None,
+        _bind=(
+            _bind
+            if declaration.on_approval_request is not None
+            or declaration.tool_config.get("require_approval") == "never"
+            else None
+        ),
         declaration=declaration,
     )

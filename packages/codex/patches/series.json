@@ -681,17 +681,17 @@
       "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
     },
     {
+      "path": "sdk-provider-tool-search.patch",
+      "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
+    },
+    {
       "path": "sdk-hosted-mcp-approvals.patch",
-      "sha256": "4eb6a4fdac8526ce39c010f714f302e0ef9e03bafa83c723ea2c67456a99c456"
+      "sha256": "41d718e1d9dd6cb02871e5c23d30eff0f13bf60bf1a37bae4d8d48e41da80c01"
     },
     {
-      "path": "sdk-hosted-mcp-qualified-policy.patch",
-      "sha256": "755b75952ca18bd8ce86e9c5a57a67345d44050ea4312a2c736db4c567aedc90"
-    },
-    {
-      "path": "sdk-hosted-mcp-terminal-results.patch",
-      "sha256": "744cd78f8ccd5c9eda5b75427fb1bb731e013995b06d9ea2ef01f22af58a2155"
+      "path": "sdk-hosted-mcp-review-corrections.patch",
+      "sha256": "f37ec7166e518275b31e0bd4fe33a34c405745a20451a98460569bdfe19ae825"
     }
   ],
-  "result_tree": "30fb17942a13a903031ee34734ec1715fb58028c"
+  "result_tree": "f7923b25cd3c74e3e45b9d34e18642c2429f7e8f"
 }
