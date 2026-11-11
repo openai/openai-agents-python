@@ -14,10 +14,51 @@ from agents import (
     NativeError,
     NativeProvider,
     ProducedItem,
+    ToolOutput,
     function_tool,
 )
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_manual_tools import LookupArgs
+
+
+async def test_produced_items_preserve_native_tool_failure_after_successful_turn(responses):
+    calls = []
+
+    @function_tool
+    def lookup(key: str) -> ToolOutput:
+        calls.append(key)
+        if key == "bad":
+            return ToolOutput.error("synthetic tool failure")
+        return ToolOutput.text('{"success": false, "error": "ordinary tool data"}')
+
+    responses.respond(function_call("lookup", {"key": "bad"}, "failed-produced"))
+    responses.respond(function_call("lookup", {"key": "good"}, "successful-produced"))
+    responses.respond(assistant_output("recovered answer"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-produced-outcomes"
+    ) as provider:
+        agent = Agent(instructions="Use lookup.", provider=provider, tools=[lookup])
+        completed = await agent.run("input", return_items=True, return_history=True)
+
+    assert completed.final_output == "recovered answer"
+    assert calls == ["bad", "good"]
+    assert completed.items is not None
+    assert completed.history is not None
+    for call_id, status, error in [
+        ("failed-produced", "failed", "synthetic tool failure"),
+        ("successful-produced", "completed", None),
+    ]:
+        produced = [entry.item for entry in completed.items if entry.item.get("call_id") == call_id]
+        native = [item for item in completed.history if item.get("call_id") == call_id]
+        assert [item["status"] for item in produced] == [status, status]
+        assert produced[1]["error"] == error
+        assert native[1]["output"] is not None
+        if status == "failed":
+            assert produced[1]["output"] is None
+        else:
+            assert "ordinary tool data" in str(produced[1]["output"])
+    assert all(entry.agent is agent for entry in completed.items)
+    assert len(responses.requests) == 3
 
 
 async def test_one_shot_items_with_unused_manual_tool(responses):

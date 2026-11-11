@@ -10,6 +10,7 @@ from ._events import FunctionCallItem as FunctionCallItem, SessionItem as Sessio
 from ._projection import (
     EventProjector as EventProjector,
     _execution_item as _execution_item,
+    _function_output_fields as _function_output_fields,
     _usage as _usage,
     project_execution_completion as project_execution_completion,
     project_hosted_response_item,
@@ -81,7 +82,9 @@ def _legacy_execution(message: dict[str, Any], turn_id: str) -> dict[str, Any] |
     return item
 
 
-def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
+def _response_item(
+    raw: dict[str, Any], turn_id: str, tool_success: bool | None = None
+) -> dict[str, Any] | None:
     kind = raw["type"]
     item_id = raw.get("id")
     if kind in {"function_call", "custom_tool_call", "computer_call", "tool_search_call"}:
@@ -153,19 +156,21 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
             **common,
             "type": "function_call_output",
             "call_id": raw["call_id"],
-            "status": "completed",
-            "output": (
-                json.dumps(
-                    {
-                        "output": raw["output"],
-                        "acknowledged_safety_checks": raw.get("acknowledged_safety_checks", []),
-                    },
-                    allow_nan=False,
-                )
-                if kind == "computer_call_output"
-                else raw["output"]
+            **_function_output_fields(
+                (
+                    json.dumps(
+                        {
+                            "output": raw["output"],
+                            "acknowledged_safety_checks": raw.get("acknowledged_safety_checks", []),
+                        },
+                        allow_nan=False,
+                    )
+                    if kind == "computer_call_output"
+                    else raw["output"]
+                ),
+                status="completed",
+                success=tool_success,
             ),
-            "error": None,
         }
     if kind == "web_search_call":
         return project_web_search_item({**raw, "type": "WebSearch"}, True, turn_id)
@@ -202,6 +207,7 @@ def project_history(
     *,
     uncertain_calls: list[UncertainCall] | None = None,
     item_record_indexes: dict[int, int] | None = None,
+    tool_success_by_record: dict[int, bool] | None = None,
 ) -> tuple[list[RecordedTurn], list[SessionItem]]:
     """Prefer native item events over raw records, retaining first-seen order."""
     projector = EventProjector(session_id, source_id=subagent_id)
@@ -367,7 +373,11 @@ def project_history(
                     ):
                         turn_id = aborted_turn
             if turn_id:
-                item = _response_item(payload, turn_id)
+                item = _response_item(
+                    payload,
+                    turn_id,
+                    tool_success_by_record.get(record_index) if tool_success_by_record else None,
+                )
                 if item is not None:
                     if reconciliation is not None:
                         item["reconciliation"] = reconciliation

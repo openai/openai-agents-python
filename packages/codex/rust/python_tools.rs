@@ -8298,6 +8298,8 @@ pub(crate) mod managed_tests {
             .to_string(),
             encrypted_function_args: None,
             internal_chat_message_metadata_passthrough: None,
+            asynchronous: None,
+            status: None,
         }
     }
 
