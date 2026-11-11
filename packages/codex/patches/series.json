@@ -635,7 +635,11 @@
     {
       "path": "sdk-bounded-one-shot-history.patch",
       "sha256": "02da72f8e5bcfab13b3be4680356a62156eb429dcb7497ecc0b9644625c05f98"
+    },
+    {
+      "path": "sdk-function-call-wire.patch",
+      "sha256": "921c9d5823942c2b5ca69221231b9b8dc7ed7c2ea032eca11afa2de3111e1e86"
     }
   ],
-  "result_tree": "fdbd4e60a29f0e6e538413243fe41cccbc3880a9"
+  "result_tree": "482cc82f3a5b531e67eaf2bfa06e9034604107d5"
 }
