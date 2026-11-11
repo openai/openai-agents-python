@@ -6,6 +6,7 @@ from _agents_codex.usage import (
     Any as Any,
     Callable as Callable,
     Literal as Literal,
+    RawProviderUsage as RawProviderUsage,
     RunBudget as RunBudget,
     RunUsage as RunUsage,
     TokenUsage as TokenUsage,
@@ -14,4 +15,4 @@ from _agents_codex.usage import (
     dataclass as dataclass,
 )
 
-__all__ = ["RunBudget", "RunUsage", "TokenUsage", "TokenUsageInfo"]
+__all__ = ["RawProviderUsage", "RunBudget", "RunUsage", "TokenUsage", "TokenUsageInfo"]

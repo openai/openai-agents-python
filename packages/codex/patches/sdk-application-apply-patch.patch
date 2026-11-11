@@ -211,7 +211,7 @@ index 2359c0ba..0965eaa5 100644
          | ResponseItem::LocalShellCall { .. }
          | ResponseItem::ToolSearchCall { .. }
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index adfe48be..50e28b80 100644
+index f3294659..856c5e34 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -2554,6 +2554,7 @@ fn recovered_tools_from_history(
@@ -248,7 +248,7 @@ index adfe48be..50e28b80 100644
          )
          .await;
          if let Some(agent_message) = final_last_agent_message {
-@@ -3925,7 +3929,8 @@ async fn try_run_sampling_request(
+@@ -3930,7 +3934,8 @@ async fn try_run_sampling_request(
                      if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                          let call_id = match &item {
                              ResponseItem::FunctionCall { call_id, .. }
@@ -258,7 +258,7 @@ index adfe48be..50e28b80 100644
                              | ResponseItem::CustomToolCall { call_id, .. } => {
                                  Some(call_id.as_str())
                              }
-@@ -4000,8 +4005,10 @@ async fn try_run_sampling_request(
+@@ -4005,8 +4010,10 @@ async fn try_run_sampling_request(
                          | ResponseItem::FunctionCall { .. }
                          | ResponseItem::ToolSearchCall { .. }
                          | ResponseItem::FunctionCallOutput { .. }

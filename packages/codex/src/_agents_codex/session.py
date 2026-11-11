@@ -314,6 +314,7 @@ from .turn_receipt import (
 )
 from .usage import (
     _MAX_SAFE_INTEGER,
+    RawProviderUsage,
     RunBudget,
     RunUsage,
     TokenUsage,
@@ -957,6 +958,7 @@ class Completed(Generic[OutputT, TurnT]):
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
     history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
     items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)
+    raw_usage: tuple[RawProviderUsage, ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
 
     def __post_init__(self) -> None:
@@ -1244,6 +1246,9 @@ _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
     "native_restore_declaration", default=None
 )
 
+_raw_usage_restore: ContextVar[
+    tuple[Agent[Any, Any], SessionState, asyncio.Task[Any] | None] | None
+] = ContextVar("native_raw_usage_restore", default=None)
 _produced_items_restore: ContextVar[
     tuple[Agent[Any, Any], SessionState, asyncio.Task[Any] | None] | None
 ] = ContextVar("native_produced_items_restore", default=None)
@@ -4515,6 +4520,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._websockets_enabled = websockets_enabled
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
+                    session._start_raw_usage_on_restore(policy_agent, state)
                     capture = _produced_items_restore.get()
                     if (
                         capture is not None
@@ -4794,6 +4800,7 @@ class Session(Generic[ContextT, OutputT]):
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
+        self._raw_usage_started = False
         self._produced_items_started = False
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
@@ -7531,6 +7538,36 @@ class Session(Generic[ContextT, OutputT]):
 
         return await self._join_mutation(asyncio.create_task(capture()))
 
+    def _start_raw_usage_on_restore(
+        self, agent: Agent[Any, Any] | None, state: SessionState | None
+    ) -> None:
+        capture = _raw_usage_restore.get()
+        if (
+            capture is not None
+            and capture[0] is agent
+            and (capture[1] is state or capture[1] == state)
+            and capture[2] is asyncio.current_task()
+        ):
+            self._start_raw_usage()
+
+    def _start_raw_usage(self) -> None:
+        if not self._raw_usage_started:
+            self._native._start_raw_usage()
+            self._raw_usage_started = True
+
+    def _take_raw_usage(self, turn: Turn[Any]) -> tuple[RawProviderUsage, ...]:
+        if not self._raw_usage_started:
+            raise NativeError("Provider usage capture was not started")
+        self._raw_usage_started = False
+        turn_id = turn.turn_id
+        if turn_id is None:
+            raise NativeError("Completed native turn has no provider usage identity")
+        try:
+            records = json.loads(self._native._take_raw_usage(turn_id))
+        except RuntimeError as error:
+            raise NativeError(str(error)) from error
+        return tuple(RawProviderUsage(**record) for record in records)
+
     async def _run_history(self) -> tuple[dict[str, Any], ...]:
         try:
             snapshot = await self._capture_canonical_history(None, for_replay=True)
@@ -8028,6 +8065,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         return_state: bool = False,
         return_history: bool = False,
+        return_raw_usage: bool = False,
         return_items: bool = False,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
@@ -8150,6 +8188,8 @@ class Session(Generic[ContextT, OutputT]):
                 result = replace(result, state=await self.save_state())
             if return_history:
                 result = replace(result, history=await self._run_history())
+            if return_raw_usage:
+                result = replace(result, raw_usage=self._take_raw_usage(result.turn))
             if return_items:
                 result = replace(result, items=self._take_produced_items(result.turn))
         except BaseException as error:
@@ -10420,6 +10460,8 @@ class Session(Generic[ContextT, OutputT]):
             # No repair work can have started before this local check.
             # _start reaches its identical check without yielding.
             repair._check_open()
+            if self._raw_usage_started:
+                repair._native._attach_raw_usage(self._native)
             rejected = False
             try:
                 try:
@@ -11133,7 +11175,9 @@ class Session(Generic[ContextT, OutputT]):
                         return value
                     if not isinstance(value, ModelResponse):
                         raise TypeError("NativeModel.complete must return ModelResponse")
-                    return value._capture()
+                    return value._capture(
+                        capture_raw_usage=message.get("capture_raw_usage") is True
+                    )
                 finally:
                     del request, value
 
@@ -11141,7 +11185,9 @@ class Session(Generic[ContextT, OutputT]):
             # Awaited producers settle on this loop. Capture immediately, before
             # another await or handing the retained value back to the application.
             if isinstance(produced, ModelResponse):
-                reply = produced._capture()
+                reply = produced._capture(
+                    capture_raw_usage=message.get("capture_raw_usage") is True
+                )
             elif produced is not None and not isinstance(produced, str):
                 raise TypeError("NativeModel.complete must return ModelResponse")
             else:

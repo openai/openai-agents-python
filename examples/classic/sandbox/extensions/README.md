@@ -119,6 +119,59 @@ Modal sandboxes also support native cloud bucket mounts through `ModalCloudBucke
 
 For native cloud bucket testing, you can either export raw credential environment variables or pass `--native-cloud-bucket-secret-name` to reuse an existing named Modal Secret instead.
 
+### GitRepo copies with a custom tool directory
+
+For a hosted provider such as Modal, pass a `git_repo_copy_launcher` through the client's `Dependencies` when its image uses a custom shell or copy tools. Bind it when creating or resuming the client. The launcher runs the SDK's copy script on the same sandbox through a provider handle that the application trusts.
+
+This Modal example uses an existing sandbox with its workspace at `/workspace`. Its image includes a statically linked BusyBox at `/opt/image-tools/busybox` and a `cp` applet link in the same directory. The absolute BusyBox command clears the inherited environment before starting the shell.
+
+Run sandbox workloads as an unprivileged user. Install the tools outside writable workspaces and mounts. Protect the binary, the link and their parent directories from writes by that user. Keep mount privileges out of the workload so it cannot cover the tools with a different filesystem.
+
+```python
+import asyncio
+
+import modal
+
+from agents.classic.extensions.sandbox.modal import (
+    ModalSandboxClient,
+    ModalSandboxSelector,
+    ModalSandboxSession,
+)
+from agents.classic.sandbox import ExecResult
+from agents.classic.sandbox.session import BaseSandboxSession, Dependencies
+
+
+def client_for_image(sandbox: modal.Sandbox) -> ModalSandboxClient:
+    async def launch(session: BaseSandboxSession, script: str, args: tuple[str, ...]) -> ExecResult:
+        if (
+            not isinstance(session, ModalSandboxSession)
+            or session.state.sandbox_id != sandbox.object_id
+        ):
+            raise ValueError("Git copy launcher is bound to another sandbox")
+        busybox = "/opt/image-tools/busybox"
+        process = await sandbox.exec.aio(
+            busybox,
+            "env",
+            "-i",
+            "PATH=/opt/image-tools",
+            busybox,
+            "sh",
+            "-c",
+            script,
+            "sandbox-git-copy",
+            *args,
+            workdir="/workspace",
+            text=False,
+        )
+        stdout, stderr = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
+        return ExecResult(stdout=stdout, stderr=stderr, exit_code=await process.wait.aio())
+
+    return ModalSandboxClient(
+        sandbox=ModalSandboxSelector.from_sandbox(sandbox),
+        dependencies=Dependencies(git_repo_copy_launcher=launch),
+    )
+```
+
 ## Cloudflare
 
 ### Setup
