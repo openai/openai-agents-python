@@ -10,7 +10,7 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from ._lifecycle import _join
@@ -18,6 +18,8 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._storage_driver import _StorageDriver
 
 if TYPE_CHECKING:
+    from _thread import LockType
+
     from dapr.aio.clients import DaprClient
 
 
@@ -34,6 +36,7 @@ class _Record:
 class _Lease:
     token: str
     stop: threading.Event
+    lock: LockType = field(default_factory=threading.Lock)
     valid: bool = True
     thread: threading.Thread | None = None
 
@@ -83,7 +86,7 @@ class DaprSessionStore:
         )
         self._driver = _StorageDriver(asynchronous=True, timeout=lease_seconds)
         self._pid = os.getpid()
-        self._mutex = threading.RLock()
+        self._mutex = threading.Lock()
         self._leases: dict[str, _Lease] = {}
         self._owns_client = False
         self._closed = False
@@ -190,23 +193,27 @@ class DaprSessionStore:
             raise
         return True
 
-    def _read_owned(self, session_id: str, token: str) -> tuple[_Record, str]:
-        lease = self._leases.get(session_id)
-        if lease is None or not lease.valid or lease.token != token:
+    def _get_lease(self, session_id: str, token: str) -> _Lease | None:
+        with self._mutex:
+            lease = self._leases.get(session_id)
+        return lease if lease is not None and lease.token == token else None
+
+    def _read_owned(self, session_id: str, lease: _Lease) -> tuple[_Record, str]:
+        if not lease.valid:
             raise RuntimeError("Canonical storage writer was fenced")
         record, etag = self._read_record(session_id)
-        if record.owner != token or record.lease_until <= time.time():
+        if record.owner != lease.token or record.lease_until <= time.time():
             lease.valid = False
             raise RuntimeError("Canonical storage writer was fenced")
         return record, etag
 
     def _renew(self, session_id: str, lease: _Lease) -> None:
         while not lease.stop.wait(self.lease_seconds / 3):
-            with self._mutex:
+            with lease.lock:
                 if lease.stop.is_set():
                     return
                 try:
-                    record, etag = self._read_owned(session_id, lease.token)
+                    record, etag = self._read_owned(session_id, lease)
                     renewed = replace(record, lease_until=time.time() + self.lease_seconds)
                     if self._replace_record(session_id, etag, renewed):
                         continue
@@ -217,31 +224,41 @@ class DaprSessionStore:
 
     def acquire(self, session_id: str) -> str:
         self._check_process()
-        with self._mutex:
-            if self._closed:
-                raise RuntimeError("DaprSessionStore is closed")
-            if session_id in self._leases:
-                raise RuntimeError("Canonical storage is already owned")
-            record, etag = self._read_record(session_id)
-            now = time.time()
-            if record.owner is not None and record.lease_until > now:
-                raise RuntimeError("Canonical storage is already owned")
-            token = uuid.uuid4().hex
-            owned = replace(record, owner=token, lease_until=now + self.lease_seconds)
-            if not self._replace_record(session_id, etag, owned):
-                raise RuntimeError("Canonical storage is already owned")
-            lease = _Lease(token, threading.Event())
-            lease.thread = threading.Thread(
-                target=self._renew, args=(session_id, lease), daemon=True
-            )
-            lease.thread.start()
-            self._leases[session_id] = lease
-            return token
+        lease = _Lease(uuid.uuid4().hex, threading.Event())
+        with lease.lock:
+            with self._mutex:
+                if self._closed:
+                    raise RuntimeError("DaprSessionStore is closed")
+                if session_id in self._leases:
+                    raise RuntimeError("Canonical storage is already owned")
+                self._leases[session_id] = lease
+            try:
+                record, etag = self._read_record(session_id)
+                now = time.time()
+                if record.owner is not None and record.lease_until > now:
+                    raise RuntimeError("Canonical storage is already owned")
+                owned = replace(record, owner=lease.token, lease_until=now + self.lease_seconds)
+                if not self._replace_record(session_id, etag, owned):
+                    raise RuntimeError("Canonical storage is already owned")
+                lease.thread = threading.Thread(
+                    target=self._renew, args=(session_id, lease), daemon=True
+                )
+                lease.thread.start()
+            except BaseException:
+                lease.valid = False
+                lease.stop.set()
+                with self._mutex:
+                    del self._leases[session_id]
+                raise
+        return lease.token
 
     def read(self, session_id: str, token: str) -> str | None:
         self._check_process()
-        with self._mutex:
-            return self._read_owned(session_id, token)[0].payload
+        lease = self._get_lease(session_id, token)
+        if lease is None:
+            raise RuntimeError("Canonical storage writer was fenced")
+        with lease.lock:
+            return self._read_owned(session_id, lease)[0].payload
 
     def commit(
         self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str
@@ -250,8 +267,11 @@ class DaprSessionStore:
         document: Any = json.loads(payload)
         if document["revision"] != expected_revision + 1 or document["write_id"] != write_id:
             raise RuntimeError("Invalid canonical revision")
-        with self._mutex:
-            record, etag = self._read_owned(session_id, token)
+        lease = self._get_lease(session_id, token)
+        if lease is None:
+            raise RuntimeError("Canonical storage writer was fenced")
+        with lease.lock:
+            record, etag = self._read_owned(session_id, lease)
             if record.write_id == write_id:
                 if record.payload == payload:
                     return
@@ -271,13 +291,14 @@ class DaprSessionStore:
         if os.getpid() != self._pid:
             return
         self._driver.require_worker()
-        lease: _Lease | None = None
+        lease = self._get_lease(session_id, token)
+        if lease is None:
+            return
         try:
-            with self._mutex:
-                current = self._leases.get(session_id)
-                if current is None or current.token != token:
-                    return
-                lease = current
+            with lease.lock:
+                with self._mutex:
+                    if self._leases.get(session_id) is not lease:
+                        return
                 lease.valid = False
                 lease.stop.set()
                 record, etag = self._read_record(session_id)
@@ -286,9 +307,10 @@ class DaprSessionStore:
                     if not self._replace_record(session_id, etag, released):
                         if self._read_record(session_id)[0].owner == token:
                             raise RuntimeError("Canonical storage release was not confirmed")
-                del self._leases[session_id]
+                with self._mutex:
+                    del self._leases[session_id]
         finally:
-            if lease is not None and lease.thread is not None:
+            if lease.thread is not None:
                 lease.thread.join()
 
     def _close(self) -> None:

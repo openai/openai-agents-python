@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -97,6 +98,48 @@ async def test_dapr_canonical_storage_fences_concurrent_writers(dapr_store_pair)
             await asyncio.to_thread(winner.read, thread_id, token)
     finally:
         await asyncio.to_thread(follower.release, thread_id, replacement)
+
+
+async def test_dapr_renews_an_idle_session_during_unrelated_io(
+    dapr_store_pair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, _ = dapr_store_pair
+    slow_key, idle_key = first._key("slow"), first._key("idle")
+    slow_entered = asyncio.Event()
+    release_slow_read = asyncio.Event()
+    idle_renewed = asyncio.Event()
+    get_state = first.client.get_state
+    save_state = first.client.save_state
+
+    async def delay_read(store_name: str, key: str, **kwargs: Any) -> Any:
+        if key == slow_key and not slow_entered.is_set():
+            slow_entered.set()
+            await release_slow_read.wait()
+        return await get_state(store_name, key, **kwargs)
+
+    async def observe_renewal(store_name: str, key: str, value: str, **kwargs: Any) -> Any:
+        result = await save_state(store_name, key, value, **kwargs)
+        if key == idle_key and slow_entered.is_set():
+            idle_renewed.set()
+        return result
+
+    async with AsyncExitStack() as stack:
+        slow_token = await asyncio.to_thread(first.acquire, "slow")
+        stack.push_async_callback(asyncio.to_thread, first.release, "slow", slow_token)
+        idle_token = await asyncio.to_thread(first.acquire, "idle")
+        stack.push_async_callback(asyncio.to_thread, first.release, "idle", idle_token)
+        monkeypatch.setattr(first.client, "get_state", delay_read)
+        monkeypatch.setattr(first.client, "save_state", observe_renewal)
+        slow_read = asyncio.create_task(asyncio.to_thread(first.read, "slow", slow_token))
+        try:
+            async with timeout(0.8):
+                await slow_entered.wait()
+                await idle_renewed.wait()
+            assert not slow_read.done()
+        finally:
+            release_slow_read.set()
+            await slow_read
+        assert await asyncio.to_thread(first.read, "idle", idle_token) is None
 
 
 async def test_dapr_rejects_incomplete_checkpoint_record(dapr_store_pair) -> None:
