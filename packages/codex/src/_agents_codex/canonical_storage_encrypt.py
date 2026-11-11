@@ -73,55 +73,66 @@ class EncryptedSessionStore:
         Session backed by an EncryptedSessionStore. The import checks the
         source item count and the bytes of ciphertext it examines.
         """
-        from cryptography.fernet import Fernet, InvalidToken
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-
-        _validate_legacy_history_limits(max_items, max_bytes)
-        if limit is not None and limit <= 0:
-            return []
-        _check_legacy_history_size(len(items), 0, max_items, max_bytes)
-        derived = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=session_id.encode("utf-8"),
-            info=b"agents.session-store.hkdf.v1",
-        ).derive(_master_key_bytes(encryption_key))
-        cipher = Fernet(base64.urlsafe_b64encode(derived))
-        del encryption_key, derived
-
         history: list[dict[str, Any]] = []
-        encoded_bytes = 0
-        source = items if limit is None else reversed(items)
-        for envelope in source:
-            token = envelope.get("payload")
-            if (
-                envelope.get("__enc__") != 1
-                or "kid" not in envelope
-                or "v" not in envelope
-                or not isinstance(token, str)
-                or not token.isascii()
-            ):
-                continue
-            encoded_bytes += len(token)
-            _check_legacy_history_size(0, encoded_bytes, max_items, max_bytes)
+        try:
+            from cryptography.fernet import Fernet, InvalidToken
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+            _validate_legacy_history_limits(max_items, max_bytes)
+            if limit is not None and limit <= 0:
+                return []
+            _check_legacy_history_size(len(items), 0, max_items, max_bytes)
+            cipher: Fernet | None = None
             try:
-                item = _decode_legacy_item(cipher.decrypt(token.encode("utf-8"), ttl=ttl))
-            except InvalidToken:
-                continue
+                derived = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=session_id.encode("utf-8"),
+                    info=b"agents.session-store.hkdf.v1",
+                ).derive(_master_key_bytes(encryption_key))
+                cipher = Fernet(base64.urlsafe_b64encode(derived))
             except (TypeError, ValueError):
-                item = None
-            if item is None:
-                # Keep authenticated payloads and the cipher out of the error frame.
-                history.clear()
-                del cipher
-                raise ValueError("An authenticated v0 session item is invalid")
-            history.append(item)
-            if limit is not None and len(history) == limit:
-                break
-        if limit is not None:
-            history.reverse()
-        return history
+                pass
+            if cipher is None:
+                raise ValueError("Invalid v0 encryption key or session ID")
+
+            encoded_bytes = 0
+            source = items if limit is None else reversed(items)
+            for envelope in source:
+                token = envelope.get("payload")
+                if (
+                    envelope.get("__enc__") != 1
+                    or "kid" not in envelope
+                    or "v" not in envelope
+                    or not isinstance(token, str)
+                    or not token.isascii()
+                ):
+                    continue
+                encoded_bytes += len(token)
+                _check_legacy_history_size(0, encoded_bytes, max_items, max_bytes)
+                try:
+                    item = _decode_legacy_item(cipher.decrypt(token.encode("utf-8"), ttl=ttl))
+                except InvalidToken:
+                    continue
+                except (TypeError, ValueError, RecursionError):
+                    item = None
+                if item is None:
+                    raise ValueError("An authenticated v0 session item is invalid")
+                history.append(item)
+                if limit is not None and len(history) == limit:
+                    break
+            if limit is not None:
+                history.reverse()
+            return history
+        finally:
+            # Exception-frame diagnostics must not retain keys, ciphertext or private history.
+            session_id = encryption_key = ""
+            derived = b""
+            items = source = ()
+            envelope = {}
+            cipher = item = token = None
+            history = []
 
     def _cipher(self, session_id: str) -> Fernet:
         derived = self._hkdf_type(

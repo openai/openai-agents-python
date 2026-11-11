@@ -180,6 +180,58 @@ async def test_imports_authenticated_unexpired_v0_items_into_native_encrypted_st
         assert "v0 imported café".encode() not in database_file.read_bytes()
 
 
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("item limit", "exceeds max_items"),
+        ("byte limit", "exceeds max_bytes"),
+        ("malformed key", "Invalid v0 encryption key or session ID"),
+        ("malformed item", "An authenticated v0 session item is invalid"),
+    ],
+)
+def test_encrypted_import_failures_discard_sensitive_traceback_locals(failure, message):
+    from traceback import walk_tb
+
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from agents.classic.extensions.memory.encrypt_session import (
+        _derive_session_fernet_key,
+        _ensure_fernet_key_bytes,
+    )
+
+    master_key = Fernet.generate_key().decode("ascii")
+    session_id = "SYNTHETIC_ENCRYPTED_IMPORT_SESSION"
+    content = "SYNTHETIC_ENCRYPTED_IMPORT_PRIVATE_HISTORY"
+    cipher = _derive_session_fernet_key(_ensure_fernet_key_bytes(master_key), session_id)
+
+    def envelope(value: Any) -> dict[str, Any]:
+        token = cipher.encrypt(json.dumps(value).encode("utf-8")).decode("ascii")
+        return {"__enc__": 1, "v": 1, "kid": "v0-fixture", "payload": token}
+
+    first = envelope({"role": "user", "content": content})
+    second = envelope([] if failure == "malformed item" else V0_ITEMS[0])
+    source = [first, second, {"role": "user", "content": content}]
+    options = {}
+    if failure == "item limit":
+        options["max_items"] = 1
+    elif failure == "byte limit":
+        options["max_bytes"] = len(first["payload"])
+    key = master_key + "\ud800" if failure == "malformed key" else master_key
+
+    with pytest.raises(ValueError, match=message) as caught:
+        EncryptedSessionStore.read_legacy_history(source, session_id, encryption_key=key, **options)
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+    for frame, _ in walk_tb(caught.value.__traceback__):
+        if frame.f_code.co_filename.endswith("canonical_storage_encrypt.py"):
+            retained = frame.f_locals
+            assert master_key not in repr(retained)
+            assert content not in repr(retained)
+            assert session_id not in repr(retained)
+            assert not any(isinstance(value, Fernet) for value in retained.values())
+
+
 async def test_imports_v0_sqlite_items_without_changing_the_file(tmp_path, responses):
     path = tmp_path / "old SQLite history.db"
     with closing(sqlite3.connect(path)) as connection, connection:
