@@ -13,6 +13,7 @@ import pytest
 from agents import (
     Agent,
     CapabilityError,
+    CodexLogin,
     CustomStorage,
     HostedMCP,
     InteractionExpiredError,
@@ -106,6 +107,26 @@ def test_hosted_mcp_callback_needs_provider_approval(policy: str | None) -> None
         config["require_approval"] = policy
         with pytest.raises(ValueError, match="approval callback requires provider approval"):
             HostedMCP(tool_config=config, on_approval_request=lambda _: {"approve": False})
+
+
+@pytest.mark.parametrize("operation", ["session", "run"])
+async def test_hosted_mcp_login_rejection_scrubs_traceback_credentials(tmp_path, operation):
+    native = NativeProvider(auth=CodexLogin(codex_home=tmp_path / "unused-login"))
+    agent = Agent(instructions="Use docs.", model="gpt-5.2", provider=native, tools=[declaration()])
+    async with timeout(10), native:
+        with pytest.raises(ValueError, match="API-key Responses provider") as caught:
+            if operation == "session":
+                async with agent.session():
+                    pytest.fail("Codex login admitted hosted MCP")
+            else:
+                await agent.run("Lookup.")
+
+    traceback = caught.value.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_globals.get("__name__", "").startswith("_agents_codex."):
+            assert "private-hosted-credential" not in repr(frame.f_locals)
+        traceback = traceback.tb_next
 
 
 @pytest.mark.asyncio
@@ -420,10 +441,14 @@ async def test_native_hosted_mcp_cancel_joins_callback_cleanup_without_publishin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["mcp_list_tools", "mcp_call"])
+@pytest.mark.parametrize(
+    ("kind", "error"),
+    [("mcp_list_tools", None), ("mcp_list_tools", "Catalog unavailable"), ("mcp_call", None)],
+)
 async def test_native_hosted_mcp_provider_receipts_are_progress_without_local_dispatch(
     responses: ResponsesFixture,
     kind: str,
+    error: str | None,
 ) -> None:
     calls = []
     item = {"type": kind, "id": "remote_item", "server_label": "docs"}
@@ -431,6 +456,8 @@ async def test_native_hosted_mcp_provider_receipts_are_progress_without_local_di
         item.update(name="lookup", arguments="{}", output="Remote result.", status="completed")
     else:
         item["tools"] = [{"name": "lookup", "input_schema": {"type": "object"}}]
+        if error is not None:
+            item["error"] = error
     responses.respond({"type": "response.output_item.done", "item": item})
     async with timeout(30), provider(responses) as native:
         agent = Agent(
@@ -446,6 +473,7 @@ async def test_native_hosted_mcp_provider_receipts_are_progress_without_local_di
     assert result.items is not None and len(result.items) == 1
     assert result.items[0].agent is agent
     assert result.items[0].item["type"] == kind
+    assert result.items[0].item["status"] == ("failed" if error is not None else "completed")
     assert result.items[0].item["provider_data"] == item
     assert result.history is not None
     raw = next(entry for entry in result.history if entry["type"] == kind)

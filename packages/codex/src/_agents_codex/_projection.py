@@ -230,8 +230,8 @@ def project_hosted_response_item(
         return None
     if kind in {"shell_call", "shell_call_output"}:
         status = raw.get("status") or "unknown"
-    elif kind in {"mcp_approval_request", "mcp_approval_response"}:
-        status = raw.get("status", "completed")
+    elif kind in {"mcp_list_tools", "mcp_call"}:
+        status = raw.get("status", "failed" if raw.get("error") is not None else "completed")
     else:
         status = raw["status"]
     return {

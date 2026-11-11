@@ -58,6 +58,7 @@ def _uses_mcp(
         # Intrinsically MCP boundaries need protection before an owner exists.
         return True
     from .agent import Agent
+    from .hosted_mcp import HostedMCP
     from .mcp import _MCP
 
     tools = kwargs.get("tools")
@@ -67,7 +68,7 @@ def _uses_mcp(
         if not isinstance(tools, (list, tuple)):
             return True
         values = list.__iter__(tools) if isinstance(tools, list) else tuple.__iter__(tools)
-        if any(isinstance(tool, _MCP) for tool in values):
+        if any(isinstance(tool, (HostedMCP, _MCP)) for tool in values):
             return True
     owners = (
         args[0] if args else kwargs.get("self"),
@@ -78,7 +79,9 @@ def _uses_mcp(
             # A lazy handoff can capture MCP declarations outside the opening tools.
             # Protect that graph without evaluating its application-owned resolvers.
             if any(
-                isinstance(value, _MCP) or isinstance(value, Agent) and bool(value.handoffs)
+                isinstance(value, (HostedMCP, _MCP))
+                or isinstance(value, Agent)
+                and bool(value.handoffs)
                 for value in declarations(owner)
             ):
                 return True
