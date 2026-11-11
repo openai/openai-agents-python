@@ -44,6 +44,7 @@ from _agents_codex.telemetry import (
     TypeVar as TypeVar,
     _activate as _activate,
     _active_processor_ids as _active_processor_ids,
+    _Callable as _Callable,
     _capture as _capture,
     _CapturedTrace as _CapturedTrace,
     _check_processor_capacity as _check_processor_capacity,

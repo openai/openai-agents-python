@@ -5,12 +5,22 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Callable
+from typing import get_type_hints
 
 import pytest
 
 from agents import Agent, function_tool, telemetry
 from agents.testing import ScriptedResponses, text, tool_call
 from tests.test_native_trace_exporter import collector, native_trace_child_env
+
+
+def test_public_tracing_id_generator_type_hints():
+    callback = Callable[[], str] | None
+    assert get_type_hints(telemetry.TracingIdGenerator) == {
+        "generate_trace_id": callback,
+        "generate_span_id": callback,
+    }
 
 
 @pytest.mark.parametrize(
