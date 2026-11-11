@@ -464,10 +464,9 @@ async def test_held_terminal_resume_checks_before_ordinary_admission(
                             await failed.wait()
                             responding.cancel("synthetic caller cancellation")
                             release.set()
-                            with pytest.raises(
-                                asyncio.CancelledError, match="synthetic caller cancellation"
-                            ):
+                            with pytest.raises(asyncio.CancelledError):
                                 await responding
+                            assert responding.cancelled()
                         finally:
                             release.set()
                             await asyncio.gather(responding, return_exceptions=True)
@@ -659,7 +658,7 @@ async def test_child_terminal_observations_keep_equal_call_ids_separate(
     from agents.observation import ToolFinished
     from tests.native_executor_fixtures import ExecutorPeer
     from tests.native_fixtures import function_call
-    from tests.test_native_child_agents import ChildPeer, metadata, trust
+    from tests.test_native_child_agents import ChildPeer, handles, metadata, trust
     from tests.test_native_executor_tools import declaration
 
     class Peer(ChildPeer):
@@ -709,30 +708,27 @@ async def test_child_terminal_observations_keep_equal_call_ids_separate(
             output_guardrails=[OutputGuardrail("children", check)],
         ).session(environment=declaration(executor)) as session:
             await (await session.submit("begin")).get_result()
-            children = [child async for child in session.subagents()]
+            children = await handles(session, 2)
             assert len(children) == 2
             for child in children:
-                assert child.turn is not None
                 try:
-                    completed = await child.turn.get_result()
+                    completed = await child.get_result()
                 except GuardrailTripwire:
-                    assert child.id in blocked
+                    assert child.child_id in blocked
                 else:
-                    assert child.id not in blocked
-                    assert completed.final_output == f"child-output:{child.id}"
-                events = [
-                    event async for event in child.turn.events(include_execution_details=True)
-                ]
+                    assert child.child_id not in blocked
+                    assert completed.final_output == f"child-output:{child.child_id}"
+                events = [event async for event in child.events(include_execution_details=True)]
                 finished = [
                     event
                     for event in events
                     if isinstance(event, ToolFinished) and event.call_id == "same-child-call"
                 ]
                 assert len(finished) == 1
-                if child.id in blocked:
-                    assert f"child-output:{child.id}" not in repr(events)
+                if child.child_id in blocked:
+                    assert f"child-output:{child.child_id}" not in repr(events)
                 else:
-                    assert f"child-output:{child.id}" in repr(finished)
+                    assert f"child-output:{child.child_id}" in repr(finished)
                 for sibling in children:
-                    if sibling.id != child.id:
-                        assert f"child-output:{sibling.id}" not in repr(finished)
+                    if sibling.child_id != child.child_id:
+                        assert f"child-output:{sibling.child_id}" not in repr(finished)

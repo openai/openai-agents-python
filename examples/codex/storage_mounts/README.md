@@ -138,7 +138,10 @@ from agents.sandbox import ManagedWorkspaceCheckpoint, sandbox_environment
 
 async def capture_workspace(agent, *, client, manifest, options, connect):
     source = sandbox_environment(
-        client, manifest=manifest, options=options, connect=connect,
+        client,
+        manifest=manifest,
+        options=options,
+        connect=connect,
         managed_workspace=True,
     )
     async with agent.session(environment=source) as session:
@@ -146,12 +149,17 @@ async def capture_workspace(agent, *, client, manifest, options, connect):
         return await session.suspend_workspace()
 
 
-async def resume_workspace(agent, payload, *, client, manifest, options, connect,
-                           authorized_state, trusted_expected_pair):
+async def resume_workspace(
+    agent, payload, *, client, manifest, options, connect, authorized_state, trusted_expected_pair
+):
     checkpoint = ManagedWorkspaceCheckpoint.from_json(payload)
     source = sandbox_environment(
-        client, manifest=manifest, options=options, connect=connect,
-        managed_workspace=True, authorized_resume_state=authorized_state,
+        client,
+        manifest=manifest,
+        options=options,
+        connect=connect,
+        managed_workspace=True,
+        authorized_resume_state=authorized_state,
         authorized_resume_checkpoint=trusted_expected_pair,
     )
     async with agent.session(environment=source, state=checkpoint) as session:

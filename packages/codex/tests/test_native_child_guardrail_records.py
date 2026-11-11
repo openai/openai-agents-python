@@ -1,6 +1,8 @@
 """A child handle published before SDK event registration retains its own records."""
 
 import asyncio
+import json
+from collections import deque
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -17,15 +19,39 @@ async def test_early_child_turn_resolves_later_guardrail_owner(tmp_path, monkeyp
     release_reader = asyncio.Event()
     reader_waiting = asyncio.Event()
     children_requested = asyncio.Event()
-    original_reader = Session._read_child_event
+    original_reader = Session._read_events
 
-    async def delayed_reader(self, event):
-        if event["msg"]["type"] in {"task_started", "turn_started"}:
-            reader_waiting.set()
-            await release_reader.wait()
-        await original_reader(self, event)
+    async def delayed_reader(self, *args, **kwargs):
+        native = self._native
+        original_next = type(native)._next_session_event
+        held = deque()
 
-    monkeypatch.setattr(Session, "_read_child_event", delayed_reader)
+        async def next_event(target):
+            if target is not native:
+                return await original_next(target)
+            if release_reader.is_set():
+                return held.popleft() if held else await original_next(target)
+            while True:
+                raw = await original_next(target)
+                event = json.loads(raw)
+                if event is None:
+                    return raw
+                message = event.get("msg", {})
+                child_id = event.get("subagent_id") or message.get("thread")
+                if child_id is not None and child_id != self.id:
+                    held.append(raw)
+                    snapshot = await native._child_instance(child_id)
+                    if snapshot is not None and snapshot[2] is not None:
+                        reader_waiting.set()
+                        await release_reader.wait()
+                        return held.popleft()
+                else:
+                    return raw
+
+        monkeypatch.setattr(type(native), "_next_session_event", next_event)
+        await original_reader(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "_read_events", delayed_reader)
 
     class Peer(ChildPeer):
         async def hold(self, event):

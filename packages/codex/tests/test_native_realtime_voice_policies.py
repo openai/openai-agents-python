@@ -1,6 +1,7 @@
 """Public native voice policy behavior against the independent provider peer."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -417,15 +418,18 @@ async def test_explicit_voice_capture_rejects_source_changed_between_policy_read
             owner = await stack.enter_async_context(session.realtime(config=config))
             await peer.frame(lambda frame: frame["type"] == "session.update")
         captured = asyncio.Event()
+        captured_generation = None
         resume = asyncio.Event()
         wire = []
         select = type(session)._realtime_function_tools
         stale = None
 
         async def capture(self, tools, **kwargs):
+            nonlocal captured_generation
             value = await select(self, tools, **kwargs)
             wire.append(value[0])
             if asyncio.current_task() is stale:
+                captured_generation = kwargs["snapshot"]["catalog_generation"]
                 captured.set()
                 await resume.wait()
             return value
@@ -438,19 +442,44 @@ async def test_explicit_voice_capture_rejects_source_changed_between_policy_read
             if owner is None
             else owner._sync_active_profile(include_mono=True)
         )
+        captured_waiter = asyncio.create_task(captured.wait())
+        updating = None
         try:
-            await captured.wait()
-            await session.update(tools=[replacement])
-            current, _ = await select(session, (original,))
-            assert wire[0] == current
+            done, _ = await asyncio.wait(
+                (captured_waiter, stale), return_when=asyncio.FIRST_COMPLETED
+            )
+            if stale in done:
+                await stale
+                pytest.fail("The stale selection finished before its capture barrier")
+            assert captured_generation is not None
+            updating = asyncio.create_task(session.update(tools=[replacement]))
+            # The public update joins profile synchronization, whose lock the
+            # stale capture still holds. Wait only for the native catalog change.
+            while True:
+                current_snapshot = json.loads(
+                    await session._native.call("realtime_tool_selection_sdk", "{}")
+                )
+                if current_snapshot["catalog_generation"] != captured_generation:
+                    break
+                if updating.done():
+                    await updating
+                    pytest.fail("The tool update did not change its native catalog")
+                await asyncio.sleep(0)
             resume.set()
             with pytest.raises(
                 (RuntimeError, ValueError), match="another captured catalog/profile"
             ):
                 await stale
+            await updating
+            current, _ = await select(session, (original,))
+            assert wire[0] == current
         finally:
             resume.set()
-            await asyncio.gather(stale, return_exceptions=True)
+            captured_waiter.cancel()
+            pending = [captured_waiter, stale]
+            if updating is not None:
+                pending.append(updating)
+            await asyncio.gather(*pending, return_exceptions=True)
         assert effects == []
         if owner is None:
             # A fresh capture of the same admitted selector resolves the accepted binding.

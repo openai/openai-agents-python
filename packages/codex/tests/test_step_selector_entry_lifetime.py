@@ -46,6 +46,7 @@ def owner(callback):
         _native_agents=SimpleNamespace(before_step=callback),
         _catalog=catalog,
         _context=None,
+        _agent=None,
         _profiles={},
         _profile_catalogs={(None, 7): catalog},
         _catalog_bindings={(None, 7): ()},
@@ -61,6 +62,7 @@ def owner(callback):
         "_catalog_for_message",
         "_agent_for_profile",
         "_agent_for_message",
+        "_original_agent_for_message",
         "_bindings_for_message",
         "_drain_terminal_observations",
     ):

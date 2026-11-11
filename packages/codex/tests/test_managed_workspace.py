@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import json
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -315,6 +316,10 @@ def native_managed_client(tmp_path, monkeypatch):
     return client
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="strict executor write isolation requires Linux or macOS",
+)
 async def test_native_pair_a_survives_resumed_workspace_b(responses, native_managed_client):
     client = native_managed_client
     root = client.root
@@ -341,6 +346,10 @@ async def test_native_pair_a_survives_resumed_workspace_b(responses, native_mana
 
 
 @pytest.mark.parametrize("cancel_waiter", [False, True])
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="strict executor write isolation requires Linux or macOS",
+)
 async def test_native_capture_intent_survives_racing_close_and_blocks_admission(
     responses, native_managed_client, monkeypatch, cancel_waiter
 ):
