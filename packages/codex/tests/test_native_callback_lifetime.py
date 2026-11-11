@@ -194,7 +194,7 @@ async def test_scoped_preparation_cancellation_does_not_fail_shared_root():
         session._run_owned_context_callback(
             state,
             {"step_id": 7, "thread": "thread", "instance": None},
-            lambda: (callback, None),
+            lambda _active: (callback, None),
             lambda _: decisions.append("accepted"),
             lambda: decisions.append("rejected"),
         ),

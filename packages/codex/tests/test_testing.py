@@ -157,6 +157,8 @@ async def test_loopback_startup_does_not_require_reverse_dns(monkeypatch):
 
 async def test_http_response_order_and_request_snapshots(capsys):
     assert testing.__all__ == [
+        "ModelError",
+        "ScriptedModel",
         "ScriptedResponse",
         "ScriptedResponses",
         "text",
