@@ -281,6 +281,9 @@ impl Change {
             "retained indices must be unique, increasing and within the current model context"
         );
         check_pairs(&live, retained_indices)?;
+        for &index in retained_indices {
+            crate::checkpoint::validate_external_response_item(&live[index])?;
+        }
         let history: Vec<RolloutItem> = serde_json::from_value(self.checkpoint["history"].clone())?;
         let mut current = Vec::new();
         let mut review = Vec::new();

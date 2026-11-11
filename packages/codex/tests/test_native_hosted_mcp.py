@@ -256,17 +256,27 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
                                 summary="Do not publish.", snapshot=snapshot, retain=retain
                             )
                         assert (await session.model_context()).items == snapshot.items
-                    await session.compact(
-                        summary="The provider approval was processed.",
-                        snapshot=snapshot,
-                        retain=[request, response],
-                    )
-                    retained = await session.model_context()
-                    assert [
-                        item
-                        for item in retained.items
-                        if item["type"] in ("mcp_approval_request", "mcp_approval_response")
-                    ] == [snapshot.items[request], snapshot.items[response]]
+                    if approve:
+                        with pytest.raises(RuntimeError, match="live SDK approval authority"):
+                            await session.compact(
+                                summary="Do not replay the approved request.",
+                                snapshot=snapshot,
+                                retain=[request, response],
+                            )
+                        assert (await session.model_context()).items == snapshot.items
+                        retained = snapshot
+                    else:
+                        await session.compact(
+                            summary="The provider approval was processed.",
+                            snapshot=snapshot,
+                            retain=[request, response],
+                        )
+                        retained = await session.model_context()
+                        assert [
+                            item
+                            for item in retained.items
+                            if item["type"] in ("mcp_approval_request", "mcp_approval_response")
+                        ] == [snapshot.items[request], snapshot.items[response]]
                     await session.compact(
                         summary="The provider approval was processed.",
                         snapshot=retained,
@@ -275,6 +285,10 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
                     responses.respond(assistant_output("Ready."))
                     continuation = await (await session.submit("Continue.")).get_result()
                     assert continuation.final_output == "Ready."
+                    assert not any(
+                        item["type"] in ("mcp_approval_request", "mcp_approval_response")
+                        for item in responses.requests[-1]["input"]
+                    )
         output = [dict(item) for item in replies(responses)]
         if storage is not None:
             assert identity is not None
