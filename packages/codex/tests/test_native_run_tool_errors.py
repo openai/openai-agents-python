@@ -34,9 +34,62 @@ def test_default_handler_stays_publicly_none_across_declaration_replacement():
     assert replace(lookup, error_function=None).error_function is None
 
 
+def test_function_declaration_subclass_keeps_default_metadata():
+    from dataclasses import dataclass
+
+    from agents import FunctionTool
+
+    @dataclass(frozen=True, init=False)
+    class TaggedFunction(FunctionTool):
+        metadata: str = "tagged"
+
+    class Arguments(BaseModel):
+        key: str
+
+    declaration = TaggedFunction(
+        name="lookup", description="Look up a key.", input_type=Arguments, output_type=str
+    )
+    assert declaration.metadata == "tagged"
+    assert declaration.error_function is None
+
+
+async def test_replacing_per_tool_formatter_with_none_suppresses_run_recovery(responses):
+    from dataclasses import replace
+
+    formatted = []
+
+    def local(context, error):
+        formatted.append("local")
+        return "local recovery"
+
+    def global_formatter(context):
+        formatted.append("global")
+        return "global recovery"
+
+    @function_tool(error_function=local)
+    async def lookup(key: str) -> str:
+        raise ValueError("body failed")
+
+    copied = replace(lookup, description="Updated")
+    copied = replace(copied, error_function=None)
+    responses.respond(function_call("lookup", {"key": "value"}, "removed-formatter"))
+    responses.respond(assistant_output("unexpected recovery"))
+    agent = Agent(instructions="Use lookup.", tools=[copied], provider=provider(responses))
+    with pytest.raises(ValueError, match="body failed"):
+        await agent.run("begin", tool_error_formatter=global_formatter)
+    assert formatted == []
+    assert len(responses.requests) == 1
+
+
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_successful_context_free_function_does_not_copy_validated_payload(responses, enabled):
-    @function_tool
+@pytest.mark.parametrize("per_tool", [False, True])
+async def test_successful_context_free_function_does_not_copy_validated_payload(
+    responses, enabled, per_tool
+):
+    def local_formatter(context, error):
+        pytest.fail("Successful function reached the per-tool formatter")
+
+    @function_tool(**({"error_function": local_formatter} if per_tool else {}))
     async def lookup(payload: _NonCopyingPayload) -> str:
         return payload.text
 

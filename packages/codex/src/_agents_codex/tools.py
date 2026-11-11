@@ -505,6 +505,7 @@ class _CapturedFunction:
     )
 
     _allow_run_error_formatter: bool = field(default=False, repr=False)
+    _reparse_error_arguments: bool = field(default=False, repr=False)
 
     @property
     def _requires_live_manual_session(self) -> bool:

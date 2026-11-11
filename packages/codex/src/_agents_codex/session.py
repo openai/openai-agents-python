@@ -13300,6 +13300,7 @@ class Session(Generic[ContextT, OutputT]):
                     if isinstance(raw_arguments, str)
                     else deepcopy(raw_arguments)
                 )
+                assert state.handle is not None
                 tool_context = ToolContext(
                     entry.context,
                     state.handle,
@@ -13412,11 +13413,14 @@ class Session(Generic[ContextT, OutputT]):
                 return
             # The body can mutate validated arguments before raising. The original
             # wire arguments are already isolated from validation and callback code.
-            formatter_arguments = (
-                _snapshot_function_arguments(kwargs, ref)
-                if entry.error_function is not None and context is None
-                else None
-            )
+            formatter_arguments = approved_kwargs
+            if (
+                entry.error_function is not None
+                and context is None
+                and formatter_arguments is None
+                and not entry._reparse_error_arguments
+            ):
+                formatter_arguments = _snapshot_function_arguments(kwargs, ref)
             failure_output: ToolOutput | None = None
             duration = entry.callback_timeout
             callback = (
@@ -13617,7 +13621,15 @@ class Session(Generic[ContextT, OutputT]):
                     )
                 else:
                     if context is None:
-                        assert formatter_arguments is not None
+                        if formatter_arguments is None:
+                            assert entry._reparse_error_arguments
+                            original_parsed = entry._parse_arguments(
+                                message.get("_sdk_effective_arguments", message["arguments"])
+                            )
+                            formatter_arguments = MappingProxyType(
+                                entry._arguments(original_parsed)
+                            )
+                            del original_parsed
                         context = make_context(formatter_arguments)
                     text = await self._call_decision_callback(
                         state,

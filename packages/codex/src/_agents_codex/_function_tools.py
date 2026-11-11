@@ -236,6 +236,97 @@ _UNSET_ERROR_FUNCTION = cast(
 )
 
 
+@dataclass(frozen=True)
+class _RunErrorFormatterInheritance:
+    allowed: bool
+    has_function: bool
+
+    def __bool__(self) -> bool:
+        return self.allowed
+
+
+def _can_reparse_error_arguments(model: type[BaseModel]) -> bool:
+    # Ordinary JSON validation and plain models can be reconstructed on failure.
+    # User construction hooks, validators, factories and unknown schemas keep snapshots.
+    schema = model.__pydantic_core_schema__
+    if schema.get("type") != "model" or schema.get("custom_init") or schema.get("post_init"):
+        return False
+    allowed = {
+        "model",
+        "model-fields",
+        "model-field",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "none",
+        "any",
+        "bytes",
+        "list",
+        "dict",
+        "tuple",
+        "set",
+        "frozenset",
+        "nullable",
+        "union",
+        "literal",
+        "default",
+    }
+    pending: list[Any] = [schema["schema"]]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if len(seen) > 1024:
+            return False
+        if isinstance(value, dict):
+            kind = value.get("type")
+            schema_node = isinstance(kind, str)
+            if schema_node and kind not in allowed:
+                return False
+            if kind == "model" and (
+                value.get("custom_init")
+                or value.get("post_init")
+                or value["cls"].__new__ is not BaseModel.__new__
+            ):
+                return False
+            if schema_node and "default_factory" in value:
+                return False
+            if (
+                schema_node
+                and "default" in value
+                and type(value["default"])
+                not in (
+                    type(None),
+                    bool,
+                    int,
+                    float,
+                    str,
+                    bytes,
+                )
+            ):
+                return False
+            if kind == "literal" and any(
+                type(item) not in (type(None), bool, int, float, str, bytes)
+                for item in value["expected"]
+            ):
+                return False
+            pending.extend(
+                child
+                for key, child in value.items()
+                if (
+                    not schema_node
+                    or key not in {"metadata", "config", "default", "expected", "serialization"}
+                )
+                and isinstance(child, (dict, list, tuple))
+            )
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return True
+
+
 @dataclass(frozen=True, kw_only=True)
 class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     """A function that runs a registered callback or takes its result from the app.
@@ -295,7 +386,9 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
         default=None, repr=False
     )
-    _allow_run_error_formatter: bool = field(default=True, repr=False)
+    _allow_run_error_formatter: bool | _RunErrorFormatterInheritance = field(
+        default=True, repr=False
+    )
 
     def __init__(
         self,
@@ -338,15 +431,24 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
         error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
         | None = _UNSET_ERROR_FUNCTION,
-        _allow_run_error_formatter: bool | None = None,
+        _allow_run_error_formatter: bool | _RunErrorFormatterInheritance | None = None,
     ) -> None:
-        # replace() carries inheritance unchanged, including same-value None copies.
-        if _allow_run_error_formatter is None:
-            _allow_run_error_formatter = error_function is not None
-        if error_function is _UNSET_ERROR_FUNCTION:
+        omitted = error_function is _UNSET_ERROR_FUNCTION
+        if omitted:
             error_function = None
+        has_function = error_function is not None
+        inheritance = _allow_run_error_formatter
+        if isinstance(inheritance, _RunErrorFormatterInheritance):
+            allowed = (
+                inheritance.allowed if has_function == inheritance.has_function else has_function
+            )
+        elif inheritance is None:
+            allowed = omitted or has_function
+        else:
+            allowed = inheritance
+        _allow_run_error_formatter = _RunErrorFormatterInheritance(allowed, has_function)
         values = locals()
-        for declaration in fields(self):
+        for declaration in fields(FunctionTool):
             object.__setattr__(self, declaration.name, values[declaration.name])
         self.__post_init__()
 
@@ -1006,7 +1108,9 @@ def function_tool(
                 timeout_error_function=declaration.timeout_error_function,
                 input_error_function=declaration.input_error_function,
                 error_function=declaration.error_function,
-                _allow_run_error_formatter=declaration._allow_run_error_formatter,
+                _allow_run_error_formatter=bool(declaration._allow_run_error_formatter),
+                _reparse_error_arguments=declaration.error_function is not None
+                and _can_reparse_error_arguments(model),
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,

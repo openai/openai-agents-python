@@ -55,6 +55,8 @@ async def test_formatter_only_context_preserves_arguments_and_is_lazy(
     contexts = []
     formatted = []
     initialize_context = native_session.ToolContext.__init__
+    snapshot_arguments = native_session._snapshot_function_arguments
+    snapshots = []
     original_error = ValueError("body failed")
 
     def observe_context(context, *args, **kwargs):
@@ -63,6 +65,13 @@ async def test_formatter_only_context_preserves_arguments_and_is_lazy(
             contexts.append(context)
 
     monkeypatch.setattr(native_session.ToolContext, "__init__", observe_context)
+
+    def observe_snapshot(arguments, tool):
+        if tool.name == "lookup":
+            snapshots.append(True)
+        return snapshot_arguments(arguments, tool)
+
+    monkeypatch.setattr(native_session, "_snapshot_function_arguments", observe_snapshot)
 
     def recover(context: ToolContext[None], error: Exception) -> str:
         assert error is original_error
@@ -87,6 +96,86 @@ async def test_formatter_only_context_preserves_arguments_and_is_lazy(
     assert result.final_output == "done"
     assert contexts == formatted
     assert len(contexts) == int(fails)
+    if not fails:
+        assert snapshots == []
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_formatter_context_runs_stateful_validation_and_defaults_once(responses, fails):
+    from pydantic import BaseModel, Field, field_validator
+
+    validations = []
+    defaults = []
+    formatted = []
+
+    def next_default():
+        defaults.append(True)
+        return len(defaults)
+
+    class Payload(BaseModel):
+        keys: list[str]
+        nonce: int = Field(default_factory=next_default)
+
+        @field_validator("keys")
+        @classmethod
+        def validate_keys(cls, value):
+            validations.append(True)
+            return [*value, "validated"]
+
+    def recover(context, error):
+        payload = context.effective_arguments["payload"]
+        assert payload.keys == ["original", "validated"]
+        assert payload.nonce == 1
+        formatted.append(True)
+        return "recovered"
+
+    @function_tool(error_function=recover)
+    async def lookup(payload: Payload) -> str:
+        payload.keys.append("body mutation")
+        payload.nonce = 9
+        if fails:
+            raise ValueError("body failed")
+        return "success"
+
+    responses.respond(function_call("lookup", {"payload": {"keys": ["original"]}}, "stateful"))
+    responses.respond(assistant_output("done"))
+    result = await Agent(
+        instructions="Use lookup.", tools=[lookup], provider=provider(responses)
+    ).run("begin")
+    assert result.final_output == "done"
+    assert validations == defaults == [True]
+    assert formatted == ([True] if fails else [])
+
+
+async def test_formatter_context_does_not_repeat_a_metadata_argument_validator(responses):
+    from typing import Annotated
+
+    from pydantic import AfterValidator
+
+    validations = []
+    formatted = []
+
+    def validate(value):
+        validations.append(True)
+        return [*value, "validated"]
+
+    def recover(context, error):
+        assert context.effective_arguments["metadata"] == ["original", "validated"]
+        formatted.append(True)
+        return "recovered"
+
+    @function_tool(error_function=recover)
+    async def lookup(metadata: Annotated[list[str], AfterValidator(validate)]) -> str:
+        metadata.append("body mutation")
+        raise ValueError("body failed")
+
+    responses.respond(function_call("lookup", {"metadata": ["original"]}, "metadata-validator"))
+    responses.respond(assistant_output("done"))
+    result = await Agent(
+        instructions="Use lookup.", tools=[lookup], provider=provider(responses)
+    ).run("begin")
+    assert result.final_output == "done"
+    assert validations == formatted == [True]
 
 
 @pytest.mark.parametrize(
