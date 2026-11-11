@@ -619,7 +619,11 @@
     {
       "path": "sdk-registered-manual-compaction-overflow.patch",
       "sha256": "796b1e927babcc03b15f4fc6dd14097ce9d1afe39aa034905139cc139c020c81"
+    },
+    {
+      "path": "0159-sdk-residual-text-guards.patch",
+      "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     }
   ],
-  "result_tree": "547d77052a094b68bb84cb686eea85a5c3d7e4bd"
+  "result_tree": "3fc07408314c0fc6d85c225c96dc1d39846c1828"
 }

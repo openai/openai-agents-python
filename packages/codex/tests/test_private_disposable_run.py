@@ -13,7 +13,7 @@ import pytest
 
 from agents import Agent, Session
 from agents.observation import EventGap, ModelRequestDispatching, ModelResponseLinked
-from tests._asyncio import timeout
+from tests._asyncio import capture_cancellation, timeout
 from tests.test_buffered_responses import json_peer, json_response, provider
 
 private_disposable_only = pytest.mark.skipif(
@@ -54,6 +54,16 @@ def record_runs(
     return recorded
 
 
+def assert_native_admission(info: dict[str, Any], status: str) -> bool:
+    supported = sys.platform == "linux"
+    assert info["private_disposable"] is supported
+    assert info["status"] == (status if supported else "unsubmitted")
+    if not supported:
+        assert info["receipt"] is None
+        assert not any(info["retired"].values())
+    return supported
+
+
 @pytest.mark.parametrize("characters", [8, 512 * 1024])
 async def test_disposable_completion_preserves_request_and_detached_views(
     characters: int, monkeypatch: pytest.MonkeyPatch
@@ -74,13 +84,11 @@ async def test_disposable_completion_preserves_request_and_detached_views(
         assert result.final_output == expected.final_output == "answer"
         assert result.thread_usage == expected.thread_usage
         assert len(recorded) == 1
-        if sys.platform == "linux":
-            assert recorded[0]["private_disposable"] is True
-            assert recorded[0]["status"] == "completed"
+        if assert_native_admission(recorded[0], "completed"):
             assert all(recorded[0]["retired"].values())
         else:
-            assert recorded[0]["private_disposable"] is False
             assert isinstance(result.turn._session, Session)
+            assert result.turn._session._closed and result.turn._session._resources_retired
         assert len(peer.requests) == 2
         for request in peer.requests:
             assert request["model"] == "gpt-5.2"
@@ -125,7 +133,6 @@ async def test_disposable_run_leaves_public_storage_and_parent_configuration_unc
         assert len(peer.requests) == 3
 
 
-@private_disposable_only
 async def test_disposable_archive_overflow_keeps_live_model_history_without_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -149,14 +156,25 @@ async def test_disposable_archive_overflow_keeps_live_model_history_without_repl
         result = await agent.run("HANDOFF_ORIGINAL_INPUT " + "x" * (512 * 1024))
         assert result.final_output == output
         assert captured == [True]
-        assert len(recorded) == 1 and recorded[0]["private_disposable"] is True
-        assert recorded[0]["status"] == "live"
+        assert len(recorded) == 1
+        private_disposable = assert_native_admission(recorded[0], "live")
         assert len(peer.requests) == 1
         assert result.turn._session._closed and result.turn._session._resources_retired
         with pytest.raises(RuntimeError, match="closed|closing"):
             await result.turn._session.save_state()
     # Capture precedes adoption into the same bounded public buffer as ordinary Sessions.
     assert len(archives) == 1
+    rows = [row async for row in result.turn.events()]
+    assert any(isinstance(row, EventGap) for row in rows)
+    retained_links = [row for row in rows if isinstance(row, ModelResponseLinked)]
+    assert len(retained_links) <= 1
+    if not private_disposable:
+        assert archives == [[]]
+        for link in retained_links:
+            assert link.thread_id == result.turn.session_id
+            assert link.turn_id == result.turn.turn_id
+            UUID(link.response_observation_id)
+        return
     metadata = [
         event
         for event in archives[0]
@@ -185,10 +203,6 @@ async def test_disposable_archive_overflow_keeps_live_model_history_without_repl
         and len(event["msg"]["delta"]) > 65_536
         for event in archives[0]
     )
-    rows = [row async for row in result.turn.events()]
-    assert any(isinstance(row, EventGap) for row in rows)
-    retained_links = [row for row in rows if isinstance(row, ModelResponseLinked)]
-    assert len(retained_links) <= 1
     for link in retained_links:
         assert link.response_observation_id == linked["response_observation_id"]
 
@@ -232,7 +246,8 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
     async with timeout(30), json_peer() as peer, provider(peer) as owner:
         peer.json_replies.append(json_response("z" * (96 * 1024), "held", "held-item"))
         agent = Agent(model="gpt-5.2", instructions="Keep cancellation ownership.", provider=owner)
-        task = asyncio.create_task(agent.run("one private request"))
+        errors: list[asyncio.CancelledError] = []
+        task = asyncio.create_task(capture_cancellation(agent.run("one private request"), errors))
         try:
             await captured.wait()
             assert observed["info"]["private_disposable"] is True
@@ -249,6 +264,8 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
             with pytest.raises(asyncio.CancelledError) as caught:
                 await task
             expected_cancellation = ("original private cancellation",)
+            assert len(errors) == 1
+            assert errors[0].args == expected_cancellation
             assert observed["handoff_cancellation_args"] == expected_cancellation
             # Cancellation-message propagation to awaiters: Python 3.11+.
             if sys.version_info < (3, 11):
@@ -293,12 +310,9 @@ async def test_explicit_websocket_selects_disposable_completion_without_http_pol
             ).run(prompt)
             assert result.final_output == "private websocket answer"
             assert len(recorded) == 1
-            if sys.platform == "linux":
-                assert recorded[0]["private_disposable"] is True
-                assert recorded[0]["status"] == "completed"
-            else:
-                assert recorded[0]["private_disposable"] is False
+            if not assert_native_admission(recorded[0], "completed"):
                 assert isinstance(result.turn._session, Session)
+                assert result.turn._session._closed and result.turn._session._resources_retired
             assert len(server.requests) == 1
             assert any(
                 item.get("role") == "user"
