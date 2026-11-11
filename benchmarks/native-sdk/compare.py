@@ -391,6 +391,8 @@ def main():
     if args.reference_transport and (not args.default_host_setup or args.reference_engine != "v1"):
         parser.error("Reference transport requires default-host mode with a v1 reference")
     if args.default_host_setup:
+        if args.native_transport == "websocket" or args.reference_transport == "websocket":
+            parser.error("Default-host HTTP/SSE mode: --native-transport http only")
         args.default_host_setup = args.default_host_setup.resolve()
         if args.v1_response_mode != "streaming" or any(
             case == "startup_import"

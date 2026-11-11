@@ -377,6 +377,8 @@ def main():
     parser.add_argument("--sample-index", type=int)
     parser.add_argument("--import-only", action="store_true")
     args = parser.parse_args()
+    if args.default_host_setup and args.native_transport == "websocket":
+        parser.error("Default-host HTTP/SSE mode: --native-transport http only")
     os.environ.pop("OPENAI_API_KEY", None)
     os.environ["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1"
     os.environ["OPENAI_AGENTS_DISABLE_TRACING"] = "1"
