@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     )
     from .canonical_storage import (
         CustomStorage as CustomStorage,
+        DaprSessionStore as DaprSessionStore,
         EncryptedSessionStore as EncryptedSessionStore,
         MongoDBSessionStore as MongoDBSessionStore,
         RedisSessionStore as RedisSessionStore,
@@ -308,6 +309,7 @@ _MODULES = {
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",
+    "DaprSessionStore": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
     "MongoDBSessionStore": ".canonical_storage",
     "RedisSessionStore": ".canonical_storage",
