@@ -611,7 +611,11 @@
     {
       "path": "sdk-private-macos-deny-paths.patch",
       "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
+    },
+    {
+      "path": "sdk-registered-auto-compaction-overflow.patch",
+      "sha256": "033b6e451bb217f8aec5968a4a521bd0e1ed4d64fa4033f1b4fdded4cd5a4a99"
     }
   ],
-  "result_tree": "13b14299628af557417468e2a8f31346fa61d64e"
+  "result_tree": "be3c72b6e38e935811a4efac35ef38aa5c009d55"
 }
