@@ -334,6 +334,7 @@ pub(crate) fn validate_for_opening(
             .is_some_and(|(receipt, _)| receipt == &source),
         "Pending calls differ from the active Agent source"
     );
+    opening.validate_pending_source(&source)?;
     let accepted = crate::agent_profiles::validate_restored(opening, &history)?;
     let (specs, manual_slots) = opening.restore_catalog(&history, &state["managed_tool_specs"])?;
     let mut frame = validate_frame(state, &accepted.text, &specs, &manual_slots)?;
@@ -347,22 +348,22 @@ pub(crate) fn validate_for_opening(
             original == &handoff.source && graph == &opening.fingerprint,
             "Handoff differs from its original call source or admitted graph"
         );
-        opening.validate_restored_handoff(&name, &handoff)?;
         // A canonical target receipt proves that this handoff already applied.
         // Buffered sibling results have no later transition and stay pending.
-        if let Some(index) = result_indices.get(&handoff.call_id) {
-            if let Some((_, next, next_graph)) = transitions
+        let next_transition = result_indices.get(&handoff.call_id).and_then(|index| {
+            transitions
                 .iter()
                 .find(|(next_index, _, _)| next_index > index)
-            {
-                ensure!(
-                    next.profile_id == handoff.target_profile_id
-                        && handoff.source.epoch.checked_add(1) == Some(next.epoch)
-                        && *next_graph == opening.fingerprint,
-                    "Handoff does not match its next accepted Agent transition"
-                );
-                continue;
-            }
+        });
+        opening.validate_restored_handoff(&name, &handoff, next_transition.is_none())?;
+        if let Some((_, next, next_graph)) = next_transition {
+            ensure!(
+                next.profile_id == handoff.target_profile_id
+                    && handoff.source.epoch.checked_add(1) == Some(next.epoch)
+                    && *next_graph == opening.fingerprint,
+                "Handoff does not match its next accepted Agent transition"
+            );
+            continue;
         }
         ensure!(
             handoff.source == source,
