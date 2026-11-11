@@ -65,8 +65,13 @@ async def test_provider_frames_precede_typed_events(
             assert frames == []
 
 
+@pytest.mark.parametrize("error_type", ["invalid_request_error", "server_error"])
+@pytest.mark.parametrize("unrelated_id", [None, "unrelated-event"])
 async def test_provider_rejection_releases_only_the_matching_response_create(
-    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
+    realtime_peer: RealtimePeer,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: str,
+    unrelated_id: str | None,
 ) -> None:
     peer = realtime_peer
     async with (
@@ -91,25 +96,22 @@ async def test_provider_rejection_releases_only_the_matching_response_create(
         first_index = peer.frames.index(first)
         assert isinstance(first["event_id"], str)
 
-        async def reject(event_id: str) -> None:
-            await send_json(
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "code": "invalid_value",
-                        "event_id": event_id,
-                    },
-                }
-            )
+        async def reject(event_id: str | None) -> None:
+            error = {"type": error_type, "code": "small_provider_error"}
+            if event_id is not None:
+                error["event_id"] = event_id
+            await send_json({"type": "error", "error": error})
             async for event in events:
                 if isinstance(event, RealtimeProviderRequestError):
-                    assert event == RealtimeProviderRequestError("invalid_value", event_id)
+                    assert event == RealtimeProviderRequestError("small_provider_error", event_id)
                     return
             pytest.fail("provider rejection was not observed")
 
-        await reject("unrelated-event")
+        await reject(unrelated_id)
         await voice.request_response()
+        # A provider-observed writer barrier follows the queued create command.
+        await voice.send_event({"type": "fixture.barrier"})
+        await peer.frame(lambda frame: frame["type"] == "fixture.barrier")
         assert not any(
             frame["type"] == "response.create" for frame in peer.frames[first_index + 1 :]
         )
@@ -125,6 +127,53 @@ async def test_provider_rejection_releases_only_the_matching_response_create(
         else:
             pytest.fail("the queued response did not finish")
         assert peer.connections == 1
+
+
+@pytest.mark.parametrize("include_raw", [False, True])
+async def test_idle_provider_error_is_observed_before_same_connection_response(
+    realtime_peer: RealtimePeer, include_raw: bool
+) -> None:
+    peer = realtime_peer
+    error = {
+        "type": "error",
+        "error": {
+            "code": "small_provider_error",
+            "message": "Provider detail retained only in raw",
+        },
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-idle-error", supports_websockets=False
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", include_raw_provider_events=include_raw)
+        ) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        assert peer.socket is not None
+        await peer.socket.send_json(error)
+        raw_errors = []
+        async for event in events:
+            if isinstance(event, RealtimeRawProviderEvent) and event.event.get("type") == "error":
+                raw_errors.append(event.event)
+            if isinstance(event, RealtimeProviderRequestError):
+                assert event == RealtimeProviderRequestError("small_provider_error", None)
+                break
+        else:
+            pytest.fail("idle provider error was not observed")
+        assert raw_errors == ([error] if include_raw else [])
+        await voice.request_response()
+        async for event in events:
+            if isinstance(event, RealtimeResponse) and event.status == "done":
+                assert event.response_id == "voice-response-1"
+                break
+        else:
+            pytest.fail("the response after the provider error did not finish")
+        assert peer.connections == 1
+        assert peer.response_count == 1
+        assert peer.responses.requests == []
 
 
 async def test_rejected_raw_session_update_preserves_accepted_prompt_and_live_voice(

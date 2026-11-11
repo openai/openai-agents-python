@@ -942,15 +942,16 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (limit=None))]
+    #[pyo3(signature = (limit=None, for_replay=false))]
     fn _canonical_history<'py>(
         &self,
         py: Python<'py>,
         limit: Option<usize>,
+        for_replay: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::snapshot(&inner, limit)
+            let value = canonical_history::snapshot(&inner, limit, for_replay)
                 .await
                 .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
@@ -2343,6 +2344,38 @@ impl NativeThread {
                     .get::<python_tools::PythonTools>()
             })
             .is_some_and(|tools| tools.check_model_producer(request_id)))
+    }
+
+    fn _start_model_producer_stream(&self, request_id: u64) -> PyResult<bool> {
+        Ok(self
+            .live()?
+            .and_then(|inner| {
+                inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+            })
+            .is_some_and(|tools| tools.start_model_producer_stream(request_id)))
+    }
+
+    fn _push_model_producer_event<'py>(
+        &self,
+        py: Python<'py>,
+        request_id: u64,
+        data_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let tools = self.live()?.and_then(|inner| {
+            inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+        });
+        async_bridge::future_into_py(py, async move {
+            let Some(tools) = tools else {
+                return Ok(false);
+            };
+            Ok(tools.push_model_producer_event(request_id, &data_json).await)
+        })
     }
 
     #[pyo3(signature = (request_id, data_json=None, error=false))]

@@ -151,30 +151,24 @@ async def test_borrowed_retry_override_keeps_original_client_open_and_counts_att
 
 @pytest.mark.parametrize("adapter", ADAPTERS)
 async def test_borrowed_per_attempt_timeout_uses_real_client_without_retries(adapter):
-    attempts = 0
+    read_timeouts = []
 
-    async def record_attempt(req):
-        nonlocal attempts
-        attempts += 1
+    def handle(request: httpx.Request) -> httpx.Response:
+        read_timeouts.append(request.extensions["timeout"]["read"])
+        raise httpx.ReadTimeout("fixture read deadline", request=request)
 
-    async def handle(req):
-        await asyncio.sleep(0.1)
-        return web.json_response(response(adapter))
+    async with AsyncOpenAI(
+        api_key="fixture",
+        base_url="https://provider.example/v1/",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+        max_retries=2,
+    ) as client:
+        with pytest.raises(APITimeoutError):
+            await adapter(client, request_options={"timeout_ms": 10, "max_retries": 0}).complete(
+                request()
+            )
 
-    app = web.Application()
-    app.router.add_post("/{tail:.*}", handle)
-    async with TestServer(app) as server:
-        async with AsyncOpenAI(
-            api_key="fixture",
-            base_url=str(server.make_url("/v1/")),
-            max_retries=0,
-            http_client=httpx.AsyncClient(event_hooks={"request": [record_attempt]}),
-        ) as client:
-            with pytest.raises(APITimeoutError):
-                await adapter(
-                    client, request_options={"timeout_ms": 10, "max_retries": 0}
-                ).complete(request())
-            assert attempts == 1
+    assert read_timeouts == [0.01]
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS)

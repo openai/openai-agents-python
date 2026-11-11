@@ -5,9 +5,154 @@ import os
 
 import pytest
 
-from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore, function_tool
+from agents import (
+    Agent,
+    CustomStorage,
+    NativeError,
+    NativeProvider,
+    SQLiteSessionStore,
+    function_tool,
+)
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.native_storage_fixtures import MemorySessionStore
+
+
+async def test_replay_capture_rejects_oversized_original_tool_output(responses):
+    effects = []
+
+    @function_tool
+    def lookup() -> str:
+        effects.append("completed")
+        return "x" * (8 * 1024 * 1024 + 1)
+
+    responses.respond(function_call("lookup", {}, "oversized-original"))
+    responses.respond(assistant_output("large tool result settled"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-budget"
+    ) as provider:
+        agent = Agent(instructions="Use lookup.", provider=provider, tools=[lookup])
+        with pytest.raises(NativeError, match="completed.*history exceeds the result size limit"):
+            await agent.run("read the document", return_history=True)
+    assert effects == ["completed"]
+    assert len(responses.requests) == 2
+
+
+async def test_replay_capture_ignores_discarded_oversized_tool_output(responses):
+    effects = []
+
+    @function_tool
+    def lookup() -> str:
+        effects.append("completed")
+        return "x" * (8 * 1024 * 1024 + 1)
+
+    responses.respond(function_call("lookup", {}, "discarded-original"))
+    responses.respond(assistant_output("large tool result settled"))
+    responses.respond(assistant_output("small history continued"))
+    retained = {"type": "application_note", "value": "kept" * (20 * 1024)}
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-budget"
+    ) as provider:
+        agent = Agent(instructions="Use lookup.", provider=provider, tools=[lookup])
+        async with agent.session() as session:
+            assert (
+                await (await session.submit("read the document")).get_result()
+            ).final_output == ("large tool result settled")
+            before = await session.history_snapshot(limit=0)
+            await session.transact_history(
+                expected_revision=before.revision, keep=0, items=[retained]
+            )
+            state = await session.save_state()
+        result = await agent.run("continue", state=state, return_history=True)
+        assert result.final_output == "small history continued"
+        assert result.history is not None
+        assert result.history[0] == retained
+        assert all(item.get("call_id") != "discarded-original" for item in result.history)
+    assert effects == ["completed"]
+    assert len(responses.requests) == 3
+
+
+@pytest.mark.parametrize("return_state", [False, True])
+async def test_one_shot_history_can_continue_in_another_session(responses, return_state):
+    calls = []
+
+    @function_tool
+    def lookup(key: str) -> str:
+        calls.append(key)
+        return f"record:{key}"
+
+    responses.respond(function_call("lookup", {"key": "first"}, "detached-lookup"))
+    responses.respond(assistant_output("record loaded"))
+    responses.respond(assistant_output("continued with the record"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
+        producer = Agent(instructions="Look up the record.", tools=[lookup], provider=provider)
+        result = await producer.run(
+            "load my record",
+            initial_messages=[{"role": "user", "content": "my prior request"}],
+            return_history=True,
+            return_state=return_state,
+        )
+        assert result.final_output == "record loaded"
+        assert (result.state is not None) is return_state
+        assert result.history is not None
+
+        consumer = Agent(instructions="Use the previous record.", provider=provider)
+        async with consumer.session() as session:
+            before = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=before.revision, keep=0, items=result.history
+            )
+            continued = await (await session.submit("continue")).get_result()
+            assert continued.final_output == "continued with the record"
+            assert continued.history is None
+
+    assert calls == ["first"]
+    assert len(responses.requests) == 3
+    items = responses.requests[-1]["input"]
+    replayed = [item for item in items if item.get("call_id") == "detached-lookup"]
+    assert [item["type"] for item in replayed] == ["function_call", "function_call_output"]
+    assert "record:first" in json.dumps(replayed[-1])
+    messages = json.dumps([item for item in items if item["type"] == "message"])
+    assert "Look up the record." not in messages
+    assert "Use the previous record." in messages
+    assert messages.index("my prior request") < messages.index("load my record")
+    assert (
+        messages.index("load my record")
+        < messages.index("record loaded")
+        < messages.index("continue")
+    )
+
+
+@pytest.mark.parametrize("declare_approval_tool", [False, True])
+async def test_one_shot_text_history_is_opt_in(responses, declare_approval_tool):
+    @function_tool(needs_approval=True)
+    def lookup(key: str) -> str:
+        raise AssertionError(f"Unexpected call for {key}")
+
+    captured_output = "captured output" + "x" * (128 * 1024)
+    responses.respond(assistant_output("ordinary output"))
+    responses.respond(assistant_output(captured_output))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
+        agent = Agent(
+            instructions="Answer.",
+            provider=provider,
+            tools=[lookup] if declare_approval_tool else (),
+        )
+        ordinary = await agent.run("ordinary input")
+        captured = await agent.run("captured input", return_history=True)
+    assert ordinary.history is None
+    assert captured.history is not None
+    assert "captured input" in json.dumps(captured.history)
+    assert captured_output in json.dumps(captured.history)
+
+
+async def test_one_shot_rejects_an_oversized_history_after_completion(responses):
+    responses.respond(assistant_output("completed"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
+        agent = Agent(instructions="Answer.", provider=provider)
+        initial = [{"role": "user", "content": f"Earlier turn {index}"} for index in range(4097)]
+        with pytest.raises(NativeError, match="completed.*history exceeds the result size limit"):
+            await agent.run("finish", initial_messages=initial, return_history=True)
+    assert len(responses.requests) == 1
 
 
 async def test_committed_history_flush_failure_retires_live_session(responses):
@@ -490,3 +635,46 @@ async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp
                 current.revision, current.total, current.items[-1:]
             )
             assert responses.requests == []
+
+
+@pytest.mark.parametrize("async_value", [None, True, False], ids=["old-record", "true", "false"])
+async def test_function_call_fields_survive_native_acceptance_and_replay(
+    responses, async_value: bool | None
+) -> None:
+    calls = []
+
+    @function_tool
+    def lookup(key: str) -> str:
+        calls.append(key)
+        return f"value:{key}"
+
+    event = function_call("lookup", {"key": "replay"}, "wire-call")
+    event["item"]["created_by"] = "provider-owned"
+    expected = {} if async_value is None else {"async": async_value, "status": "completed"}
+    event["item"].update(expected)
+    responses.respond(event)
+    responses.respond(assistant_output("tool result accepted"))
+    responses.respond(assistant_output("replayed"))
+
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-wire-alias") as provider:
+        agent = Agent(instructions="Use the lookup result.", tools=[lookup], provider=provider)
+        async with agent.session() as source:
+            await (await source.submit("call the tool")).get_result()
+            snapshot = await source.history_snapshot()
+        async with agent.session() as target:
+            initial = await target.history_snapshot()
+            await target.transact_history(
+                expected_revision=initial.revision, keep=0, items=snapshot.items
+            )
+            await (await target.submit("continue from the replay")).get_result()
+
+    assert calls == ["replay"]
+    assert len(responses.requests) == 3
+    for items in (snapshot.items, responses.requests[-1]["input"]):
+        item = next(
+            item
+            for item in items
+            if item["type"] == "function_call" and item.get("call_id") == "wire-call"
+        )
+        assert {key: item[key] for key in ("async", "status") if key in item} == expected
+        assert "created_by" not in item
