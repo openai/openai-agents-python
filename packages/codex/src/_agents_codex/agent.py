@@ -1277,6 +1277,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1305,6 +1306,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1333,6 +1335,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1361,6 +1364,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1385,6 +1389,8 @@ class Agent(Generic[ContextT, OutputT]):
         this Session lifetime, including for late readers. Memory grows with
         emitted payloads until Session references are released. The default "bounded"
         retains a limited suffix and reports gaps. This policy is not checkpointed.
+        include_model_output_items=True records ordinary assistant messages and
+        provider reasoning summaries in the Session's observation stream.
 
         max_function_concurrency bounds automatic Python callbacks per turn owner,
         including validation and hooks through reply settlement. None adds no
@@ -1509,6 +1515,7 @@ class Agent(Generic[ContextT, OutputT]):
                 on_interaction=on_interaction,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                include_model_output_items=include_model_output_items,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
@@ -1542,6 +1549,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        include_model_output_items: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         discover_agents_md: bool = False,
@@ -1580,6 +1588,7 @@ class Agent(Generic[ContextT, OutputT]):
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                include_model_output_items=include_model_output_items,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,

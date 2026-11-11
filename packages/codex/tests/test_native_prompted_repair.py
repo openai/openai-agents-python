@@ -28,7 +28,7 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
-from agents.observation import TurnFinished, TurnStarted, UsageUpdated
+from agents.observation import ModelOutputItemCompleted, TurnFinished, TurnStarted, UsageUpdated
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     assistant_output,
@@ -43,6 +43,49 @@ from tests.test_native_mcp_tools import Peer
 
 class Report(BaseModel):
     label: str = Field(min_length=2)
+
+
+@pytest.mark.parametrize("include_items", [False, True])
+async def test_model_output_item_observations_include_owned_repair(responses, include_items):
+    invalid = '{"label":"x"}'
+    corrected = '{"label":"corrected"}'
+    summary = [{"type": "summary_text", "text": "Corrected the label."}]
+    responses.respond(assistant_output(invalid))
+    responses.respond(
+        {
+            "type": "response.output_item.done",
+            "item": {"type": "reasoning", "id": "repair_reasoning", "summary": summary},
+        },
+        assistant_output(corrected),
+    )
+    async with (
+        timeout(30),
+        NativeProvider(base_url=responses.url, api_key="synthetic-repair-key") as provider,
+        Agent(
+            instructions="Answer.",
+            provider=provider,
+            output_type=PromptedOutput(Report, 1),
+        ).session(include_model_output_items=include_items) as session,
+    ):
+        turn = await session.submit("Produce a report.")
+        output = [
+            event async for event in turn.events() if isinstance(event, ModelOutputItemCompleted)
+        ]
+        result = await turn.get_result()
+        assert result.final_output == Report(label="corrected")
+        if not include_items:
+            assert output == []
+            return
+        assert [event.item["type"] for event in output] == ["message", "reasoning", "message"]
+        original, reasoning, repair = output
+        assert (original.session_id, original.turn_id) == (session.id, turn.turn_id)
+        assert original.item["content"][0]["text"] == invalid
+        attempt = result.repair_attempts[0]
+        for event in (reasoning, repair):
+            assert (event.session_id, event.turn_id) == (attempt["session_id"], attempt["id"])
+            assert event.parent_submission_id == original.submission_id
+        assert reasoning.item["summary"] == summary
+        assert repair.item["content"][0]["text"] == corrected
 
 
 @pytest.mark.parametrize("policy_fails", [False, True])
