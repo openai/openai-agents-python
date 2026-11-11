@@ -213,6 +213,33 @@ class CodeInterpreter:
     """Additional provider fields; declared fields and tool identity cannot be replaced."""
 
 
+class HostedShellAutoEnvironment(TypedDict, total=False):
+    type: Required[Literal["container_auto"]]
+    file_ids: Sequence[str]
+    memory_limit: Literal["1g", "4g", "16g", "64g"] | None
+    network_policy: ContainerNetworkDisabled | ContainerNetworkAllowlist
+    skills: Sequence[dict[str, Any]]
+
+
+class HostedShellReferenceEnvironment(TypedDict):
+    type: Literal["container_reference"]
+    container_id: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class HostedShell:
+    """Run shell commands in provider-owned containers, without local execution.
+
+    Use container_auto to provision a container or container_reference to reuse
+    one. The provider owns container lifetime and validates resource, skill and
+    network settings. Closing a Session does not delete the container or files.
+    """
+
+    environment: HostedShellAutoEnvironment | HostedShellReferenceEnvironment
+    allowed_callers: Sequence[Literal["direct", "programmatic"]] | None = None
+    provider_data: dict[str, Any] | None = None
+
+
 @dataclass(frozen=True, kw_only=True)
 class ImageGeneration:
     """Generate or edit images with a provider-hosted Responses tool.
@@ -242,14 +269,16 @@ class ImageGeneration:
     """Additional provider fields; declared fields and tool identity cannot be replaced."""
 
 
-_HOSTED_TOOLS = (FileSearch, CodeInterpreter, ImageGeneration)
+_HOSTED_TOOLS = (FileSearch, CodeInterpreter, HostedShell, ImageGeneration)
 
 
-def _hosted_tool_name(tool: FileSearch | CodeInterpreter | ImageGeneration) -> str:
+def _hosted_tool_name(tool: FileSearch | CodeInterpreter | HostedShell | ImageGeneration) -> str:
     if isinstance(tool, FileSearch):
         return "file_search"
     if isinstance(tool, CodeInterpreter):
         return "code_interpreter"
+    if isinstance(tool, HostedShell):
+        return "shell"
     return "image_generation"
 
 
@@ -262,6 +291,11 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
         if not isinstance(tool, _HOSTED_TOOLS):
             continue
         fields = asdict(tool)
+        if isinstance(tool, HostedShell) and fields["environment"].get("type") not in {
+            "container_auto",
+            "container_reference",
+        }:
+            raise ValueError("HostedShell requires a provider-owned container environment")
         provider_data = fields.pop("provider_data")
         if provider_data is None:
             provider_data = {}

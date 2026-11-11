@@ -611,6 +611,18 @@ class CodeInterpreterCallItem(_HostedCallItem):
     outputs: list[dict[str, JsonValue]] | None
 
 
+class ShellCallItem(_HostedCallItem):
+    type: Literal["shell_call"]
+    call_id: str
+    action: dict[str, JsonValue]
+
+
+class ShellCallOutputItem(_HostedCallItem):
+    type: Literal["shell_call_output"]
+    call_id: str
+    output: list[dict[str, JsonValue]]
+
+
 class ImageGenerationCallItem(_HostedCallItem):
     type: Literal["image_generation_call"]
     result: str | None
@@ -745,6 +757,8 @@ OutputItem = _PublicTypeAliasType(
         | WebSearchCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
+        | ShellCallItem
+        | ShellCallOutputItem
         | ImageGenerationCallItem
     ),
 )

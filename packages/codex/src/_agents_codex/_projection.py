@@ -216,6 +216,8 @@ def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> di
     fields = {
         "file_search_call": ("queries", "results"),
         "code_interpreter_call": ("container_id", "code", "outputs"),
+        "shell_call": ("call_id", "action"),
+        "shell_call_output": ("call_id", "output"),
         "image_generation_call": ("result", "revised_prompt"),
     }.get(raw.get("type", ""))
     if fields is None or not raw.get("id"):
