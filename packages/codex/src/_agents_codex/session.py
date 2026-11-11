@@ -53,7 +53,12 @@ from uuid import uuid4 as uuid4
 
 from pydantic import BaseModel as BaseModel, TypeAdapter as _TypeAdapter, ValidationError
 
-from ._agent_profiles import _AgentProfile, _capture_agent_graph, _check_handoff_tool_names
+from ._agent_profiles import (
+    _AgentProfile,
+    _capture_agent_graph,
+    _check_handoff_tool_names,
+    _python_tool_slot,
+)
 from ._compat import cancel_once as cancel_once, cancellation_requested
 from ._events import (
     CodeInterpreterCallItem,
@@ -2147,9 +2152,9 @@ def _split_tools(
                     )
                     assert isinstance(resolved, (HttpMCP, StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
-        if isinstance(tool, ToolSearch) and tool._manual is not None:
-            tool = tool._manual
-        if isinstance(tool, FunctionTool):
+        python_tool = _python_tool_slot(tool)
+        if python_tool is not None:
+            tool = python_tool
             if has_native_agents and tool.ref.namespace == "collaboration":
                 raise ValueError(
                     f"NativeAgents reserves the collaboration namespace: {tool.name}; "
