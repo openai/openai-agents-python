@@ -57,6 +57,10 @@ async def test_native_profile_changes_are_immediate_ordered_and_captured(respons
                 ("B", "agent_1", 1),
                 ("C", "agent_2", 3),
             ]
+            assert [(e.previous_agent_name, e.previous_profile_id) for e in notices] == [
+                ("A", "agent_0"),
+                ("B", "agent_1"),
+            ]
             assert all(
                 e.session_id == session.id
                 and e.turn_id == turn.turn_id
@@ -92,6 +96,10 @@ async def test_idle_profile_changes_preserve_unnamed_root_and_ignore_failed_acti
         assert [(e.agent_name, e.profile_id, e.profile_epoch) for e in notices] == [
             ("B", "agent_1", 1),
             (None, "agent_0", 3),
+        ]
+        assert [(e.previous_agent_name, e.previous_profile_id) for e in notices] == [
+            (None, "agent_0"),
+            ("B", "agent_1"),
         ]
         assert all(
             e.session_id == session.id and e.turn_id is None and e.submission_id is None

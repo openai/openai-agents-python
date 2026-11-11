@@ -13,7 +13,7 @@ index bc9da7d9..ac2d05f0 100644
          || event
              .kind
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index f9a64766..34791382 100644
+index f9a64766..2a0e088f 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -1382,6 +1382,23 @@ impl ModelClient {
@@ -40,8 +40,70 @@ index f9a64766..34791382 100644
          Ok(request)
      }
  
+@@ -2110,10 +2127,6 @@ impl ModelClientSession {
+                 .as_ref()
+                 .and_then(|admission| admission.model_attempt())
+             {
+-                if attempt.disable_provider_retries() {
+-                    // This provider belongs to this request, including its HTTP fallback.
+-                    client_setup.api_provider.retry.max_attempts = 0;
+-                }
+                 attempt
+                     .observe_request(
+                         if prompt.prefer_buffered_response {
+@@ -2225,6 +2238,16 @@ impl ModelClientSession {
+                 responses_metadata,
+                 include_internal,
+             )?;
++            if let Some(attempt) = prompt
++                .tool_admission
++                .as_ref()
++                .and_then(|admission| admission.model_attempt())
++            {
++                if attempt.disable_provider_retries() {
++                    // Final request projection has captured potential provider effects.
++                    client_setup.api_provider.retry.max_attempts = 0;
++                }
++            }
+             if prompt.prefer_buffered_response {
+                 request.stream = false;
+                 request.stream_options = None;
+@@ -2449,16 +2472,6 @@ impl ModelClientSession {
+                 .client
+                 .current_client_setup(ClientRouting::Workspace)
+                 .await?;
+-            if let Some(attempt) = prompt
+-                .tool_admission
+-                .as_ref()
+-                .and_then(|admission| admission.model_attempt())
+-            {
+-                if attempt.disable_provider_retries() {
+-                    // This provider belongs to this request, including its HTTP fallback.
+-                    client_setup.api_provider.retry.max_attempts = 0;
+-                }
+-            }
+ 
+             let include_internal = self
+                 .client
+@@ -2484,6 +2497,16 @@ impl ModelClientSession {
+                 responses_metadata,
+                 include_internal,
+             )?;
++            if let Some(attempt) = prompt
++                .tool_admission
++                .as_ref()
++                .and_then(|admission| admission.model_attempt())
++            {
++                if attempt.disable_provider_retries() {
++                    // Final request projection has captured potential provider effects.
++                    client_setup.api_provider.retry.max_attempts = 0;
++                }
++            }
+             if is_guardian_reviewer(&responses_headers) {
+                 request.service_tier = None;
+             }
 diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
-index 3af26098..1882c65c 100644
+index 3af26098..313bd7a9 100644
 --- a/codex-rs/core/src/session/model_attempts.rs
 +++ b/codex-rs/core/src/session/model_attempts.rs
 @@ -31,6 +31,8 @@ pub(crate) struct Attempt {
@@ -77,6 +139,15 @@ index 3af26098..1882c65c 100644
      fn mark_local_effect(&self) {
          self.local_effects.store(true, Ordering::Release);
      }
+@@ -255,7 +267,7 @@ impl ModelAttemptAdmission for Attempt {
+         self.retry_configured
+     }
+     fn disable_provider_retries(&self) -> bool {
+-        self.disable_provider_retries
++        self.disable_provider_retries || self.provider_tools.load(Ordering::Acquire)
+     }
+     fn cancellation(&self) -> CancellationToken {
+         self.cancellation.clone()
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
 index 70668f84..edf4b7a3 100644
 --- a/codex-rs/core/src/session/turn.rs
