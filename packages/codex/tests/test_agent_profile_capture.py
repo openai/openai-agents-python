@@ -8,6 +8,7 @@ from typing_extensions import assert_type
 
 from _agents_codex._agent_profiles import _capture_agent_graph
 from agents import Agent, NativeAgents, NativeOutput, NativeRole, PromptedOutput
+from agents.realtime import realtime_handoff
 
 
 def test_no_handoff_capture_preserves_native_defaults_and_identity():
@@ -75,6 +76,15 @@ def test_handoff_names_collide_only_within_the_source_profile():
     assert profiles[1].handoffs.keys() == profiles[2].handoffs.keys()
     assert profiles[3].agent is first
     assert profiles[4].agent is second
+
+
+def test_realtime_handoff_cannot_share_a_name_with_another_handoff_to_the_same_target():
+    target = Agent(instructions="Bill", name="Billing")
+    configured = realtime_handoff(target)
+
+    for handoffs in ((target, configured), (configured, target), (configured, configured)):
+        with pytest.raises(ValueError, match="Duplicate handoff name"):
+            _capture_agent_graph(Agent(instructions="Route", handoffs=handoffs))
 
 
 @pytest.mark.parametrize("name", [None, "", "   "])

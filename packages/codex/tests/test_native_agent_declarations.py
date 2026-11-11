@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
+from inspect import Parameter, signature
 
 import pytest
 
@@ -17,6 +18,50 @@ from agents import (
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses  # noqa: F401
 from tests.test_native_agent_checkpoints import message, peer
+
+
+def test_realtime_preserves_existing_agent_field_and_parameter_order():
+    original_fields = (
+        "instructions",
+        "name",
+        "tools",
+        "handoffs",
+        "model",
+        "model_settings",
+        "provider",
+        "output_type",
+        "programmatic_tool_calling",
+        "transform_context",
+        "before_compact",
+        "before_complete",
+        "decisions",
+    )
+    assert tuple(field.name for field in fields(Agent)) == (*original_fields, "realtime")
+    assert Agent.__match_args__ == (*original_fields, "realtime")
+    agent = Agent(instructions="Answer.", name="Voice")
+    match agent:
+        case Agent("Answer.", "Voice"):
+            pass
+        case _:
+            pytest.fail("Existing positional class patterns must retain the agent name")
+    parameters = tuple(signature(Agent).parameters.values())
+    assert tuple(parameter.name for parameter in parameters) == (
+        "instructions",
+        "name",
+        "tools",
+        "handoffs",
+        "model",
+        "model_settings",
+        "provider",
+        "decisions",
+        "output_type",
+        "programmatic_tool_calling",
+        "transform_context",
+        "before_compact",
+        "before_complete",
+        "realtime",
+    )
+    assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters)
 
 
 async def test_agent_captures_defaults_and_settings_cannot_mutate_live_or_future_runs(

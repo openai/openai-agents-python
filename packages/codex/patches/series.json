@@ -501,9 +501,33 @@
       "sha256": "a0cb667f8dd1f5358bcee2eeb706592c679c95d8ccc05cfe2e140380e8d4e795"
     },
     {
+      "path": "sdk-realtime-provider-events-and-scopes.patch",
+      "sha256": "765ea5dd42cd743855514d8694e6a497c1352c0ea0a95f1940bbff4c5c4db542"
+    },
+    {
+      "path": "sdk-realtime-application-update-rejections.patch",
+      "sha256": "7371166d4fd71f8ea0aeb1d15746da37618e8cb5583bceb209ce2c4a1061368b"
+    },
+    {
+      "path": "sdk-realtime-unpublished-agent-source.patch",
+      "sha256": "e0311387868c576d81dce16ee47a1ce4d345c35c182b799eade073475efc044c"
+    },
+    {
+      "path": "sdk-realtime-historical-delete-terminal.patch",
+      "sha256": "8442a703759550a806a5f640b8d2a50047ba4e9f9c6d9455396c5d97ff2e3ab7"
+    },
+    {
+      "path": "sdk-realtime-historical-delete-terminal-tests.patch",
+      "sha256": "48d2df857342b269a96fe97822c51937fbbd2f5fa528a340072dd60ac681cd02"
+    },
+    {
+      "path": "sdk-realtime-finish-batch-test-fixture.patch",
+      "sha256": "61a544805338b79ec8bb0cec3e177389b47c9fa3fee4e4790cd7a83d3ede2d76"
+    },
+    {
       "path": "sdk-private-macos-deny-paths.patch",
       "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
     }
   ],
-  "result_tree": "9b37a3c3d42173e0a09ac65ceeb27e4996e46ab1"
+  "result_tree": "af489cf24c033978df086dc06f14d5b07bc5bfa7"
 }
