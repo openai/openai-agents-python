@@ -17,6 +17,60 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.native_storage_fixtures import MemorySessionStore
 
 
+async def test_replay_capture_rejects_oversized_original_tool_output(responses):
+    effects = []
+
+    @function_tool
+    def lookup() -> str:
+        effects.append("completed")
+        return "x" * (8 * 1024 * 1024 + 1)
+
+    responses.respond(function_call("lookup", {}, "oversized-original"))
+    responses.respond(assistant_output("large tool result settled"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-budget"
+    ) as provider:
+        agent = Agent(instructions="Use lookup.", provider=provider, tools=[lookup])
+        with pytest.raises(NativeError, match="completed.*history exceeds the result size limit"):
+            await agent.run("read the document", return_history=True)
+    assert effects == ["completed"]
+    assert len(responses.requests) == 2
+
+
+async def test_replay_capture_ignores_discarded_oversized_tool_output(responses):
+    effects = []
+
+    @function_tool
+    def lookup() -> str:
+        effects.append("completed")
+        return "x" * (8 * 1024 * 1024 + 1)
+
+    responses.respond(function_call("lookup", {}, "discarded-original"))
+    responses.respond(assistant_output("large tool result settled"))
+    responses.respond(assistant_output("small history continued"))
+    retained = {"type": "application_note", "value": "kept" * (20 * 1024)}
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-budget"
+    ) as provider:
+        agent = Agent(instructions="Use lookup.", provider=provider, tools=[lookup])
+        async with agent.session() as session:
+            assert (
+                await (await session.submit("read the document")).get_result()
+            ).final_output == ("large tool result settled")
+            before = await session.history_snapshot(limit=0)
+            await session.transact_history(
+                expected_revision=before.revision, keep=0, items=[retained]
+            )
+            state = await session.save_state()
+        result = await agent.run("continue", state=state, return_history=True)
+        assert result.final_output == "small history continued"
+        assert result.history is not None
+        assert result.history[0] == retained
+        assert all(item.get("call_id") != "discarded-original" for item in result.history)
+    assert effects == ["completed"]
+    assert len(responses.requests) == 3
+
+
 @pytest.mark.parametrize("return_state", [False, True])
 async def test_one_shot_history_can_continue_in_another_session(responses, return_state):
     calls = []
