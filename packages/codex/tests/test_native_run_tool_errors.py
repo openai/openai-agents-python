@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import BaseModel
 
 from agents import Agent, ToolContext, function_tool
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -10,6 +11,41 @@ from tests.test_native_agent import provider
 
 if TYPE_CHECKING:
     from agents import ToolErrorContext
+
+
+class _NonCopyingPayload(BaseModel):
+    text: str
+
+    def __deepcopy__(self, memo=None):
+        raise AssertionError("Successful function payload was copied")
+
+
+def test_default_handler_stays_publicly_none_across_declaration_replacement():
+    from dataclasses import replace
+
+    @function_tool
+    async def lookup(key: str) -> str:
+        return key
+
+    assert lookup.error_function is None
+    assert replace(lookup, description="Updated").error_function is None
+    assert replace(lookup, error_function=None).error_function is None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_successful_context_free_function_does_not_copy_validated_payload(responses, enabled):
+    @function_tool
+    async def lookup(payload: _NonCopyingPayload) -> str:
+        return payload.text
+
+    def format_error(context):
+        pytest.fail("Successful function reached the formatter")
+
+    responses.respond(function_call("lookup", {"payload": {"text": "synthetic"}}, "no-copy"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(instructions="Use lookup.", tools=[lookup], provider=provider(responses))
+    result = await agent.run("begin", tool_error_formatter=format_error if enabled else None)
+    assert result.final_output == "done"
 
 
 @pytest.mark.parametrize("phase", ["arguments", "execution"])

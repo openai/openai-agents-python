@@ -13133,11 +13133,25 @@ class Session(Generic[ContextT, OutputT]):
             raw_arguments = message["arguments"]
             if isinstance(raw_arguments, str):
                 raw_arguments = json.loads(raw_arguments)
+            call = ToolCallInfo(
+                tool=ref,
+                session_id=self.id,
+                turn_id=state.handle.turn_id,
+                call_id=message["callId"] if code_origin is None else None,
+                child_id=state.handle.child_id if isinstance(state, _ChildCallbacks) else None,
+                child_incarnation=(
+                    state.handle.instance_id if isinstance(state, _ChildCallbacks) else None
+                ),
+                role=None,
+                model=message.get("_sdk_model"),
+                route="direct" if code_origin is None else "code",
+                cell_id=code_origin["cell_id"] if code_origin is not None else None,
+                nested_call_id=(code_origin["nested_call_id"] if code_origin is not None else None),
+            )
             context = None
             if (
                 entry.context_parameter is not None
                 or entry.error_function is not None
-                or (self._tool_error_formatter is not None and entry._allow_run_error_formatter)
                 or entry.before is not None
                 or entry.after is not None
                 or (
@@ -13154,25 +13168,7 @@ class Session(Generic[ContextT, OutputT]):
                     _snapshot_function_arguments(kwargs, ref),
                     trace_context=_native_trace_context(message.get("_sdk_trace")),
                     realtime_usage=self.realtime_usage,
-                    call=ToolCallInfo(
-                        tool=ref,
-                        session_id=self.id,
-                        turn_id=state.handle.turn_id,
-                        call_id=message["callId"] if code_origin is None else None,
-                        child_id=state.handle.child_id
-                        if isinstance(state, _ChildCallbacks)
-                        else None,
-                        child_incarnation=(
-                            state.handle.instance_id if isinstance(state, _ChildCallbacks) else None
-                        ),
-                        role=None,
-                        model=message.get("_sdk_model"),
-                        route="direct" if code_origin is None else "code",
-                        cell_id=code_origin["cell_id"] if code_origin is not None else None,
-                        nested_call_id=(
-                            code_origin["nested_call_id"] if code_origin is not None else None
-                        ),
-                    ),
+                    call=call,
                 )
             if context is not None:
                 object.__setattr__(
@@ -13437,7 +13433,6 @@ class Session(Generic[ContextT, OutputT]):
                 if not self._admit_tool(state, request):
                     state.retain_cleanup_error(failure.original)
                     return
-                assert context is not None
                 if entry.error_function is None:
                     text = await self._format_run_tool_error(
                         state,
@@ -13445,10 +13440,11 @@ class Session(Generic[ContextT, OutputT]):
                         entry,
                         failure.original,
                         "execution",
-                        context.call,
+                        call,
                         lambda: self._admit_tool(state, request),
                     )
                 else:
+                    assert context is not None
                     text = await self._call_decision_callback(
                         state,
                         message,

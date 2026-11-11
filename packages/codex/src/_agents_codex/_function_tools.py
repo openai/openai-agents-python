@@ -12,7 +12,7 @@ from collections.abc import (
     Mapping as Mapping,
     Sequence as Sequence,
 )
-from dataclasses import dataclass as dataclass, field as field
+from dataclasses import dataclass as dataclass, field as field, fields as fields
 from functools import partial as partial
 from types import UnionType as UnionType
 from typing import (
@@ -231,7 +231,7 @@ _UNSET_ERROR_FUNCTION = cast(
 )
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, init=False)
 class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     """A function that runs a registered callback or takes its result from the app.
 
@@ -283,16 +283,70 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]
     ) = True
 
-    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
-        default=_UNSET_ERROR_FUNCTION, repr=False
+    _error_function_config: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = (
+        field(default=_UNSET_ERROR_FUNCTION, repr=False)
     )
 
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        input_type: type[InputT],
+        output_type: type[ResultT],
+        _bind: BinderT_co | None = None,
+        _requires_context: bool = False,
+        callback_timeout: float | None = None,
+        before: Callable[
+            [ToolContext[Any]],
+            Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments],
+        ]
+        | None = None,
+        after: Callable[
+            [ToolContext[Any], ToolOutput],
+            ToolOutput
+            | BackgroundResult[ToolOutput]
+            | Awaitable[ToolOutput | BackgroundResult[ToolOutput]],
+        ]
+        | None = None,
+        defer_loading: bool = False,
+        timeout_behavior: ToolTimeoutBehavior = "raise_exception",
+        timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
+        | None = None,
+        input_error_function: Callable[
+            [ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]
+        ]
+        | None = None,
+        namespace: str | None = None,
+        namespace_description: str | None = None,
+        finish_turn: bool = False,
+        needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+        run_before_approval: bool = False,
+        is_enabled: bool
+        | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
+        error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
+        | None = _UNSET_ERROR_FUNCTION,
+        _error_function_config: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
+        | None = _UNSET_ERROR_FUNCTION,
+    ) -> None:
+        # replace() carries private configuration; a public override takes precedence.
+        if error_function is not _UNSET_ERROR_FUNCTION:
+            _error_function_config = error_function
+        values = locals()
+        for declaration in fields(self):
+            object.__setattr__(self, declaration.name, values[declaration.name])
+        self.__post_init__()
+
+    @property
+    def error_function(
+        self,
+    ) -> Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None:
+        if self._error_function_config is _UNSET_ERROR_FUNCTION:
+            return None
+        return self._error_function_config
+
     def __post_init__(self) -> None:
-        if (
-            self.error_function is not _UNSET_ERROR_FUNCTION
-            and self.error_function is not None
-            and not callable(self.error_function)
-        ):
+        if self.error_function is not None and not callable(self.error_function):
             raise TypeError("FunctionTool error_function must be callable or None")
         if not isinstance(self.is_enabled, bool) and not callable(self.is_enabled):
             raise TypeError("FunctionTool is_enabled must be a bool or callable")
@@ -349,9 +403,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             or self.timeout_behavior != "raise_exception"
             or self.timeout_error_function is not None
             or self.input_error_function is not None
-            or (
-                self.error_function is not _UNSET_ERROR_FUNCTION and self.error_function is not None
-            )
+            or self.error_function is not None
         ):
             raise TypeError("Callback settings require a callback registered with function_tool")
 
@@ -428,7 +480,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                     policies += ("timeout_error_function",)
                 for name in policies:
                     callback = getattr(self, name)
-                    if callback is None or callback is _UNSET_ERROR_FUNCTION:
+                    if callback is None:
                         continue
                     parameters = list(inspect.signature(callback).parameters.values())
                     if parameters:
@@ -915,10 +967,8 @@ def function_tool(
                 timeout_behavior=declaration.timeout_behavior,
                 timeout_error_function=declaration.timeout_error_function,
                 input_error_function=declaration.input_error_function,
-                error_function=None
-                if declaration.error_function is _UNSET_ERROR_FUNCTION
-                else declaration.error_function,
-                _allow_run_error_formatter=declaration.error_function is not None,
+                error_function=declaration.error_function,
+                _allow_run_error_formatter=declaration._error_function_config is not None,
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,
