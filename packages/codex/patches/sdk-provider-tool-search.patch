@@ -884,7 +884,7 @@ index 95cbd6a82dfe2221ec160cf00dd930c873ecd4bc..98011aa873410d3c660162be22f70d6e
 +            None => crate::ToolSpec::Function(function),
 +        };
 +        ClientToolSearchEntry {
-+            name: ToolName::new(namespace.map(str::to_owned), name.into()),
++            name: ToolName::new(namespace.map(str::to_owned), name),
 +            deferred,
 +            info: ToolSearchInfo::from_tool_spec(spec, None).unwrap(),
 +        }
@@ -915,8 +915,8 @@ index 95cbd6a82dfe2221ec160cf00dd930c873ecd4bc..98011aa873410d3c660162be22f70d6e
 +            selected,
 +            vec![
 +                ToolName::plain("lookup"),
-+                ToolName::new(Some("reports".into()), "first".into()),
-+                ToolName::new(Some("reports".into()), "second".into())
++                ToolName::new(Some("reports".into()), "first"),
++                ToolName::new(Some("reports".into()), "second")
 +            ]
 +        );
 +    }

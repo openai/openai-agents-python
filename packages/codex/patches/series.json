@@ -682,8 +682,8 @@
     },
     {
       "path": "sdk-provider-tool-search.patch",
-      "sha256": "eb51a80cb739be9f21383794f3a65b48c147bb14b2b34073172d730e7efecb17"
+      "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
     }
   ],
-  "result_tree": "61a7679d00517719cc7a9a955c0518d05941b54f"
+  "result_tree": "52ed03837ce2e6774ea3a7e3be127361aa2c4d68"
 }
