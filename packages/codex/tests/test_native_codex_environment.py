@@ -28,8 +28,6 @@ async def test_native_cli_environment_boundary(
         "HTTPS_PROXY": "http://127.0.0.1:9",
         "PYTHONPATH": "/synthetic-module-search-path",
     }
-    for name, value in selected.items():
-        monkeypatch.setenv(name, value)
     executable = tmp_path / "synthetic-codex"
     executable.write_text(
         f"#!{sys.executable}\nimport json, os, sys\nsys.stdin.read()\n"
@@ -41,35 +39,44 @@ async def test_native_cli_environment_boundary(
         "{'input_tokens': 1, 'cached_input_tokens': 0, 'output_tokens': 1}}))\n"
     )
     executable.chmod(0o700)
-    options = CodexOptions(codex_path_override=str(executable))
-    if configuration == "mapping":
-        declaration = codex_tool(codex_options={"codex_path_override": str(executable)})
-    elif configuration == "empty":
-        declaration = codex_tool(
-            codex_options=CodexOptions(codex_path_override=str(executable), env={})
-        )
-    elif configuration == "explicit":
-        declaration = codex_tool(
-            codex_options=CodexOptions(
-                codex_path_override=str(executable),
-                env={"SDK_UNRELATED_TOKEN": "explicit-token", "CODEX_API_KEY": "explicit-key"},
+
+    async def invoke(context):
+        with monkeypatch.context() as environment:
+            for name, value in selected.items():
+                environment.setenv(name, value)
+            options = CodexOptions(codex_path_override=str(executable))
+            if configuration == "mapping":
+                declaration = codex_tool(codex_options={"codex_path_override": str(executable)})
+            elif configuration == "empty":
+                declaration = codex_tool(
+                    codex_options=CodexOptions(codex_path_override=str(executable), env={})
+                )
+            elif configuration == "explicit":
+                declaration = codex_tool(
+                    codex_options=CodexOptions(
+                        codex_path_override=str(executable),
+                        env={
+                            "SDK_UNRELATED_TOKEN": "explicit-token",
+                            "CODEX_API_KEY": "explicit-key",
+                        },
+                    )
+                )
+            elif configuration == "inherited":
+                declaration = codex_tool(
+                    codex_options=CodexOptions(
+                        codex_path_override=str(executable), env=dict(os.environ)
+                    )
+                )
+            elif configuration == "provided":
+                declaration = codex_tool(codex=Codex(options))
+            else:
+                declaration = codex_tool(codex_options=options)
+            binding = declaration._bind(None, None, declaration)
+            return await binding.callback(
+                context, prompt="Inspect the selected test variables", thread_id=None
             )
-        )
-    elif configuration == "inherited":
-        declaration = codex_tool(
-            codex_options=CodexOptions(codex_path_override=str(executable), env=dict(os.environ))
-        )
-    elif configuration == "provided":
-        declaration = codex_tool(codex=Codex(options))
-    else:
-        declaration = codex_tool(codex_options=options)
-    binding = declaration._bind(None, None, declaration)
-    result = await _run_in_native_session(
-        responses,
-        lambda context: binding.callback(
-            context, prompt="Inspect the selected test variables", thread_id=None
-        ),
-    )
+
+    result = await _run_in_native_session(responses, invoke)
     observed = json.loads(result["response"])
     if configuration == "empty":
         assert observed == dict.fromkeys(selected)

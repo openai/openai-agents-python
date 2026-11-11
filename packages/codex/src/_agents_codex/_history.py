@@ -234,6 +234,8 @@ def project_history(
         original_input: JsonValue | None = None,
     ) -> _HistoryItem:
         kind = item["type"]
+        if not isinstance(kind, str) or not kind:
+            raise ValueError("Invalid canonical history item type")
         is_output = kind in _CALL_TYPES_BY_OUTPUT
         is_execution = kind in _EXECUTION_TYPES
         # Execution records describe what ran. Keep them separate from the model's call and output.

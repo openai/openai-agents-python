@@ -346,12 +346,12 @@ async def test_cli_idle_timeout_closes_the_subprocess(tmp_path: Path, responses)
     path.chmod(0o700)
     declaration = codex_tool(
         codex_options={"codex_path_override": str(path)},
-        turn_options={"idle_timeout_seconds": 0.1},
+        turn_options={"idle_timeout_seconds": 1.0},
     )
     binding = declaration._bind(None, None, declaration)
 
     async def invoke(context: ToolContext[object]) -> None:
-        with pytest.raises(RuntimeError, match="idle"):
+        with pytest.raises(RuntimeError, match=r"^Codex stream idle for 1\.0 seconds\.$"):
             await binding.callback(context, prompt="Do the task", thread_id=None)
 
     await _run_in_native_session(responses, invoke)
