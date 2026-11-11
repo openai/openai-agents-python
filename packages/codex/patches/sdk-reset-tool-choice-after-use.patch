@@ -1,0 +1,238 @@
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 54bdeda7dfb66a6d55a13ac2828bcf7775bf1edc..0b6f33449d83aecc91ae641a7df7d0510fc5bdb2 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3990,6 +3990,9 @@ impl Session {
+                 self.services.turn_environments.snapshot(),
+             )
+         };
++        if turn::tool_choice_reset_applies(&settings, &turn_context.extension_data) {
++            Arc::make_mut(&mut settings).release_forced_tool_choice();
++        }
+         if matches!(
+             turn_context.session_source,
+             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index 90ccb7a7ffc529bf31ea93df5be26a896ca1cbb3..ad08c4de58685051983303a58ac7c41300f6ef3f 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -97,6 +97,14 @@ impl ResolvedStepSettings {
+         }
+     }
+ 
++    pub(super) fn release_forced_tool_choice(&mut self) {
++        if self.tool_choice() == ToolChoice::Required {
++            let selected = Arc::make_mut(&mut self.selected);
++            selected.tool_choice = Some(ToolChoice::Auto);
++            selected.request_controls.named_tool_choice = Some(None);
++        }
++    }
++
+     pub(super) fn set_captured_named_tool_choice(&mut self, choice: ToolName) {
+         if self
+             .request_controls()
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 339a905576815c58bb46b08a5c54490839248fe2..df48225867badb14b122e5bc00196b3ff3108371 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -202,6 +202,21 @@ pub(crate) async fn run_turn(
+     let recovered_tools = turn_context
+         .extension_data
+         .remove::<codex_extension_api::RecoveredToolCompletionCandidates>();
++    // Resolve opt-in accepted recovery before this step captures its eligible catalog.
++    // Retain the starting profile receipt; a later handoff must keep its own choice.
++    let recovered_reset_tools = if let Some(candidates) = recovered_tools.as_deref() {
++        let settings = turn_context.next_step_settings.load_full();
++        if settings.request_controls().reset_tool_choice.flatten() == Some(true) {
++            let tools =
++                load_recovered_tools(&sess, &turn_context, candidates, &cancellation_token).await?;
++            record_tool_choice_use(&settings, &turn_context.extension_data, &tools);
++            Some(tools)
++        } else {
++            None
++        }
++    } else {
++        None
++    };
+     // A checkpoint can finish while the original input is still being prepared.
+     // Its retiring owner must record later steers after this input.
+     let recording = (!input.is_empty()).then(|| {
+@@ -448,24 +463,12 @@ pub(crate) async fn run_turn(
+     // 2. After auto-compact, while a model/tool continuation is pending.
+ 
+     if let Some(candidates) = recovered_tools {
+-        let live = sess.live_thread().ok_or_else(|| {
+-            CodexErr::InvalidRequest("Recovered tool completion requires retained history".into())
+-        })?;
+-        live.flush()
+-            .or_cancel(&cancellation_token)
+-            .await?
+-            .map_err(|_| CodexErr::Fatal("Could not flush recovered tool history".into()))?;
+-        let history = live
+-            .load_history(true)
+-            .or_cancel(&cancellation_token)
+-            .await?
+-            .map_err(|_| CodexErr::Fatal("Could not read recovered tool history".into()))?;
+-        let tools = recovered_tools_from_history(
+-            &candidates,
+-            sess.thread_id,
+-            &turn_context.sub_id,
+-            &history.items,
+-        )?;
++        let tools = match recovered_reset_tools {
++            Some(tools) => tools,
++            None => {
++                load_recovered_tools(&sess, &turn_context, &candidates, &cancellation_token).await?
++            }
++        };
+         first_step_context
+             .turn
+             .extension_data
+@@ -660,6 +663,11 @@ pub(crate) async fn run_turn(
+                     last_agent_message: sampling_request_last_agent_message,
+                     settled_tools,
+                 } = sampling_request_output;
++                record_tool_choice_use(
++                    &step_context.settings,
++                    &step_context.turn.extension_data,
++                    &settled_tools,
++                );
+                 pending_agent_handoff = accepted_handoff;
+                 if model_needs_follow_up {
+                     sess.input_queue
+@@ -2039,6 +2047,12 @@ async fn run_sampling_request(
+                 base_instructions.clone(),
+             );
+             prompt.request_controls = step_context.settings.request_controls().clone();
++            if prompt.tool_choice == codex_protocol::config_types::ToolChoice::Required
++                && tool_choice_reset_applies(&step_context.settings, &turn_context.extension_data)
++            {
++                prompt.tool_choice = codex_protocol::config_types::ToolChoice::Auto;
++                prompt.request_controls.named_tool_choice = Some(None);
++            }
+             prompt.prefer_buffered_response = sess
+                 .services
+                 .thread_extension_data
+@@ -2399,6 +2413,43 @@ struct SamplingRequestResult {
+ /// Serialized terminal payloads and host initializers cannot construct this type.
+ pub(crate) struct ValidatedToolCompletion(pub(crate) codex_protocol::protocol::ToolTurnCompletion);
+ 
++/// One accepted use on the current captured profile, owned by this logical turn.
++struct ToolChoiceUse {
++    profile: Option<codex_extension_api::AgentProfileReceipt>,
++}
++
++pub(super) fn tool_choice_reset_applies(
++    settings: &super::step_settings::ResolvedStepSettings,
++    store: &codex_extension_api::ExtensionData,
++) -> bool {
++    settings.request_controls().reset_tool_choice.flatten() == Some(true)
++        && store.get::<ToolChoiceUse>().is_some_and(|used| {
++            used.profile.as_ref()
++                == settings
++                    .agent_profile
++                    .as_ref()
++                    .map(|profile| &profile.receipt)
++        })
++}
++
++fn record_tool_choice_use(
++    settings: &super::step_settings::ResolvedStepSettings,
++    store: &codex_extension_api::ExtensionData,
++    tools: &SettledDirectTools,
++) {
++    if settings.request_controls().reset_tool_choice.flatten() == Some(true)
++        && !tools.calls.is_empty()
++        && !tools.outputs.is_empty()
++    {
++        store.insert(ToolChoiceUse {
++            profile: settings
++                .agent_profile
++                .as_ref()
++                .map(|profile| profile.receipt.clone()),
++        });
++    }
++}
++
+ /// Original direct-call order and accepted outputs from this sample only.
+ #[derive(Debug, Default)]
+ struct SettledDirectTools {
+@@ -2407,6 +2458,32 @@ struct SettledDirectTools {
+     all_succeeded: bool,
+ }
+ 
++async fn load_recovered_tools(
++    sess: &Session,
++    turn_context: &TurnContext,
++    candidates: &codex_extension_api::RecoveredToolCompletionCandidates,
++    cancellation_token: &CancellationToken,
++) -> CodexResult<SettledDirectTools> {
++    let live = sess.live_thread().ok_or_else(|| {
++        CodexErr::InvalidRequest("Recovered tool completion requires retained history".into())
++    })?;
++    live.flush()
++        .or_cancel(cancellation_token)
++        .await?
++        .map_err(|_| CodexErr::Fatal("Could not flush recovered tool history".into()))?;
++    let history = live
++        .load_history(true)
++        .or_cancel(cancellation_token)
++        .await?
++        .map_err(|_| CodexErr::Fatal("Could not read recovered tool history".into()))?;
++    recovered_tools_from_history(
++        candidates,
++        sess.thread_id,
++        &turn_context.sub_id,
++        &history.items,
++    )
++}
++
+ /// Resolve one retained sampled batch across same-ID recovery starts. Outcome
+ /// data preserves sibling facts; only the later live policy can authorize a finish.
+ fn recovered_tools_from_history(
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index fb4bd92a3f640b60d241fd87d9122a0ce98063ff..b30f72b200644bac8cc9c6149ea0ed4467e8ecd8 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -159,6 +159,15 @@ pub struct ModelRequestControls {
+     #[ts(optional = nullable, as = "Option<ToolName>")]
+     #[schemars(with = "Option<ToolName>")]
+     pub named_tool_choice: Option<Option<ToolName>>,
++    /// Local opt-in: release forced choice after an accepted tool use on this profile.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<bool>")]
++    #[schemars(with = "Option<bool>")]
++    pub reset_tool_choice: Option<Option<bool>>,
+ }
+ 
+ impl ModelRequestControls {
+@@ -179,6 +188,7 @@ impl ModelRequestControls {
+             && self.prompt_cache_retention.is_none()
+             && self.prompt_cache_ttl.is_none()
+             && self.named_tool_choice.is_none()
++            && self.reset_tool_choice.is_none()
+     }
+ 
+     pub fn apply_patch(&mut self, patch: &Self) {
+@@ -231,6 +241,9 @@ impl ModelRequestControls {
+         if patch.named_tool_choice.is_some() {
+             self.named_tool_choice = patch.named_tool_choice.clone();
+         }
++        if patch.reset_tool_choice.is_some() {
++            self.reset_tool_choice = patch.reset_tool_choice;
++        }
+     }
+ 
+     /// Check wire shapes independently of uncertain model-level support.
+@@ -258,6 +271,7 @@ impl ModelRequestControls {
+         if let Some(Some(body)) = &self.extra_body {
+             const RESERVED: &[&str] = &[
+                 "input_modalities",
++                "reset_tool_choice",
+                 "type",
+                 "generate",
+                 "model",
