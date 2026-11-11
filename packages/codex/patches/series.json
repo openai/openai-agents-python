@@ -650,7 +650,7 @@
     },
     {
       "path": "sdk-native-model-response-stream.patch",
-      "sha256": "043d40e59af9ce390c8cb8e3eedd9d5104b413a14e943cfa0c09241b8a57f533"
+      "sha256": "0c23bbf1515d26979e84697b7e457dfaf4507cb489dd593927b073b7a5142ae6"
     },
     {
       "path": "sdk-provider-item-references.patch",
@@ -669,5 +669,5 @@
       "sha256": "1090afd706b9ce7ef2f1337dc66c42bf8f7b2cf4d8e5cbbd17275b143724bb70"
     }
   ],
-  "result_tree": "83c257d64449f40193c4fe3e4a202235b1970b75"
+  "result_tree": "460fb3dae4aa37f66873e8ae079ad4f0d66cfeda"
 }
