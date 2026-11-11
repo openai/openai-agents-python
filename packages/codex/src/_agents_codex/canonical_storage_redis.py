@@ -9,7 +9,7 @@ import os
 import threading
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from ._legacy_history import (
     check_legacy_history_size,
@@ -204,7 +204,7 @@ class RedisSessionStore:
                 check_legacy_history_size(count, size, max_items, max_bytes)
                 return [decode_legacy_item(row) for row in rows]
 
-        return await _join(asyncio.create_task(asyncio.to_thread(read)))
+        return cast(list[dict[str, Any]], await _join(asyncio.create_task(asyncio.to_thread(read))))
 
     def _keys(self, session_id: str) -> tuple[str, str]:
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()

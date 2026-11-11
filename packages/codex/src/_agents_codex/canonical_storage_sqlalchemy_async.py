@@ -11,7 +11,7 @@ import uuid
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast as typing_cast
 from weakref import WeakKeyDictionary
 
 from ._legacy_history import decode_legacy_item
@@ -202,9 +202,11 @@ class AsyncSQLAlchemySessionStore:
             self._check_process()
             with self._mutex:
                 self._check_process()
-                return self._driver.call(fetch)
+                return typing_cast(list[dict[str, Any]], self._driver.call(fetch))
 
-        return await _join(asyncio.create_task(asyncio.to_thread(read)))
+        return typing_cast(
+            list[dict[str, Any]], await _join(asyncio.create_task(asyncio.to_thread(read)))
+        )
 
     def _check_process(self) -> None:
         if self._closed:
@@ -317,13 +319,13 @@ class AsyncSQLAlchemySessionStore:
             ).one_or_none()
             if row is None:
                 raise RuntimeError("Canonical storage writer was fenced")
-            return row[0]
+            return typing_cast(str | None, row[0])
 
     def read(self, session_id: str, token: str) -> str | None:
         self._check_process()
         with self._mutex:
             self._owner(session_id, token)
-            return self._driver.call(self._read, session_id, token)
+            return typing_cast(str | None, self._driver.call(self._read, session_id, token))
 
     async def _commit(
         self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str

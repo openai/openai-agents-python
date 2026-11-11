@@ -137,6 +137,7 @@ class DaprSessionStore:
             # The Redis component assigns ETag 1 on create and increments it
             # on every replacement. ETag 0 can only match an absent key.
             return _Record(None, 0, 0, None, None), "0"
+        record: _Record | None
         try:
             record = _Record(**json.loads(response.data))
             if (
@@ -171,8 +172,8 @@ class DaprSessionStore:
 
     def _replace_record(self, session_id: str, etag: str, record: _Record) -> bool:
         from dapr.clients.exceptions import DaprInternalError
-        from grpc import StatusCode
-        from grpc.aio import AioRpcError
+        from grpc import StatusCode  # type: ignore[import-untyped]
+        from grpc.aio import AioRpcError  # type: ignore[import-untyped]
 
         try:
             self._driver.call(

@@ -8,7 +8,7 @@ import os
 import threading
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from ._legacy_history import (
     check_legacy_history_size,
@@ -361,7 +361,7 @@ class MongoDBSessionStore:
                     .limit(max_items + 1)
                     .batch_size(1)
                 )
-                items = []
+                items: list[dict[str, Any]] = []
                 encoded_bytes = 0
                 try:
                     while rows := self._driver.call(cursor.to_list, length=1):
@@ -379,7 +379,7 @@ class MongoDBSessionStore:
                     self._driver.call(cursor.close)
                 return items
 
-        return await _join(asyncio.create_task(asyncio.to_thread(read)))
+        return cast(list[dict[str, Any]], await _join(asyncio.create_task(asyncio.to_thread(read))))
 
 
 _preserve_module_identity(globals(), "agents.canonical_storage")
