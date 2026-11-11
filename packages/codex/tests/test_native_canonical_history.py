@@ -674,3 +674,46 @@ async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp
                 current.revision, current.total, current.items[-1:]
             )
             assert responses.requests == []
+
+
+@pytest.mark.parametrize("async_value", [None, True, False], ids=["old-record", "true", "false"])
+async def test_function_call_fields_survive_native_acceptance_and_replay(
+    responses, async_value: bool | None
+) -> None:
+    calls = []
+
+    @function_tool
+    def lookup(key: str) -> str:
+        calls.append(key)
+        return f"value:{key}"
+
+    event = function_call("lookup", {"key": "replay"}, "wire-call")
+    event["item"]["created_by"] = "provider-owned"
+    expected = {} if async_value is None else {"async": async_value, "status": "completed"}
+    event["item"].update(expected)
+    responses.respond(event)
+    responses.respond(assistant_output("tool result accepted"))
+    responses.respond(assistant_output("replayed"))
+
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-wire-alias") as provider:
+        agent = Agent(instructions="Use the lookup result.", tools=[lookup], provider=provider)
+        async with agent.session() as source:
+            await (await source.submit("call the tool")).get_result()
+            snapshot = await source.history_snapshot()
+        async with agent.session() as target:
+            initial = await target.history_snapshot()
+            await target.transact_history(
+                expected_revision=initial.revision, keep=0, items=snapshot.items
+            )
+            await (await target.submit("continue from the replay")).get_result()
+
+    assert calls == ["replay"]
+    assert len(responses.requests) == 3
+    for items in (snapshot.items, responses.requests[-1]["input"]):
+        item = next(
+            item
+            for item in items
+            if item["type"] == "function_call" and item.get("call_id") == "wire-call"
+        )
+        assert {key: item[key] for key in ("async", "status") if key in item} == expected
+        assert "created_by" not in item

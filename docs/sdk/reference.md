@@ -452,6 +452,7 @@ ModelRequest(body: dict[str, Any], context: Any, session_id: str, turn_id: str)
 ModelResponse(output: list[dict[str, Any]], usage: dict[str, int] | None = None,
               response_id: str = <generated>)
 NativeModel.complete(request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]
+NativeStreamingModel.stream(request: ModelRequest) -> AsyncIterator[Mapping[str, Any]] | Awaitable[AsyncIterator[Mapping[str, Any]]]
 ModelProvider.get_model(model_name: str) -> NativeModel
 ChatCompletionsModel(client, model=None, *, prompt_cache_key=None)
 ResponsesModel(client, model=None, *, prompt_cache_key=None)
@@ -460,6 +461,8 @@ AnyLLMModel(client, model=None, *, prompt_cache_key=None)
 ```
 
 The runtime has been accepting synchronous or asynchronous `complete()` methods. The packaged client adapters have been requiring asynchronous clients and complete responses. `ModelResponse.output` has been using Responses item JSON. `usage` has been accepting nonnegative native token counters: `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, and `total_tokens`. Omitted usage has been representing unknown counts.
+
+An application model can provide `stream()` as well as `complete()`. Yield Responses events in provider order, including finished output items and one terminal event with its response ID. A turn emits text deltas as they arrive. Core admits tool calls after the iterator has finished with a valid completion. Cancellation closes the iterator before the session accepts another turn.
 
 ### CodexLogin
 
