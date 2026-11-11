@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from agents import Agent, Environment
-from agents.sandbox import Manifest, sandbox_environment
+from agents.sandbox import Dir, Manifest, sandbox_environment
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_native_agent import provider
@@ -107,3 +107,94 @@ async def test_native_workspace_appendix_preserves_providers_and_replaces_curren
             assert "SYNTHETIC_APPLICATION" in encoded
             assert "SYNTHETIC_ENV_SECRET" not in encoded
             assert "user_instructions_appendix" not in encoded
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@pytest.mark.parametrize("scenario", ["unicode", "oversized_allowlist", "path_priority"])
+async def test_native_large_workspace_guidance_preserves_paths_and_policy(
+    tmp_path, monkeypatch, responses, scenario
+) -> None:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "AGENTS.md").write_text("UNDISCOVERED_GLOBAL_RULE")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    commands = (
+        [f"fixture-mount-{index}" for index in range(2500)]
+        if scenario == "oversized_allowlist"
+        else ["fixture-mount", "fixture-unmount"]
+    )
+    root = "/workspace/fixtures/workspace-guidance-boundary"
+    source_description = (
+        "x" * 39_500 if scenario == "path_priority" else 'Source "code" 📚\nDirectory guidance.'
+    )
+    file_description = 'Entrée "test" 🧪\nFile guidance.'
+    manifest = Manifest(
+        root=root,
+        remote_mount_command_allowlist=commands,
+        entries={
+            "data": declaration(description="📚" * 11_000),
+            "output": declaration(read_only=False, description="Keep this short description."),
+            "src": Dir(
+                description=source_description,
+                children={
+                    "café.py": {
+                        "type": "file",
+                        "content": "pass\n",
+                        "description": file_description,
+                    }
+                },
+            ),
+        },
+    )
+    client = Client([])
+    async with ExecutorPeer(tmp_path / "workspace").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-certificates"))
+        (peer.root / "AGENTS.md").write_text("UNDISCOVERED_PROJECT_RULE")
+
+        @asynccontextmanager
+        async def connect(selected):
+            yield Environment(
+                url=peer.url,
+                headers={"Authorization": "Bearer " + peer.token},
+                cwd=str(peer.root),
+                tools=(),
+                read_only=scenario == "path_priority",
+            )
+
+        source = sandbox_environment(client, manifest=manifest, options=Options(), connect=connect)
+        agent = Agent(instructions="SYNTHETIC_APPLICATION", provider=provider(responses))
+        responses.replies.append([assistant_output("done")])
+        async with agent.session(environment=source, discover_agents_md=False) as session:
+            await (await session.submit("Read current workspace guidance")).get_result()
+    text = _latest_user_instructions(responses.requests[0])
+    assert "Some workspace details have been omitted" in text
+    assert f"Executor read-only: {str(scenario == 'path_priority').lower()}" in text
+    assert "untrusted external content" in text and "then copy back" in text
+    assert "Do not write to read-only mounts" in text
+    assert "UNDISCOVERED_GLOBAL_RULE" not in text
+    assert "UNDISCOVERED_PROJECT_RULE" not in text
+    storage = json.loads(text.split("Declared storage access:\n")[1].split("\n\n")[0])
+    assert storage == [
+        {"path": root + "/data", "access": "read_only"},
+        {
+            "path": root + "/output",
+            "access": "read_write",
+            "description": "Keep this short description.",
+        },
+    ]
+    filesystem = json.loads(text.split("Filesystem layout:\n")[1].split("\n\n")[0])
+    assert filesystem == [
+        {
+            "path": root + "/src/",
+            **({"description": source_description} if scenario != "path_priority" else {}),
+        },
+        {"path": root + "/src/café.py", "description": file_description},
+    ]
+    if scenario == "oversized_allowlist":
+        assert "Do not use remote mount management commands." in text
+        assert "Allowed remote mount commands:" not in text
+        assert "fixture-mount-0" not in text
+    else:
+        assert 'Allowed remote mount commands: ["fixture-mount","fixture-unmount"].' in text
+    assert client.events == ["create", "start", "close", "delete"]

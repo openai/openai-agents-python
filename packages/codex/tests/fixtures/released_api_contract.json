@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "693698f68319aa52c46d425cbd137a80d2547888",
+  "baseline_commit": "2c0b9c1082d789ec3963b3c26587b03007c92583",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1153,11 +1153,14 @@
           "apply_diff": "agents.classic.apply_diff.apply_diff",
           "cleanup_stale_default_local_snapshots": "agents.classic.sandbox.snapshot_defaults.cleanup_stale_default_local_snapshots",
           "default_local_snapshot_base_dir": "agents.classic.sandbox.snapshot_defaults.default_local_snapshot_base_dir",
+          "formatted_truncate_text": "agents.classic.sandbox.util.token_truncation.formatted_truncate_text",
+          "formatted_truncate_text_with_token_count": "agents.classic.sandbox.util.token_truncation.formatted_truncate_text_with_token_count",
           "render_storage_layout": "agents.sandbox.render_storage_layout",
           "resolve_default_local_snapshot_spec": "agents.classic.sandbox.snapshot_defaults.resolve_default_local_snapshot_spec",
           "retry_async": "agents.classic.sandbox.util.retry.retry_async",
           "sandbox_environment": "agents.sandbox.sandbox_environment",
-          "truncate_text": "agents.classic.sandbox.util.token_truncation.truncate_text"
+          "truncate_text": "agents.classic.sandbox.util.token_truncation.truncate_text",
+          "truncate_with_token_budget": "agents.classic.sandbox.util.token_truncation.truncate_with_token_budget"
         },
         "imports": [
           "from collections.abc import Callable, Mapping",
@@ -1174,7 +1177,7 @@
           "from _agents_shared.sandbox_limits import SandboxArchiveLimits, SandboxConcurrencyLimits",
           "from _agents_shared.sandbox_session_state import SandboxSessionState",
           "from _agents_shared.snapshot import LocalSnapshot, LocalSnapshotSpec, NoopSnapshot, NoopSnapshotSpec, RemoteSnapshot, RemoteSnapshotSpec, SnapshotBase, SnapshotSpec",
-          "from _agents_shared.token_truncation import TruncationPolicy, truncate_text",
+          "from _agents_shared.token_truncation import TruncationPolicy, formatted_truncate_text, formatted_truncate_text_with_token_count, truncate_text, truncate_with_token_budget",
           "from _agents_shared.snapshot_defaults import cleanup_stale_default_local_snapshots as cleanup_stale_default_local_snapshots, default_local_snapshot_base_dir as default_local_snapshot_base_dir, resolve_default_local_snapshot_spec as resolve_default_local_snapshot_spec",
           "from .classic.sandbox.session.sandbox_session import SandboxSession",
           "from .executor import Environment"
@@ -1217,10 +1220,13 @@
           "apply_diff": "_agents_shared.apply_diff.apply_diff",
           "cleanup_stale_default_local_snapshots": "_agents_shared.snapshot_defaults.cleanup_stale_default_local_snapshots",
           "default_local_snapshot_base_dir": "_agents_shared.snapshot_defaults.default_local_snapshot_base_dir",
+          "formatted_truncate_text": "_agents_shared.token_truncation.formatted_truncate_text",
+          "formatted_truncate_text_with_token_count": "_agents_shared.token_truncation.formatted_truncate_text_with_token_count",
           "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync",
           "resolve_default_local_snapshot_spec": "_agents_shared.snapshot_defaults.resolve_default_local_snapshot_spec",
           "retry_async": "_agents_shared.retry.retry_async",
-          "truncate_text": "_agents_shared.token_truncation.truncate_text"
+          "truncate_text": "_agents_shared.token_truncation.truncate_text",
+          "truncate_with_token_budget": "_agents_shared.token_truncation.truncate_with_token_budget"
         }
       },
       "agents.schema": {
@@ -2475,7 +2481,10 @@
         "declarations": [
           "TruncationMode = Literal['bytes', 'tokens']",
           "@dataclass(frozen=True)\nclass TruncationPolicy:\n    mode: TruncationMode\n    limit: int\n\n    @classmethod\n    def bytes(cls, limit: int) -> TruncationPolicy:\n        pass\n\n    @classmethod\n    def tokens(cls, limit: int) -> TruncationPolicy:\n        pass\n\n    def token_budget(self) -> int:\n        pass\n\n    def byte_budget(self) -> int:\n        pass",
-          "def truncate_text(content: str, policy: TruncationPolicy) -> str:\n    pass"
+          "def formatted_truncate_text(content: str, policy: TruncationPolicy) -> str:\n    pass",
+          "def truncate_text(content: str, policy: TruncationPolicy) -> str:\n    pass",
+          "def formatted_truncate_text_with_token_count(content: str, max_output_tokens: int | None) -> tuple[str, int | None]:\n    pass",
+          "def truncate_with_token_budget(s: str, policy: TruncationPolicy) -> tuple[str, int | None]:\n    pass"
         ],
         "exports": {},
         "imports": [
