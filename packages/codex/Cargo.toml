@@ -71,6 +71,7 @@ codex-login = { path = ".upstream/codex/codex-rs/login" }
 codex-code-mode = { path = ".upstream/codex/codex-rs/code-mode" }
 codex-code-mode-host = { path = ".upstream/codex/codex-rs/code-mode-host" }
 codex-execpolicy = { path = ".upstream/codex/codex-rs/execpolicy" }
+codex-utils-rustls-provider = { path = ".upstream/codex/codex-rs/utils/rustls-provider" }
 codex-utils-path-uri = { path = ".upstream/codex/codex-rs/utils/path-uri" }
 futures-core = "0.3"
 futures-util = "0.3"
@@ -86,6 +87,7 @@ serde_path_to_error = "0.1"
 sha2 = "0.10"
 tempfile = "3"
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "3e636cab26c013eca5131103c03d20237f12c4df", version = "=3.3.0", default-features = false }
+rustls-native-certs = "=0.8.3"
 rustls = { version = "=0.23.45", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }

@@ -1,0 +1,151 @@
+--- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
++++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+@@ -570,16 +570,115 @@
+         let (tx, rx) = tokio::sync::oneshot::channel();
+         (DeleteReply::new(tx), rx)
+     }
++    #[test]
++    fn retrieved_external_nonterminal_work_is_rejected_without_adoption() {
++        let terminal = [
++            serde_json::json!({"id":"work","type":"function_call","call_id":"call"}),
++            serde_json::json!({"id":"work","type":"function_call_output","call_id":"call","output":"done"}),
++            serde_json::json!({"id":"work","type":"mcp_call","output":"done"}),
++            serde_json::json!({"id":"work","type":"mcp_tool_call","error":{}}),
++            serde_json::json!({"id":"work","type":"mcp_list_tools","tools":[]}),
++            serde_json::json!({"id":"work","type":"mcp_approval_request"}),
++            serde_json::json!({"id":"work","type":"mcp_approval_response","approval_request_id":"prior","approve":true}),
++        ];
++        for value in terminal {
++            for status in ["in_progress", "incomplete"] {
++                let mut state = State::default();
++                state.observe(&RealtimeEvent::ConversationItemAdded {
++                    item: serde_json::json!({"id":"decision","type":"mcp_approval_response","approval_request_id":"work","approve":true,"status":"completed"}),
++                    previous_item_id: None,
++                }).unwrap();
++                let mut value = value.clone();
++                value["status"] = status.into();
++                assert!(state.admit_retrieved_item(&value).is_err(), "{value}");
++                assert!(!state.items.contains_key("work"));
++            }
++        }
++    }
++
++    #[test]
++    fn retrieved_external_statusless_work_needs_schema_terminal_evidence() {
++        for value in [
++            serde_json::json!({"id":"work","type":"function_call","call_id":"call"}),
++            serde_json::json!({"id":"work","type":"function_call_output","call_id":"call"}),
++            serde_json::json!({"id":"work","type":"mcp_call"}),
++            serde_json::json!({"id":"work","type":"mcp_tool_call"}),
++            serde_json::json!({"id":"work","type":"mcp_list_tools"}),
++            serde_json::json!({"id":"work","type":"mcp_approval_request","status":"completed"}),
++            serde_json::json!({"id":"work","type":"mcp_approval_response","approval_request_id":"request"}),
++        ] {
++            let mut state = State::default();
++            assert!(state.admit_retrieved_item(&value).is_err(), "{value}");
++            assert!(!state.items.contains_key("work"));
++        }
++    }
++
++    #[test]
++    fn retrieved_approval_request_needs_matching_accepted_decision() {
++        let request =
++            serde_json::json!({"id":"request","type":"mcp_approval_request","status":"completed"});
++        let mut state = State::default();
++        state
++            .observe(&RealtimeEvent::ConversationItemAdded {
++                item: request.clone(),
++                previous_item_id: None,
++            })
++            .unwrap();
++        state
++            .observe(&RealtimeEvent::ConversationItemDone {
++                item_id: "request".into(),
++            })
++            .unwrap();
++        assert!(state.admit_retrieved_item(&request).is_err());
++        // This request was already observed; a done envelope cannot decide it.
++        assert!(state.validate("request").is_err());
++        let mut state = State::default();
++        state.admit_retrieved_item(&serde_json::json!({"id":"foreign-decision","type":"mcp_approval_response","approval_request_id":"other","approve":false})).unwrap();
++        assert!(state.admit_retrieved_item(&request).is_err());
++        state.admit_retrieved_item(&serde_json::json!({"id":"decision","type":"mcp_approval_response","approval_request_id":"request","approve":false})).unwrap();
++        state.admit_retrieved_item(&request).unwrap();
++        assert!(state.validate("request").is_ok());
++    }
++
++    #[test]
++    fn same_item_terminal_receipt_during_lookup_keeps_native_ownership() {
++        let mut state = State::default();
++        let value =
++            serde_json::json!({"id":"call-item","type":"function_call","call_id":"native-call"});
++        state
++            .observe(&RealtimeEvent::ConversationItemAdded {
++                item: value.clone(),
++                previous_item_id: None,
++            })
++            .unwrap();
++        state
++            .observe(&RealtimeEvent::ConversationItemDone {
++                item_id: "call-item".into(),
++            })
++            .unwrap();
++        assert!(state.admit_retrieved_item(&value).is_err());
++        state
++            .observe(&RealtimeEvent::FunctionCallFinished {
++                call_id: "native-call".into(),
++                succeeded: true,
++            })
++            .unwrap();
++        state.admit_retrieved_item(&value).unwrap();
++        assert!(state.external_identity("call-item").is_none());
++        let mut changed = value;
++        changed["call_id"] = "foreign-call".into();
++        assert!(state.admit_retrieved_item(&changed).is_err());
++    }
++
+     #[tokio::test]
+     async fn retrieved_external_tool_records_wait_for_exact_ack_and_audit() {
+         for value in [
+             serde_json::json!({"id":"historical","type":"function_call","call_id":"old-call","status":"completed"}),
+-            serde_json::json!({"id":"historical","type":"function_call_output","call_id":"old-call"}),
+-            serde_json::json!({"id":"historical","type":"mcp_call"}),
+-            serde_json::json!({"id":"historical","type":"mcp_tool_call"}),
+-            serde_json::json!({"id":"historical","type":"mcp_list_tools"}),
+-            serde_json::json!({"id":"historical","type":"mcp_approval_request"}),
+-            serde_json::json!({"id":"historical","type":"mcp_approval_response","approval_request_id":"old-approval"}),
++            serde_json::json!({"id":"historical","type":"function_call_output","call_id":"old-call","output":""}),
++            serde_json::json!({"id":"historical","type":"mcp_call","output":""}),
++            serde_json::json!({"id":"historical","type":"mcp_tool_call","error":{}}),
++            serde_json::json!({"id":"historical","type":"mcp_list_tools","tools":[]}),
++            serde_json::json!({"id":"historical","type":"mcp_approval_response","approval_request_id":"old-approval","approve":false}),
+         ] {
+             let mut state = State::default();
+             state.admit_retrieved_item(&value).unwrap();
+@@ -600,7 +699,7 @@
+     #[tokio::test]
+     async fn external_delete_retries_recheck_native_call_ownership() {
+         let sdk = SdkRealtimeState::new("voice".into());
+-        let item = serde_json::json!({"id":"historical","type":"function_call_output","call_id":"old-call"});
++        let item = serde_json::json!({"id":"historical","type":"function_call_output","call_id":"old-call","output":""});
+         sdk.item_deletion
+             .lock()
+             .unwrap()
+@@ -654,7 +753,7 @@
+             .lock()
+             .unwrap()
+             .admit_retrieved_item(&serde_json::json!({
+-                "id":"historical-output", "type":"function_call_output", "call_id":"caller-call"
++                "id":"historical-output", "type":"function_call_output", "call_id":"caller-call", "output":""
+             }))
+             .unwrap();
+         let mut history = sdk.history.lock().unwrap();
+@@ -708,7 +807,7 @@
+         let mut state = State::default();
+         state
+             .admit_retrieved_item(
+-                &serde_json::json!({"id":"call-item","type":"function_call","call_id":"call"}),
++                &serde_json::json!({"id":"call-item","type":"function_call","call_id":"call","status":"completed"}),
+             )
+             .unwrap();
+         state

@@ -47,6 +47,8 @@ pub(crate) struct ToolOutcomes {
     pub response_observation_id: String,
     pub call_ids: Vec<String>,
     pub outcomes: Vec<(String, bool)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_call_ids: Vec<String>,
 }
 
 impl ToolOutcomes {
@@ -139,6 +141,7 @@ impl ToolOutcomes {
             .filter_map(|id| known.get(id).map(|success| (id.clone(), *success)))
             .collect();
         Ok(Some(Self {
+            held_call_ids: Vec::new(),
             response_observation_id: record.id.clone(),
             call_ids,
             outcomes,
@@ -180,8 +183,10 @@ impl ToolOutcomes {
     pub(crate) fn candidates(
         &self,
         turn: &str,
+        held_outputs: Vec<(ResponseItemEnvelope, bool)>,
     ) -> codex_extension_api::RecoveredToolCompletionCandidates {
         codex_extension_api::RecoveredToolCompletionCandidates {
+            held_outputs,
             turn_id: turn.to_owned(),
             response_observation_id: self.response_observation_id.clone(),
             call_ids: self.call_ids.clone(),
@@ -193,6 +198,7 @@ impl ToolOutcomes {
 pub(crate) struct Frame {
     tool_outcomes: Option<ToolOutcomes>,
     fresh: Option<crate::python_tools::FreshTerminalReceipts>,
+    terminal_calls: HashSet<String>,
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
@@ -747,6 +753,7 @@ fn validate_frame(
         handoffs,
         tool_outcomes,
         fresh: None,
+        terminal_calls: HashSet::new(),
         turn,
         pending: admitted,
         order,
@@ -1009,6 +1016,11 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
         .thread_extension_data()
         .get::<crate::python_tools::PythonTools>()
         .context("Manual continuation requires current tools")?;
+    frame.terminal_calls = tools.private_terminal_calls(
+        captured.as_deref(),
+        &history,
+        &frame.order.iter().cloned().collect(),
+    )?;
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
     let model = crate::checkpoint::managed_settings(&history, source_id)
         .map(|settings| settings.model.as_str());
@@ -1094,15 +1106,69 @@ pub(crate) async fn continue_if_ready(
         }
         current.take().expect("Checked continuation")
     };
-    let outputs = frame
+    let saved_held_ids: HashSet<_> = frame
+        .tool_outcomes
+        .as_ref()
+        .map(|outcomes| outcomes.held_call_ids.iter().cloned().collect())
+        .unwrap_or_default();
+    ensure!(
+        saved_held_ids.len()
+            == frame
+                .tool_outcomes
+                .as_ref()
+                .map_or(0, |outcomes| outcomes.held_call_ids.len())
+            && saved_held_ids
+                .iter()
+                .all(|id| frame.accepted.contains_key(id) && frame.terminal_calls.contains(id)),
+        "Invalid held terminal reply identities"
+    );
+    // Erasing a checkpoint hint cannot publish an actual current terminal reply.
+    let held_ids = &frame.terminal_calls;
+    ensure!(
+        held_ids.is_empty() || frame.tool_outcomes.is_some(),
+        "Terminal continuation lacks completed-response facts"
+    );
+    if let Some(outcomes) = &mut frame.tool_outcomes {
+        outcomes.held_call_ids = frame
+            .order
+            .iter()
+            .filter(|id| held_ids.contains(*id))
+            .cloned()
+            .collect();
+    }
+    let held_outputs = frame
         .order
         .iter()
+        .filter(|id| held_ids.contains(*id))
+        .map(|id| {
+            let output = frame.accepted[id].clone();
+            let success = frame
+                .tool_outcomes
+                .as_ref()
+                .and_then(|outcomes| {
+                    outcomes
+                        .outcomes
+                        .iter()
+                        .find(|(call, _)| call == id)
+                        .map(|(_, success)| *success)
+                })
+                // Missing historical success cannot authorize terminal completion.
+                .unwrap_or(false);
+            Ok((output, success))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let outputs: Vec<_> = frame
+        .order
+        .iter()
+        .filter(|call| !held_ids.contains(*call))
         .map(|call| frame.accepted[call].clone())
         .collect();
-    thread
-        .thread
-        .inject_response_item_envelopes(outputs)
-        .await?;
+    if !outputs.is_empty() {
+        thread
+            .thread
+            .inject_response_item_envelopes(outputs)
+            .await?;
+    }
     let mut recovery_options = match frame.state["native_continuation"].get("output_schema") {
         Some(schema) => serde_json::json!({"output_schema":schema}),
         None => serde_json::json!({}),
@@ -1112,12 +1178,13 @@ pub(crate) async fn continue_if_ready(
     if let Some(source) = operation_declaration_source {
         recovery_options["operation_declaration_source"] = serde_json::to_value(source)?;
     }
-    let terminal = match (frame.tool_outcomes.take(), frame.fresh.take()) {
-        (Some(outcomes), Some(fresh)) => {
+    let terminal = match frame.tool_outcomes.take() {
+        Some(outcomes) if frame.fresh.is_some() || !held_outputs.is_empty() => {
             Some(crate::python_tools::RecoveredToolCompletionSeed::new(
                 frame.turn.clone(),
                 outcomes,
-                fresh,
+                frame.fresh.take(),
+                held_outputs,
             ))
         }
         _ => None,
@@ -1425,9 +1492,34 @@ pub(crate) async fn capture(
         }
     }
     let start = active_start.context("Core lost the pending turn history")?;
+    let held_outputs = tools.held_tool_outputs(&turn);
+    let mut held_ids = HashSet::new();
+    for (output, succeeded) in held_outputs {
+        let ResponseItem::FunctionCallOutput {
+            call_id: Some(id), ..
+        } = &output.item
+        else {
+            anyhow::bail!("Invalid held terminal output");
+        };
+        ensure!(
+            held_ids.insert(id.clone()) && !outputs.contains_key(id),
+            "Duplicate held terminal output"
+        );
+        if let Some(outcomes) = tool_outcomes.as_mut() {
+            ensure!(
+                outcomes.call_ids.contains(id),
+                "Held terminal output has no sampled call"
+            );
+            outcomes.record(id, succeeded);
+            outcomes.held_call_ids.push(id.clone());
+        } else {
+            anyhow::bail!("Held terminal output has no sampled batch");
+        }
+        outputs.insert(id.clone(), output);
+    }
     let prefix = calls
         .iter()
-        .take_while(|(id, _)| outputs.contains_key(id))
+        .take_while(|(id, _)| outputs.contains_key(id) && !held_ids.contains(id))
         .count();
     let order: Vec<String> = calls
         .iter()

@@ -52,6 +52,11 @@ impl ThreadInstructionsProvider for ThreadInstructions {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThreadOptions {
+    // Set only by private one-shot constructors, never by JSON options.
+    #[serde(skip)]
+    pub(crate) private_http: bool,
+    #[serde(skip)]
+    pub(crate) private_disposable: bool,
     // Private Agents SDK entry path; never used for portable checkpoint import.
     #[serde(rename = "_sdk_resume_thread_id")]
     pub sdk_resume_thread_id: Option<ThreadId>,
@@ -105,6 +110,7 @@ pub struct ThreadOptions {
     #[serde(rename = "_sdk_chatgpt_apps")]
     chatgpt_apps: Option<Value>,
     user_instructions: Option<UserInstructions>,
+    user_instructions_appendix: Option<String>,
     tool_policy: Option<Policy>,
 }
 
@@ -112,6 +118,7 @@ pub struct ThreadOptions {
 #[serde(default, deny_unknown_fields)]
 struct Policy {
     allowed_tools: Option<Vec<ToolName>>,
+    allowed_mcp_tools: Option<Vec<(String, String, ToolName)>>,
     require_managed_sandbox: bool,
     require_unified_exec: bool,
     expose_additional_permissions: Option<bool>,
@@ -133,6 +140,42 @@ struct InstructionText {
 }
 
 impl ThreadOptions {
+    pub(crate) fn permits_private_disposable(&self) -> bool {
+        self.permits_initial_config()
+            && self.application_instructions.is_some()
+            && self
+                .sdk_instruction_files
+                .as_ref()
+                .is_none_or(Vec::is_empty)
+            && self.agent_profiles.is_none()
+            && self.native_agent_roles.is_none()
+            && self.native_agent_max_depth.is_none()
+            && !self.canonical_rules
+            && self.instructions.is_none()
+            && !self.share_instructions_with_subagents
+            && !self.allow_provider_model_fallback
+            && self.history_mode.is_none()
+            && self.session_source.is_none()
+            && self.thread_source.is_none()
+            && self.dynamic_tools.is_empty()
+            && self.manual_tool_slots.is_empty()
+            && self.terminal_tool_slots.is_empty()
+            && self.hosted_tools.is_empty()
+            && self.metrics_service_name.is_none()
+            && self.parent_trace.is_none()
+            && self.environments.is_none()
+            && self.disabled_plugin_ids.is_none()
+            && self.hosted_verification.is_none()
+            && self.chatgpt_apps.is_none()
+            && self.user_instructions.is_none()
+            && self.tool_policy.as_ref().is_some_and(|p| {
+                p.allowed_tools.as_ref().is_some_and(Vec::is_empty)
+                    && !p.require_managed_sandbox
+                    && !p.require_unified_exec
+                    && p.expose_additional_permissions != Some(true)
+            })
+    }
+
     pub fn permits_initial_config(&self) -> bool {
         self.sdk_resume_thread_id.is_none()
             && self.sdk_history.is_none()
@@ -311,6 +354,19 @@ impl ThreadOptions {
                     .selection(&options.config, environment_manager, private_paths)
                     .await?;
                 env.configure_local_proxy(&mut options.config, &selection)?;
+                if self.canonical_rules && env.is_local() {
+                    if let [root] = selection.workspace_roots.as_slice() {
+                        if root != &selection.cwd {
+                            options.thread_extension_init.insert(
+                                codex_core::ProjectReadPathMapping {
+                                    environment_id: selection.environment_id.clone(),
+                                    declared_cwd: selection.cwd.clone(),
+                                    canonical_cwd: root.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
                 if strict_writes {
                     options.thread_extension_init.insert(writes);
                 }
@@ -322,6 +378,7 @@ impl ThreadOptions {
         options.disabled_plugin_ids = self.disabled_plugin_ids;
         options.client_mcp_extensions =
             codex_protocol::mcp::ClientMcpExtensions::new(self.client_mcp_extensions);
+        options.user_instructions_appendix = self.user_instructions_appendix;
         options.user_instructions = self.user_instructions.map(|user| LoadedUserInstructions {
             instructions: user.instructions.map(|i| Instructions {
                 text: i.text,
@@ -332,6 +389,7 @@ impl ThreadOptions {
         if let Some(policy) = self.tool_policy {
             options.thread_extension_init.insert(ToolPolicy {
                 allowed_tools: policy.allowed_tools,
+                allowed_mcp_tools: policy.allowed_mcp_tools,
                 require_managed_sandbox: policy.require_managed_sandbox,
                 require_unified_exec: policy.require_unified_exec,
                 expose_additional_permissions: policy.expose_additional_permissions.unwrap_or(true),

@@ -243,29 +243,41 @@ def _completion_dispatcher(
 async def _windows_completion_pair() -> tuple[socket.socket, socket.socket]:
     """Create connected sockets without blocking Windows' event-loop thread."""
     loop = asyncio.get_running_loop()
-    with socket.socket() as listener, ExitStack() as cleanup:
-        listener.setblocking(False)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        writer = cleanup.enter_context(socket.socket())
-        writer.setblocking(False)
-        await loop.sock_connect(writer, listener.getsockname())
-        reader, _ = await loop.sock_accept(listener)
-        cleanup.enter_context(reader)
-        # Only the reader closes abortively, after receiving the native EOF.
-        # This releases the TCP addresses without retaining TIME_WAIT sockets.
-        reader.setsockopt(
-            socket.SOL_SOCKET,
-            socket.SO_LINGER,
-            struct.pack("HH" if os.name == "nt" else "ii", 1, 0),
-        )
-        if (
-            reader.getsockname() != writer.getpeername()
-            or writer.getsockname() != reader.getpeername()
-        ):
-            raise ConnectionError("Unexpected native completion peer")
-        cleanup.pop_all()
-        return reader, writer
+    retrying = False
+    while True:
+        if retrying:
+            # Both failed sockets have closed; allow cancellation before replacement.
+            await asyncio.sleep(0)
+        with socket.socket() as listener, ExitStack() as cleanup:
+            listener.setblocking(False)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            writer = cleanup.enter_context(socket.socket())
+            writer.setblocking(False)
+            address = listener.getsockname()
+            try:
+                await loop.sock_connect(writer, address)
+            except OSError as error:
+                if retrying or getattr(error, "winerror", None) != 52:
+                    raise
+                retrying = True
+                continue
+            reader, _ = await loop.sock_accept(listener)
+            cleanup.enter_context(reader)
+            # Only the reader closes abortively, after receiving the native EOF.
+            # This releases the TCP addresses without retaining TIME_WAIT sockets.
+            reader.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_LINGER,
+                struct.pack("HH" if os.name == "nt" else "ii", 1, 0),
+            )
+            if (
+                reader.getsockname() != writer.getpeername()
+                or writer.getsockname() != reader.getpeername()
+            ):
+                raise ConnectionError("Unexpected native completion peer")
+            cleanup.pop_all()
+            return reader, writer
 
 
 async def _await_native_completion(call: Any) -> Any:
@@ -307,6 +319,12 @@ async def _await_socket_completion(call: Any) -> Any:
                     # EOF persists through repeated cancellation of sock_recv.
             if acknowledgement != b"":
                 raise _NativeCompletionError("Native completion acknowledgement was lost")
+            if cancelled is None:
+                try:
+                    # An already-readable EOF may not deliver pending cancellation.
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError as error:
+                    cancelled = error
             if cancelled is not None:
                 call.discard_result()
                 raise cancelled

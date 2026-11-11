@@ -580,6 +580,9 @@ def _replace_mount_error(
 
 
 def _replace_protected_mount_error(error: BaseException) -> BaseException:
+    if type(error) is _sandbox_errors._InvalidGitHostError:
+        discard_mount_source_exception(error)
+        return _sandbox_errors._InvalidGitHostError()
     process_control_error = _replace_data_redacted_process_control_error(error)
     if process_control_error is not None:
         return process_control_error

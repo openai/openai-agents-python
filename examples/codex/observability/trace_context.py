@@ -45,6 +45,14 @@ async def exercise(collector_url: str) -> None:
             )
             result = await agent.run("Start", parent_trace=parent)
             print(result.final_output)
+
+        # Inherited original JSON, with a retained context after scope end.
+        with telemetry.trace("Local metadata", options={"metadata": {"tenant": "example"}}) as root:
+            with telemetry.span("Read metadata") as child:
+                print(child.context.trace_metadata)
+        snapshot = dict(root.trace_metadata or {})
+        snapshot["tenant"] = "local copy"
+        print(root.trace_metadata)  # {"tenant": "example"}; no native metadata update.
     finally:
         await telemetry.shutdown()
 

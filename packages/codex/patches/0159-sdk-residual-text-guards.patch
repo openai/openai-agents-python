@@ -1,0 +1,109 @@
+diff --git a/codex-rs/ext/skills/src/selection.rs b/codex-rs/ext/skills/src/selection.rs
+index ba28ee866f44e150e8e40c05f1bed8b8c2a3944f..79dffd003a4f56aef71a4e1337f5b4ddc8bf50a5 100644
+--- a/codex-rs/ext/skills/src/selection.rs
++++ b/codex-rs/ext/skills/src/selection.rs
+@@ -22,6 +22,9 @@ pub(crate) fn collect_explicit_skill_mentions(
+     inputs: &[UserInput],
+     catalog: &SkillCatalog,
+ ) -> Vec<SkillCatalogEntry> {
++    if catalog.entries.is_empty() {
++        return Vec::new();
++    }
+     let mut selected = Vec::new();
+     let mut seen = HashSet::new();
+     let mut blocked_plain_names = HashSet::new();
+diff --git a/codex-rs/protocol/src/items.rs b/codex-rs/protocol/src/items.rs
+index 3b531e049774523c183fff9440a77c503033eb76..0fd3f69d8b8fc184b61e27e4a8f34d97190b56b5 100644
+--- a/codex-rs/protocol/src/items.rs
++++ b/codex-rs/protocol/src/items.rs
+@@ -764,6 +764,9 @@ pub fn parse_hook_prompt_message(
+ 
+ pub fn parse_hook_prompt_fragment(text: &str) -> Option<HookPromptFragment> {
+     let trimmed = text.trim();
++    if !trimmed.starts_with(|c| matches!(c, '<' | '&' | '\u{feff}')) {
++        return None;
++    }
+     let HookPromptXml { text, hook_run_id } = from_xml_str::<HookPromptXml>(trimmed).ok()?;
+     if hook_run_id.trim().is_empty() {
+         return None;
+@@ -881,6 +884,44 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn hook_prompt_preserves_xml_prefixes_and_alternate_root() {
++        let xml = r#"<alternate hook_run_id="hook-run-1">Retry &amp; verify.</alternate>"#;
++        for prefix in [
++            "",
++            " \n\t",
++            "\u{feff}",
++            "\u{feff} \r\n",
++            r#"<?xml version="1.0" encoding="UTF-8"?>"#,
++            "<!-- before -->",
++            "<?probe ready?>",
++            "&#32;&#x9;",
++            "<![CDATA[ ]]>",
++        ] {
++            assert_eq!(
++                parse_hook_prompt_fragment(&format!("{prefix}{xml}")),
++                Some(HookPromptFragment {
++                    text: "Retry & verify.".to_string(),
++                    hook_run_id: "hook-run-1".to_string(),
++                }),
++                "prefix: {prefix:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn hook_prompt_rejects_plain_text_and_invalid_fragments() {
++        for text in [
++            String::new(),
++            "ordinary prompt".to_string(),
++            "x".repeat(524_288),
++            r#"<hook_prompt>Missing run id.</hook_prompt>"#.to_string(),
++            r#"<hook_prompt hook_run_id=" ">Blank run id.</hook_prompt>"#.to_string(),
++        ] {
++            assert!(parse_hook_prompt_fragment(&text).is_none());
++        }
++    }
++
+     #[test]
+     fn hook_prompt_roundtrips_multiple_fragments() {
+         let original = vec![
+diff --git a/codex-rs/skills/src/mentions.rs b/codex-rs/skills/src/mentions.rs
+index 1f391235d1ede003f6edfc8c93fddc2925650dbe..21e18dc7d3702a823bf1ed19482c18f428416d69 100644
+--- a/codex-rs/skills/src/mentions.rs
++++ b/codex-rs/skills/src/mentions.rs
+@@ -90,6 +90,13 @@ pub fn extract_tool_mentions_with_sigil(text: &str, sigil: char) -> ToolMentions
+     let mut mentioned_names: HashSet<&str> = HashSet::new();
+     let mut mentioned_paths: HashSet<&str> = HashSet::new();
+     let mut plain_names: HashSet<&str> = HashSet::new();
++    if !text_bytes.contains(&(sigil as u8)) {
++        return ToolMentions {
++            names: mentioned_names,
++            paths: mentioned_paths,
++            plain_names,
++        };
++    }
+ 
+     let mut index = 0;
+     while index < text_bytes.len() {
+diff --git a/codex-rs/skills/src/selection.rs b/codex-rs/skills/src/selection.rs
+index c21bd47adb0980a8460533a481e7a7a675f94681..b1a9f904c0c8037ed3faacc1a9ed1debb64dcaeb 100644
+--- a/codex-rs/skills/src/selection.rs
++++ b/codex-rs/skills/src/selection.rs
+@@ -44,8 +44,11 @@ pub fn collect_explicit_skill_mentions(
+     loaded_skills: &impl ExplicitSkillLookup,
+     connector_slug_counts: &HashMap<String, usize>,
+ ) -> Vec<SkillMetadata> {
+-    let skill_name_counts =
+-        build_skill_name_counts(loaded_skills.skills(), loaded_skills.disabled_paths()).0;
++    let skills = loaded_skills.skills();
++    if skills.is_empty() {
++        return Vec::new();
++    }
++    let skill_name_counts = build_skill_name_counts(skills, loaded_skills.disabled_paths()).0;
+ 
+     let selection_context = SkillSelectionContext {
+         loaded_skills,

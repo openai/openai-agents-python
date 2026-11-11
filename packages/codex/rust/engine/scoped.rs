@@ -74,6 +74,11 @@ impl EngineState {
             slots
                 .iter()
                 .filter_map(|slot| {
+                    // Scoped engines require in-memory storage, so stored-fork
+                    // registrations remain owned by their LocalStorage engine.
+                    let NativeThreadRegistration::Owner(slot) = slot else {
+                        return None;
+                    };
                     slot.upgrade().and_then(|slot| {
                         slot.lock()
                             .expect("native thread poisoned")

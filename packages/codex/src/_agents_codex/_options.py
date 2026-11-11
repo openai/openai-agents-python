@@ -30,14 +30,18 @@ class RuntimeEnvironment(TypedDict, total=False, closed=True):
     url: str
     local: bool
     read_only: bool
+    trusted_workspace_write: bool
+    temp_dir: str
     cwd: Required[str]
     headers: dict[str, str]
+    env_json: str
     connect_timeout: float | None
     local_mcp: bool
     network: RuntimeNetworkPolicy
     capability_directories: list[str]  # Remote file: URIs; omitted inherits, [] clears.
     writable_roots: list[str]  # Additional write roots, as executor file: URIs.
     mounts: list[RuntimeStorageMount]
+    read_only_roots: list[str]  # Additional macOS read roots, as executor file: URIs.
 
 
 class BasicSpecialPath(TypedDict):

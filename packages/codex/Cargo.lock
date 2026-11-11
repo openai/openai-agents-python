@@ -1701,6 +1701,7 @@ dependencies = [
  "codex-thread-store",
  "codex-tools",
  "codex-utils-path-uri",
+ "codex-utils-rustls-provider",
  "codex-web-search-extension",
  "futures-core",
  "futures-util",
@@ -1716,6 +1717,7 @@ dependencies = [
  "regex",
  "rmcp",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_ignored",
  "serde_json",
@@ -2646,6 +2648,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

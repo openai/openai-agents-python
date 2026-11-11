@@ -1,5 +1,5 @@
 //! A Provider owns native acquisition slots, homes and uncredentialed HTTP clients, never Python work.
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use futures_util::future::{BoxFuture, FutureExt, Shared};
@@ -36,6 +36,7 @@ struct State {
 struct ProviderResource {
     state: Mutex<State>,
     model_http_pool: codex_http_client::SdkModelHttpPool,
+    private_model_http_pool: OnceLock<codex_http_client::SdkModelHttpPool>,
     prepared_runtime: AsyncMutex<Option<runtime::PreparedRuntime>>,
 }
 impl ProviderResource {
@@ -43,6 +44,7 @@ impl ProviderResource {
         Self {
             state: Mutex::new(State::default()),
             model_http_pool: codex_http_client::SdkModelHttpPool::default(),
+            private_model_http_pool: OnceLock::new(),
             prepared_runtime: AsyncMutex::new(None),
         }
     }
@@ -60,6 +62,17 @@ impl Lease {
             .upgrade()
             .ok_or_else(|| py_error("Provider is closed"))?;
         Ok(resource.model_http_pool.clone())
+    }
+    pub(crate) fn private_model_http_pool(&self) -> PyResult<codex_http_client::SdkModelHttpPool> {
+        self.check_live()?;
+        let resource = self
+            .resource
+            .upgrade()
+            .ok_or_else(|| py_error("Provider is closed"))?;
+        Ok(resource
+            .private_model_http_pool
+            .get_or_init(crate::private_http::pool)
+            .clone())
     }
     pub(crate) fn check_live(&self) -> PyResult<()> {
         if !matches!(
@@ -369,6 +382,9 @@ impl NativeProviderOwner {
                         .await
                         .map_err(|error| error.to_string())?;
                     model_http_pool.close();
+                    if let Some(pool) = _resource.private_model_http_pool.get() {
+                        pool.close();
+                    }
                     Ok(())
                 });
                 let pending = async move { task.await.map_err(|error| error.to_string())? }

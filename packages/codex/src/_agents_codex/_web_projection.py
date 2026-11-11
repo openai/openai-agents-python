@@ -51,6 +51,7 @@ def project_web_search_item(
         "turn_id": turn_id,
         "status": "completed" if done else "in_progress",
         "action": _action(native),
+        **({"results": native["results"]} if native.get("results") is not None else {}),
     }
 
 

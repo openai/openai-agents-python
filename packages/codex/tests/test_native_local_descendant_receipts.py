@@ -469,15 +469,16 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
     peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     hold_parent = depth == 2 and not known and no_children
     release_parent = asyncio.Event()
-    if hold_parent:
-        parent_waiting = asyncio.Event()
+    parent_waiting = asyncio.Event()
+    if depth == 2 and not known:
 
         async def hold_spawning_turn(event):
             item = event.get("item", {})
             if item.get("content") == [{"type": "output_text", "text": "/root/alpha finished"}]:
                 parent_waiting.set()
-                await release_parent.wait()
-            elif item.get("call_id") == "source-effect":
+                if hold_parent:
+                    await release_parent.wait()
+            elif hold_parent and item.get("call_id") == "source-effect":
                 # The spawning turn has durably recorded the grandchild and
                 # is waiting on its next model response when the effect runs.
                 await parent_waiting.wait()
@@ -502,6 +503,9 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                 assert first.stdout is not None
                 rows = [json.loads(await first.stdout.readline()) for _ in range(2)]
                 assert "pending_effect" in json.loads(await first.stdout.readline())
+                if depth == 2:
+                    # The live parent can still send its post-spawn request.
+                    await parent_waiting.wait()
                 before = len(peer.requests)
                 competing = await start(
                     peer, executor, tmp_path, "inspect", depth, identity=rows[0]["opened"]

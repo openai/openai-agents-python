@@ -113,7 +113,8 @@ def tool_call(
 class ScriptedResponse:
     """One response with optional provider usage and HTTP metadata.
 
-    Omitted usage stays unknown. Content type and framing remain SDK-owned.
+    Usage omitted by both the response and peer stays unknown.
+    Content type and framing remain SDK-owned.
     ScriptedResponses captures items, usage and headers before starting HTTP.
     """
 
@@ -153,13 +154,19 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
     served it; requests and tool_output provide readback.
     """
 
-    def __init__(self, *responses: Script) -> None:
+    def __init__(
+        self,
+        *responses: Script,
+        default_usage: Mapping[str, JsonValue] | None = None,
+    ) -> None:
         self._responses = deque(self._capture_script(script) for script in responses)
         self._requests: list[dict[str, JsonValue]] = []
         self._unexpected = 0
         self._callback_error: BaseException | None = None
         self._lock = Lock()
         self._condition = _Condition(self._lock)
+        self._default_usage: Mapping[str, JsonValue] | None = None
+        self.set_default_usage(default_usage)
         self._callback_running = False
         self._next_admission = 1
         self._server: ThreadingHTTPServer | None = None
@@ -201,6 +208,23 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
             if response.error_body is None
             else json.loads(json.dumps(dict(response.error_body), allow_nan=False)),
         )
+
+    @property
+    def remaining_steps(self) -> int:
+        """Count queued responses, excluding an already admitted request."""
+        with self._lock:
+            return len(self._responses)
+
+    def set_default_usage(self, usage: Mapping[str, JsonValue] | None) -> None:
+        """Capture usage for responses without explicit usage.
+
+        The current default is selected after a dynamic responder returns.
+        None removes the default; an explicit response usage always wins.
+        """
+        captured = self._capture_script(ScriptedResponse((), usage=usage))
+        assert isinstance(captured, ScriptedResponse)
+        with self._lock:
+            self._default_usage = captured.usage
 
     def append(self, *responses: Script) -> None:
         """Append responses for subsequent requests; dynamic callbacks may append."""
@@ -373,10 +397,13 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         failed = False
+        usage: Mapping[str, JsonValue] | None = None
         try:
             if callable(items):
                 items = self.peer._capture_script(items(deepcopy(body)))
             assert isinstance(items, ScriptedResponse)
+            with self.peer._lock:
+                usage = items.usage if items.usage is not None else self.peer._default_usage
         except BaseException as error:
             with self.peer._condition:
                 if self.peer._callback_error is None:
@@ -413,8 +440,8 @@ class _Handler(BaseHTTPRequestHandler):
             "id": items.response_id if items.response_id is not None else response_id
         }
         created = json.dumps({"type": "response.created", "response": response})
-        if items.usage is not None:
-            response["usage"] = items.usage
+        if usage is not None:
+            response["usage"] = usage
         completed = json.dumps({"type": "response.completed", "response": response})
         events = [created, *(item.encoded for item in items.items), completed]
         payload = "".join(f"data: {event}\n\n" for event in events).encode()

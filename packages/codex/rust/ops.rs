@@ -658,6 +658,8 @@ params!(RealtimeToolSubmission {
     #[serde(default)]
     expected_root_turn_id: Option<String>,
     call_ids: Vec<String>,
+    #[serde(default)]
+    disabled_call_ids: Vec<String>,
     observation_submission_id: Option<String>,
     #[serde(default, with = "ThreadSettings")]
     thread_settings: ThreadSettingsOverrides,
@@ -690,10 +692,11 @@ pub(crate) async fn submit_realtime_tools(
         // graph or seed a replacement turn/admission receipt.
         let result = state
             .thread
-            .attach_realtime_tools_if_owned(
+            .attach_realtime_tools_if_owned_with_policy(
                 p.generation,
                 p.response_id,
                 p.call_ids,
+                p.disabled_call_ids,
                 expected_root_turn_id.clone(),
                 p.trace,
             )
@@ -714,6 +717,7 @@ pub(crate) async fn submit_realtime_tools(
             p.generation,
             p.response_id,
             p.call_ids,
+            p.disabled_call_ids,
             p.thread_settings,
             p.trace,
             init,
@@ -1542,6 +1546,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                     settings: p.settings,
                     function_tools,
                     expected_selection_id: p.expected_selection_id,
+                    disabled_tool_names: p.disabled_tool_names,
                     hosted_mcp_auto_response: p.hosted_mcp_auto_response,
                     reply,
                 })
@@ -1605,6 +1610,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                     settings: p.settings,
                     function_tools: realtime_function_tools(p.function_tools),
                     expected_selection_id: p.expected_selection_id,
+                    disabled_tool_names: p.disabled_tool_names,
                     reply,
                 })
                 .await?;
@@ -1621,7 +1627,13 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                     settings: p.settings,
                     function_tools,
                     expected_selection_id: p.expected_selection_id,
+                    disabled_tool_names: p.disabled_tool_names,
                     hosted_mcp_auto_response: p.hosted_mcp_auto_response,
+                    provider_event_observation: if p.include_raw_provider_events {
+                        codex_protocol::protocol::RealtimeProviderEventObservation::All
+                    } else {
+                        codex_protocol::protocol::RealtimeProviderEventObservation::None
+                    },
                     reply,
                 })
                 .await?;
@@ -1763,8 +1775,26 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                     }
                 }
             };
+            let response_scoped = matches!(
+                &operation,
+                Op::RealtimeConversationUpdateSdk { profile: Some(profile), .. }
+                    if profile.response_id.is_some()
+            );
             thread.submit(operation).await?;
-            result.await??;
+            let outcome = result.await?;
+            if response_scoped
+                && matches!(
+                    &outcome,
+                    Err(error)
+                        if matches!(
+                            error.details(),
+                            codex_protocol::error::CodexErrorDetails::TurnAborted
+                        )
+                )
+            {
+                return Ok(serde_json::json!({"applied": false}));
+            }
+            outcome?;
             return Ok(Value::Null);
         }
         "realtime_conversation_start" => {
@@ -1848,8 +1878,12 @@ params!(RealtimeSdkStart {
     function_tools: Option<Vec<codex_protocol::dynamic_tools::DynamicToolFunctionSpec>>,
     #[serde(default)]
     expected_selection_id: Option<String>,
+    #[serde(default)]
+    disabled_tool_names: Option<Vec<String>>,
     #[serde(default = "realtime_auto_response_default")]
-    hosted_mcp_auto_response: bool
+    hosted_mcp_auto_response: bool,
+    #[serde(default)]
+    include_raw_provider_events: bool
 });
 params!(RealtimeSdkConfig {
     params: RealtimeStart,
@@ -1858,7 +1892,9 @@ params!(RealtimeSdkConfig {
     #[serde(default)]
     function_tools: Option<Vec<codex_protocol::dynamic_tools::DynamicToolFunctionSpec>>,
     #[serde(default)]
-    expected_selection_id: Option<String>
+    expected_selection_id: Option<String>,
+    #[serde(default)]
+    disabled_tool_names: Option<Vec<String>>
 });
 pub(crate) async fn prepare_realtime(
     thread: &CodexThread,
@@ -1879,7 +1915,13 @@ pub(crate) async fn prepare_realtime(
                 settings: p.settings,
                 function_tools: realtime_function_tools(p.function_tools),
                 expected_selection_id: p.expected_selection_id,
+                disabled_tool_names: p.disabled_tool_names,
                 hosted_mcp_auto_response: p.hosted_mcp_auto_response,
+                provider_event_observation: if p.include_raw_provider_events {
+                    codex_protocol::protocol::RealtimeProviderEventObservation::All
+                } else {
+                    codex_protocol::protocol::RealtimeProviderEventObservation::None
+                },
                 reply,
             },
             init,
@@ -1907,7 +1949,9 @@ params!(RealtimeSdkProfileUpdate {
     #[serde(default)]
     function_tools: Option<Vec<codex_protocol::dynamic_tools::DynamicToolFunctionSpec>>,
     #[serde(default)]
-    expected_selection_id: Option<String>
+    expected_selection_id: Option<String>,
+    #[serde(default)]
+    disabled_tool_names: Option<Vec<String>>
 });
 impl From<RealtimeSdkProfileUpdate>
     for codex_protocol::realtime_settings::RealtimeToolProfileUpdate
@@ -1919,6 +1963,7 @@ impl From<RealtimeSdkProfileUpdate>
             target: value.target,
             function_tools: realtime_function_tools(value.function_tools),
             expected_selection_id: value.expected_selection_id,
+            disabled_tool_names: value.disabled_tool_names,
         }
     }
 }

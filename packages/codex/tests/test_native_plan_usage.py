@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import select
+import sys
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from time import get_clock_info
 
 import pytest
 import pytest_asyncio
@@ -135,7 +138,9 @@ async def test_read_codex_plan_usage_before_dispatch(plan_endpoint, monkeypatch,
         assert isinstance(usage, CodexPlanUsage)
         assert usage.account_id == ACCOUNT
         assert usage.identity_verified
-        assert start <= usage.observed_at <= datetime.now(timezone.utc)
+        # Python's wall clock can lag the native clock on Windows.
+        clock_tick = timedelta(seconds=get_clock_info("time").resolution)
+        assert start <= usage.observed_at <= datetime.now(timezone.utc) + clock_tick
         assert usage.observed_at.utcoffset() == timezone.utc.utcoffset(None)
         assert usage.plan_type == "team"
         assert usage.ordinary_usage_allowed is True
@@ -341,14 +346,39 @@ async def test_closing_session_retires_in_flight_plan_usage(plan_endpoint, tmp_p
             release.set()
 
 
+@pytest.mark.parametrize(
+    "socket_eof_ready",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="Unix socket EOF timing requires the Unix completion transport",
+            ),
+        ),
+    ],
+)
 async def test_plan_usage_cancelled_before_poll_does_not_send_get(
-    plan_endpoint, monkeypatch, tmp_path
+    plan_endpoint, monkeypatch, tmp_path, socket_eof_ready
 ):
     replies, requests, _, _ = plan_endpoint
     payload = {"plan_type": "team", "account_id": ACCOUNT, "user_id": USER}
     replies.extend(web.json_response(payload) for _ in range(3))
     bridge = importlib.import_module("agents._native_async")
     await_completion = bridge._await_native_completion
+    loop = asyncio.get_running_loop()
+    sock_recv = loop.sock_recv
+    eof_seen = []
+
+    async def receive_ready_eof(reader, nbytes):
+        # Wait for real native completion without yielding to pending cancellation.
+        ready, _, _ = select.select([reader], [], [], 5)
+        assert ready == [reader], "Native completion socket never became readable"
+        acknowledgement = await sock_recv(reader, nbytes)
+        assert acknowledgement == b""
+        eof_seen.append(True)
+        return acknowledgement
 
     async def cancel_before_poll(call):
         # Signal native cancellation before the bridge can start the request.
@@ -361,9 +391,14 @@ async def test_plan_usage_cancelled_before_poll_does_not_send_get(
     async with timeout(30), codex_agent(saved_login(tmp_path / "login")).session() as session:
         assert await session.plan_usage() is not None
         with monkeypatch.context() as patch:
+            if socket_eof_ready:
+                native_async = importlib.import_module("_agents_codex._native_async")
+                patch.setattr(native_async, "_completion_dispatcher", lambda *_: None)
+                patch.setattr(loop, "sock_recv", receive_ready_eof)
             patch.setattr(bridge, "_await_native_completion", cancel_before_poll)
             with pytest.raises(asyncio.CancelledError):
                 await session.plan_usage()
+        assert eof_seen == ([True] if socket_eof_ready else [])
         assert await session.plan_usage() is not None
 
     assert requests == [("/backend-api/wham/usage", "Bearer saved-token", ACCOUNT)] * 2

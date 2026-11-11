@@ -131,11 +131,15 @@ pub fn build(
     builder.thread_lifecycle_contributor(interception.clone());
     builder.turn_lifecycle_contributor(interception.clone());
     builder.tool_lifecycle_contributor(interception.clone());
+    let registered_plan = config
+        .model_provider_id
+        .starts_with(crate::engine::SIWC_PROVIDER_PREFIX);
     let python_tools = Arc::new(crate::python_tools::PythonContributor {
         managed_calls,
         manager: manager.clone(),
         models_config: config.to_models_manager_config(),
         code_mode_enabled: config.features.enabled(Feature::CodeMode),
+        registered_plan,
     });
     builder.prompt_contributor(python_tools.clone());
     builder.tool_contributor(python_tools.clone());
@@ -247,10 +251,6 @@ pub fn build(
     ));
     let mut skills_registry = ExtensionRegistryBuilder::with_event_sink(builder.event_sink());
     let skills_metrics = codex_otel::global();
-    // Skip shadow ranking only when SDK telemetry has no active consumer.
-    let shadow_selection_enabled = skills_metrics.is_some()
-        || !crate::telemetry::is_initialized()
-        || crate::telemetry::exports_enabled();
     codex_skills_extension::install_with_providers_and_metrics(
         &mut skills_registry,
         skills,
@@ -260,8 +260,8 @@ pub fn build(
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,
-            shadow_selection_enabled: config.features.enabled(Feature::SkillSearch)
-                && (shadow_selection_enabled || crate::telemetry::export_requested(config)),
+            // SDK providers are executor-only; shadow ranking admits Host/Cloud skills.
+            shadow_selection_enabled: false,
         },
     );
     install_audited_extensions(
@@ -274,14 +274,21 @@ pub fn build(
     )));
     builder.model_request_contributor(Arc::new(crate::python_tools::PreparedRequestContributor));
     builder.model_request_contributor(recovery);
-    builder.model_request_contributor(interception.clone());
-    builder.model_request_contributor(Arc::new(crate::response_integrity::Contributor(
-        interception,
-    )));
-    // Core wraps streams in registration order. Recovery must see the original
-    // item before any application callback, then response/step control records
-    // precisely the item admitted by interception. Do not collect a second copy
-    // before edits (or publish Completed from a rejected interception stream).
+    let integrity = Arc::new(crate::response_integrity::Contributor {
+        boundary: interception.clone(),
+        registered_plan,
+    });
+    if registered_plan {
+        // A plan-backed tool call must cross the terminal boundary before any
+        // pre-dispatch callback or canonical history insertion can see it.
+        builder.model_request_contributor(integrity);
+        builder.model_request_contributor(interception);
+    } else {
+        // Ordinary providers can need a tool decision while the stream is open.
+        // Validate the item admitted by interception and retain that ordering.
+        builder.model_request_contributor(interception);
+        builder.model_request_contributor(integrity);
+    }
     Arc::new(builder.build())
 }
 

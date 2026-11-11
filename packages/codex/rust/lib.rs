@@ -12,6 +12,7 @@ mod canonical_rules;
 mod canonical_storage;
 mod checkpoint;
 mod config;
+mod console_diagnostics;
 mod context;
 mod decisions;
 mod engine;
@@ -30,6 +31,7 @@ mod native_interception;
 mod ops;
 mod options;
 mod plan_usage;
+mod private_http;
 mod project_search;
 mod provider_owner;
 mod python_tools;
@@ -37,6 +39,7 @@ mod realtime_adapter;
 mod recovery_guard;
 mod response_integrity;
 mod storage;
+mod stored_history;
 mod subagents;
 mod telemetry;
 mod turn_settlement;
@@ -413,6 +416,12 @@ impl Engine {
             }
             // CanonicalStore loads under its exclusive writer. Keep that lease
             // through startup or failed-opening cleanup; never start Core here.
+            let stored = inner.read_stored_thread(id).await.map_err(py_error)?;
+            engine::EngineState::validate_siwc_resume_provider(
+                &stored.model_provider,
+                &inner.service_config.model_provider_id,
+            )
+            .map_err(py_error)?;
             let history = inner
                 .store
                 .load_history(codex_thread_store::LoadThreadHistoryParams {
@@ -762,11 +771,20 @@ impl NativeThread {
             .is_some_and(|control| control.check(nonce)))
     }
 
-    fn _configure_native_interception(&self, rules: &str) -> PyResult<()> {
+    #[pyo3(signature = (rules, realtime_mcp_tools = None))]
+    fn _configure_native_interception(
+        &self,
+        rules: &str,
+        realtime_mcp_tools: Option<&str>,
+    ) -> PyResult<()> {
         let rules = serde_json::from_str(rules).map_err(py_error)?;
+        let realtime_mcp_tools = realtime_mcp_tools
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(py_error)?;
         self.native_interception()?
             .ok_or_else(|| py_error("Codex thread is closed"))?
-            .configure_tools(rules)
+            .configure_tools_with_realtime(rules, realtime_mcp_tools)
             .map_err(py_error)
     }
 
@@ -923,20 +941,153 @@ impl NativeThread {
     }
 
     #[pyo3(signature = (limit=None))]
-    fn _canonical_history<'py>(&self, py: Python<'py>, limit: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
+    fn _canonical_history<'py>(
+        &self,
+        py: Python<'py>,
+        limit: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::snapshot(&inner, limit).await.map_err(py_error)?;
+            let value = canonical_history::snapshot(&inner, limit)
+                .await
+                .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
         })
     }
 
-    fn _transact_history<'py>(&self, py: Python<'py>, expected_revision: String, keep: usize, items_json: &str) -> PyResult<Bound<'py, PyAny>> {
+    fn _stored_history<'py>(
+        &self,
+        py: Python<'py>,
+        query_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let query = serde_json::from_str(query_json).map_err(py_error)?;
+        async_bridge::future_into_py(py, async move {
+            let value = stored_history::read(&inner, query)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
+    fn _set_stored_name<'py>(
+        &self,
+        py: Python<'py>,
+        name_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let name = serde_json::from_str(name_json).map_err(py_error)?;
+        async_bridge::future_into_py(py, async move {
+            let name = stored_history::set_name(&inner, name)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&name).map_err(py_error)
+        })
+    }
+
+    fn _fork_stored<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let source = self.current()?;
+        let boundary = stored_history::fork_boundary(request_json).map_err(py_error)?;
+        async_bridge::future_into_py(py, async move {
+            let _operation = source.engine.operation(false).map_err(py_error)?;
+            source
+                .engine
+                .fork_stored(&source, boundary)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _discard_stored_fork<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let Some(inner) = self.live()? else {
+            return async_bridge::future_into_py(py, async { Ok(()) });
+        };
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(true).map_err(py_error)?;
+            let _lifecycle = inner.engine.lifecycle.lock().await;
+            inner
+                .engine
+                .discard_stored_forks(Some(inner.id))
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _retire_stored_fork<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        if inner.engine.local_checklist_store.is_none()
+            || !self
+                .checkpoint_import
+                .as_ref()
+                .is_some_and(|ids| ids.len() == 1 && ids[0] == inner.id)
+        {
+            return Err(py_error("This thread is not an owned stored fork"));
+        }
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(true).map_err(py_error)?;
+            // Preserve the imported-ID/live-slot cleanup receipt until the
+            // outer public waiter chooses publication or joined rollback.
+            inner.close().await.map_err(py_error)
+        })
+    }
+
+    fn _publish_stored_fork(&self) -> PyResult<String> {
+        let mut owner = self.inner.lock().map_err(py_error)?;
+        let inner = owner
+            .live
+            .as_ref()
+            .ok_or_else(|| py_error("No unpublished stored fork"))?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        if !inner.is_closed()
+            || inner.engine.local_checklist_store.is_none()
+            || !self
+                .checkpoint_import
+                .as_ref()
+                .is_some_and(|ids| ids.len() == 1 && ids[0] == inner.id)
+        {
+            return Err(py_error(
+                "Stored fork publication requires its joined native writer",
+            ));
+        }
+        if let Some(store) = &inner.engine.local_checklist_store {
+            store.check_durability().map_err(py_error)?;
+        }
+        // No await after this handoff. Later discard cannot delete publication.
+        if !inner.engine.finish_stored_fork(inner.id) {
+            return Err(py_error("Unpublished stored fork receipt expired"));
+        }
+        owner.release();
+        Ok(self.id.clone())
+    }
+
+    fn _stored_history_close_action(&self, action_json: &str) -> PyResult<StoredHistoryClose> {
+        let inner = self.current()?;
+        Ok(StoredHistoryClose {
+            inner: Arc::new(
+                stored_history::CloseAction::capture(&inner, action_json).map_err(py_error)?,
+            ),
+            owner: Arc::downgrade(&self.inner),
+        })
+    }
+
+    fn _transact_history<'py>(
+        &self,
+        py: Python<'py>,
+        expected_revision: String,
+        keep: usize,
+        items_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let items = serde_json::from_str(items_json)
             .map_err(|_| py_error("Invalid canonical history items"))?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::replace(&inner, expected_revision, keep, items).await.map_err(py_error)?;
+            let value = canonical_history::replace(&inner, expected_revision, keep, items)
+                .await
+                .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
         })
     }
@@ -1869,14 +2020,14 @@ impl NativeThread {
         )
     }
 
-    fn _validate_hosted_search_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn _validate_provider_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let current = inner.thread.config_snapshot().await;
             inner
                 .engine
-                .validate_hosted_search_model(current.collaboration_mode.model())
+                .validate_model(current.collaboration_mode.model())
                 .await
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             Ok(())
@@ -1908,7 +2059,7 @@ impl NativeThread {
             if let Some(model) = &settings.model {
                 inner
                     .engine
-                    .validate_hosted_search_model(model)
+                    .validate_model(model)
                     .await
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }
@@ -1965,6 +2116,97 @@ impl NativeThread {
             .await
             .map_err(py_error)?;
             serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _admit_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        roster_json: String,
+        root_id: String,
+        expected_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let expected = serde_json::from_str(&expected_json).map_err(py_error)?;
+            let receipt = agent_profiles::admit_realtime_graph(
+                &inner,
+                &generation,
+                &roster_json,
+                &root_id,
+                expected,
+            )
+            .await;
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let Some(tools) = inner
+                        .thread
+                        .thread_extension_data()
+                        .get::<python_tools::PythonTools>()
+                    else {
+                        return Err(py_error(error));
+                    };
+                    serde_json::json!({
+                        "error": error.to_string(),
+                        "generation_high_water": tools.generation_high_water(),
+                    })
+                }
+            };
+            serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _discard_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        receipt_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = serde_json::from_str(&receipt_json).map_err(py_error)?;
+            agent_profiles::discard_realtime_graph(&inner.thread, &generation, &receipt)
+                .map_err(py_error)
+        })
+    }
+
+    fn _restore_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = agent_profiles::restore_realtime_graph(&inner.thread, &generation)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _realtime_agent_source<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        receipt_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = serde_json::from_str(&receipt_json).map_err(py_error)?;
+            let snapshot = agent_profiles::realtime_source(&inner.thread, &generation, receipt)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&snapshot).map_err(py_error)
         })
     }
 
@@ -2611,11 +2853,13 @@ impl NativeThread {
         })
     }
 
+    #[pyo3(signature = (grant, response_json, start_response = true))]
     fn _respond_manual_tool<'py>(
         &self,
         py: Python<'py>,
         grant: &python_tools::ManualToolGrant,
         response_json: &str,
+        start_response: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let grant = grant.clone();
@@ -2674,11 +2918,16 @@ impl NativeThread {
                         .commit_sdk_receipt(id, &grant.key, item, reentry)
                         .await
                         .map_err(py_error)?;
-                    Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+                    Ok(tools.respond_manual(
+                        &grant.key.reply.thread,
+                        &grant,
+                        response,
+                        start_response,
+                    ))
                 })
                 .await;
             }
-            Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+            Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response, start_response))
         })
     }
 
@@ -3469,6 +3718,31 @@ impl NativeThread {
     }
 }
 
+#[pyclass(frozen, name = "_StoredHistoryClose", module = "agents._native")]
+struct StoredHistoryClose {
+    inner: Arc<stored_history::CloseAction>,
+    owner: std::sync::Weak<std::sync::Mutex<NativeThreadOwner>>,
+}
+
+#[pymethods]
+impl StoredHistoryClose {
+    fn apply<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        {
+            let owner = self
+                .owner
+                .upgrade()
+                .ok_or_else(|| py_error("Native thread shutdown cannot be verified"))?;
+            if owner.lock().map_err(py_error)?.live.is_some() {
+                return Err(py_error(
+                    "Stored history mutation requires confirmed native thread shutdown",
+                ));
+            }
+        }
+        let inner = Arc::clone(&self.inner);
+        async_bridge::future_into_py(py, async move { inner.apply().await.map_err(py_error) })
+    }
+}
+
 // Deliberately private: Session owns the transaction and its durable decision.
 #[pyclass(module = "agents._native")]
 struct ContextChange {
@@ -3563,7 +3837,7 @@ impl ContextChange {
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false))]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false))]
 fn _open_conversation<'py>(
     py: Python<'py>,
     config_json: String,
@@ -3574,6 +3848,7 @@ fn _open_conversation<'py>(
     api_key: String,
     provider_lease: PyRef<'py, provider_owner::NativeProviderLease>,
     _share_model_http: bool,
+    _private_http: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let opening = conversation_opening(
         config_json,
@@ -3584,6 +3859,8 @@ fn _open_conversation<'py>(
         api_key,
         provider_lease.inner.clone(),
         _share_model_http,
+        _private_http,
+        false,
     )?;
     async_bridge::future_factory_into_py(py, move || opening)
 }
@@ -3597,6 +3874,8 @@ fn conversation_opening(
     api_key: String,
     lease: Arc<provider_owner::Lease>,
     share_model_http: bool,
+    private_http: bool,
+    private_disposable: bool,
 ) -> PyResult<
     impl std::future::Future<
         Output = PyResult<(
@@ -3607,8 +3886,10 @@ fn conversation_opening(
     > + Send
     + use<>,
 > {
-    let options: options::ThreadOptions =
+    let mut options: options::ThreadOptions =
         config::decode(serde_json::from_str(options_json).map_err(py_error)?).map_err(py_error)?;
+    options.private_http = private_http;
+    options.private_disposable = private_disposable;
     if !options.permits_initial_config()
         || options.agent_profiles.is_some()
         || !options.manual_tool_slots.is_empty()
@@ -3631,9 +3912,13 @@ fn conversation_opening(
     let settings = ops::model_settings(settings_value)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(async move {
-        let (state, generated_home) = lease
+        let (mut state, generated_home) = lease
             .conversation_engine(config_json, runtime_json, api_key, share_model_http)
             .await?;
+        if private_http {
+            // Only this scope selects the retained handshake-fresh owner.
+            state.model_http_pool = Some(lease.private_model_http_pool()?);
+        }
         let mut engine = Engine::new(state);
         lease.register_engine(engine.inner.clone())?;
         engine.managed_lease = Some(Arc::downgrade(&lease));
@@ -3648,7 +3933,7 @@ fn conversation_opening(
         if has_settings {
             if let Some(model) = &settings.model {
                 inner
-                    .validate_hosted_search_model(model)
+                    .validate_model(model)
                     .await
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }
@@ -3692,7 +3977,7 @@ fn conversation_opening(
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, input_json, *, api_key, provider_lease, _share_model_http=false))]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, input_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false))]
 fn _prepare_run_conversation(
     config_json: String,
     runtime_json: String,
@@ -3703,6 +3988,7 @@ fn _prepare_run_conversation(
     api_key: String,
     provider_lease: PyRef<'_, provider_owner::NativeProviderLease>,
     _share_model_http: bool,
+    _private_http: bool,
 ) -> PyResult<agent_run::NativeRun> {
     provider_lease.inner.check_live()?;
     if !provider_lease.inner.keeps_unpublished_owner() {
@@ -3719,6 +4005,8 @@ fn _prepare_run_conversation(
         api_key,
         provider_lease.inner.clone(),
         _share_model_http,
+        _private_http,
+        true,
     )?;
     Ok(agent_run::NativeRun::new(
         opening,
@@ -3778,7 +4066,9 @@ fn create_engine<'py>(
         )
         .await
         .map_err(py_error)?;
-        inner.model_http_pool = model_http_pool;
+        if model_http_pool.is_some() {
+            inner.model_http_pool = model_http_pool;
+        }
         let mut engine = Engine::new(inner);
         if let Some(lease) = lease {
             lease.register_engine(engine.inner.clone())?;
@@ -4135,6 +4425,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<python_tools::ManualToolGrant>()?;
     module.add_class::<NativeChildTurn>()?;
     module.add_class::<NativeThread>()?;
+    module.add_class::<StoredHistoryClose>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapter>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapterRequest>()?;
     module.add_class::<live::NativeLiveSession>()?;

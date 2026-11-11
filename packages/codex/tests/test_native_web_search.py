@@ -2,6 +2,7 @@
 
 import json
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import pytest
 from aiohttp import web
@@ -19,7 +20,7 @@ from agents import (
     function_tool,
 )
 from agents.observation import ModelOutputItemCompleted
-from agents.tools import WebSearchLocation
+from agents.tools import WebSearchImageSettings, WebSearchLocation
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
@@ -75,8 +76,15 @@ async def test_hosted_controls_are_captured_and_outer_choice_survives_idle_resto
             "city": "Chicago",
             "timezone": "America/Chicago",
         }
+        content_types: list[Literal["text", "image"]] = ["text", "image"]
+        image_settings: WebSearchImageSettings = {"max_results": 3, "caption": False}
         web_search = WebSearch(
-            route="hosted", allowed_domains=allowed, blocked_domains=blocked, location=location
+            route="hosted",
+            allowed_domains=allowed,
+            blocked_domains=blocked,
+            location=location,
+            search_content_types=content_types,
+            image_settings=image_settings,
         )
         provider = NativeProvider(base_url=model.url, api_key="hosted-controls-fixture")
         agent = Agent(
@@ -90,6 +98,9 @@ async def test_hosted_controls_are_captured_and_outer_choice_survives_idle_resto
                 allowed[:] = ["changed.example"]
                 blocked.clear()
                 location["timezone"] = "America/New_York"
+                content_types[:] = ["text"]
+                image_settings["caption"] = True
+                image_settings["max_results"] = 9
                 replacement = WebSearch(route="hosted", allowed_domains=["replacement.example"])
                 with pytest.raises(CapabilityError, match="captured"):
                     await session.submit("invalid", tools=[replacement])
@@ -136,9 +147,13 @@ async def test_hosted_controls_are_captured_and_outer_choice_survives_idle_resto
             "city": "Chicago",
             "timezone": "America/Chicago",
         }
+        assert tool["search_content_types"] == ["text", "image"]
+        assert tool["image_settings"] == {"max_results": 3, "caption": False}
+        assert "web_search_call.results" in first["include"]
         assert "web_search_call.action.sources" in first["include"]
         assert all(tool["type"] != "web_search" for tool in third["tools"])
         assert "web_search_call.action.sources" not in third["include"]
+        assert "web_search_call.results" not in third["include"]
         assert any(
             item.get("role") == "user"
             and {"type": "input_text", "text": "Remember Ada."} in item["content"]
@@ -146,8 +161,14 @@ async def test_hosted_controls_are_captured_and_outer_choice_survives_idle_resto
         )
 
 
-@pytest.mark.parametrize("with_evidence", [True, False], ids=["with-evidence", "without-evidence"])
-async def test_hosted_search_evidence_reaches_history_events_and_next_request(with_evidence):
+@pytest.mark.parametrize(
+    "with_evidence,result_characters",
+    [(True, 0), (False, 0), (True, 70_000)],
+    ids=["with-evidence", "without-evidence", "large-evidence"],
+)
+async def test_hosted_search_evidence_reaches_history_events_and_next_request(
+    with_evidence, result_characters
+):
     async with timeout(30), search_peer() as (model, searches):
 
         async def omit_usage(event):
@@ -158,6 +179,12 @@ async def test_hosted_search_evidence_reaches_history_events_and_next_request(wi
         if not with_evidence:
             model.before_event = omit_usage
         action = {"type": "search", "query": "Chicago weather"}
+        results = [
+            {"type": "image", "image_url": "https://weather.example/clouds.png"},
+            {"type": "future_result", "details": {"caption": "Synthetic cloud map"}},
+        ]
+        if result_characters:
+            results.append({"type": "future_result", "payload": "x" * result_characters})
         parts = [
             {"type": "output_text", "text": "Chicago forecast. "},
             {"type": "output_text", "text": "Clear skies."},
@@ -192,6 +219,7 @@ async def test_hosted_search_evidence_reaches_history_events_and_next_request(wi
                     "id": "ws_chicago",
                     "status": "completed",
                     "action": action,
+                    **({"results": results} if with_evidence else {}),
                 },
             },
             {
@@ -215,6 +243,20 @@ async def test_hosted_search_evidence_reaches_history_events_and_next_request(wi
         async with agent.session() as session:
             turn = await session.submit("Find the Chicago forecast.")
             events = [event async for event in turn.events()]
+            detailed_events = [event async for event in turn.events(include_execution_details=True)]
+
+            async def session_observations(include_details):
+                observed_events = []
+                async for event in session.events(include_execution_details=include_details):
+                    observed_events.append(event)
+                    if event.type == "turn_finished" and event.turn_id == turn.turn_id:
+                        return observed_events
+                pytest.fail("Session observations ended before the turn finished")
+
+            session_events = await session_observations(False)
+            detailed_session_events = await session_observations(True)
+            assert any(event.type == "turn_started" for event in events)
+            assert any(event.type == "turn_started" for event in session_events)
             settled = await turn.get_result()
             assert settled.final_output == "Chicago forecast. Clear skies."
             items = [item async for item in session.items()]
@@ -224,13 +266,31 @@ async def test_hosted_search_evidence_reaches_history_events_and_next_request(wi
             search = next(item for item in items if item["type"] == "web_search_call")
             assert message["content"] == parts
             assert search["action"] == {**action, "queries": None}
+            if with_evidence:
+                assert search.get("results") == results
+            else:
+                assert "results" not in search
 
             observed = {
                 event.item["type"]: event.item
                 for event in events
                 if isinstance(event, ModelOutputItemCompleted)
             }
-            assert observed["web_search_call"] == search
+            default_search = {key: value for key, value in search.items() if key != "results"}
+            assert observed["web_search_call"] == default_search
+            for captured, expected_search in (
+                (session_events, default_search),
+                (detailed_events, search),
+                (detailed_session_events, search),
+            ):
+                assert [
+                    event.item
+                    for event in captured
+                    if isinstance(event, ModelOutputItemCompleted)
+                    and event.item["type"] == "web_search_call"
+                ] == [expected_search]
+            assert "Synthetic cloud map" not in repr(events)
+            assert "Synthetic cloud map" not in repr(session_events)
             if with_evidence:
                 cited_part = message["content"][1]
                 citation = cited_part["annotations"][0]
@@ -272,6 +332,10 @@ async def test_hosted_search_evidence_reaches_history_events_and_next_request(wi
         )
         assert message["content"] == parts
         assert replayed["web_search_call"]["action"].get("sources") == action.get("sources")
+        if with_evidence:
+            assert replayed["web_search_call"]["results"] == results
+        else:
+            assert "results" not in replayed["web_search_call"]
 
 
 async def test_unknown_annotation_format_does_not_discard_assistant_message():
@@ -302,6 +366,8 @@ async def test_unknown_annotation_format_does_not_discard_assistant_message():
         WebSearch(allowed_domains=["weather.example"]),
         WebSearch(blocked_domains=["weather.example"]),
         WebSearch(location={"timezone": "America/Chicago"}),
+        WebSearch(search_content_types=["image"]),
+        WebSearch(image_settings={"caption": True}),
     ],
 )
 async def test_standalone_controls_rejected_before_provider_io(search):
@@ -844,3 +910,61 @@ async def test_hosted_portable_data_checked_before_executor_connect(
                 ):
                     assert executor.attempts > 0
             assert len(model.requests) == count and not searches
+
+
+@pytest.mark.parametrize("route", ["standalone", "hosted"])
+@pytest.mark.parametrize("search_context_size", ["low", "medium", "high", None])
+async def test_captured_context_budget_on_native_route(route, search_context_size):
+    async with timeout(25), search_peer() as (model, searches):
+        if route == "standalone":
+            model.respond(search_call(False, "context-size"))
+        model.respond(assistant_output("done"))
+        async with NativeProvider(
+            base_url=model.url, api_key="synthetic-context-size", supports_websockets=False
+        ) as provider:
+            async with Agent(
+                instructions="Use selected search.",
+                model="gpt-5.5",
+                provider=provider,
+                tools=[WebSearch(route=route, search_context_size=search_context_size)],
+            ).session() as session:
+                assert (
+                    await (await session.submit("Research")).get_result()
+                ).final_output == "done"
+        if route == "standalone":
+            assert len(searches) == 1
+            settings = searches[0]["body"]["settings"]
+            if search_context_size is None:
+                assert "search_context_size" not in settings
+            else:
+                assert settings["search_context_size"] == search_context_size
+        else:
+            assert not searches
+            search = next(
+                item for item in model.requests[0]["tools"] if item["type"] == "web_search"
+            )
+            if search_context_size is None:
+                assert "search_context_size" not in search
+            else:
+                assert search["search_context_size"] == search_context_size
+
+
+@pytest.mark.parametrize("content_types", [["text"], ["image"], ["image", "text"]])
+async def test_hosted_content_selection_requests_image_results(content_types):
+    async with timeout(20), search_peer() as (model, searches):
+        model.respond(assistant_output("Selected search controls."))
+        provider = NativeProvider(base_url=model.url, api_key="image-controls-fixture")
+        agent = Agent(
+            instructions="Research the question.",
+            model="gpt-5.5",
+            provider=provider,
+            tools=[WebSearch(route="hosted", search_content_types=content_types)],
+        )
+        async with provider, agent.session() as session:
+            await (await session.submit("Research.")).get_result()
+        [request] = model.requests
+        tool = next(tool for tool in request["tools"] if tool["type"] == "web_search")
+        assert tool["search_content_types"] == content_types
+        assert "image_settings" not in tool
+        assert ("web_search_call.results" in request["include"]) == ("image" in content_types)
+        assert not searches

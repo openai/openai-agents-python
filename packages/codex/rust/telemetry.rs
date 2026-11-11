@@ -25,8 +25,6 @@ static STATE: Mutex<State> = Mutex::const_new(State {
     provider: None,
 });
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
-// Successful process configuration is immutable, including after shutdown.
-static EXPORTS_ENABLED: AtomicBool = AtomicBool::new(false);
 static TRACE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 const SERVICE: &str = "codex_agents_python";
@@ -36,10 +34,6 @@ type ExportLayer = Box<dyn Layer<Registry> + Send + Sync>;
 
 pub fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Acquire)
-}
-
-pub fn exports_enabled() -> bool {
-    EXPORTS_ENABLED.load(Ordering::Acquire)
 }
 
 pub async fn engine_starting() -> Result<()> {
@@ -95,8 +89,9 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
         !tracing::dispatcher::has_been_set(),
         "A Rust tracing subscriber is already installed; Codex telemetry cannot replace it"
     );
+    let (config_json, diagnostics) = crate::console_diagnostics::extract(config_json)?;
     let runtime_json = config::prepare_runtime(runtime_json)?;
-    let (mut config, _) = config::load(config_json, &runtime_json, None).await?;
+    let (mut config, _) = config::load(&config_json, &runtime_json, None).await?;
     if uses_http_mtls(&config.otel.exporter)
         || (config.analytics_enabled.unwrap_or(true)
             && uses_http_mtls(&config.otel.metrics_exporter))
@@ -106,7 +101,6 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
             http_mtls_network_policy(&config.application_network_policy);
     }
 
-    let exports_enabled = export_requested(&config);
     codex_otel::sdk_trace::configure_pipeline(false);
     // Claim the subscriber first: losing this race must not modify native OTel globals.
     let (logger, handle) = reload::Layer::new(None::<ExportLayer>);
@@ -118,6 +112,9 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
             .boxed(),
     ];
     layers.push(OtelProvider::reloadable_tracing_layer(SERVICE).boxed());
+    if let Some(diagnostics) = diagnostics {
+        layers.push(diagnostics.layer(&ACTIVE).boxed());
+    }
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layers))
         .context("Could not claim the process-wide Rust tracing subscriber")?;
     state.claimed = true;
@@ -153,7 +150,6 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
     codex_otel::sdk_trace::configure_pipeline(TRACE_INITIALIZED.load(Ordering::Acquire));
     ACTIVE.store(true, Ordering::Release);
     state.provider = provider;
-    EXPORTS_ENABLED.store(exports_enabled, Ordering::Release);
     INITIALIZED.store(true, Ordering::Release);
     Ok(())
 }
@@ -164,6 +160,7 @@ pub async fn shutdown(timeout_ms: Option<u32>) -> Result<()> {
     // Publish before owner admission: an older flush may hold STATE until this
     // terminal call's entire budget expires. Its worker must still stop.
     codex_otel::sdk_trace_routes::begin_shutdown(started + timeout);
+    let _host_credentials = codex_otel::sdk_trace_routes::HostTraceDeliveryShutdown;
     TRACE_INITIALIZED.store(false, Ordering::Release);
     ACTIVE.store(false, Ordering::Release);
     codex_otel::sdk_trace::configure_pipeline(false);

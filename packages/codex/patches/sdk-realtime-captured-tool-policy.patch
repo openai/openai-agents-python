@@ -1,0 +1,29 @@
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index 612eb701f1b168ed47eff9213594a4a89afd2c4f..81772bfc7ccdd83593db03535270854fee304bcf 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -1105,9 +1105,9 @@ impl RealtimeToolTask {
+             .and_then(|source| source.as_any().downcast_ref::<RealtimeToolSource>())
+             .ok_or_else(|| CodexErr::InvalidRequest("Unknown native Realtime source".into()))?;
+         let mut execution = source.execution.clone();
+-        if source.voice_expected.is_some() {
+-            // These names have already been admitted by this response's exact
+-            // source. Keep the opening thread policy for every other step.
++        if source.voice_expected.is_some() || source.application_instructions.is_some() {
++            // Both admitted voice profiles and SDK application sources have been
++            // retaining their exact response's captured tool-policy names.
+             execution.tool_policy = Some(Arc::new(codex_extension_api::ToolPolicy {
+                 allowed_tools: Some(
+                     self.calls
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 28fb6452e6698afd0879e42a83365bf3bfa1a276..9fd1b029bbd29546be60446467168b5d83ef8ac7 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -145,6 +145,7 @@ pub(crate) async fn build_tool_router(
+         .unwrap_or(&session.tool_policy);
+     // This exact binding owns both admission and the SDK's per-step projection.
+     step_store.insert(Arc::clone(mcp));
++
+     let mut resolved_policy = tool_policy.as_ref().clone();
+     if let Some(selectors) = &resolved_policy.allowed_mcp_tools {
+         let named_ceiling = resolved_policy.allowed_tools.clone();

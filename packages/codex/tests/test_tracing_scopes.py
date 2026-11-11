@@ -2711,7 +2711,10 @@ async def test_retained_cell_executor_span_records_its_own_outcome(
         raise ValueError("PRIVATE_CALLBACK_EXCEPTION")
 
     executor = SimpleNamespace(
-        transform_arguments=None, transform_result=transform, policy_timeout=0.01, approval=None
+        transform_arguments=None,
+        transform_result=transform,
+        policy_timeout=0.01 if outcome == "timeout" else 10,
+        approval=None,
     )
     owner = _CellPolicyOwner(
         1,

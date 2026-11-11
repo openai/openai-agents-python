@@ -27,7 +27,9 @@ def get_remote_mounts(manifest: Manifest) -> list[tuple[Path, bool]]:
     return remote_mounts
 
 
-def build_remote_mount_policy_instructions(manifest: Manifest) -> str | None:
+def build_remote_mount_policy_instructions(
+    manifest: Manifest, *, allow_direct_edits: bool = True
+) -> str | None:
     remote_mounts = get_remote_mounts(manifest)
     if not remote_mounts:
         return None
@@ -38,7 +40,9 @@ def build_remote_mount_policy_instructions(manifest: Manifest) -> str | None:
     allowlist_text = ", ".join(
         f"`{command}`" for command in manifest.remote_mount_command_allowlist
     )
-    edit_instructions = _remote_mount_edit_instructions(remote_mounts)
+    edit_instructions = _remote_mount_edit_instructions(
+        remote_mounts, allow_direct_edits=allow_direct_edits
+    )
     return REMOTE_MOUNT_POLICY.format(
         path_lines=path_lines,
         REMOTE_MOUNT_COMMAND_ALLOWLIST_TEXT=allowlist_text,
@@ -46,16 +50,22 @@ def build_remote_mount_policy_instructions(manifest: Manifest) -> str | None:
     )
 
 
-def _remote_mount_edit_instructions(remote_mounts: list[tuple[Path, bool]]) -> str:
+def _remote_mount_edit_instructions(
+    remote_mounts: list[tuple[Path, bool]], *, allow_direct_edits: bool = True
+) -> str:
     has_read_write = any(not read_only for _, read_only in remote_mounts)
     has_read_only = any(read_only for _, read_only in remote_mounts)
 
     instructions: list[str] = []
     if has_read_write:
         instructions.append(
-            "Use `apply_patch` directly for text edits on read+write mounts. "
-            "For shell-based edits on read+write mounts, first `cp` the mounted file "
-            "to a normal local workspace path, edit the local copy there, then copy "
+            (
+                "Use `apply_patch` directly for text edits on read+write mounts. "
+                "For shell-based edits on read+write mounts, first `cp` the mounted file "
+                if allow_direct_edits
+                else "For edits on read+write mounts, first `cp` the mounted file "
+            )
+            + "to a normal local workspace path, edit the local copy there, then copy "
             "it back."
         )
     if has_read_only:

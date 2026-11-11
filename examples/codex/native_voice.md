@@ -207,8 +207,9 @@ await voice.send_event(
 
 Core validates the payloads of these event types.
 
-- `session.update` accepts existing sparse session settings and waits for the provider acknowledgement. Raw tool declarations remain unsupported; use the Session's admitted tools.
-- `response.create` accepts alternate `input` and `conversation`, plus instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Use `input: []` for an explicitly empty context. Use `tool_choice` or an exact subset of the advertised function declarations in `tools` to control tools for one linked response. Detached responses default to no tools. To handle a detached function call yourself, supply its declaration in `tools`, read the call from the provider event stream, and include the result in a later detached response's `input`. Detached output stays outside the provider conversation.
+- `session.update` accepts sparse session settings and waits for the provider acknowledgement. Set `session.tools` to replace the provider tool list, send `[]` to clear it, or omit `tools` to keep it. Reuse exact advertised declarations for native functions. Hosted MCP declarations follow the existing approval flow.
+- `response.create` accepts alternate `input` and `conversation`, plus instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Use `input: []` for an empty context. Use `tools` for an exact subset of advertised native functions, application functions, or hosted MCP declarations. Select hosted MCP with `"tool_choice": {"type": "mcp", "server_label": "docs"}`; add `name` to select one tool from that server. This selection applies to one response.
+- Use `conversation: "none"` to create detached responses alongside the linked response. Detached responses default to no tools. For detached functions declared in `response.tools`, handle `RealtimeDetachedFunctionCall` with its exact `response_id`, `item_id`, `call_id`, `name`, and JSON `arguments` string. Supply a `function_call_output` with that `call_id` and string `output` in a later detached response's `input`. Check `RealtimeResponse.out_of_band` to identify detached lifecycle events. Detached output stays outside linked history and playback accounting.
 - `response.cancel` retires native work and local buffered output for the exact accepted response IDs. Consume `RealtimePlaybackInterrupted` and discard the indicated unplayed application audio, as with `interrupt()`.
 - `conversation.item.create` accepts supported messages and completed historical function calls and outputs. Create the historical call first, then use its `call_id` on one output. These writes wait for matching provider acknowledgements. To answer a pending hosted MCP approval, send an `mcp_approval_response` with the provider's issued `approval_request_id` and a Boolean `approve` value.
 - `conversation.item.retrieve` returns the full provider item as a dictionary. `conversation.item.delete` waits for the matching provider acknowledgement.
@@ -216,11 +217,44 @@ Core validates the payloads of these event types.
 - `input_audio_buffer.append`, `input_audio_buffer.clear`, and `input_audio_buffer.commit` use the native media queue. Audio appends use base64 data in the configured input format.
 - `output_audio_buffer.clear` applies only to provider-managed media.
 
+For a linked response using an application function declared in the raw tool list, wait for a `RealtimeConversationItemObserved` event with `kind="function_call"` and `status="done"`. Use `retrieve_conversation_item(event.item_id)` to read the function name, arguments, and `call_id`. After handling a function you own, send `conversation.item.create` with a `function_call_output` item, a fresh `id`, the same `call_id`, and the string `output`. Send `response.create` when the response's tool outputs have settled.
+
+Applications have been overriding reusable prompts for one response with `response.prompt`, using an `id`, optional `version` and `variables`, or explicit `null`. They have been choosing that response's voice and codec through `response.audio.output`.
+
+```python
+await voice.send_event(
+    {
+        "type": "response.create",
+        "response": {
+            "prompt": {
+                "id": "pmpt_example",
+                "version": "2",
+                "variables": {"topic": "rainbows"},
+            },
+            "audio": {
+                "output": {
+                    "voice": "marin",
+                    "format": {"type": "audio/pcmu"},
+                }
+            },
+        },
+    }
+)
+```
+
+Applications have also been passing a custom voice as `{"id": "voice_example"}`, or selecting `{"type": "audio/pcm", "rate": 24000}` or `{"type": "audio/pcma"}`. The SDK has been preserving each response's codec while leaving session defaults unchanged.
+
 Every event can carry an `event_id`. Sends other than item retrieval return `None`. The existing message, response, audio, and history methods remain available for their typed operations.
+
+### Observe provider events
+
+Set `RealtimeConfig(include_raw_provider_events=True)` to receive `RealtimeRawProviderEvent` alongside typed events. Its `event` field contains the decoded provider JSON, including event types without a typed projection. Consume `voice.events()` for startup and subsequent events. Observe `RealtimeProviderRequestError` for recoverable provider rejections and use its `event_id` to identify the rejected request.
+
+Use `contextlib.aclosing(voice.subscribe())` to manage an independent observer of future events. Consume each observer promptly. Overflow closes that observer, and the primary media stream remains available through `voice.events()`.
 
 ### Edit provider history
 
-`delete_conversation_item(provider_item_id)` deletes an eligible item from the current provider conversation. Use the provider ID from `RealtimeConversationItemObserved`, whose `status` is `"added"` or `"done"`. Canonical history IDs are separate. Native checks reject unknown or incomplete items and items still needed by unfinished work. The call completes after the matching provider acknowledgement and durable history update; `RealtimeConversationItemDeleted` reports that deletion.
+`delete_conversation_item(provider_item_id)` deletes an eligible item from the current provider conversation. Use a provider ID from `RealtimeConversationItemObserved` or one your application already knows. For an ID from before attachment, the SDK retrieves the item to establish its identity and checks it against current responses, calls, and approvals. Completed external messages, tool items, and approval records can be pruned after these checks. Items owned by current native work require native completion receipts. The call completes after the matching provider acknowledgement and durable history update. `RealtimeConversationItemDeleted` reports the provider ID.
 
 Canonical history keeps prior transcripts and appends a `provider_item_deleted` entry with its target in `provider_item_id`. Shared Session history, tool outcomes, and approval records remain intact. Deletion cannot retract output already generated or change context a response already consumed. A later voice connection can use retained Session context. This operation prunes the current provider conversation rather than erasing Session history.
 
@@ -254,7 +288,71 @@ Set `settings={"tool_choice": "auto"}` to let the model choose tools, or select 
 
 Omit `RealtimeConfig.tools` to inherit the captured active Agent's function catalog and handoffs. An explicit tuple contains original admitted function objects. An empty tuple excludes the Agent's tools and handoffs from direct calls and delegated backend turns. The reserved `background_agent` and `remain_silent` controls remain available; delegation still obeys the empty backend tool selection. Native policies and application approvals still apply. `background_agent` delegates to the same Session and returns only accepted final string output. Output validation and repair finish before that text is returned. Non-string output fails rather than being serialized for speech.
 
-Declare reachable `Agent.handoffs` before opening the Session. `await session.get_active_agent()` returns the original Agent selected by native state. An idle `session.update(agent=...)` activates a captured Agent and applies its declaration defaults. Idle tool updates change active defaults. Explicit per-operation tools remain a ceiling across handoffs; omitted tools inherit the destination defaults. Graph Agents must share compatible output formats and Session runtime grants. Restore binds fresh caller-supplied objects, not saved callback implementations.
+For backend turns, `Agent.handoffs` has been defining the graph before Session opening. `await session.get_active_agent()` has been returning the original Agent selected by native state. Idle `session.update(agent=...)` has been activating a captured Agent with its defaults. Explicit per-operation tools have been limiting backend tools across handoffs. Restore has been binding fresh caller-supplied objects, rather than saved callback implementations.
+
+### Contextual voice Agents and structured handoffs
+
+`Agent(realtime=RealtimeAgentConfig(...))` has been supplying voice-specific instructions, prompt defaults, output guardrails, and tool predicates. Sync and async instruction callbacks have been receiving `RealtimeAgentContext`, containing the application context and issuing Agent. Explicit `RealtimeConfig.instructions` and prompt settings have been overriding Agent defaults. Agent output guardrails have been running alongside connection guardrails against the response's captured source.
+
+`realtime_handoff()` has been capturing a target, custom tool name and description, enable predicate, and optional application callback. Structured `input_type` declarations have been accepting Pydantic models, dataclasses, and TypedDict classes. Validation has been preceding the callback; callback completion has been preceding target acceptance. Callback return values have not been selecting another target. Failed validation or callbacks have been leaving the target unactivated.
+
+```python
+import asyncio
+from dataclasses import dataclass
+
+from agents import Agent, NativeProvider
+from agents.realtime import RealtimeAgentConfig, RealtimeConfig, realtime_handoff
+
+
+@dataclass
+class Transfer:
+    reason: str
+
+
+async def instructions(context):
+    return "Speak " + context.context["language"]
+
+
+async def record_transfer(context, transfer):
+    context.context["transfers"].append(transfer.reason)
+
+
+async def main():
+    application = {"language": "French", "transfers": [], "allow_tools": True}
+    specialist = Agent(name="Specialist", instructions="Handle specialist questions.")
+    async with NativeProvider() as provider:
+        agent = Agent(
+            instructions="Handle backend requests.",
+            provider=provider,
+            realtime=RealtimeAgentConfig(
+                instructions=instructions,
+                tool_enabled=lambda context, tool: context.context["allow_tools"],
+            ),
+            handoffs=[
+                realtime_handoff(
+                    specialist,
+                    name="transfer_specialist",
+                    description="Transfer a specialist question with its reason.",
+                    input_type=Transfer,
+                    on_handoff=record_transfer,
+                    is_enabled=lambda context: context.context["allow_tools"],
+                )
+            ],
+        )
+        async with agent.session(context=application) as session:
+            async with session.realtime(config=RealtimeConfig()) as voice:
+                replacement = Agent(name="NewVoice", instructions="Handle voice questions.")
+                await voice.update_agent(replacement)
+                assert await voice.get_active_agent() is replacement
+                assert await session.get_active_agent() is agent
+
+
+asyncio.run(main())
+```
+
+`voice.update_agent()` has been authorizing a new voice graph and awaiting provider acknowledgement. New graphs have been requiring the same provider, output contract, and runtime grants. Earlier issued calls and approvals have been retaining their original sources. New direct calls have been using the newly authorized graph's defaults, including after an explicit opening tool selection.
+
+The `background_agent` bridge has been continuing through the caller-owned Session and its original backend tool selection. Acknowledged Session updates have been updating that backend selection; voice graph changes have been preserving it. `voice.get_active_agent()` has been reporting the acknowledged voice Agent separately. Voice ownership has been blocking checkpoints until cleanup, retaining admitted callbacks until close, and restoring the original Session registry before checkpointing resumes.
 
 A tool can return `background_result(value)` to publish an accepted result without requesting a model follow-up. Output policies can replace that decision. Provider-hosted MCP tools are separate from native MCP tools. Configure their URL or connector ID in `hosted_mcp_tools`. Pass the exact issued `RealtimeHostedMcpApprovalRequested` object to `await voice.approve_hosted_mcp(request, approve=False)` to deny it, or set `approve=True` after your application approves. Cancellation waits for the admitted decision to settle; an accepted decision cannot be replayed. Clones and cross-session objects are invalid. `automatically_trigger_response_for_mcp_tool_calls` defaults to true and controls hosted MCP follow-ups.
 
@@ -276,6 +374,10 @@ python examples/codex/voice.py input.wav spoken-answer.wav
 
 `agents.voice` exposes `VoicePipeline`, speech model settings, streamed audio input, and `NativeSessionVoiceWorkflow`.
 
-Speech providers and audio delivery reuse the retained speech engine; the workflow executes native turns. It preserves Session history, tools, output validation, and approvals. Synthesis starts only after the native turn accepts final text. Use a custom workflow to render accepted structured output. The application owns audio input, output playback, stream consumption, and the Session lifetime.
+The workflow uses the speech providers and runs each transcription as a native turn with the Session's history, tools, and approvals. By default, synthesis starts after the turn accepts its final text. Use a custom workflow to render accepted structured output. The application owns audio input, playback, stream consumption, and the Session lifetime.
+
+Pass `early_speech=True` to synthesize text deltas while the turn is running. Playback can include intermediate assistant text or words from a turn that later fails validation. Spoken audio cannot be retracted.
+
+Pass `on_turn=observe_turn` to observe the submitted `Turn` before speech. The workflow awaits an async callback. A callback failure cancels and joins that turn.
 
 Pass `NativeSessionVoiceWorkflow(session, tools=[lookup])` to limit every transcription to selected tools. The workflow captures the sequence when constructed. Omit `tools` to use the Session's current defaults, or pass `tools=[]` to exclude all tools. Selected opening tools use their current acknowledged replacements. Submission fails if a different active Agent does not admit the selection. Realtime background delegation carries the Realtime owner's captured selection into the workflow, including an explicit empty selection.

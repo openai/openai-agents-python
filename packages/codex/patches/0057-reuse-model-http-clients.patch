@@ -1,3 +1,120 @@
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 58d43f7af9e4a3a29dd410436b5f3295249bd4ce..cf7ca828dd3a0be54ee54e671f1dff284ec69c04 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -19,6 +19,7 @@ use codex_http_client::RetryAfter;
+ use codex_protocol::protocol::ApiRateLimits;
+ use codex_websocket_client::WebSocketConnection;
+ use codex_websocket_client::WebSocketConnector;
++use codex_websocket_client::WebSocketTlsMode;
+ use futures::FutureExt;
+ use futures::SinkExt;
+ use futures::StreamExt;
+@@ -508,6 +509,20 @@ fn merge_request_headers(
+     headers
+ }
+ 
++// Plain destinations do not use trust roots. HTTPS proxy tunnels still build
++// their own Codex TLS configuration in the dialer when this mode supplies None.
++fn websocket_tls_mode(url: &Url) -> WebSocketTlsMode {
++    if url.scheme() == "ws"
++        && !["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"]
++            .iter()
++            .any(|name| std::env::var_os(name).is_some())
++    {
++        WebSocketTlsMode::TungsteniteDefault
++    } else {
++        WebSocketTlsMode::ExplicitCodexTls
++    }
++}
++
+ async fn connect_websocket(
+     url: Url,
+     headers: HeaderMap,
+@@ -522,8 +537,9 @@ async fn connect_websocket(
+         .map_err(|err| ApiError::Stream(format!("failed to build websocket request: {err}")))?;
+     request.headers_mut().extend(headers);
+ 
+-    let connector = WebSocketConnector::new(http_client_factory)
+-        .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
++    let connector =
++        WebSocketConnector::new_with_tls_mode(http_client_factory, websocket_tls_mode(&url))
++            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
+     let response = connector.connect(request, websocket_config()).await;
+ 
+     let (stream, response) = match response {
+@@ -968,6 +984,71 @@ mod tests {
+     use std::collections::HashMap;
+     use std::sync::Arc;
+ 
++    #[test]
++    fn destination_tls_selection_preserves_secure_and_configured_ca_construction() {
++        const CASE: &str = "CODEX_RESPONSES_TLS_SELECTION_TEST_CASE";
++        const SELECTOR: &str = "endpoint::responses_websocket::tests::destination_tls_selection_preserves_secure_and_configured_ca_construction";
++        let keys = ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"];
++        if let Ok(case) = std::env::var(CASE) {
++            let url = Url::parse(if case == "secure" {
++                "wss://localhost/v1/responses"
++            } else {
++                "ws://localhost/v1/responses"
++            })
++            .unwrap();
++            let mode = websocket_tls_mode(&url);
++            assert_eq!(
++                matches!(mode, WebSocketTlsMode::TungsteniteDefault),
++                case == "plain",
++                "only plain destinations without CA overrides may skip construction"
++            );
++            let factory =
++                HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::ReqwestDefault);
++            let connector = WebSocketConnector::new_with_tls_mode(&factory, mode);
++            if case == "CODEX_CA_CERTIFICATE" || case == "SSL_CERT_FILE" {
++                assert!(
++                    connector.is_err(),
++                    "configured missing CA files must still fail before dialing"
++                );
++            } else {
++                assert!(connector.is_ok());
++            }
++            return;
++        }
++        for case in [
++            "plain",
++            "secure",
++            "CODEX_CA_CERTIFICATE",
++            "SSL_CERT_FILE",
++            "SSL_CERT_DIR",
++            "empty",
++        ] {
++            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
++            command
++                .args(["--exact", SELECTOR, "--nocapture"])
++                .env(CASE, case);
++            for key in keys {
++                command.env_remove(key);
++            }
++            if keys.contains(&case) {
++                command.env(case, "/codex-responses-nonexistent-ca-selection-test.pem");
++            } else if case == "empty" {
++                command.env("CODEX_CA_CERTIFICATE", "");
++            }
++            let output = command.output().unwrap();
++            let stdout = String::from_utf8_lossy(&output.stdout);
++            assert!(
++                output.status.success(),
++                "{case}: {stdout}\n{}",
++                String::from_utf8_lossy(&output.stderr)
++            );
++            assert!(
++                stdout.contains("1 passed; 0 failed"),
++                "{case}: exact child test did not run: {stdout}"
++            );
++        }
++    }
++
+     #[tokio::test]
+     #[expect(
+         clippy::await_holding_invalid_type,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
 index b3ae84d194ebd9316f091926ca830d37b2e6f031..390fa6668116a6c7231ec1390284b9be38ba3a21 100644
 --- a/codex-rs/core/src/client.rs
@@ -105,10 +222,10 @@ index c5c2e40bba02d337cbb7602909d9492054d55ed4..49db9caa234dd96b532f2aa4af4a66e9
          self.request(Method::GET, url)
      }
 diff --git a/codex-rs/http-client/src/client_builder.rs b/codex-rs/http-client/src/client_builder.rs
-index d3b8054767a89c56ac5209ba9aa87508a7b73746..30a68449d44214e4693c5d5874eb8a45a88952cc 100644
+index d3b8054767a89c56ac5209ba9aa87508a7b73746..ada92f34dbcf0a318828645cc5583c092d562d07 100644
 --- a/codex-rs/http-client/src/client_builder.rs
 +++ b/codex-rs/http-client/src/client_builder.rs
-@@ -239,6 +239,37 @@ impl HttpClientBuilder {
+@@ -239,6 +239,41 @@ impl HttpClientBuilder {
          self.build_with_proxy_routing(ProxyRouting::TransportDefault)
      }
  
@@ -116,6 +233,7 @@ index d3b8054767a89c56ac5209ba9aa87508a7b73746..30a68449d44214e4693c5d5874eb8a45
 +    pub(crate) fn build_sdk_model_snapshot(
 +        mut self,
 +        snapshot: &crate::custom_ca::SdkModelCaSnapshot,
++        preconfigured_tls: Option<&rustls::ClientConfig>,
 +        max_idle_per_host: usize,
 +        idle_timeout: std::time::Duration,
 +        redirect_observed: impl Fn() + Send + Sync + 'static,
@@ -135,6 +253,9 @@ index d3b8054767a89c56ac5209ba9aa87508a7b73746..30a68449d44214e4693c5d5874eb8a45
 +                reqwest::redirect::Policy::default().redirect(attempt)
 +            }));
 +        }
++        if let Some(config) = preconfigured_tls {
++            builder = builder.use_preconfigured_tls(config.clone());
++        }
 +        let inner = snapshot.build(builder)?;
 +        Ok(HttpClient::from_parts(
 +            inner,
@@ -153,7 +274,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a
 @@ -40,12 +40,15 @@
  //! - those subprocess tests also scrub inherited CA environment variables before launch so their
  //!   result depends only on the test fixtures and env vars set by the test itself
-
+ 
 +use std::collections::VecDeque;
  use std::env;
  use std::fs;
@@ -163,10 +284,10 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a
  use std::sync::Arc;
 +use std::sync::LazyLock;
 +use std::sync::Mutex;
-
+ 
  use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
  use rustls::ClientConfig;
-@@ -54,6 +57,8 @@
+@@ -54,6 +57,8 @@ use rustls_pki_types::CertificateDer;
  use rustls_pki_types::pem::PemObject;
  use rustls_pki_types::pem::SectionKind;
  use rustls_pki_types::pem::{self};
@@ -175,7 +296,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a
  use thiserror::Error;
  use tracing::info;
  use tracing::warn;
-@@ -290,7 +295,7 @@
+@@ -290,7 +295,7 @@ fn build_rustls_client_config(
  ///
  /// This exists so tests can exercise precedence behavior deterministically without mutating the
  /// real process environment. It selects the CA bundle, delegates file parsing to
@@ -184,7 +305,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a
  /// configuration, forces rustls when a custom CA is configured, and finally registers each parsed
  /// certificate with that builder.
  fn build_reqwest_client_with_env(
-@@ -306,28 +311,8 @@
+@@ -306,28 +311,8 @@ fn build_reqwest_client_with_env(
          );
          builder = builder.use_rustls_tls();
  
@@ -215,7 +336,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a
          }
          return match builder.build() {
              Ok(client) => Ok(client),
-@@ -424,6 +409,71 @@
+@@ -424,6 +409,71 @@ impl EnvSource for ProcessEnv {
      }
  }
  
@@ -287,7 +408,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a
  /// Identifies the CA bundle selected for a client and the policy decision that selected it.
  ///
  /// This is the concrete output of the environment-precedence logic. Callers use `source_env` for
-@@ -436,6 +486,105 @@
+@@ -436,6 +486,105 @@ struct ConfiguredCaBundle {
  }
  
  impl ConfiguredCaBundle {
@@ -393,7 +514,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a
      /// Loads certificates from this selected CA bundle.
      ///
      /// The bundle already represents the output of environment-precedence selection, so this is
-@@ -476,7 +625,13 @@
+@@ -476,7 +625,13 @@ impl ConfiguredCaBundle {
      fn parse_certificates(
          &self,
      ) -> Result<Vec<CertificateDer<'static>>, BuildCustomCaTransportError> {
@@ -408,7 +529,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a
          let normalized_pem = NormalizedPem::from_pem_data(self.source_env, &self.path, &pem_data);
  
          let mut certificates = Vec::new();
-@@ -817,8 +972,111 @@
+@@ -817,8 +972,111 @@ mod tests {
              BuildCustomCaTransportError::InvalidCaFile { .. }
          ));
      }
@@ -883,10 +1004,10 @@ index 905aaf8f0dd11598b9ff4e31e03bb3e42c8bec89..28104827934e95dd644ae8f1072dfec0
      client_build: Arc<tokio::sync::Mutex<()>>,
 diff --git a/codex-rs/http-client/src/sdk_model_http_pool.rs b/codex-rs/http-client/src/sdk_model_http_pool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822a5c61356
+index 0000000000000000000000000000000000000000..b5ca928957a5e1f666b3cdd4e67fb7465ae7fb4a
 --- /dev/null
 +++ b/codex-rs/http-client/src/sdk_model_http_pool.rs
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,551 @@
 +//! SDK Provider-owned connection reuse, deliberately restricted to legacy unmanaged HTTP.
 +//! Ordinary system trust is captured for this owner's lifetime. Explicit SSL_CERT_FILE
 +//! trust is revalidated on every checkout; all other transports keep their original builder.
@@ -935,6 +1056,7 @@ index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822
 +#[derive(Clone, Default)]
 +pub struct SdkModelHttpPool {
 +    state: Arc<Mutex<State>>,
++    preconfigured_tls: Option<Arc<rustls::ClientConfig>>,
 +}
 +impl std::fmt::Debug for SdkModelHttpPool {
 +    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -942,6 +1064,15 @@ index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822
 +    }
 +}
 +impl SdkModelHttpPool {
++    /// Uses an immutable TLS policy in a separate Provider-owned pool.
++    /// Custom-CA profiles retain the caller's original construction path.
++    pub fn with_preconfigured_tls(config: rustls::ClientConfig) -> Self {
++        Self {
++            state: Arc::default(),
++            preconfigured_tls: Some(Arc::new(config)),
++        }
++    }
++
 +    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
 +        self.state
 +            .lock()
@@ -1005,6 +1136,9 @@ index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822
 +        {
 +            return Ok(None);
 +        }
++        if self.preconfigured_tls.is_some() && std::env::var_os("SSL_CERT_FILE").is_some() {
++            return Ok(None);
++        }
 +        // Empty/non-Unicode file overrides are unsupported, never mistaken for OS defaults.
 +        if std::env::var_os("SSL_CERT_FILE").is_some()
 +            && std::env::var("SSL_CERT_FILE")
@@ -1039,11 +1173,17 @@ index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822
 +                builder = builder.without_redirects();
 +            }
 +            builder
-+                .build_sdk_model_snapshot(&snapshot, MAX_IDLE_PER_HOST, IDLE_TIMEOUT, move || {
-+                    // A redirected client remains owned by its active request, never the Provider.
-+                    // The unique token prevents an old client's callback evicting its replacement.
-+                    retire_redirected(&owner, &token);
-+                })
++                .build_sdk_model_snapshot(
++                    &snapshot,
++                    self.preconfigured_tls.as_deref(),
++                    MAX_IDLE_PER_HOST,
++                    IDLE_TIMEOUT,
++                    move || {
++                        // A redirected client remains owned by its active request, never the Provider.
++                        // The unique token prevents an old client's callback evicting its replacement.
++                        retire_redirected(&owner, &token);
++                    },
++                )
 +                .ok()
 +        })
 +    }
@@ -1058,6 +1198,11 @@ index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822
 +            let mut state = self.lock();
 +            if state.closed {
 +                return Err(io::Error::other("Provider model HTTP pool is closed"));
++            }
++            // A selector can change after admission but before snapshot capture.
++            // A custom snapshot must never replace this pool's immutable TLS policy.
++            if self.preconfigured_tls.is_some() && key.ca_digest.is_some() {
++                return Ok(None);
 +            }
 +            let retired = if state.ca_digest != Some(key.ca_digest) {
 +                state.ca_digest = Some(key.ca_digest);
@@ -1126,6 +1271,33 @@ index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822
 +mod tests {
 +    use super::*;
 +    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    #[test]
++    fn preconfigured_tls_rejects_a_captured_custom_ca_before_construction() {
++        codex_utils_rustls_provider::ensure_rustls_crypto_provider();
++        let config = rustls::ClientConfig::builder()
++            .with_root_certificates(rustls::RootCertStore::empty())
++            .with_no_client_auth();
++        let pool = SdkModelHttpPool::with_preconfigured_tls(config);
++        let mut captured = key("https://example.test");
++        captured.ca_digest = Some([7; 32]);
++        assert!(
++            pool.client_with_key(captured, HeaderMap::new(), |_| {
++                panic!("a captured custom CA must not replace preconfigured TLS")
++            })
++            .unwrap()
++            .is_none()
++        );
++        pool.close();
++        let mut captured = key("https://example.test");
++        captured.ca_digest = Some([7; 32]);
++        assert!(
++            pool.client_with_key(captured, HeaderMap::new(), |_| {
++                panic!("closed pool must never construct a client")
++            })
++            .is_err()
++        );
++    }
 +
 +    fn key(origin: &str) -> Key {
 +        Key {
@@ -1387,3 +1559,141 @@ index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822
 +        assert!(owner.upgrade().is_none());
 +    }
 +}
+diff --git a/codex-rs/websocket-client/src/dialer_tests.rs b/codex-rs/websocket-client/src/dialer_tests.rs
+index e965915ee596af8333941b74d09fdbcf134f39f5..5737726353a4ddbe3f0ed63d01748da3f8b70840 100644
+--- a/codex-rs/websocket-client/src/dialer_tests.rs
++++ b/codex-rs/websocket-client/src/dialer_tests.rs
+@@ -213,6 +213,133 @@ async fn https_proxy_tunnels_secure_websocket_before_handshake() {
+     assert_proxy_tunnels_secure_websocket(/*proxy_tls*/ true).await;
+ }
+ 
++#[tokio::test]
++async fn tls_none_rejects_untrusted_https_proxy() {
++    const CHILD: &str = "CODEX_WEBSOCKET_TLS_NONE_PROXY_CHILD";
++    if std::env::var(CHILD).as_deref() != Ok("1") {
++        struct OwnedChild(std::process::Child);
++        impl Drop for OwnedChild {
++            fn drop(&mut self) {
++                let _ = self.0.kill();
++                let _ = self.0.wait();
++            }
++        }
++        let mut child = OwnedChild(
++            Command::new(std::env::current_exe().expect("test executable should exist"))
++                .args([
++                    "--exact",
++                    "dialer::tests::tls_none_rejects_untrusted_https_proxy",
++                    "--nocapture",
++                ])
++                .env(CHILD, "1")
++                .env_remove("CODEX_CA_CERTIFICATE")
++                .env_remove("SSL_CERT_FILE")
++                .env_remove("SSL_CERT_DIR")
++                .spawn()
++                .expect("isolated TLS probe should start"),
++        );
++        let status = tokio::time::timeout(Duration::from_secs(30), async {
++            loop {
++                if let Some(status) = child.0.try_wait().expect("TLS probe should be waitable") {
++                    break status;
++                }
++                tokio::time::sleep(Duration::from_millis(20)).await;
++            }
++        })
++        .await;
++        drop(child);
++        assert!(
++            status
++                .expect("TLS probe should finish within 30 seconds")
++                .success()
++        );
++        return;
++    }
++
++    let (_, acceptor, _) = test_tls_configs();
++    let target = TcpListener::bind("127.0.0.1:0")
++        .await
++        .expect("target listener should bind");
++    let target_addr = target.local_addr().expect("target address should exist");
++    let proxy = TcpListener::bind("127.0.0.1:0")
++        .await
++        .expect("proxy listener should bind");
++    let proxy_addr = proxy.local_addr().expect("proxy address should exist");
++    let mut proxy_task = tokio::spawn(async move {
++        let (stream, _) = proxy.accept().await.expect("proxy should accept");
++        let mut prefix = [0_u8; 1];
++        assert_eq!(
++            stream.peek(&mut prefix).await.expect("proxy should peek"),
++            1
++        );
++        if prefix[0] != 0x16 {
++            return (false, false, Vec::new());
++        }
++        match acceptor.accept(stream).await {
++            Ok(mut secured) => {
++                let mut data = [0_u8; 8];
++                let count = secured.read(&mut data).await.unwrap_or(0);
++                (true, true, data[..count].to_vec())
++            }
++            Err(_) => (true, false, Vec::new()),
++        }
++    });
++    let request = format!("ws://{target_addr}/v1/responses")
++        .into_client_request()
++        .expect("plain websocket request should build");
++    let result = tokio::time::timeout(
++        Duration::from_secs(5),
++        connect(
++            request,
++            WebSocketConfig::default(),
++            None,
++            OutboundProxyRoute::Proxy {
++                url: format!("https://localhost:{}", proxy_addr.port()),
++                no_proxy: None,
++            },
++            TcpNodelay::Enabled,
++            /*loopback_direct*/ false,
++        ),
++    )
++    .await;
++    let (client_hello, tls_succeeded, decrypted) =
++        match tokio::time::timeout(Duration::from_secs(5), &mut proxy_task).await {
++            Ok(result) => result.expect("proxy task should join"),
++            Err(_) => {
++                proxy_task.abort();
++                let _ = proxy_task.await;
++                panic!("proxy task should join within five seconds");
++            }
++        };
++    assert!(client_hello, "HTTPS proxy must receive a TLS ClientHello");
++    assert!(!tls_succeeded, "untrusted proxy must not finish TLS");
++    assert!(
++        decrypted.is_empty(),
++        "untrusted proxy must not receive CONNECT"
++    );
++    let error = match result {
++        Ok(Err(WebSocketError::Io(error))) => error,
++        _ => panic!("client should reject the proxy certificate before CONNECT"),
++    };
++    assert!(
++        matches!(
++            error
++                .get_ref()
++                .and_then(|error| error.downcast_ref::<rustls::Error>()),
++            Some(rustls::Error::InvalidCertificate(
++                rustls::CertificateError::UnknownIssuer
++            ))
++        ),
++        "client should reject the untrusted issuer: {error:?}"
++    );
++    assert!(
++        tokio::time::timeout(Duration::from_millis(10), target.accept())
++            .await
++            .is_err(),
++        "destination must not receive a connection"
++    );
++}
++
+ #[tokio::test]
+ async fn environment_proxy_route_honors_no_proxy_in_a_subprocess() {
+     assert_no_proxy_subprocess(

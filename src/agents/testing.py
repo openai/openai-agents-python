@@ -15,6 +15,12 @@ The peer records request bodies for explicit inspection, so use synthetic test
 data. It does not record HTTP headers. Close all Sessions before leaving the
 peer context. An ordinary successful exit also checks for exact exhaustion;
 exceptions from the test or native loop are preserved.
+
+``remaining_steps`` counts queued responses, excluding an admitted request.
+``default_usage={...}`` supplies captured provider usage when a response omits
+usage. ``set_default_usage(...)`` updates that default; ``None`` removes it.
+An explicit response usage map, including an empty map, takes precedence.
+Dynamic responders select the current default after returning.
 """
 
 from __future__ import annotations
