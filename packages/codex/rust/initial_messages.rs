@@ -65,6 +65,7 @@ impl Batch {
                                 .context("initial user content requires a type")?;
                             let allowed: &[&str] = match kind {
                                 "input_text" => &["type", "text"],
+                                "input_audio" => &["type", "audio_url"],
                                 "input_image" => &["type", "image_url", "file_id", "detail"],
                                 "input_file" => {
                                     &["type", "file_id", "file_data", "file_url", "filename"]
@@ -81,7 +82,9 @@ impl Batch {
                                     "initial text requires a string"
                                 );
                             } else {
-                                let sources: &[&str] = if kind == "input_image" {
+                                let sources: &[&str] = if kind == "input_audio" {
+                                    &["audio_url"]
+                                } else if kind == "input_image" {
                                     &["image_url", "file_id"]
                                 } else {
                                     &["file_id", "file_data", "file_url"]
@@ -269,6 +272,24 @@ mod tests {
         ] {
             assert!(Batch::capture(input).is_err(), "{input}");
         }
+        for part in [
+            r#"{"type":"input_audio"}"#,
+            r#"{"type":"input_audio","audio_url":""}"#,
+            r#"{"type":"input_audio","audio_url":null}"#,
+            r#"{"type":"input_audio","audio_url":42}"#,
+            r#"{"type":"input_audio","audio_url":"source","file_id":"other"}"#,
+        ] {
+            let input = format!(r#"[{{"role":"user","content":[{part}]}}]"#);
+            assert!(Batch::capture(&input).is_err());
+        }
+        let audio = Batch::capture(r#"[{"role":"user","content":[{"type":"input_text","text":"before"},{"type":"input_audio","audio_url":"opaque:audio-source"},{"type":"input_text","text":"after"}]}]"#).unwrap();
+        let ResponseItem::Message { content, .. } = &audio.0[0] else {
+            panic!("message");
+        };
+        assert!(
+            matches!(&content[1], ContentItem::InputAudio { audio_url } if audio_url == "opaque:audio-source")
+        );
+        assert_eq!(content.len(), 3);
         assert!(Batch::capture("[]").unwrap().0.is_empty());
     }
 }

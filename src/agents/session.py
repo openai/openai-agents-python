@@ -14,6 +14,7 @@ from _agents_codex.session import (
     ActionReply as ActionReply,
     ActionRequested as ActionRequested,
     Agent as Agent,
+    AgentProfileChanged as AgentProfileChanged,
     Allow as Allow,
     Any as Any,
     ApiRateLimits as ApiRateLimits,

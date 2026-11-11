@@ -1,0 +1,110 @@
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 725c140..60d1dfc 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4225,6 +4225,11 @@ impl Session {
+             tool_router,
+             extension_data,
+         ) = prepared_tools??;
++        if apply_named_tool_choice
++            && let Some(choice) = crate::tools::spec_plan::selected_forced_tool(&extension_data)
++        {
++            Arc::make_mut(&mut settings).set_captured_named_tool_choice(choice);
++        }
+         Ok(Arc::new(StepContext {
+             preempt: turn_context
+                 .config
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index 5f00339..90ccb7a 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -17,6 +17,7 @@ use codex_protocol::config_types::ToolChoice;
+ use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::protocol::AskForApproval;
++use codex_tools::ToolName;
+ use std::sync::Arc;
+ 
+ /// Model and execution settings selected for an individual model step within
+@@ -96,6 +97,21 @@ impl ResolvedStepSettings {
+         }
+     }
+ 
++    pub(super) fn set_captured_named_tool_choice(&mut self, choice: ToolName) {
++        if self
++            .request_controls()
++            .named_tool_choice
++            .as_ref()
++            .and_then(Option::as_ref)
++            == Some(&choice)
++        {
++            return;
++        }
++        Arc::make_mut(&mut self.selected)
++            .request_controls
++            .named_tool_choice = Some(Some(choice));
++    }
++
+     pub(crate) fn request_controls(
+         &self,
+     ) -> &codex_protocol::model_request_controls::ModelRequestControls {
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 9fd1b02..e23a405 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -146,6 +146,8 @@ pub(crate) async fn build_tool_router(
+     // This exact binding owns both admission and the SDK's per-step projection.
+     step_store.insert(Arc::clone(mcp));
+ 
++    let mut resolved_forced_tool = None;
++    let mut forced_identity_seen = false;
+     let mut resolved_policy = tool_policy.as_ref().clone();
+     if let Some(selectors) = &resolved_policy.allowed_mcp_tools {
+         let named_ceiling = resolved_policy.allowed_tools.clone();
+@@ -160,6 +162,15 @@ pub(crate) async fn build_tool_router(
+                 )
+                 .into());
+             }
++            if forced_tool == Some(declared) {
++                if forced_identity_seen {
++                    return Err(CodexErrorDetails::InvalidRequest(
++                        "Ambiguous named MCP tool choice".into(),
++                    )
++                    .into());
++                }
++                forced_identity_seen = true;
++            }
+             let mut matches = mcp.tools().iter().filter(|tool| {
+                 tool.server_name == *server && tool.tool.name.as_ref() == raw.as_str()
+             });
+@@ -170,6 +181,9 @@ pub(crate) async fn build_tool_router(
+                     )
+                     .into());
+                 }
++                if forced_tool == Some(declared) {
++                    resolved_forced_tool = Some(tool.canonical_tool_name());
++                }
+                 if let Some(allowed) = &mut resolved_policy.allowed_tools {
+                     if named_ceiling
+                         .as_ref()
+@@ -181,6 +195,7 @@ pub(crate) async fn build_tool_router(
+             }
+         }
+     }
++    let forced_tool = resolved_forced_tool.as_ref().or(forced_tool);
+     let resolved_policy = Arc::new(resolved_policy);
+     step_store.insert(resolved_policy.as_ref().clone());
+     let context = CoreToolPlanContext {
+@@ -345,6 +360,12 @@ pub(crate) async fn build_tool_router(
+ 
+ struct SelectedStepTools(Option<HashSet<ToolName>>, Option<ToolName>);
+ 
++pub(crate) fn selected_forced_tool(step_store: &ExtensionData) -> Option<ToolName> {
++    step_store
++        .get::<SelectedStepTools>()
++        .and_then(|selected| selected.1.clone())
++}
++
+ pub(crate) fn has_selected_tool_plan(step: &ExtensionData) -> bool {
+     step.get::<SelectedStepTools>()
+         .is_some_and(|selected| selected.0.is_some())

@@ -200,3 +200,7 @@ A separate context command has been comparing stable v0 over HTTP with the nativ
   --server-python "$PEER_PY" --output-dir "$LAB/stable-http-context" \
   --samples 5 --iterations 100 --timeout 60 --cases oneshot_text
 ```
+
+## Optional default-host container smoke
+
+The [default-host container guide](container-default-host/README.md) has been supplying an offline functional check against a local TLS peer at the normal API hostname. Its image setup has been provisioning matching Python environments and explicit certifi prerequisites. Scope: fresh, final-only, no-tool native HTTP/SSE calls; one-worker correctness evidence, without a performance claim.

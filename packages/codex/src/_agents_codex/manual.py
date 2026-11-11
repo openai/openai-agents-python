@@ -332,13 +332,20 @@ class ActionRequested(Generic[InputT, ResultT]):
         await session._respond(self, value)
 
 
+class _DefaultApprovalReason(str):
+    """Preserve omission while retaining the existing string default."""
+
+
+_DEFAULT_APPROVAL_REASON = _DefaultApprovalReason("Tool execution was rejected")
+
+
 @dataclass(frozen=True)
 class ApprovalDecision:
     """A managed function decision; always applies within this Session and agent."""
 
     approve: bool
     always: bool = False
-    reason: str = "Tool execution was rejected"
+    reason: str = _DEFAULT_APPROVAL_REASON
 
     def __post_init__(self) -> None:
         if (
@@ -383,9 +390,7 @@ class ApprovalRequested(ActionRequested[InputT, Any]):
             raise InteractionExpiredError("Managed approval is expired")
         await session._decide_approval(self, True, always=always)
 
-    async def reject(
-        self, reason: str = "Tool execution was rejected", *, always: bool = False
-    ) -> None:
+    async def reject(self, reason: str = _DEFAULT_APPROVAL_REASON, *, always: bool = False) -> None:
         session = self._session()
         if session is None:
             from .session import InteractionExpiredError

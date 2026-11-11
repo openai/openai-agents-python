@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import signal
 import sys
@@ -13,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import compare
+import worker
 from worker import reject_inherited_overrides
 from workloads import get_workload
 
@@ -531,6 +533,67 @@ class InstrumentationTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     compare.main()
                 spawn.assert_not_called()
+
+
+class DefaultHostTransportTests(unittest.TestCase):
+    def test_websocket_rejected_before_controller_or_worker_startup(self):
+        previous = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        controller = [
+            "compare.py",
+            "--v0-python",
+            "/opt/v0/python",
+            "--v1-python",
+            "/opt/v1/python",
+            "--v0-version",
+            VERSIONS["v0"],
+            "--v1-version",
+            VERSIONS["v1"],
+            "--server-python",
+            "/opt/peer/python",
+            "--output-dir",
+            "/unused/result",
+            "--cases",
+            "oneshot_text",
+            "--default-host-setup",
+            "/missing-setup.json",
+        ]
+        cases = (
+            (compare, controller + ["--native-transport", "websocket"]),
+            (
+                compare,
+                controller + ["--reference-engine", "v1", "--reference-transport", "websocket"],
+            ),
+            (
+                worker,
+                [
+                    "worker.py",
+                    "--engine",
+                    "v1",
+                    "--case",
+                    "oneshot_text",
+                    "--default-host-setup",
+                    "/missing-setup.json",
+                    "--native-transport",
+                    "websocket",
+                    "--output",
+                    "/unused/result.json",
+                ],
+            ),
+        )
+        for module, argv in cases:
+            with self.subTest(entrypoint=module.__name__, argv=argv):
+                with (
+                    mock.patch.dict(os.environ, {}, clear=True),
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr,
+                    mock.patch.object(module.subprocess, "Popen") as spawn,
+                ):
+                    with self.assertRaises(SystemExit) as error:
+                        module.main()
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn("Default-host HTTP/SSE mode", stderr.getvalue())
+                    spawn.assert_not_called()
 
 
 class PostflightTests(unittest.TestCase):

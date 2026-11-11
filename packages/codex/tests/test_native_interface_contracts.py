@@ -187,7 +187,7 @@ async def test_scope_cleanup_preserves_body_error_and_exposes_original_owner(mon
 
 
 def test_run_sync_exposes_cleanup_after_scope_exit_failure(monkeypatch) -> None:
-    from agents import Agent, Completed
+    from agents import Agent, Completed, RunUsage
 
     events = []
 
@@ -196,7 +196,20 @@ def test_run_sync_exposes_cleanup_after_scope_exit_failure(monkeypatch) -> None:
         session._interaction_handler = None
 
         async def result():
-            return Completed(turn=None, final_output="synthetic completed answer")
+            usage = RunUsage(
+                input_tokens=0,
+                cached_input_tokens=0,
+                cache_write_input_tokens=0,
+                output_tokens=0,
+                reasoning_output_tokens=0,
+                total_tokens=0,
+                requests=0,
+                missing_usage_requests=0,
+            )
+            return Completed(
+                turn=SimpleNamespace(run_usage=usage),
+                final_output="synthetic completed answer",
+            )
 
         async def submit(*args, **kwargs):
             return SimpleNamespace(get_result=result)

@@ -1,0 +1,442 @@
+diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
+index c0add22985def56b2a9dff73233c93578b8afc79..d5d7bf3f9cd17cc543390a2fe8aee4a515d3ca14 100644
+--- a/codex-rs/codex-mcp/src/connection_manager.rs
++++ b/codex-rs/codex-mcp/src/connection_manager.rs
+@@ -54,7 +54,6 @@ use crate::server::McpServerMetadata;
+ use crate::tool_catalog_cache::McpToolCatalogCacheContext;
+ use crate::tools::ToolFilter;
+ use crate::tools::ToolInfo;
+-use crate::tools::filter_tools;
+ use crate::trusted_access::ENTITLEMENT_CONTEXT_KEY;
+ use crate::trusted_access::TrustedAccessContext;
+ use anyhow::Context;
+@@ -204,7 +203,6 @@ impl McpServerView {
+         tool_plugin_context: &ToolPluginContext,
+     ) -> Result<Vec<ToolInfo>, StartupOutcomeError> {
+         let tools = self.connection.client.listed_tools().await?;
+-        let tools = filter_tools(tools, &self.tool_filter);
+         Ok(if self.connection.client.is_codex_apps_mcp_server {
+             prepare_codex_apps_tools_for_model(tools, tool_plugin_context)
+         } else {
+diff --git a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
+index a5fa54d7e57f28790f4a333525103e808e5d06b8..73fb1dc720c5cad86718eedc76f06d644c1a3b9d 100644
+--- a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
++++ b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
+@@ -31,7 +31,6 @@ use crate::rmcp_client::list_tools_for_client_uncached;
+ use crate::rmcp_client::prepare_codex_apps_tools_for_model;
+ use crate::runtime::emit_duration;
+ use crate::tools::ToolInfo;
+-use crate::tools::filter_tools;
+ use crate::tools::normalize_tools_for_model_with_prefix;
+ 
+ const MCP_UI_META_KEY: &str = "ui";
+@@ -177,6 +176,26 @@ impl McpConnectionSet {
+         Some(revisions)
+     }
+ 
++    // Name assignment observes the complete current catalog. A raw allowlist
++    // change must not rename surviving tools or change their dispatch identity.
++    fn normalize_and_filter_tools(
++        &self,
++        tools: impl IntoIterator<Item = ToolInfo>,
++    ) -> Vec<ToolInfo> {
++        normalize_tools_for_model_with_prefix(
++            tools,
++            self.prefix_mcp_tool_names,
++            &self.non_prefixed_mcp_tool_servers,
++        )
++        .into_iter()
++        .filter(|tool| {
++            self.servers
++                .get(&tool.server_name)
++                .is_some_and(|view| view.tool_filter.allows(&tool.tool.name))
++        })
++        .collect()
++    }
++
+     /// Returns all tools with model-visible names normalized.
+     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
+         Box::pin(self.list_tools_with_errors(|_| true)).await.0
+@@ -243,11 +262,7 @@ impl McpConnectionSet {
+                 }
+             }
+         }
+-        let tools = normalize_tools_for_model_with_prefix(
+-            tools,
+-            self.prefix_mcp_tool_names,
+-            &self.non_prefixed_mcp_tool_servers,
+-        );
++        let tools = self.normalize_and_filter_tools(tools);
+         trace!(
+             available_server_count,
+             unavailable_server_count,
+@@ -371,7 +386,6 @@ impl McpConnectionSet {
+                 let server_tools = snapshot.tools.to_vec();
+                 (Some((Arc::new(client), snapshot)), server_tools)
+             };
+-            let server_tools = filter_tools(server_tools, &view.tool_filter);
+             let server_tools = if server_name == CODEX_APPS_MCP_SERVER_NAME {
+                 prepare_codex_apps_tools_for_model(server_tools, &self.tool_plugin_context)
+             } else {
+@@ -420,11 +434,7 @@ impl McpConnectionSet {
+                 }
+             }
+         }
+-        let mut listed_tools = normalize_tools_for_model_with_prefix(
+-            listed_tools,
+-            self.prefix_mcp_tool_names,
+-            &self.non_prefixed_mcp_tool_servers,
+-        );
++        let mut listed_tools = self.normalize_and_filter_tools(listed_tools);
+         for tool in &mut listed_tools {
+             if tool.server_name == CODEX_APPS_MCP_SERVER_NAME {
+                 if let Some(connector) = application_connectors.remove(tool.tool.name.as_ref()) {
+@@ -595,17 +605,10 @@ impl McpConnectionSet {
+             .get(CODEX_APPS_MCP_SERVER_NAME)
+             .ok_or_else(|| anyhow!("unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"))?;
+         let (_, tools) = self.refresh_codex_apps_tool_catalog().await?;
+-        let tools = prepare_codex_apps_tools_for_model(
+-            filter_tools(tools, &view.tool_filter),
+-            &self.tool_plugin_context,
+-        )
+-        .into_iter()
+-        .map(|tool| Self::with_server_metadata(tool, &view.metadata));
+-        let tools = normalize_tools_for_model_with_prefix(
+-            tools,
+-            self.prefix_mcp_tool_names,
+-            &self.non_prefixed_mcp_tool_servers,
+-        );
++        let tools = prepare_codex_apps_tools_for_model(tools, &self.tool_plugin_context)
++            .into_iter()
++            .map(|tool| Self::with_server_metadata(tool, &view.metadata));
++        let tools = self.normalize_and_filter_tools(tools);
+         emit_duration(
+             CODEX_APPS_REFRESH_DURATION_METRIC,
+             refresh_start.elapsed(),
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+index 1c04131f10f67937730d2909c590eaff88d6eafb..4f5aaa809334cca2292d0844d9caf73989e5dc30 100644
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -6734,3 +6734,61 @@ async fn retained_cached_call_waits_on_its_source_and_rejects_schema_drift() {
+         manager.shutdown().await;
+     }
+ }
++
++#[tokio::test]
++async fn selected_raw_subset_preserves_complete_catalog_names() {
++    let tools = vec![
++        create_test_tool("docs", "a.b"),
++        create_test_tool("docs", "a_b"),
++    ];
++    let client = create_ready_async_managed_client(tools).await;
++    client.client().await.expect("ready client");
++    let approval = Constrained::allow_any(AskForApproval::OnRequest);
++    let permission = Constrained::allow_any(PermissionProfile::default());
++    let mut manager = McpConnectionSet::new_uninitialized(&approval, &permission, true);
++    manager.insert_test_client("docs", client);
++    let full = manager.list_all_tools().await;
++    assert_eq!(full.len(), 2);
++    let expected = full
++        .iter()
++        .find(|tool| tool.tool.name == "a.b")
++        .expect("dotted tool")
++        .canonical_tool_name();
++    manager
++        .servers
++        .get_mut("docs")
++        .expect("docs")
++        .tool_filter
++        .enabled = Some(HashSet::from(["a.b".to_owned()]));
++    let selected = manager.list_all_tools().await;
++    assert_eq!(selected.len(), 1);
++    assert_eq!(selected[0].canonical_tool_name(), expected);
++    assert_eq!(selected[0].tool.name, "a.b");
++    let binding = capture_binding(&Arc::new(manager)).await;
++    assert_eq!(binding.tools().len(), 1);
++    assert_eq!(binding.tools()[0].canonical_tool_name(), expected);
++    assert_eq!(binding.tools()[0].tool.name, "a.b");
++}
++
++#[test]
++fn selected_raw_subset_preserves_complete_catalog_names_golden_vectors() {
++    let expected: serde_json::Value = serde_json::from_str(r#"[{"server": "docs", "raw": "a.b", "namespace": "mcp__docs", "name": "a_b_98fddac4920d"}, {"server": "docs", "raw": "a_b", "namespace": "mcp__docs", "name": "a_b_ad9cfbd56676"}, {"server": "docs", "raw": "récord", "namespace": "mcp__docs", "name": "r_cord"}, {"server": "docs", "raw": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "namespace": "mcp__docs", "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx_667b55e866b4"}, {"server": "docs", "raw": "", "namespace": "mcp__docs", "name": "__2e3a2e842460"}, {"server": "docs", "raw": "😀", "namespace": "mcp__docs", "name": "__cc10b263be5f"}, {"server": "team-a", "raw": "lookup", "namespace": "mcp__team_a_6c297ddc1d9b", "name": "lookup"}, {"server": "team_a", "raw": "lookup", "namespace": "mcp__team_a_8aa268757a69", "name": "lookup"}, {"server": "ab", "raw": "c", "namespace": "mcp__ab", "name": "c_147906af845b"}, {"server": "a", "raw": "bc", "namespace": "mcp__a", "name": "bc"}]"#).unwrap();
++    let inputs = expected.as_array().unwrap().iter().map(|item| {
++        create_test_tool(
++            item["server"].as_str().unwrap(),
++            item["raw"].as_str().unwrap(),
++        )
++    });
++    let actual = normalize_tools_for_model_with_prefix(inputs, true, &[]);
++    for item in expected.as_array().unwrap() {
++        let tool = actual
++            .iter()
++            .find(|tool| {
++                tool.server_name == item["server"].as_str().unwrap()
++                    && tool.tool.name == item["raw"].as_str().unwrap()
++            })
++            .unwrap();
++        assert_eq!(tool.callable_namespace, item["namespace"].as_str().unwrap());
++        assert_eq!(tool.callable_name, item["name"].as_str().unwrap());
++    }
++}
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+index 8c50ac91f4bc6dd639638cccc42bb438a72f81f1..6595f7763954c0e1573046a2eb82388b850dc7b1 100644
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -468,6 +468,7 @@ async fn handle_approved_mcp_tool_call(
+         .clone()
+         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
+     let mut elicitation_type = None;
++    let mut request_failed = false;
+     let result = async {
+         let result = codex_rmcp_client::with_elicitation_owner(
+             turn_context.sub_id.clone(),
+@@ -482,7 +483,8 @@ async fn handle_approved_mcp_tool_call(
+                 None
+             },
+             async {
+-                let mut result = prepared_call
++                let mut prepared = false;
++                let peer_result = prepared_call
+                     .call_with_preparation(/*requested_timeout*/ None, || async {
+                         // Resolve application data inside this exact catalog lease, after
+                         // approval but before persistent decisions, uploads or tools/call.
+@@ -624,26 +626,45 @@ async fn handle_approved_mcp_tool_call(
+                             .services
+                             .rollout_thread_trace
+                             .start_mcp_call_trace(call_id);
++                        prepared = true;
+                         Ok((
+                             rewritten_arguments,
+                             mcp_call_trace.add_request_meta(request_meta),
+                         ))
+                     })
+-                    .await
+-                    .map_err(|error| format!("tool call error: {error:?}"))?;
+-                crate::tools::record_confirmed_code_mode_send(
+-                    sess,
+-                    &turn_context.sub_id,
+-                    call_id,
+-                    source,
+-                    &prepared_call,
+-                    &tool_input,
+-                    &result,
+-                );
+-                // Capture trusted server metadata before result callbacks or model-facing rewrites.
+-                let trusted_auth_plan = auth_plan_for_call(call_id, Some(&metadata), &result);
+-                elicitation_type =
+-                    mcp_tool_call_auth_elicitation_type(&server, connector_id, &result);
++                    .await;
++                let (mut result, trusted_auth_plan) = match peer_result {
++                    Ok(result) => {
++                        crate::tools::record_confirmed_code_mode_send(
++                            sess,
++                            &turn_context.sub_id,
++                            call_id,
++                            source,
++                            &prepared_call,
++                            &tool_input,
++                            &result,
++                        );
++                        // Only an actual peer response supplies trusted server metadata.
++                        let plan = auth_plan_for_call(call_id, Some(&metadata), &result);
++                        elicitation_type =
++                            mcp_tool_call_auth_elicitation_type(&server, connector_id, &result);
++                        (result, plan)
++                    }
++                    Err(error) if !prepared || cancellation_token.is_cancelled() => {
++                        return Err(format!("tool call error: {error:?}"));
++                    }
++                    Err(_) => {
++                        request_failed = true;
++                        // The existing result policy also owns missing peer results.
++                        // Keep transport diagnostics private; never replay this call.
++                        (
++                            CallToolResult::from_error_text(
++                                "MCP tool invocation failed".to_string(),
++                            ),
++                            None,
++                        )
++                    }
++                };
+                 let server_config =
+                     if crate::realtime_conversation::uses_retained_mcp_binding(&step_context) {
+                         prepared_call
+@@ -681,7 +702,15 @@ async fn handle_approved_mcp_tool_call(
+             },
+         )
+         .await;
+-        record_mcp_result_span_telemetry(&Span::current(), &result);
++        let failed_request = Err(String::new());
++        record_mcp_result_span_telemetry(
++            &Span::current(),
++            if request_failed {
++                &failed_request
++            } else {
++                &result
++            },
++        );
+         result
+     }
+     .instrument(mcp_tool_call_span(
+@@ -731,7 +760,11 @@ async fn handle_approved_mcp_tool_call(
+     .await;
+     maybe_track_codex_app_used(sess, step_context, &server, &metadata, elicitation_type).await;
+ 
+-    let outcome = mcp_call_metric_outcome(&result);
++    let outcome = if request_failed {
++        mcp_call_metric_outcome(&Err(String::new()))
++    } else {
++        mcp_call_metric_outcome(&result)
++    };
+     emit_mcp_call_metrics(
+         &step_context.session_telemetry,
+         &outcome,
+diff --git a/codex-rs/core/src/mcp_tool_exposure.rs b/codex-rs/core/src/mcp_tool_exposure.rs
+index 2b273076d6e63b8bcb252d590cf79d378d2f1321..3f5c836d0460da523e3296e2360263b8fc96360e 100644
+--- a/codex-rs/core/src/mcp_tool_exposure.rs
++++ b/codex-rs/core/src/mcp_tool_exposure.rs
+@@ -93,6 +93,18 @@ fn append_mcp_tools(
+     let mut registered_tools = HashSet::new();
+     let mut agent_plugin_bytes = 0usize;
+     for tool in non_app_tools.chain(app_tools) {
++        if registry
++            .tool_policy
++            .allowed_mcp_tools
++            .as_ref()
++            .is_some_and(|selectors| {
++                !selectors.iter().any(|(server, raw, _)| {
++                    tool.server_name == *server && tool.tool.name.as_ref() == raw.as_str()
++                })
++            })
++        {
++            continue;
++        }
+         let tool_name = tool.canonical_tool_name();
+         let server = mcp_server_catalog.server(&tool.server_name);
+         let agent_plugin = server.is_some_and(|server| server.source().is_agent_plugin());
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 8b6b9cc930cad599c9352230c9a154dec2643969..28fb6452e6698afd0879e42a83365bf3bfa1a276 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -143,8 +143,47 @@ pub(crate) async fn build_tool_router(
+         .as_ref()
+         .and_then(|source| source.tool_policy.as_ref())
+         .unwrap_or(&session.tool_policy);
++    // This exact binding owns both admission and the SDK's per-step projection.
++    step_store.insert(Arc::clone(mcp));
++    let mut resolved_policy = tool_policy.as_ref().clone();
++    if let Some(selectors) = &resolved_policy.allowed_mcp_tools {
++        let named_ceiling = resolved_policy.allowed_tools.clone();
++        if let Some(allowed) = &mut resolved_policy.allowed_tools {
++            allowed.retain(|name| !selectors.iter().any(|(_, _, declared)| declared == name));
++        }
++        let mut identities = HashSet::new();
++        for (server, raw, declared) in selectors {
++            if !identities.insert((server, raw)) {
++                return Err(CodexErrorDetails::InvalidRequest(
++                    "Duplicate raw MCP tool identity".into(),
++                )
++                .into());
++            }
++            let mut matches = mcp.tools().iter().filter(|tool| {
++                tool.server_name == *server && tool.tool.name.as_ref() == raw.as_str()
++            });
++            if let Some(tool) = matches.next() {
++                if matches.next().is_some() {
++                    return Err(CodexErrorDetails::InvalidRequest(
++                        "Ambiguous raw MCP tool identity".into(),
++                    )
++                    .into());
++                }
++                if let Some(allowed) = &mut resolved_policy.allowed_tools {
++                    if named_ceiling
++                        .as_ref()
++                        .is_some_and(|names| names.contains(declared))
++                    {
++                        allowed.push(tool.canonical_tool_name());
++                    }
++                }
++            }
++        }
++    }
++    let resolved_policy = Arc::new(resolved_policy);
++    step_store.insert(resolved_policy.as_ref().clone());
+     let context = CoreToolPlanContext {
+-        tool_policy,
++        tool_policy: &resolved_policy,
+         turn_context,
+         model_info,
+         environments,
+@@ -154,7 +193,7 @@ pub(crate) async fn build_tool_router(
+         default_agent_type_description: &default_agent_type_description,
+         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+     };
+-    let mut registry = ToolRegistry::with_tool_policy(Arc::clone(tool_policy));
++    let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&resolved_policy));
+     add_core_tool_sources(&context, &mut registry);
+ 
+     let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
+diff --git a/codex-rs/ext/extension-api/src/tool_policy.rs b/codex-rs/ext/extension-api/src/tool_policy.rs
+index 71824bd42c40fd5284b76492363d7fe08ffaf73f..85fde76543873ddada7b7f10d25e37972d5cbef1 100644
+--- a/codex-rs/ext/extension-api/src/tool_policy.rs
++++ b/codex-rs/ext/extension-api/src/tool_policy.rs
+@@ -12,6 +12,10 @@ pub struct ToolPolicy {
+     /// Names include their namespace; plain names use the default namespace.
+     /// Generated tools such as Code Mode's `exec` and `wait` must also be listed.
+     pub allowed_tools: Option<Vec<ToolName>>,
++    /// Raw MCP identities and their inert declaration references. Resolve against
++    /// the captured binding before applying the named ceiling. None preserves
++    /// ordinary MCP admission; an empty list admits no MCP tools.
++    pub allowed_mcp_tools: Option<Vec<(String, String, ToolName)>>,
+     /// Omit core tools unless the thread and every ready environment use a managed sandbox.
+     pub require_managed_sandbox: bool,
+     /// Omit shell tools when unified exec is disabled, instead of using one-shot exec.
+@@ -24,6 +28,7 @@ impl Default for ToolPolicy {
+     fn default() -> Self {
+         Self {
+             allowed_tools: None,
++            allowed_mcp_tools: None,
+             require_managed_sandbox: false,
+             require_unified_exec: false,
+             expose_additional_permissions: true,
+@@ -32,6 +37,27 @@ impl Default for ToolPolicy {
+ }
+ 
+ impl ToolPolicy {
++    /// Translate an inert declaration reference using this operation's binding.
++    pub fn resolve_mcp_reference(
++        &self,
++        name: &ToolName,
++        binding: &codex_mcp::McpBinding,
++    ) -> Option<ToolName> {
++        let selector = self.allowed_mcp_tools.as_ref().and_then(|selectors| {
++            selectors.iter().find(|(_, _, declared)| {
++                declared.clone().with_default_namespace() == name.clone().with_default_namespace()
++            })
++        });
++        match selector {
++            Some((server, raw, _)) => binding
++                .tools()
++                .iter()
++                .find(|tool| tool.server_name == *server && tool.tool.name.as_ref() == raw.as_str())
++                .map(|tool| tool.canonical_tool_name()),
++            None => Some(name.clone()),
++        }
++    }
++
+     pub fn allows(&self, tool: &ToolName) -> bool {
+         self.allowed_tools.as_ref().is_none_or(|tools| {
+             tools.iter().any(|allowed| {
+diff --git a/codex-rs/ext/guardian-reviewer/src/settings.rs b/codex-rs/ext/guardian-reviewer/src/settings.rs
+index 619bf15eb0afb92863bb40c56133c9eb62d8efc1..5c20cb24c485c6aac7468c439f78db9274777207 100644
+--- a/codex-rs/ext/guardian-reviewer/src/settings.rs
++++ b/codex-rs/ext/guardian-reviewer/src/settings.rs
+@@ -36,6 +36,7 @@ pub fn reviewer_tool_policy() -> ToolPolicy {
+                 .map(ToolName::plain)
+                 .collect(),
+         ),
++        allowed_mcp_tools: None,
+         require_managed_sandbox: true,
+         require_unified_exec: true,
+         expose_additional_permissions: false,

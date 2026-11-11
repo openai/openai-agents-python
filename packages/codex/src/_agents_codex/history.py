@@ -22,6 +22,17 @@ from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
 from ._events import Failure as Failure, TokenUsage as TokenUsage
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._stored_history import (
+    StoredItem as StoredItem,
+    StoredItemPage as StoredItemPage,
+    StoredMatch as StoredMatch,
+    StoredMatchPage as StoredMatchPage,
+    StoredMatchRange as StoredMatchRange,
+    StoredSession as StoredSession,
+    StoredSessionPage as StoredSessionPage,
+    StoredTurn as StoredTurn,
+    StoredTurnPage as StoredTurnPage,
+)
 from .response_facts import (
     CaptureTruncatedFact as CaptureTruncatedFact,
     MalformedProbabilitiesFact as MalformedProbabilitiesFact,

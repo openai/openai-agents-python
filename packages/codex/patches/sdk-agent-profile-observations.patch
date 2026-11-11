@@ -1,0 +1,119 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index a42cc02..e81bc27 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -12,7 +12,9 @@ use codex_extension_api::{
+ use codex_history::{ResponseItemEnvelope, RolloutItem};
+ use codex_protocol::error::{CodexErr, Result as CodexResult};
+ use codex_protocol::models::ResponseItem;
+-use codex_protocol::protocol::{EventMsg, ThreadSettingsAppliedEvent};
++use codex_protocol::protocol::{
++    AgentProfileChangedEvent, Event, EventMsg, ThreadSettingsAppliedEvent,
++};
+ use serde::{Deserialize, Serialize};
+ use std::sync::Arc;
+ use tokio::sync::Notify;
+@@ -506,6 +508,27 @@ impl Session {
+         if task_fence.is_some() {
+             context.next_step_settings.store(Arc::new(destination));
+         }
++        drop(state);
++        // The profile persistence gate remains held through delivery, preserving
++        // committed transition order even when several handoffs share one turn.
++        // Rebinding the same identity can refresh configuration without changing
++        // the displayed Agent. Initial and restored bindings are silent.
++        if expected
++            .as_ref()
++            .is_some_and(|previous| previous.profile_id != receipt.profile_id)
++        {
++            let turn_id = task_fence.as_ref().map(|_| context.sub_id.clone());
++            self.send_event_raw(Event {
++                id: turn_id.clone().unwrap_or_default(),
++                msg: EventMsg::AgentProfileChanged(AgentProfileChangedEvent {
++                    thread_id: self.thread_id(),
++                    turn_id,
++                    profile_id: receipt.profile_id.clone(),
++                    profile_epoch: receipt.epoch,
++                }),
++            })
++            .await;
++        }
+         Ok(receipt)
+     }
+ }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 99b3b3e..998c30b 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2845,6 +2845,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
+         | EventMsg::ThreadRolledBack(_)
+         | EventMsg::TurnStarted(_)
+         | EventMsg::ThreadSettingsApplied(_)
++        | EventMsg::AgentProfileChanged(_)
+         | EventMsg::TurnComplete(_)
+         | EventMsg::TokenCount(_)
+         | EventMsg::UserMessage(_)
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 6740337..0519b60 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1925,6 +1925,9 @@ pub enum EventMsg {
+     /// been applied to the session configuration.
+     ThreadSettingsApplied(ThreadSettingsAppliedEvent),
+ 
++    /// A committed change of captured Agent identity; initial binding is silent.
++    AgentProfileChanged(AgentProfileChangedEvent),
++
+     /// Agent has completed all actions.
+     /// v1 wire format uses `task_complete`; accept `turn_complete` for v2 interop.
+     #[serde(rename = "task_complete", alias = "turn_complete")]
+@@ -2747,6 +2750,15 @@ pub struct TurnStartedEvent {
+     pub collaboration_mode_kind: ModeKind,
+ }
+ 
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
++pub struct AgentProfileChangedEvent {
++    pub thread_id: ThreadId,
++    /// None for an idle activation, never a synthetic sampling turn.
++    pub turn_id: Option<String>,
++    pub profile_id: String,
++    pub profile_epoch: u64,
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ pub struct ThreadSettingsAppliedEvent {
+     /// Logical task that owns this snapshot, independent of the physical rollout file.
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index 40ac594..c6e954a 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -372,6 +372,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+         | EventMsg::ThreadQueueChanged(_)
+         | EventMsg::TurnStarted(_)
+         | EventMsg::ThreadSettingsApplied(_)
++        | EventMsg::AgentProfileChanged(_)
+         | EventMsg::TurnComplete(_)
+         | EventMsg::TokenCount(_)
+         | EventMsg::AgentMessage(_)
+@@ -452,6 +453,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
+         | EventMsg::TurnModerationMetadata(_)
+         | EventMsg::ContextCompacted(_)
+         | EventMsg::ThreadSettingsApplied(_)
++        | EventMsg::AgentProfileChanged(_)
+         | EventMsg::EnvironmentConnected(_)
+         | EventMsg::EnvironmentDisconnected(_)
+         | EventMsg::TokenCount(_)
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index daae0a3..4412e42 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -169,7 +169,8 @@ pub fn persisted_event_msg(
+             .then_some(Cow::Borrowed(ev)),
+ 
+         // Transient, non-durable events.
+-        EventMsg::Error(_)
++        EventMsg::AgentProfileChanged(_)
++        | EventMsg::Error(_)
+         | EventMsg::ThreadQueueChanged(_)
+         | EventMsg::GuardianAssessment(_)
+         | EventMsg::ExecCommandEnd(_)

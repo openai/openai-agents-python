@@ -356,18 +356,37 @@ def test_handoff_names_cannot_replace_ordinary_source_tools():
         _capture_agent_graph(source)
 
 
-def test_live_graph_capture_preserves_provider_output_and_runtime_contracts():
-    from agents import NativeProvider
+@pytest.mark.parametrize("session_guards", [False, True])
+def test_live_graph_capture_preserves_provider_output_and_runtime_contracts(session_guards):
+    from agents import GuardrailResult, InputGuardrail, NativeProvider, OutputGuardrail
 
     provider = NativeProvider(api_key="synthetic-live-graph-key")
     opening = Agent(instructions="Original", provider=provider)
-    session = SimpleNamespace(_opening_agent=opening, _context=None, _executor=None)
+    session = SimpleNamespace(
+        _opening_agent=opening,
+        _context=None,
+        _executor=None,
+        _input_guardrails=(
+            InputGuardrail(
+                "global-input",
+                lambda *_: GuardrailResult(False),
+                child_callback=lambda *_: GuardrailResult(False),
+            ),
+        )
+        if session_guards
+        else (),
+        _output_guardrails=(OutputGuardrail("global-output", lambda *_: GuardrailResult(False)),)
+        if session_guards
+        else (),
+    )
     target = Agent(name="New", instructions="New source")
     runtimes, roster = _capture_voice_graph(session, target, "voice_fresh_")
     assert list(runtimes) == ["voice_fresh_0"]
     assert runtimes["voice_fresh_0"].profile.agent is target
     assert runtimes["voice_fresh_0"].profile.declaration.provider is provider
     assert roster[0]["instructions"] == "New source"
+    assert roster[0]["before_complete"] is session_guards
+    assert roster[0]["selecting_steps"] is session_guards
     assert opening.instructions == "Original"
     with pytest.raises(ValueError, match="provider"):
         _capture_voice_graph(

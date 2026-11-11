@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import sys
 from typing import Any
 from uuid import UUID
 
@@ -14,6 +15,10 @@ from agents import Agent, Session
 from agents.observation import EventGap, ModelRequestDispatching, ModelResponseLinked
 from tests._asyncio import timeout
 from tests.test_buffered_responses import json_peer, json_response, provider
+
+private_disposable_only = pytest.mark.skipif(
+    sys.platform != "linux", reason="Private disposal requires Linux managed execution"
+)
 
 
 class OrdinaryAgent(Agent[Any, str]):
@@ -50,6 +55,7 @@ def record_runs(
 
 
 @pytest.mark.parametrize("characters", [8, 512 * 1024])
+@private_disposable_only
 async def test_disposable_completion_preserves_request_and_detached_views(
     characters: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -116,6 +122,7 @@ async def test_disposable_run_leaves_public_storage_and_parent_configuration_unc
         assert len(peer.requests) == 3
 
 
+@private_disposable_only
 async def test_disposable_archive_overflow_keeps_live_model_history_without_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -183,6 +190,7 @@ async def test_disposable_archive_overflow_keeps_live_model_history_without_repl
         assert link.response_observation_id == linked["response_observation_id"]
 
 
+@private_disposable_only
 async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -210,6 +218,7 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
             stopped.set()
 
     async def adopt(session: Session[Any, Any], *args: Any, **kwargs: Any) -> None:
+        observed["handoff_cancellation_args"] = args[1].cancelled.args
         adopted.append(session)
         await actual_adopt(session, *args, **kwargs)
 
@@ -236,7 +245,13 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
             release.set()
             with pytest.raises(asyncio.CancelledError) as caught:
                 await task
-            assert caught.value.args == ("original private cancellation",)
+            expected_cancellation = ("original private cancellation",)
+            assert observed["handoff_cancellation_args"] == expected_cancellation
+            # Cancellation-message propagation to awaiters: Python 3.11+.
+            if sys.version_info < (3, 11):
+                assert caught.value.args in ((), expected_cancellation)
+            else:
+                assert caught.value.args == expected_cancellation
             assert len(adopted) == 1 and adopted[0]._closed and adopted[0]._resources_retired
             assert adopted[0]._reader is not None and adopted[0]._reader.done()
             assert len(peer.requests) == 1
@@ -253,6 +268,7 @@ async def test_disposable_live_handoff_joins_double_cancellation_and_recovers(
 
 
 @pytest.mark.parametrize("characters", [8, 512 * 1024])
+@private_disposable_only
 async def test_explicit_websocket_selects_disposable_completion_without_http_policy(
     characters: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
