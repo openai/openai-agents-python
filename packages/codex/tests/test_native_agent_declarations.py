@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
+from inspect import Parameter, signature
 
 import pytest
 
@@ -14,9 +15,69 @@ from agents import (
     NativeProvider,
     function_tool,
 )
+from agents.realtime import RealtimeAgentConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses  # noqa: F401
 from tests.test_native_agent_checkpoints import message, peer
+
+
+def test_realtime_preserves_existing_agent_field_and_parameter_order():
+    original_fields = (
+        "instructions",
+        "name",
+        "tools",
+        "handoffs",
+        "model",
+        "model_settings",
+        "provider",
+        "output_type",
+        "programmatic_tool_calling",
+        "transform_context",
+        "before_compact",
+        "before_complete",
+        "decisions",
+    )
+    expected_fields = (
+        *original_fields,
+        "realtime",
+        "input_guardrails",
+        "output_guardrails",
+        "tool_batch_completion",
+    )
+    assert tuple(field.name for field in fields(Agent)) == expected_fields
+    assert Agent.__match_args__ == expected_fields
+    realtime = RealtimeAgentConfig(instructions="Answer aloud.")
+    agent = Agent(instructions="Answer.", name="Voice", realtime=realtime)
+    match agent:
+        case Agent("Answer.", "Voice"):
+            pass
+        case _:
+            pytest.fail("Existing positional class patterns must retain the agent name")
+    match agent:
+        case Agent(_, _, _, _, _, _, _, _, _, _, _, _, decisions, voice):
+            assert decisions is None
+            assert voice == realtime
+    parameters = tuple(signature(Agent).parameters.values())
+    assert tuple(parameter.name for parameter in parameters) == (
+        "instructions",
+        "name",
+        "tools",
+        "handoffs",
+        "model",
+        "model_settings",
+        "provider",
+        "decisions",
+        "output_type",
+        "programmatic_tool_calling",
+        "transform_context",
+        "before_compact",
+        "before_complete",
+        "tool_batch_completion",
+        "realtime",
+        "input_guardrails",
+        "output_guardrails",
+    )
+    assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters)
 
 
 async def test_agent_captures_defaults_and_settings_cannot_mutate_live_or_future_runs(

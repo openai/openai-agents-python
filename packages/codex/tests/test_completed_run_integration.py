@@ -157,14 +157,23 @@ async def test_eligibility_opt_out_keeps_existing_atomic_opening(
 
 @pytest.mark.parametrize(
     "input",
-    [None, {"role": "user", "content": "text"}, "x" * 16385],
-    ids=["no-input", "item-input", "large-input"],
+    [None, {"role": "user", "content": "text"}],
+    ids=["no-input", "item-input"],
 )
 def test_unsupported_inputs_do_not_select_completed_route(input: Any) -> None:
     from _agents_codex.agent import _completed_run_eligible
 
     assert not _completed_run_eligible(
         Agent(instructions="Answer."), input, None, False, None, None
+    )
+
+
+@pytest.mark.parametrize("size", [16 * 1024, 16 * 1024 + 1, 512 * 1024])
+def test_text_at_and_above_previous_size_boundary_selects_completed_route(size: int) -> None:
+    from _agents_codex.agent import _completed_run_eligible
+
+    assert _completed_run_eligible(
+        Agent(instructions="Answer."), "x" * size, None, False, None, None
     )
 
 

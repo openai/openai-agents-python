@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
-from collections.abc import Awaitable
+import math
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeAlias, cast
 from uuid import uuid4
 
+from typing_extensions import TypedDict
+
+from agents.config import JsonValue
+
+from ._compat import cancellation_requested
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
@@ -20,6 +28,125 @@ class ModelRequest:
     context: Any = field(repr=False)
     session_id: str
     turn_id: str
+
+
+class ModelRequestOptions(TypedDict, total=False):
+    """HTTP options for a borrowed OpenAI request; native cancellation remains active.
+
+    ``headers`` values of ``None`` omit inherited client headers. ``timeout_ms``
+    limits each HTTP attempt, excluding client retry backoff. ``max_retries``
+    selects the borrowed client's HTTP retry count. Omitted values retain its
+    defaults. A factory supplies captured options once per native model request.
+    """
+
+    headers: Mapping[str, str | None]
+    query: Mapping[str, JsonValue]
+    timeout_ms: float
+    max_retries: int
+
+
+ModelRequestOptionsFactory: TypeAlias = Callable[
+    [ModelRequest], ModelRequestOptions | None | Awaitable[ModelRequestOptions | None]
+]
+
+
+def _capture_request_options(value: Any) -> ModelRequestOptions:
+    data: dict[str, Any] | None = None
+    rendered: str | None = None
+    number: Any = None
+    header: Any = None
+    query: Any = None
+    key: Any = None
+    item: Any = None
+    try:
+        if not isinstance(value, Mapping):
+            raise TypeError("request_options must be an HTTP options mapping")
+        data = dict(value)
+        if data.keys() - {"headers", "query", "timeout_ms", "max_retries"}:
+            raise TypeError("Unsupported model request option")
+        if "headers" in data:
+            if not isinstance(data["headers"], Mapping):
+                raise TypeError("request_options.headers must contain strings")
+            header = dict(data["headers"])
+            for key, item in header.items():
+                if not isinstance(key, str) or (item is not None and not isinstance(item, str)):
+                    raise TypeError("request_options.headers must contain strings")
+            data["headers"] = header
+        if "query" in data:
+            if not isinstance(data["query"], Mapping):
+                raise TypeError("request_options.query must be a string-keyed mapping")
+            query = dict(data["query"])
+            for key in query:
+                if not isinstance(key, str):
+                    raise TypeError("request_options.query must be a string-keyed mapping")
+            try:
+                rendered = json.dumps(query, allow_nan=False)
+            except (TypeError, ValueError, OverflowError, RecursionError):
+                pass
+            if rendered is None:
+                raise ValueError("request_options.query must contain JSON values")
+            data["query"] = json.loads(rendered)
+        if "timeout_ms" in data:
+            number = data["timeout_ms"]
+            if type(number) not in (int, float) or number <= 0 or not math.isfinite(number):
+                raise ValueError("request_options.timeout_ms must be positive and finite")
+        if "max_retries" in data:
+            number = data["max_retries"]
+            if type(number) is not int or number < 0:
+                raise ValueError("request_options.max_retries must be a nonnegative integer")
+        return cast(ModelRequestOptions, data)
+    finally:
+        del value, data, rendered, number, header, query, key, item
+
+
+async def _request_options_for(
+    source: ModelRequestOptions | ModelRequestOptionsFactory | None, request: ModelRequest
+) -> dict[str, Any]:
+    value: Any = source
+    observed: ModelRequest | None = None
+    task = asyncio.current_task()
+
+    def admit(owner: asyncio.Task[Any] | None = task) -> bool:
+        return owner is not None and not cancellation_requested(owner)
+
+    try:
+        if task is not None and cancellation_requested(task):
+            raise asyncio.CancelledError
+        if callable(source):
+            from .session import _call_callback
+
+            observed = ModelRequest(
+                body=deepcopy(request.body),
+                context=request.context,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+            )
+            value = await _call_callback(source, admit, observed)
+        if task is not None and cancellation_requested(task):
+            raise asyncio.CancelledError
+        return dict(_capture_request_options(value)) if value is not None else {}
+    finally:
+        del source, request, value, observed, task, admit
+
+
+def _client_request_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    headers: dict[str, Any] | None = None
+    key: Any = None
+    value: Any = None
+    try:
+        if "headers" in options:
+            from openai import omit
+
+            headers = {}
+            for key, value in options["headers"].items():
+                headers[key] = omit if value is None else value
+        return {
+            **({"extra_headers": headers} if headers is not None else {}),
+            **({"extra_query": options["query"]} if "query" in options else {}),
+            **({"timeout": options["timeout_ms"] / 1000} if "timeout_ms" in options else {}),
+        }
+    finally:
+        del options, headers, key, value
 
 
 @dataclass(frozen=True)
@@ -87,6 +214,19 @@ class NativeModel(Protocol):
     def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]: ...
 
 
+class NativeStreamingModel(NativeModel, Protocol):
+    """Produce Responses events incrementally through the native turn.
+
+    Yield finalized output items and one terminal response event. Core applies
+    the output and executes admitted tools after the stream completes. The
+    session joins the iterator when its model request is cancelled.
+    """
+
+    def stream(
+        self, request: ModelRequest
+    ) -> AsyncIterator[Mapping[str, Any]] | Awaitable[AsyncIterator[Mapping[str, Any]]]: ...
+
+
 class ModelProvider(Protocol):
     """Resolve a native model for the effective request model name."""
 
@@ -102,17 +242,34 @@ class ChatCompletionsModel:
     and settled assistant/tool history retain their Core execution ownership.
     ``prompt_cache_key`` selects provider cache affinity for this adapter only;
     ``None`` retains the native request key and existing client conversion.
+    ``request_options`` captures HTTP options or a context-aware factory. Factory
+    calls use the existing joined callback owner. The borrowed client retains
+    transport/retry ownership; the adapter never closes it or a shared copy.
     """
 
     client: Any = field(repr=False)
     model: str | None = None
     prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)
+    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(
+        default=None, repr=False, kw_only=True
+    )
+    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.prompt_cache_key is not None and not isinstance(self.prompt_cache_key, str):
             raise TypeError("prompt_cache_key must be a string or None")
+        source = self.request_options
+        if source is not None and not callable(source):
+            source = _capture_request_options(source)
+        object.__setattr__(self, "_request_options_source", source)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        audio_data: Any = None
+        audio_format: Any = None
+        audio_header: Any = None
+        audio_separator: Any = None
         call: Any = None
         choice: Any = None
         content: Any = None
@@ -155,6 +312,32 @@ class ChatCompletionsModel:
                     for part in item.get("content", []):
                         if part.get("type") in ("input_text", "output_text"):
                             content.append({"type": "text", "text": part["text"]})
+                        elif part.get("type") == "input_audio":
+                            if not isinstance(part.get("audio_url"), str):
+                                raise ValueError("Chat audio requires an inline audio data URL")
+                            audio_header, audio_separator, audio_data = part["audio_url"].partition(
+                                ","
+                            )
+                            if (
+                                not audio_separator
+                                or not audio_data
+                                or not audio_header.lower().startswith("data:audio/")
+                                or not audio_header.lower().endswith(";base64")
+                            ):
+                                raise ValueError("Chat audio requires an inline audio data URL")
+                            audio_format = audio_header[11:].split(";", 1)[0].lower()
+                            if audio_format in ("wav", "x-wav", "wave", "vnd.wave"):
+                                audio_format = "wav"
+                            elif audio_format in ("mp3", "mpeg"):
+                                audio_format = "mp3"
+                            else:
+                                raise ValueError("Chat audio requires WAV or MP3 input")
+                            content.append(
+                                {
+                                    "type": "input_audio",
+                                    "input_audio": {"data": audio_data, "format": audio_format},
+                                }
+                            )
                         elif part.get("type") == "input_image" and part.get("image_url"):
                             content.append(
                                 {
@@ -228,8 +411,12 @@ class ChatCompletionsModel:
                 else:
                     leaves = [declaration]
                 for tool in leaves:
+                    if tool.get("namespace") not in (None, "functions"):
+                        raise ValueError("Chat adapters support the default function namespace")
                     if tool.get("type") != "function":
                         raise ValueError("ChatCompletionsModel supports native function tools")
+                    if tool.get("output_schema") is not None:
+                        raise ValueError("Tool output schemas require the Responses API")
                     tools.append(
                         {
                             "type": "function",
@@ -318,6 +505,22 @@ class ChatCompletionsModel:
                 )
             if "max_output_tokens" in request.body:
                 options["max_completion_tokens"] = request.body["max_output_tokens"]
+            if isinstance(options.get("tool_choice"), Mapping):
+                declaration = options["tool_choice"]
+                if declaration.get("type") != "function":
+                    raise ValueError("Chat adapters require a function tool selector")
+                tool = declaration.get("function", declaration)
+                if (
+                    declaration.get("namespace") not in (None, "functions")
+                    or not isinstance(tool, Mapping)
+                    or tool.get("namespace") not in (None, "functions")
+                    or not isinstance(tool.get("name"), str)
+                    or tool["name"] not in [item["function"].get("name") for item in tools]
+                ):
+                    raise ValueError(
+                        "Chat tool choice must select an offered default-namespace function"
+                    )
+                options["tool_choice"] = {"type": "function", "function": {"name": tool["name"]}}
             if tools:
                 options["tools"] = tools
             else:
@@ -330,6 +533,7 @@ class ChatCompletionsModel:
             if thinking is not None and thinking.get("type") != "disabled":
                 raise ValueError("Chat adapters do not support configured provider thinking")
             response = await self._create(
+                request,
                 model=self.model or request.body["model"],
                 messages=messages,
                 stream=False,
@@ -439,6 +643,10 @@ class ChatCompletionsModel:
             # Release SDK-owned payloads before exposing any callback failure.
             del (
                 request,
+                audio_data,
+                audio_format,
+                audio_header,
+                audio_separator,
                 call,
                 choice,
                 content,
@@ -470,15 +678,24 @@ class ChatCompletionsModel:
                 value,
             )
 
-    async def _create(self, **options: Any) -> Any:
+    async def _create(self, request: ModelRequest, **options: Any) -> Any:
+        selected: dict[str, Any] | None = None
+        client: Any = None
         try:
-            create = self.client.chat.completions.create
+            selected = await _request_options_for(self._request_options_source, request)
+            client = self.client
+            if "max_retries" in selected:
+                if not callable(getattr(client, "with_options", None)):
+                    raise TypeError("Per-request retries require client.with_options")
+                # The real OpenAI copy borrows its original HTTP client; never close it here.
+                client = client.with_options(max_retries=selected["max_retries"])
+            create = client.chat.completions.create
             if not inspect.iscoroutinefunction(inspect.unwrap(create)):
                 raise TypeError("ChatCompletionsModel requires an asynchronous client")
-            return await create(**options)
+            return await create(**options, **_client_request_options(selected))
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
-            del options
+            del request, options, selected, client
 
 
 @dataclass(frozen=True)
@@ -490,13 +707,15 @@ class LitellmModel(ChatCompletionsModel):
     Completed text/function responses only; provider reasoning replay unsupported.
     """
 
-    async def _create(self, **options: Any) -> Any:
+    async def _create(self, request: ModelRequest, **options: Any) -> Any:
         choice: Any = None
         message: Any = None
         refusal: Any = None
         response: Any = None
         value: Any = None
         try:
+            if self._request_options_source is not None:
+                raise TypeError("request_options requires an OpenAI-compatible client adapter")
             if self.prompt_cache_key is not None:
                 options["extra_body"] = {
                     **options.get("extra_body", {}),
@@ -512,7 +731,7 @@ class LitellmModel(ChatCompletionsModel):
             return value
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
-            del options, choice, message, refusal, response, value
+            del request, options, choice, message, refusal, response, value
 
 
 @dataclass(frozen=True)
@@ -526,8 +745,10 @@ class AnyLLMModel(ChatCompletionsModel):
     Generic completion requests omit the native ``store=False`` default.
     """
 
-    async def _create(self, **options: Any) -> Any:
+    async def _create(self, request: ModelRequest, **options: Any) -> Any:
         try:
+            if self._request_options_source is not None:
+                raise TypeError("request_options requires an OpenAI-compatible client adapter")
             if "max_completion_tokens" in options:
                 options["max_tokens"] = options.pop("max_completion_tokens")
             if (
@@ -542,7 +763,7 @@ class AnyLLMModel(ChatCompletionsModel):
             return await self.client.acompletion(**options)
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
-            del options
+            del request, options
 
 
 @dataclass(frozen=True)
@@ -552,19 +773,32 @@ class ResponsesModel:
     Native request fields reach ``responses.create`` without a second formatter.
     The client remains application-owned; only complete responses are admitted.
     ``prompt_cache_key`` overrides only this borrowed client's outgoing cache
-    affinity; ``None`` retains the native request key.
+    affinity; ``None`` retains the native request key. ``request_options`` captures
+    HTTP options or a per-native-request factory, as on ``ChatCompletionsModel``.
     """
 
     client: Any = field(repr=False)
     model: str | None = None
     prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)
+    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(
+        default=None, repr=False, kw_only=True
+    )
+    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.prompt_cache_key is not None and not isinstance(self.prompt_cache_key, str):
             raise TypeError("prompt_cache_key must be a string or None")
+        source = self.request_options
+        if source is not None and not callable(source):
+            source = _capture_request_options(source)
+        object.__setattr__(self, "_request_options_source", source)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         body: dict[str, Any] = {}
+        selected: dict[str, Any] | None = None
+        client: Any = None
         response: Any = None
         value: Any = None
         output: list[dict[str, Any]] = []
@@ -573,7 +807,13 @@ class ResponsesModel:
         item: Any = None
         part: Any = None
         try:
-            create = self.client.responses.create
+            selected = await _request_options_for(self._request_options_source, request)
+            client = self.client
+            if "max_retries" in selected:
+                if not callable(getattr(client, "with_options", None)):
+                    raise TypeError("Per-request retries require client.with_options")
+                client = client.with_options(max_retries=selected["max_retries"])
+            create = client.responses.create
             if not inspect.iscoroutinefunction(inspect.unwrap(create)):
                 raise TypeError("ResponsesModel requires an asynchronous client")
             body = dict(request.body)
@@ -581,7 +821,9 @@ class ResponsesModel:
             if self.prompt_cache_key is not None:
                 body["prompt_cache_key"] = self.prompt_cache_key
             body.pop("stream", None)
-            response = await create(stream=False, extra_body=body)
+            response = await create(
+                stream=False, extra_body=body, **_client_request_options(selected)
+            )
             value = response.model_dump() if hasattr(response, "model_dump") else response
             output = value.get("output") or []
             refusal = False
@@ -629,7 +871,19 @@ class ResponsesModel:
 
         finally:
             # Traceback-local logging must not retain SDK-owned request/response payloads.
-            del request, body, response, value, output, raw_usage, usage, item, part
+            del (
+                request,
+                body,
+                selected,
+                client,
+                response,
+                value,
+                output,
+                raw_usage,
+                usage,
+                item,
+                part,
+            )
 
 
 _preserve_module_identity(globals(), "agents.models")

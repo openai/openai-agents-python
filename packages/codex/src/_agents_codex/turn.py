@@ -11,6 +11,7 @@ from typing import (
     Generic as Generic,
     Literal as Literal,
     Protocol as Protocol,
+    cast as cast,
     overload as overload,
 )
 
@@ -18,6 +19,7 @@ from typing_extensions import TypeVar as TypeVar
 
 from ._mcp_errors import _protect_mcp_methods, _strip_mcp_frames, _uses_mcp
 from ._public import preserve_module_identity as _preserve_module_identity
+from .usage import RunUsage, _UsageCollector
 
 if TYPE_CHECKING:
     from ._completed_turn_owner import _CompletedTurnOwner
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     from .observation import EventStream
     from .rate_limits import ApiRateLimits
     from .session import Completed, NativeError, Session, TurnStoppedError
+    from .state import ApplicationToolOutput
 
 OutputT = TypeVar("OutputT")
 _DecisionT = TypeVar("_DecisionT")
@@ -81,11 +84,58 @@ class Turn(Generic[OutputT]):
     instance_id: int | None
     _session: Session[Any, Any] | _CompletedTurnOwner = field(repr=False, compare=False)
     _owner: object = field(repr=False, compare=False)
+    _run_usage: _UsageCollector = field(repr=False, compare=False)
     _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)
     _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)
     _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)
     _native: Any = field(repr=False, compare=False)
     _observation_after: int = field(repr=False, compare=False)
+    _guardrail_results: list[Any] = field(repr=False, compare=False)
+
+    @property
+    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
+        """Detached application data from accepted tool results on this turn."""
+        # A restored root has a fresh submission ID for the same native turn.
+        native_turn_id = self.turn_id if self.child_id is None else None
+        return tuple(
+            record.model_copy(deep=True)
+            for record in self._session._application_tool_outputs
+            if record.submission_id == self.submission_id or record.turn_id == native_turn_id
+        )
+
+    @property
+    def guardrail_results(self) -> tuple[Any, ...]:
+        """Completed guardrail diagnostics on this exact owning run."""
+        if self.child_id is not None and hasattr(self._session, "_child_callbacks"):
+            session = cast("Session[Any, Any]", self._session)
+            turn_id = self.turn_id
+            state = (
+                None
+                if turn_id is None
+                else session._child_callbacks.get(
+                    (self.child_id, self._native.incarnation, turn_id)
+                )
+            )
+            if state is not None:
+                object.__setattr__(self, "_guardrail_results", state.guardrail_results)
+        return tuple(self._guardrail_results)
+
+    @property
+    def run_usage(self) -> RunUsage:
+        """Detached measured usage for this logical run, excluding unrelated children."""
+        if self.child_id is not None and hasattr(self._session, "_child_callbacks"):
+            session = cast("Session[Any, Any]", self._session)
+            turn_id = self.turn_id
+            state = (
+                None
+                if turn_id is None
+                else session._child_callbacks.get(
+                    (self.child_id, self._native.incarnation, turn_id)
+                )
+            )
+            if state is not None:
+                object.__setattr__(self, "_run_usage", state.run_usage)
+        return self._run_usage.snapshot()
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:
         raise TypeError("Turns are issued by a Session or Subagent")
@@ -312,6 +362,15 @@ class ChildTurn(Protocol):
     @property
     def instance_id(self) -> int | None: ...
 
+    @property
+    def guardrail_results(self) -> tuple[Any, ...]: ...
+
+    @property
+    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]: ...
+
+    @property
+    def run_usage(self) -> RunUsage: ...
+
     async def get_result(self) -> Completed[str, ChildTurn]: ...
     async def wait_for_request_or_result(
         self,
@@ -329,6 +388,7 @@ def _root_turn(
     submission_id: str,
     completion: asyncio.Future[Any],
     observation_after: int = 0,
+    guardrail_results: list[Any] | None = None,
 ) -> Turn[Any]:
     result = object.__new__(Turn)
     for name, value in {
@@ -339,11 +399,13 @@ def _root_turn(
         "instance_id": None,
         "_session": session,
         "_owner": session._owner,
+        "_run_usage": _UsageCollector(),
         "_completion": completion,
         "_continuation": None,
         "_result": None,
         "_native": None,
         "_observation_after": observation_after,
+        "_guardrail_results": [] if guardrail_results is None else guardrail_results,
     }.items():
         object.__setattr__(result, name, value)
     return result
@@ -365,10 +427,12 @@ def _child_turn(session: Session[Any, Any], native: Any) -> Turn[str]:
         "instance_id": native.instance_id,
         "_session": session,
         "_owner": session._owner,
+        "_run_usage": observed.run_usage if observed is not None else _UsageCollector(),
         "_completion": None,
         "_continuation": None,
         "_result": None,
         "_native": native,
+        "_guardrail_results": observed.guardrail_results if observed is not None else [],
         "_observation_after": observed.observation_after
         if observed is not None
         else session._observations.sequence,

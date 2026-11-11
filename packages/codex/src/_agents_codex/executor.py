@@ -293,7 +293,7 @@ class Environment(Generic[ContextT_contra]):
     sequence keeps only that directory writable. Strict write enforcement is the
     default and requires a Linux or macOS executor. To retain remote approval
     behavior, explicitly select ``write_policy="legacy"`` without writable roots.
-    Linux local executors also support ``write_policy="trusted_workspace_write"``.
+    Linux and macOS local executors also accept ``write_policy="trusted_workspace_write"``.
 
     With ``exec_command``, set ``network`` to a NetworkPolicy or a dictionary with
     the same fields. Omit the policy to keep the executor's default restricted
@@ -377,6 +377,7 @@ class Environment(Generic[ContextT_contra]):
     # Captured command overrides; current declarations only, excluded from saved state.
     env: Mapping[str, str] | None = field(default=None, repr=False)
     temp_dir: str | PathLike[str] | None = None
+    read_only_roots: Sequence[str | PathLike[str]] = ()
 
     @classmethod
     def local(
@@ -406,6 +407,7 @@ class Environment(Generic[ContextT_contra]):
         read_only: bool = False,
         env: Mapping[str, str] | None = None,
         temp_dir: str | PathLike[str] | None = None,
+        read_only_roots: Sequence[str | PathLike[str]] = (),
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 
@@ -417,7 +419,7 @@ class Environment(Generic[ContextT_contra]):
         additional writable roots, and platform runtime paths. Run the executor
         on an isolated job host if those paths contain sensitive data.
 
-        Set ``write_policy="trusted_workspace_write"`` for trusted local Linux jobs.
+        Set ``write_policy="trusted_workspace_write"`` for trusted local jobs on Linux or macOS.
         Commands can read files accessible to the application user and inherit
         the application process environment, including ambient credentials,
         subject to native sandbox and network rules. Both inherited values and
@@ -431,10 +433,19 @@ class Environment(Generic[ContextT_contra]):
         Selected capability directories can contain directory symlinks to
         readable skill directories. Use this mode only when you trust the
         prompts and tools with the application's files and credentials.
+        On macOS, the sandbox has been isolating commands from host ``launchd``
+        services. Directory-backed account lookup through ``id -F`` and ``ssh``
+        has been failing in that sandbox. Application function tools have been
+        using the host process's directory access for these operations.
 
         On Linux, ``mounts`` adds read-only access to canonical same-path
         directories. Supply each source; destination and ``local_bind`` strategy
         default to the supported same-path bind. Mounts require strict mode.
+        On macOS, ``read_only_roots`` grants reads at existing canonical directory
+        paths. Use directories your application controls and keeps stable for
+        the Session. Keep them separate from the workspace, writable roots and
+        private SDK or credential paths. While these grants are active, writable
+        roots are fixed. Restore with the same grants on the current Environment.
         ``read_only=True`` caps the workspace at read access without expanding
         its readable paths or network policy. It excludes additional writable
         roots, native apply_patch and NativeAgents. Empty root replacement stays read-only.
@@ -459,6 +470,7 @@ class Environment(Generic[ContextT_contra]):
             write_policy=write_policy,
             read_only=read_only,
             temp_dir=temp_dir,
+            read_only_roots=read_only_roots,
         )
 
     def __post_init__(self) -> None:
@@ -475,8 +487,10 @@ class Environment(Generic[ContextT_contra]):
         if self.write_policy == "trusted_workspace_write":
             if not self._is_local:
                 raise ValueError("Trusted workspace-write requires Environment.local")
-            if sys.platform != "linux":
-                raise ValueError("Trusted workspace-write requires Environment.local on Linux")
+            if sys.platform not in ("linux", "darwin"):
+                raise ValueError(
+                    "Trusted workspace-write requires Environment.local on Linux or macOS"
+                )
         if self.temp_dir is not None:
             if self.write_policy != "trusted_workspace_write":
                 raise ValueError("temp_dir requires trusted workspace-write")
@@ -496,6 +510,10 @@ class Environment(Generic[ContextT_contra]):
             self._validate_remote_url()
         if self.writable_roots is not None:
             object.__setattr__(self, "writable_roots", _writable_roots(self.writable_roots))
+        read_only_roots = _writable_roots(self.read_only_roots, name="read_only_roots")
+        if read_only_roots and (not self._is_local or sys.platform != "darwin"):
+            raise ValueError("read_only_roots requires Environment.local on macOS")
+        object.__setattr__(self, "read_only_roots", read_only_roots)
         if isinstance(self.mounts, (str, bytes)) or not isinstance(self.mounts, Sequence):
             raise TypeError("mounts must be a sequence of LocalStorageMount declarations")
         mounts = []
@@ -712,6 +730,8 @@ class Environment(Generic[ContextT_contra]):
             result["temp_dir"] = _path_uri(fspath(self.temp_dir))
         if self.writable_roots is not None:
             result["writable_roots"] = [fspath(root) for root in self.writable_roots]
+        if self.read_only_roots:
+            result["read_only_roots"] = [fspath(root) for root in self.read_only_roots]
         if self.mounts:
             native_mounts: list[RuntimeStorageMount] = [
                 {
@@ -762,18 +782,20 @@ def _path_uri(value: str) -> str:
     return prefix + quote_from_bytes(fsencode(encoded_path))
 
 
-def _writable_roots(values: Sequence[str | PathLike[str]]) -> tuple[str, ...]:
+def _writable_roots(
+    values: Sequence[str | PathLike[str]], *, name: str = "writable_roots"
+) -> tuple[str, ...]:
     if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
-        raise TypeError("writable_roots must be a sequence of absolute executor paths")
+        raise TypeError(f"{name} must be a sequence of absolute executor paths")
     roots = set()
     for value in values:
         raw = fspath(value)
         if not isinstance(raw, str):
-            raise TypeError("writable_roots must contain text paths")
+            raise TypeError(f"{name} must contain text paths")
         if raw.startswith("file:") and (
             re.search(r"[\x00-\x20\x7f]", raw) or re.search(r"%(?![0-9a-fA-F]{2})", raw)
         ):
-            raise ValueError("writable_roots must contain valid file URIs")
+            raise ValueError(f"{name} must contain valid file URIs")
         try:
             uri = urlsplit(_path_uri(raw))
             path = PurePosixPath(unquote(uri.path, errors="strict"))
@@ -790,7 +812,7 @@ def _writable_roots(values: Sequence[str | PathLike[str]]) -> tuple[str, ...]:
         except ValueError:
             valid = False
         if not valid:
-            raise ValueError("writable_roots must contain absolute executor directories")
+            raise ValueError(f"{name} must contain absolute executor directories")
         roots.add(_path_uri(str(path)))
     return tuple(sorted(roots))
 

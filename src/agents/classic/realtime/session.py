@@ -143,6 +143,16 @@ def _serialize_tool_output(output: Any) -> str:
         return str(output)
 
 
+def _validate_output_guardrails(guardrails: list[Any]) -> None:
+    for guardrail in guardrails:
+        if not callable(getattr(guardrail, "run", None)):
+            raise TypeError(
+                "Classic Realtime output guardrails require a callable run() method. "
+                "Use agents.classic.OutputGuardrail or agents.classic.output_guardrail. "
+                "Native RealtimeOutputGuardrail belongs to agents.realtime.RealtimeSession."
+            )
+
+
 @dataclasses.dataclass
 class _PendingToolOutput:
     tool_call: RealtimeModelToolCallEvent
@@ -2157,6 +2167,12 @@ class RealtimeSession(RealtimeModelListener):
         if disable_tracing:
             updated_settings["tracing"] = None
 
+        # Validate after asynchronous settings preparation and before connection or agent
+        # activation. Native guardrails expose a different callback protocol and would otherwise
+        # be treated as failed Classic callbacks and silently skipped.
+        _validate_output_guardrails(
+            agent.output_guardrails + self._run_config.get("output_guardrails", [])
+        )
         return updated_settings
 
     @classmethod

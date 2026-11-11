@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel as BaseModel,
     ConfigDict as ConfigDict,
     Field as Field,
+    JsonValue,
     TypeAdapter as TypeAdapter,
     model_validator as model_validator,
 )
@@ -20,7 +21,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .subagents import SubagentConfig as SubagentConfig
 from .tools import ToolRef as ToolRef
-from .usage import TokenUsage as TokenUsage
+from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,7 @@ class _ToolOutcomes(BaseModel):
     response_observation_id: str = Field(min_length=1)
     call_ids: list[str]
     outcomes: list[tuple[str, bool]]
+    held_call_ids: list[str] = Field(default_factory=list)
 
 
 class _ManualContinuation(BaseModel):
@@ -190,6 +192,19 @@ class _ManualContinuation(BaseModel):
     pending_manual: list[_PendingManual]
     tool_outcomes: _ToolOutcomes | None = None
     output_schema: dict[str, Any] | None = None
+
+
+class ApplicationToolOutput(BaseModel):
+    """Application data from one accepted native tool result."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+
+    submission_id: str
+    turn_id: str
+    call_id: str
+    name: str
+    namespace: str | None = None
+    application_data: dict[str, JsonValue] = Field(repr=False)
 
 
 class SessionState(BaseModel):
@@ -231,6 +246,7 @@ class SessionState(BaseModel):
     # None predates on_step; [] intentionally withholds every optional MCP tool.
     step_mcp_tools: list[_StepMcpTool] | None = None
     native_continuation: _ManualContinuation | None = None
+    run_usage: RunUsage | None = None
     # SDK contract identity is checked before importing native state or grants.
     output_version: Literal[1] | None = None
     output_fingerprint: str | None = None
@@ -241,6 +257,7 @@ class SessionState(BaseModel):
     # enter native history, model context, or continuation authority.
     repair_turns: list[RecordedTurn] = Field(default_factory=list)
     repair_items: list[SessionItem] = Field(default_factory=list)
+    application_tool_outputs: list[ApplicationToolOutput] = Field(default_factory=list, repr=False)
     network_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     executor_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     # Additive SDK overlay. Older writable checkpoints omit it.

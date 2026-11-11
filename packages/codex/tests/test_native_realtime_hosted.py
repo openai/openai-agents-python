@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -11,7 +12,7 @@ from typing import Any
 import pytest
 from aiohttp import web
 
-from agents import Agent, NativeProvider
+from agents import Agent, NativeProvider, function_tool
 from agents.realtime import (
     NativeRealtimeHostedMcpTool,
     RealtimeConfig,
@@ -383,4 +384,98 @@ async def test_hosted_continuation_waits_for_every_call_and_can_be_disabled(
             await voice.update({"instructions": "All calls are already settled."})
             await next_event(events, RealtimeLifecycle, seen, status="updated")
         assert sum(frame["type"] == "response.create" for frame in peer.frames) == int(automatic)
+        assert peer.responses.requests == []
+
+
+async def test_detached_ack_keeps_native_continuation_waiting_for_hosted_call(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @function_tool
+    async def lookup() -> str:
+        entered.set()
+        await release.wait()
+        return "native result"
+
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-mixed-continuation",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Use the declared tools.", tools=[lookup], provider=provider
+        ).session() as session,
+        session.realtime(
+            config=RealtimeConfig(
+                model="fixture-realtime",
+                tools=(lookup,),
+                settings={"hosted_mcp_tools": [{**hosted_tool(), "require_approval": "never"}]},
+                automatically_trigger_response_for_mcp_tool_calls=False,
+            )
+        ) as voice,
+    ):
+        assert peer.socket is not None
+        socket = peer.socket
+        events, seen = voice.events(), []
+        response_id = "mixed-response"
+        native = {
+            "type": "function_call",
+            "id": "mixed-native-item",
+            "call_id": "mixed-native-call",
+            "name": "lookup",
+            "arguments": "{}",
+        }
+        hosted = {
+            "type": "mcp_call",
+            "id": "mixed-hosted-item",
+            "server_label": "docs",
+            "name": "search",
+            "arguments": '{"query":"synthetic"}',
+            "status": "in_progress",
+        }
+        await socket.send_json({"type": "response.created", "response": {"id": response_id}})
+        await socket.send_json(
+            {"type": "response.output_item.added", "response_id": response_id, "item": hosted}
+        )
+        await socket.send_json(
+            {"type": "response.output_item.done", "response_id": response_id, "item": native}
+        )
+        await socket.send_json(
+            {"type": "response.done", "response": {"id": response_id, "output": [native, hosted]}}
+        )
+        await entered.wait()
+        await next_event(events, RealtimeResponse, seen, status="done", response_id=response_id)
+        release.set()
+        await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == native["call_id"])
+        await voice.send_event(
+            {
+                "type": "response.create",
+                "event_id": "unrelated-detached-request",
+                "response": {"conversation": "none", "input": [], "output_modalities": ["text"]},
+            }
+        )
+        await next_event(
+            events, RealtimeResponse, seen, status="done", response_id="voice-response-1"
+        )
+        assert len([frame for frame in peer.frames if frame["type"] == "response.create"]) == 1
+        await socket.send_json(
+            {
+                "type": "response.output_item.done",
+                "response_id": response_id,
+                "item": {**hosted, "status": "completed", "output": "hosted result"},
+            }
+        )
+        await next_event(events, RealtimeHostedMcpCallCompleted, seen, item_id=hosted["id"])
+        await next_event(
+            events, RealtimeResponse, seen, status="done", response_id="voice-response-2"
+        )
+        creates = [frame for frame in peer.frames if frame["type"] == "response.create"]
+        assert len(creates) == 2
+        assert creates[0]["response"]["conversation"] == "none"
+        assert creates[1].get("response", {}).get("conversation", "auto") == "auto"
         assert peer.responses.requests == []

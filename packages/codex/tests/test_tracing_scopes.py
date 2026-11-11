@@ -2711,7 +2711,10 @@ async def test_retained_cell_executor_span_records_its_own_outcome(
         raise ValueError("PRIVATE_CALLBACK_EXCEPTION")
 
     executor = SimpleNamespace(
-        transform_arguments=None, transform_result=transform, policy_timeout=0.01, approval=None
+        transform_arguments=None,
+        transform_result=transform,
+        policy_timeout=0.01 if outcome == "timeout" else 10,
+        approval=None,
     )
     owner = _CellPolicyOwner(
         1,
@@ -3438,6 +3441,9 @@ async def test_interception_reader_keeps_native_context_private_through_dispatch
     issuer._invoke_executor_policy = MethodType(Session._invoke_executor_policy, issuer)
     issuer._invoke_executor_policy_body = MethodType(Session._invoke_executor_policy_body, issuer)
     issuer._call_decision_callback = MethodType(Session._call_decision_callback, issuer)
+    issuer._call_decision_callback_entered = MethodType(
+        Session._call_decision_callback_entered, issuer
+    )
     interception = _NativeInterception(issuer)
     issuer._interception = interception
     if route == "cell":

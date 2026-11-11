@@ -30,6 +30,7 @@ from agents import (
     Environment,
     EnvironmentSource,
     ExecutorContext,
+    InputGuardrail,
     InputImage,
     InputText,
     LocalStorage,
@@ -43,6 +44,7 @@ from agents import (
     NativeProvider,
     NativeRole,
     OpenAIDecisions,
+    OutputGuardrail,
     PromptedOutput,
     ReplaceArguments,
     ResponseIntegrityReason,
@@ -50,6 +52,7 @@ from agents import (
     StopTurn,
     Tool,
     ToolContext,
+    ToolInputErrorContext,
     ToolOutput,
     ToolRef,
     ToolTimeoutBehavior,
@@ -71,10 +74,17 @@ from agents.observation import (
     ToolStarted,
 )
 from agents.subagents import Subagent
-from agents.tools import WebSearchLocation
+from agents.tools import WebSearchImageSettings, WebSearchLocation
 
 search_location: WebSearchLocation = {"timezone": "America/Chicago"}
-search = WebSearch(route="hosted", allowed_domains=["weather.example"], location=search_location)
+image_settings: WebSearchImageSettings = {"max_results": 3, "caption": False}
+search = WebSearch(
+    route="hosted",
+    allowed_domains=["weather.example"],
+    location=search_location,
+    search_content_types=["text", "image"],
+    image_settings=image_settings,
+)
 search_settings: ModelSettings = {"tool_choice": "required"}
 search_agent = Agent(instructions="Research.", tools=[search], model_settings=search_settings)
 assert_type(search_agent, Agent[None, str])
@@ -909,6 +919,31 @@ def formatter_only(key: str) -> str:
     return key
 
 
+def format_input_error(
+    context: ToolInputErrorContext[Application], error: Exception, original_arguments: Any
+) -> str:
+    return context.context.tenant
+
+
+def input_error_lookup(key: str) -> str:
+    return key
+
+
+direct_input_formatter = function_tool(input_error_lookup, input_error_function=format_input_error)
+decorated_input_formatter = function_tool(input_error_function=format_input_error)(
+    input_error_lookup
+)
+
+
+def contextual_input_lookup(context: ToolContext[Application], key: str) -> str:
+    return context.context.tenant + key
+
+
+contextual_input_formatter = function_tool(
+    contextual_input_lookup, input_error_function=format_input_error
+)
+
+
 @function_tool(before=contextual_before, after=neutral_after)
 def mixed_policies(key: str) -> str:
     return key
@@ -937,6 +972,11 @@ def raising_formatter(key: str) -> str:
 assert_type(Agent(instructions="Read.", tools=[policy_only]), Agent[Application, str])
 assert_type(Agent(instructions="Read.", tools=[after_only]), Agent[Application, str])
 assert_type(Agent(instructions="Read.", tools=[formatter_only]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[direct_input_formatter]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[decorated_input_formatter]), Agent[Application, str])
+assert_type(
+    Agent(instructions="Read.", tools=[contextual_input_formatter]), Agent[Application, str]
+)
 assert_type(Agent(instructions="Read.", tools=[mixed_policies]), Agent[Application, str])
 assert_type(
     Agent(instructions="Read.", tools=[plain, namespaced_policy_only]), Agent[Application, str]
@@ -1111,3 +1151,35 @@ async def typed_scalar_decision_schemas(
     assert_type(
         await child.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
     )
+
+
+def guardrail_constructor_inference(
+    input_guardrail: "InputGuardrail[dict[str, int]]",
+    output_guardrail: "OutputGuardrail[dict[str, int]]",
+) -> None:
+    assert_type(
+        Agent(instructions="Guarded input", input_guardrails=(input_guardrail,)),
+        Agent[dict[str, int], str],
+    )
+    assert_type(
+        Agent(
+            instructions="Guarded output",
+            output_type=int,
+            output_guardrails=(output_guardrail,),
+        ),
+        Agent[dict[str, int], int],
+    )
+
+
+def body_error_formatter(context: ToolContext[Application], error: Exception) -> str:
+    return context.context.tenant
+
+
+def body_error_callback(key: str) -> str:
+    return key
+
+
+direct_body_formatter = function_tool(body_error_callback, error_function=body_error_formatter)
+decorated_body_formatter = function_tool(error_function=body_error_formatter)(body_error_callback)
+assert_type(Agent(instructions="Read.", tools=[direct_body_formatter]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[decorated_body_formatter]), Agent[Application, str])

@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from _agents_codex._agent_profiles import _capture_agent_graph
+from _agents_codex.observation import _ObservationBuffer
 from _agents_codex.schema import _prepare_spec
 from _agents_codex.session import (
     Session,
@@ -65,6 +66,8 @@ def callback_session(root):
     session = object.__new__(Session)
     session._profiles = runtime
     session._closing = False
+    session._output_guardrails = ()
+    session._uses_siwc = False
     session._opening_agent = profiles[0].declaration
     session._decisions_provider = profiles[0].declaration.decisions
     session._profile_current = ("agent_0", 0)
@@ -340,7 +343,8 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
     session._repair_turns = []
     session._repair_items = []
     session._repair_receipts_incomplete = False
-    session._observations = SimpleNamespace()
+    session._include_raw_provider_events = True
+    session._observations = _ObservationBuffer("session", include_model_output_items=True)
     state = _Submission(_prepare_spec(root.output_type))
     state.handle = SimpleNamespace(turn_id="original-turn", submission_id="submission")
     settings = {
@@ -412,7 +416,8 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
         def _check_open(self):
             return None
 
-        async def _start(self, input, output, *, budget):
+        async def _start(self, input, output, *, budget, run_usage):
+            assert run_usage is state.run_usage
             correction_inputs.append(json.loads(input[0]["text"]))
             return Attempt()
 
@@ -420,6 +425,8 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
             self._closed = True
 
     async def open_repair(cls, declaration, **kwargs):
+        assert kwargs["include_model_output_items"] is True
+        assert kwargs["include_raw_provider_events"] is True
         opened.append(declaration)
         return Repair()
 

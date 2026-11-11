@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import inspect as inspect
 import json as json
-from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence as Sequence
+from collections.abc import (
+    Awaitable as Awaitable,
+    Callable as Callable,
+    Mapping,
+    Sequence as Sequence,
+)
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Literal, cast
@@ -12,6 +17,7 @@ from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Litera
 from pydantic import (
     BaseModel as BaseModel,
     ConfigDict as ConfigDict,
+    JsonValue as JsonValue,
     TypeAdapter as TypeAdapter,
     create_model as create_model,
 )
@@ -24,7 +30,12 @@ from .manual import _CapturedManual as _CapturedManual
 from .realtime_result import BackgroundResult as BackgroundResult
 
 if TYPE_CHECKING:
-    from ._function_tools import ToolContext, ToolTimeoutBehavior, ToolTimeoutError
+    from ._function_tools import (
+        ToolContext,
+        ToolInputErrorContext,
+        ToolTimeoutBehavior,
+        ToolTimeoutError,
+    )
     from .native_interception import Allow, Deny, ReplaceArguments
 
 _TOOL_RESPONSE = TypeAdapter(FunctionCallResponse)
@@ -50,6 +61,13 @@ class WebSearchLocation(TypedDict, total=False, closed=True):
     timezone: str
 
 
+class WebSearchImageSettings(TypedDict, total=False, closed=True):
+    """Provider-hosted image result count and caption controls."""
+
+    max_results: int
+    caption: bool
+
+
 @dataclass(frozen=True, kw_only=True)
 class WebSearch:
     """Allow the native web search tool for this Session.
@@ -61,21 +79,31 @@ class WebSearch:
     support. It grants no other tools. An operation/step cannot add or change
     its binding. A selection may omit it to disable search for that step.
 
+    ``search_context_size`` has been selecting the low, medium, or high context
+    budget on either route. An omitted value has been retaining the route's default.
+
     Domain filters and approximate location require ``route="hosted"``,
     a Responses provider with the ``web_search`` tool, and a model that
     supports that route, such as ``gpt-5.5``. Supply domains without a URL
     scheme. Use a two-letter country code and an IANA timezone such as
     ``America/Chicago`` when setting those location fields. The Session
     captures the controls when it opens. The provider applies them.
-    Search results can include cited URLs and consulted sources. Source
-    passages are unavailable through this interface.
+    ``search_content_types`` and ``image_settings`` have been selecting hosted
+    image results. Image selection has been requesting raw search results.
+    Session items and detailed completed-item observations have been preserving
+    those results, including provider fields unknown to this SDK. Detailed readers
+    have been using ``include_execution_details=True``. Default observations have
+    been retaining search metadata without raw result payloads.
     """
 
     mode: Literal["cached", "live"] = "cached"
     route: Literal["standalone", "hosted"] = "standalone"
+    search_context_size: Literal["low", "medium", "high"] | None = None
     allowed_domains: Sequence[str] | None = None
     blocked_domains: Sequence[str] | None = None
     location: WebSearchLocation | None = None
+    search_content_types: Sequence[Literal["text", "image"]] | None = None
+    image_settings: WebSearchImageSettings | None = None
 
 
 @dataclass(frozen=True)
@@ -346,7 +374,7 @@ class ToolOutputFile:
 
 @dataclass
 class ToolOutput:
-    """A mutable native response of content items, with optional explicit failure."""
+    """A native tool response with optional SDK-only application data."""
 
     content_items: (
         list[dict[str, Any] | ToolOutputText | ToolOutputImage | ToolOutputFile]
@@ -354,6 +382,8 @@ class ToolOutput:
         | list[dict[str, Any]]
     )
     success: bool = True
+    application_data: dict[str, JsonValue] | None = field(default=None, repr=False)
+    """An optional JSON object retained with the accepted result for the application."""
 
     @classmethod
     def text(cls, value: str) -> ToolOutput:
@@ -439,6 +469,21 @@ class ToolOutput:
         _TOOL_RESPONSE.validate_python(self.to_native(), strict=True)
 
 
+def _capture_application_data(
+    value: Mapping[str, JsonValue] | None,
+) -> dict[str, JsonValue] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise TypeError("Tool application data must be a mapping with string keys")
+    if not value:
+        return None
+    try:
+        return cast(dict[str, JsonValue], json.loads(json.dumps(dict(value), allow_nan=False)))
+    except (TypeError, ValueError) as error:
+        raise ValueError("Tool application data must be JSON-compatible") from error
+
+
 @dataclass(frozen=True)
 class _CapturedFunction:
     """One immutable snapshot for schema publication and callback execution."""
@@ -472,8 +517,18 @@ class _CapturedFunction:
         | None
     )
     context: Any = field(repr=False)
+    input_error_function: (
+        Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None
+    ) = field(default=None, repr=False)
     namespace: str | None = None
     finish_turn: bool = False
+
+    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
+        default=None, repr=False
+    )
+
+    _allow_run_error_formatter: bool = field(default=False, repr=False)
+    _reparse_error_arguments: bool = field(default=False, repr=False)
 
     @property
     def _requires_live_manual_session(self) -> bool:

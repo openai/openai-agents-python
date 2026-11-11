@@ -17,7 +17,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import pytest
@@ -37,6 +37,7 @@ from agents import (
     StaleTurnError,
     StdioMCP,
     TurnNeedsAttention,
+    function_tool,
 )
 from agents.state import SessionState
 from tests._asyncio import timeout
@@ -90,11 +91,16 @@ def test_local_declaration_has_no_transport_and_normalizes_additional_roots() ->
     assert host._config(local)["env_vars"] == env_vars
 
 
-def test_trusted_workspace_write_is_linux_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    with pytest.raises(ValueError, match="requires Environment.local on Linux"):
-        Environment.local(cwd="/job/worktree", write_policy="trusted_workspace_write")
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_trusted_workspace_write_on_supported_local_platforms(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
     assert Environment.local(cwd="/job/worktree").write_policy == "strict"
+    assert (
+        Environment.local(cwd="/job/worktree", write_policy="trusted_workspace_write").write_policy
+        == "trusted_workspace_write"
+    )
 
 
 def test_trusted_workspace_write_requires_a_local_opt_in() -> None:
@@ -142,17 +148,7 @@ async def test_missing_local_root_refuses_session_before_model(
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@pytest.mark.parametrize(
-    "trusted",
-    [
-        pytest.param(False, id="strict"),
-        pytest.param(
-            True,
-            marks=pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux"),
-            id="trusted",
-        ),
-    ],
-)
+@pytest.mark.parametrize("trusted", [False, True], ids=["strict", "trusted"])
 async def test_local_write_roots_cannot_include_the_native_helper_installation(
     responses: ResponsesFixture, tmp_path: Path, trusted: bool
 ) -> None:
@@ -737,7 +733,12 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     assert (linked / ".agents" / "protected").read_text() == "metadata"
 
 
-@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
 @pytest.mark.usefixtures("isolated_github_cli")
 async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_writes(
     responses: ResponsesFixture,
@@ -819,6 +820,13 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
             "DYLD_SYNTHETIC_MARKER": "synthetic-explicit-loader-value",
         },
     )
+    if sys.platform == "darwin":
+        identity_check = f'test "$(/usr/bin/id -u)" = {os.geteuid()}; '
+    else:
+        identity_check = (
+            "ssh_config=$(ssh -G -T -F /dev/null credential.example.invalid); "
+            'printf "%s\\n" "$ssh_config" | grep -q "^user "; '
+        )
     command = (
         'set -eu; test "$(fixture-tool)" = "fixture tool"; '
         f'test "$HOME" = {shlex.quote(str(home))}; '
@@ -827,8 +835,7 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         f'test "$TMPDIR" = {shlex.quote(str(job_temp))}; '
         'test -z "${OPENAI_API_KEY+x}${openai_api_key+x}${CODEX_API_KEY+x}${LD_LIBRARY_PATH+x}"; '
         'test -z "${ld_synthetic_marker+x}${DYLD_SYNTHETIC_MARKER+x}"; '
-        "ssh_config=$(ssh -G -T -F /dev/null credential.example.invalid); "
-        'printf "%s\\n" "$ssh_config" | grep -q "^user "; '
+        f"{identity_check}"
         "printf 'protocol=https\\nhost=credential.example.invalid\\n\\n' "
         "| git credential fill | grep -qx password=synthetic-git-password; "
         'scratch=$(mktemp -d "$TMPDIR/sdk-job.XXXXXX"); printf job > "$scratch/result"; '
@@ -900,7 +907,98 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
     assert job_result.read_text() == "job"
 
 
-@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS directory services")
+@pytest.mark.requires_native_macos_sandbox
+async def test_macos_local_session_can_read_host_account_with_an_application_tool(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    @function_tool
+    async def inspect_host_account() -> str:
+        account_name = await asyncio.to_thread(
+            subprocess.run,
+            ["/usr/bin/id", "-F"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        ssh_config = await asyncio.to_thread(
+            subprocess.run,
+            ["/usr/bin/ssh", "-G", "-T", "-F", "/dev/null", "credential.example.invalid"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        assert account_name.stdout.strip()
+        assert any(line.startswith("user ") for line in ssh_config.stdout.splitlines())
+        return "Host account lookup completed."
+
+    responses.respond(function_call("inspect_host_account", {}, "host-identity"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(
+        instructions="Use the supplied host account tool.",
+        tools=[inspect_host_account],
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+    environment = Environment.local(
+        cwd=tmp_path, tools=["exec_command"], write_policy="trusted_workspace_write"
+    )
+    async with timeout(30), agent.session(environment=environment) as session:
+        turn = await session.submit("Check the host account.")
+        assert (await turn.get_result()).final_output == "done"
+    assert tool_output(responses.requests[-1], "host-identity") == "Host account lookup completed."
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Xcode and Homebrew")
+@pytest.mark.requires_native_macos_sandbox
+@pytest.mark.usefixtures("isolated_github_cli")
+async def test_trusted_local_runs_xcode_shims_and_homebrew(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("brew") is None:
+        pytest.skip("Homebrew is required")
+    monkeypatch.setenv("HOMEBREW_NO_AUTO_UPDATE", "1")
+    monkeypatch.setenv("HOMEBREW_NO_ANALYTICS", "1")
+    prefix = subprocess.check_output(["brew", "--prefix"], text=True).strip()
+    command = (
+        "set -e; /usr/bin/xcrun --no-cache --find git; /usr/bin/git --version; "
+        "/usr/bin/make --version; brew --version; brew --prefix"
+    )
+    bash = Path(prefix) / "bin" / "bash"
+    if bash.is_file():
+        command += f"; {shlex.quote(str(bash))} -c 'printf homebrew-bash'"
+    responses.respond(function_call("exec_command", {"cmd": command, "login": False}, "dev-tools"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(
+        instructions="Use the selected tools.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+    selected = Environment.local(
+        cwd=tmp_path,
+        tools=["exec_command"],
+        write_policy="trusted_workspace_write",
+        temp_dir=tmp_path,
+    )
+    async with timeout(40), agent.session(environment=selected) as session:
+        turn = await session.submit("Run the developer tools.")
+        assert (await turn.get_result()).final_output == "done"
+    output = tool_output(responses.requests[-1], "dev-tools")
+    assert "Process exited with code 0" in output
+    assert "git version" in output
+    assert "GNU Make" in output
+    assert "Homebrew " in output
+    assert prefix in output.splitlines()
+    if bash.is_file():
+        assert "homebrew-bash" in output
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
 @pytest.mark.usefixtures("isolated_github_cli")
 @pytest.mark.parametrize("explicit_network", [False, True], ids=["default-deny", "explicit-allow"])
 async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
@@ -974,17 +1072,7 @@ async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
     if sys.platform == "linux"
     else pytest.mark.requires_native_macos_sandbox
 )
-@pytest.mark.parametrize(
-    "trusted",
-    [
-        pytest.param(False, id="strict"),
-        pytest.param(
-            True,
-            marks=pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux"),
-            id="trusted",
-        ),
-    ],
-)
+@pytest.mark.parametrize("trusted", [False, True], ids=["strict", "trusted"])
 @pytest.mark.usefixtures("isolated_github_cli")
 async def test_local_write_root_replacement_survives_portable_resume(
     responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trusted: bool
@@ -1442,8 +1530,11 @@ async def test_cancel_joins_local_process_before_its_result_is_accepted(
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
 @pytest.mark.requires_native_macos_sandbox
+@pytest.mark.parametrize("write_policy", ["strict", "trusted_workspace_write"])
 async def test_macos_session_close_stops_child_after_command_exit(
-    responses: ResponsesFixture, tmp_path: Path
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    write_policy: Literal["strict", "trusted_workspace_write"],
 ) -> None:
     cwd, extra = tmp_path / "cwd", tmp_path / "extra"
     cwd.mkdir()
@@ -1478,7 +1569,9 @@ async def test_macos_session_close_stops_child_after_command_exit(
     responses.respond(assistant_output("parent exited"))
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
     agent = Agent(instructions="Use the selected tools.", provider=provider)
-    environment = Environment.local(cwd=cwd, writable_roots=[extra], tools=["exec_command"])
+    environment = Environment.local(
+        cwd=cwd, writable_roots=[extra], tools=["exec_command"], write_policy=write_policy
+    )
     # The fixture's 30-second self-exit must never satisfy this test.
     async with timeout(25), provider:
         try:

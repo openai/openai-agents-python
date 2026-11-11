@@ -39,6 +39,7 @@ async def test_sip_config_prepares_captured_tools_without_connecting(explicit_to
             _native=SimpleNamespace(call=call),
             _check_open=lambda: None,
             _check_callback_operation=lambda _: None,
+            _check_realtime_provider=lambda: None,
             _realtime_function_tools=tools,
             _prepare_realtime_mcp=prepare_mcp,
             _realtime=None,
@@ -95,8 +96,10 @@ async def test_sip_config_default_and_native_rejection() -> None:
             _native=SimpleNamespace(call=call),
             _check_open=lambda: None,
             _check_callback_operation=lambda _: None,
+            _check_realtime_provider=lambda: None,
             _realtime_function_tools=tools,
             _prepare_realtime_mcp=prepare_mcp,
+            _realtime=None,
         ),
     )
     with pytest.raises(ValueError, match="Captured source"):
@@ -114,6 +117,7 @@ async def test_sip_config_rejects_attachment_policy_before_preparing_tools() -> 
         SimpleNamespace(
             _check_open=lambda: None,
             _check_callback_operation=lambda _: None,
+            _check_realtime_provider=lambda: None,
             _native=SimpleNamespace(call=unexpected),
             _prepare_realtime_mcp=unexpected,
             _realtime_function_tools=unexpected,
@@ -158,6 +162,7 @@ async def test_sip_attachment_forwards_repeated_call_accept_options() -> None:
             transport=RealtimeSIP("rtc_repeated_options"),
         ),
     )
+    session._realtime = voice
     voice._live = True
     await voice._admit()
     params = requests[0][1]["params"]

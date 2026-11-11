@@ -47,12 +47,16 @@ pub(crate) struct ProfileSpec {
     step_defaults: Option<Vec<usize>>,
     #[serde(default)]
     handoffs: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    handoff_callbacks: BTreeMap<String, usize>,
     #[serde(default)]
     transform_context: bool,
     #[serde(default)]
     before_compact: bool,
     #[serde(default)]
     before_complete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tool_batch_completion: bool,
     #[serde(default)]
     selecting_steps: bool,
     output_fingerprint: String,
@@ -108,10 +112,36 @@ fn handoff_defaults(
 struct OpeningFiles(Vec<InstructionFile>);
 
 impl OpeningProfiles {
+    /// A serialized pending source can only claim permissions the fresh graph
+    /// grants without running a callback.
+    pub(crate) fn validate_pending_source(&self, source: &AgentProfileReceipt) -> Result<()> {
+        let mut candidates = vec![self.root_id.as_str()];
+        let mut visited = HashSet::new();
+        while let Some(id) = candidates.pop() {
+            if id == source.profile_id {
+                return Ok(());
+            }
+            if !visited.insert(id) {
+                continue;
+            }
+            if let Some(profile) = self.roster.iter().find(|profile| profile.id == id) {
+                candidates.extend(
+                    profile
+                        .handoffs
+                        .iter()
+                        .filter(|(name, _)| !profile.handoff_callbacks.contains_key(*name))
+                        .map(|(_, target)| target.as_str()),
+                );
+            }
+        }
+        anyhow::bail!("Restored pending Agent profile requires live callback acceptance")
+    }
+
     pub(crate) fn validate_restored_handoff(
         &self,
         tool_name: &ToolName,
         receipt: &codex_protocol::agent_profile::AgentProfileHandoff,
+        pending: bool,
     ) -> Result<()> {
         let source = self
             .roster
@@ -125,6 +155,11 @@ impl OpeningProfiles {
                     && target == &receipt.target_profile_id
             }),
             "Restored handoff is outside its source declaration"
+        );
+        // Checkpoints cannot authorize a callback for the current turn.
+        ensure!(
+            !pending || !source.handoff_callbacks.contains_key(&tool_name.name),
+            "Pending callback-backed Agent handoffs require live acceptance"
         );
         Ok(())
     }
@@ -176,12 +211,15 @@ impl OpeningProfiles {
         Ok((saved, slots))
     }
 
-    pub(crate) fn capabilities(&self) -> [bool; 4] {
+    pub(crate) fn capabilities(&self) -> [bool; 5] {
         [
             self.roster.iter().any(|profile| profile.selecting_steps),
             self.roster.iter().any(|profile| profile.transform_context),
             self.roster.iter().any(|profile| profile.before_compact),
             self.roster.iter().any(|profile| profile.before_complete),
+            self.roster
+                .iter()
+                .any(|profile| profile.tool_batch_completion),
         ]
     }
 }
@@ -206,7 +244,12 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
         );
         let mut all_declarations = profile.tools.clone();
         for name in profile.handoffs.keys() {
+            if profile.handoff_callbacks.contains_key(name) {
+                continue;
+            }
             all_declarations.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                strict: false,
+                output_schema: None,
                 name: name.clone(),
                 description: "Native handoff".into(),
                 input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -214,6 +257,15 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
             }));
         }
         crate::python_tools::validate_declarations(&all_declarations)?;
+        for (name, slot) in &profile.handoff_callbacks {
+            ensure!(
+                profile.handoffs.contains_key(name)
+                    && matches!(profile.tools.get(*slot), Some(DynamicToolSpec::Function(spec)) if spec.name == *name)
+                    && !profile.manual_slots.contains(slot)
+                    && !profile.terminal_slots.contains(slot),
+                "Handoff callback must name its exact automatic catalog slot"
+            );
+        }
         for (name, target) in &profile.handoffs {
             ensure!(
                 !name.is_empty()
@@ -253,6 +305,17 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
 /// Hashes declaration/model/instruction/output/callback shapes and MCP names, never credentials.
 pub(crate) fn fingerprint(roster_json: &str, root_id: &str) -> Result<String> {
     roster_fingerprint(&decode_roster(roster_json)?, root_id)
+}
+
+pub(crate) fn opening(thread: &CodexThread) -> Option<(OpeningProfiles, Vec<InstructionFile>)> {
+    let store = thread.thread_extension_data();
+    Some((
+        (*store.get::<OpeningProfiles>()?).clone(),
+        store
+            .get::<OpeningFiles>()
+            .map(|files| files.0.clone())
+            .unwrap_or_default(),
+    ))
 }
 
 pub(crate) fn install_opening(
@@ -444,6 +507,7 @@ pub(crate) fn validate_restored(
     Ok(accepted)
 }
 
+#[derive(Clone)]
 struct PreparedProfile {
     declaration: ProfileSpec,
     model: AgentProfileModelSettings,
@@ -470,6 +534,291 @@ struct AgentProfiles {
     profiles: BTreeMap<String, PreparedProfile>,
     files: Vec<InstructionFile>,
     reservation: Mutex<Option<Reservation>>,
+}
+
+struct VoiceProfileRegistry {
+    generation: String,
+    previous: Option<Arc<AgentProfiles>>,
+    last_admission: Option<VoiceGraphAdmission>,
+}
+
+struct VoiceGraphAdmission {
+    receipt: AgentProfileReceipt,
+    previous: Option<Arc<AgentProfiles>>,
+}
+
+fn set_profiles(thread: &CodexThread, profiles: Option<Arc<AgentProfiles>>) {
+    match profiles {
+        Some(profiles) => {
+            thread.thread_extension_data().insert(profiles);
+        }
+        None => {
+            thread
+                .thread_extension_data()
+                .remove::<Arc<AgentProfiles>>();
+        }
+    }
+}
+
+async fn prepare_profile(
+    thread: &CodexThread,
+    tools: &PythonTools,
+    descriptor: &ProfileSpec,
+    mut model: AgentProfileModelSettings,
+    default_model: &str,
+    startup: bool,
+    voice: bool,
+) -> Result<PreparedProfile> {
+    if model.model.is_empty() {
+        model.model = default_model.to_owned();
+    }
+    let flags = [
+        descriptor.selecting_steps,
+        descriptor.transform_context,
+        descriptor.before_compact,
+        descriptor.before_complete,
+        descriptor.tool_batch_completion,
+    ];
+    let catalog = if voice {
+        tools.voice_profile_catalog(
+            descriptor.tools.clone(),
+            &descriptor.manual_slots,
+            &descriptor.terminal_slots,
+            descriptor.step_defaults.as_deref(),
+            flags,
+        )?
+    } else {
+        tools.profile_catalog(
+            descriptor.tools.clone(),
+            &descriptor.manual_slots,
+            &descriptor.terminal_slots,
+            descriptor.step_defaults.as_deref(),
+            flags,
+            startup,
+        )?
+    };
+    let servers = crate::mcp_roster::decode(json!(descriptor.mcp_servers))?;
+    let result_selection: crate::mcp_result_control::Selection = serde_json::from_value(json!({
+        "generation": catalog.generation.id, "servers": descriptor.mcp_result_tools,
+        "metadata_servers": descriptor.mcp_metadata_tools,
+    }))?;
+    result_selection.validate(&servers)?;
+    let (mcp, plugins) = thread.prepare_agent_profile_mcp(servers).await?;
+    let mcp_policy = crate::native_interception::ProfileMcpPolicy::prepare(
+        &mcp,
+        &descriptor.mcp_tools,
+        catalog.generation.id,
+    )?;
+    Ok(PreparedProfile {
+        declaration: descriptor.clone(),
+        model,
+        catalog,
+        mcp,
+        plugins,
+        result_selection,
+        mcp_policy,
+    })
+}
+
+pub(crate) async fn admit_realtime_graph(
+    state: &crate::engine::ThreadState,
+    generation: &str,
+    roster_json: &str,
+    root_id: &str,
+    expected: Option<AgentProfileReceipt>,
+) -> Result<Value> {
+    let thread = &state.thread;
+    let current = thread
+        .thread_extension_data()
+        .get::<Arc<AgentProfiles>>()
+        .map(|current| current.as_ref().clone());
+    let original = match thread.thread_extension_data().get::<VoiceProfileRegistry>() {
+        Some(registry) => {
+            ensure!(
+                registry.generation == generation,
+                "Voice graph belongs to another generation"
+            );
+            registry.previous.clone()
+        }
+        None => current.clone(),
+    };
+    let tools = thread
+        .thread_extension_data()
+        .get::<PythonTools>()
+        .context("Voice update requires the native tool owner")?;
+    let roster = decode_roster(roster_json)?;
+    validate(&roster, root_id)?;
+    let mut prepared = current
+        .as_ref()
+        .map(|current| current.profiles.clone())
+        .unwrap_or_default();
+    ensure!(
+        prepared.len() + roster.len() <= 1024,
+        "Voice Agent graph capacity exceeded"
+    );
+    ensure!(
+        roster
+            .iter()
+            .all(|profile| !prepared.contains_key(&profile.id)),
+        "Voice Agent identities cannot be reused"
+    );
+    let default_model = thread.thread_settings_snapshot().await.model;
+    for descriptor in &roster {
+        prepared.insert(
+            descriptor.id.clone(),
+            prepare_profile(
+                thread,
+                &tools,
+                descriptor,
+                descriptor.model.clone(),
+                &default_model,
+                false,
+                true,
+            )
+            .await?,
+        );
+    }
+    let opening = match &current {
+        Some(current) => current.opening.clone(),
+        None => Arc::new(OpeningProfiles {
+            root_id: root_id.to_owned(),
+            roster: roster.clone(),
+            fingerprint: roster_fingerprint(&roster, root_id)?,
+        }),
+    };
+    let profiles = Arc::new(AgentProfiles {
+        opening,
+        thread: Arc::downgrade(thread),
+        tools,
+        profiles: prepared,
+        files: current
+            .as_ref()
+            .map(|current| current.files.clone())
+            .unwrap_or_default(),
+        reservation: Mutex::new(None),
+    });
+    let target = profiles.candidate(thread, root_id)?;
+    thread.thread_extension_data().insert(profiles.clone());
+    let captured = thread
+        .capture_realtime_agent_profile_source(generation, expected.as_ref(), target)
+        .await;
+    let receipt = match captured {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            set_profiles(thread, current);
+            return Err(error.into());
+        }
+    };
+    let (selection_id, function_tools) = match thread
+        .realtime_agent_source_selection(Some(generation), Some(&receipt))
+        .await
+    {
+        Ok(selection) => selection,
+        Err(error) => {
+            thread.release_realtime_agent_profile_source(generation, &receipt);
+            set_profiles(thread, current);
+            return Err(error.into());
+        }
+    };
+    thread.thread_extension_data().insert(VoiceProfileRegistry {
+        generation: generation.to_owned(),
+        previous: original,
+        last_admission: Some(VoiceGraphAdmission {
+            receipt: receipt.clone(),
+            previous: current,
+        }),
+    });
+    let catalogs = roster
+        .iter()
+        .map(|profile| {
+            (
+                profile.id.clone(),
+                profiles.profiles[&profile.id].catalog.generation.id,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok(
+        json!({"active": receipt, "catalogs": catalogs, "selection_id": selection_id, "function_tools": function_tools, "generation_high_water": profiles.tools.generation_high_water()}),
+    )
+}
+
+pub(crate) fn discard_realtime_graph(
+    thread: &CodexThread,
+    generation: &str,
+    receipt: &AgentProfileReceipt,
+) -> Result<()> {
+    let registry = thread
+        .thread_extension_data()
+        .get::<VoiceProfileRegistry>()
+        .context("Voice graph is unavailable")?;
+    ensure!(
+        registry.generation == generation,
+        "Voice graph belongs to another generation"
+    );
+    let admission = registry
+        .last_admission
+        .as_ref()
+        .filter(|admission| &admission.receipt == receipt)
+        .context("Voice graph does not match the last admission")?;
+    thread.release_realtime_agent_profile_source(generation, receipt);
+    set_profiles(thread, admission.previous.clone());
+    thread.thread_extension_data().insert(VoiceProfileRegistry {
+        generation: generation.to_owned(),
+        previous: registry.previous.clone(),
+        last_admission: None,
+    });
+    Ok(())
+}
+
+pub(crate) async fn restore_realtime_graph(
+    thread: &CodexThread,
+    generation: &str,
+) -> Result<Value> {
+    if let Some(registry) = thread.thread_extension_data().get::<VoiceProfileRegistry>() {
+        ensure!(
+            registry.generation == generation,
+            "Voice graph belongs to another generation"
+        );
+        set_profiles(thread, registry.previous.clone());
+        thread.release_realtime_agent_profile_sources(generation);
+        thread
+            .thread_extension_data()
+            .remove::<VoiceProfileRegistry>();
+    }
+    if let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() {
+        profiles.receipt(thread).await
+    } else {
+        let tools = thread
+            .thread_extension_data()
+            .get::<PythonTools>()
+            .context("Native tool owner is unavailable")?;
+        Ok(
+            json!({"active":null,"catalogs":{},"generation_high_water":tools.generation_high_water()}),
+        )
+    }
+}
+
+pub(crate) async fn realtime_source(
+    thread: &CodexThread,
+    generation: &str,
+    receipt: AgentProfileReceipt,
+) -> Result<Value> {
+    let profiles = thread
+        .thread_extension_data()
+        .get::<Arc<AgentProfiles>>()
+        .context("Captured Agent graph is unavailable")?;
+    let catalog = &profiles
+        .profiles
+        .get(&receipt.profile_id)
+        .context("Voice Agent source is outside its retained graph")?
+        .catalog;
+    let (selection_id, function_tools) = thread
+        .realtime_agent_source_selection(Some(generation), Some(&receipt))
+        .await?;
+    Ok(
+        json!({"profile_receipt": receipt, "catalog_generation": catalog.generation.id,
+        "selection_id": selection_id, "function_tools": function_tools}),
+    )
 }
 
 impl AgentProfiles {
@@ -678,52 +1027,23 @@ pub(crate) async fn configure(
     });
     let mut profiles = BTreeMap::new();
     for descriptor in &opening.roster {
-        let declaration = descriptor.clone();
-        let mut model = if descriptor.id == opening.root_id {
+        let model = if descriptor.id == opening.root_id {
             opening_model.clone()
         } else {
             descriptor.model.clone()
         };
-        if model.model.is_empty() {
-            model.model = opening_model.model.clone();
-        }
-        let catalog = tools.profile_catalog(
-            descriptor.tools.clone(),
-            &descriptor.manual_slots,
-            &descriptor.terminal_slots,
-            descriptor.step_defaults.as_deref(),
-            [
-                descriptor.selecting_steps,
-                descriptor.transform_context,
-                descriptor.before_compact,
-                descriptor.before_complete,
-            ],
-            !restored && descriptor.id == opening.root_id,
-        )?;
-        let servers = crate::mcp_roster::decode(json!(descriptor.mcp_servers))?;
-        let result_selection: crate::mcp_result_control::Selection =
-            serde_json::from_value(json!({
-                "generation": catalog.generation.id, "servers": descriptor.mcp_result_tools,
-                "metadata_servers": descriptor.mcp_metadata_tools,
-            }))?;
-        result_selection.validate(&servers)?;
-        let (mcp, plugins) = thread.prepare_agent_profile_mcp(servers).await?;
-        let mcp_policy = crate::native_interception::ProfileMcpPolicy::prepare(
-            &mcp,
-            &descriptor.mcp_tools,
-            catalog.generation.id,
-        )?;
         profiles.insert(
             descriptor.id.clone(),
-            PreparedProfile {
-                declaration,
+            prepare_profile(
+                thread,
+                &tools,
+                descriptor,
                 model,
-                catalog,
-                mcp,
-                plugins,
-                result_selection,
-                mcp_policy,
-            },
+                &opening_model.model,
+                !restored && descriptor.id == opening.root_id,
+                false,
+            )
+            .await?,
         );
     }
     let profiles = Arc::new(AgentProfiles {
@@ -747,6 +1067,7 @@ pub(crate) async fn configure(
                 prepared.catalog.transform_context,
                 prepared.catalog.before_compact,
                 prepared.catalog.before_complete,
+                prepared.catalog.tool_batch_completion,
             ],
             default_slots,
         )?;
@@ -848,11 +1169,11 @@ pub(crate) async fn update_active(
     let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
         return Ok(false);
     };
+    // Voice-only graphs can populate the registry without a backend profile.
+    let Some(captured) = thread.captured_agent_profile().await? else {
+        return Ok(false);
+    };
     profiles.tools.check_idle(thread).await?;
-    let captured = thread
-        .captured_agent_profile()
-        .await?
-        .context("Managed Agent update has no committed source")?;
     let mut target = (*captured.profile).clone();
     if let Some(settings) = settings {
         if let Some(model) = &settings.model {
@@ -950,11 +1271,10 @@ pub(crate) async fn replace_tools(
     let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
         return Ok(None);
     };
+    let Some(captured) = thread.captured_agent_profile().await? else {
+        return Ok(None);
+    };
     profiles.tools.check_idle(thread).await?;
-    let captured = thread
-        .captured_agent_profile()
-        .await?
-        .context("Managed Agent replacement has no committed source")?;
     let previous = captured
         .profile
         .data
@@ -978,6 +1298,7 @@ pub(crate) async fn replace_tools(
             previous.transform_context,
             previous.before_compact,
             previous.before_complete,
+            previous.tool_batch_completion,
         ],
         false,
     )?;
@@ -1141,6 +1462,7 @@ struct HandoffExecutor {
     name: String,
     target: String,
     spec: ToolSpec,
+    callback: Option<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>>,
 }
 
 impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
@@ -1149,6 +1471,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
     }
     fn spec(&self) -> ToolSpec {
         self.spec.clone()
+    }
+    fn exposure(&self) -> codex_tools::ToolExposure {
+        codex_tools::ToolExposure::DirectModelOnly
     }
     fn supports_parallel_tool_calls(&self) -> bool {
         true
@@ -1193,17 +1518,26 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
         ToolCall<'call>: 'a,
     {
         Box::pin(async move {
-            let arguments: Value =
-                serde_json::from_str(call.function_arguments()?).map_err(|_| {
-                    FunctionCallError::RespondToModel("Invalid handoff arguments".into())
-                })?;
-            if !arguments
-                .as_object()
-                .is_some_and(|arguments| arguments.is_empty())
-            {
-                return Err(FunctionCallError::RespondToModel(
-                    "Handoffs accept no arguments".into(),
-                ));
+            let turn_id = call.turn_id.to_owned();
+            let call_id = call.call_id.clone();
+            if let Some(callback) = &self.callback {
+                let output = callback.handle(call).await?;
+                if !output.success_for_logging() {
+                    return Ok(output);
+                }
+            } else {
+                let arguments: Value =
+                    serde_json::from_str(call.function_arguments()?).map_err(|_| {
+                        FunctionCallError::RespondToModel("Invalid handoff arguments".into())
+                    })?;
+                if !arguments
+                    .as_object()
+                    .is_some_and(|arguments| arguments.is_empty())
+                {
+                    return Err(FunctionCallError::RespondToModel(
+                        "Handoffs accept no arguments".into(),
+                    ));
+                }
             }
             let mut pending = self
                 .profiles
@@ -1212,12 +1546,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                 .expect("Agent reservation poisoned");
             if pending
                 .as_ref()
-                .is_some_and(|previous| previous.turn != call.turn_id)
+                .is_some_and(|previous| previous.turn != turn_id)
             {
                 *pending = None;
             }
             if let Some(previous) = pending.as_mut() {
-                if previous.turn != call.turn_id
+                if previous.turn != turn_id
                     || previous.expected != self.source
                     || previous.target != self.target
                 {
@@ -1225,13 +1559,13 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                         "Conflicting Agent handoffs in one tool batch".into(),
                     ));
                 }
-                previous.calls.insert(call.call_id.clone());
+                previous.calls.insert(call_id.clone());
             } else {
                 *pending = Some(Reservation {
-                    turn: call.turn_id.to_owned(),
+                    turn: turn_id,
                     expected: self.source.clone(),
                     target: self.target.clone(),
-                    calls: HashSet::from([call.call_id.clone()]),
+                    calls: HashSet::from([call_id]),
                     accepted: false,
                     restored: false,
                 });
@@ -1246,8 +1580,47 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
     }
 }
 
+/// The ordinary Python factory owns exact callback admission and result fencing.
+pub(crate) fn wrap_handoff_callback(
+    thread: &ExtensionData,
+    source: Option<&AgentProfileReceipt>,
+    slot: usize,
+    callback: Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>,
+) -> Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>> {
+    let Some(source) = source else {
+        return callback;
+    };
+    let Some(profiles) = thread.get::<Arc<AgentProfiles>>() else {
+        return callback;
+    };
+    let Some(profile) = profiles.profiles.get(&source.profile_id) else {
+        return callback;
+    };
+    let Some((name, _)) = profile
+        .declaration
+        .handoff_callbacks
+        .iter()
+        .find(|(_, candidate)| **candidate == slot)
+    else {
+        return callback;
+    };
+    let Some(target) = profile.declaration.handoffs.get(name) else {
+        return callback;
+    };
+    Arc::new(HandoffExecutor {
+        profiles: profiles.as_ref().clone(),
+        source: source.clone(),
+        name: name.clone(),
+        target: target.clone(),
+        spec: callback.spec(),
+        callback: Some(callback),
+    })
+}
+
 fn handoff_declaration(name: &str, target: &str) -> DynamicToolFunctionSpec {
     DynamicToolFunctionSpec {
+        strict: false,
+        output_schema: None,
         name: name.to_owned(),
         description: format!("Transfer this conversation to captured Agent {target}."),
         input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
@@ -1256,12 +1629,34 @@ fn handoff_declaration(name: &str, target: &str) -> DynamicToolFunctionSpec {
 }
 
 /// Project only the handoffs admitted by this immutable producing Agent profile.
+pub(crate) fn is_handoff_callback(
+    thread: &ExtensionData,
+    source: Option<&AgentProfileReceipt>,
+    name: &ToolName,
+) -> bool {
+    source
+        .and_then(|source| {
+            thread.get::<Arc<AgentProfiles>>().and_then(|profiles| {
+                profiles.profiles.get(&source.profile_id).map(|profile| {
+                    profile
+                        .declaration
+                        .handoff_callbacks
+                        .contains_key(&name.name)
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn realtime_handoff_declarations(
     handoffs: &codex_extension_api::AgentProfileHandoffTools,
+    thread: &ExtensionData,
+    source: Option<&AgentProfileReceipt>,
 ) -> Result<Vec<codex_extension_api::RealtimeToolDeclaration>> {
     handoffs
         .targets
         .iter()
+        .filter(|(name, _)| !is_handoff_callback(thread, source, name))
         .map(|(name, target)| {
             let raw = handoff_declaration(&name.name, target);
             let native = dynamic_tool_to_responses_api_tool(&raw)?;
@@ -1310,6 +1705,7 @@ impl ToolContributor for Contributor {
             .declaration
             .handoffs
             .iter()
+            .filter(|(name, _)| !profile.declaration.handoff_callbacks.contains_key(*name))
             .filter_map(|(name, target)| {
                 let declaration = handoff_declaration(name, target);
                 let spec =
@@ -1320,6 +1716,7 @@ impl ToolContributor for Contributor {
                     name: name.clone(),
                     target: target.clone(),
                     spec,
+                    callback: None,
                 })
                     as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>)
             })
@@ -1344,6 +1741,77 @@ mod tests {
                 "service_tier":null,"tool_choice":null,"personality":null},
                 "instructions":"Destination","tools":[],"output_fingerprint":"output-b"}
         ])
+    }
+
+    #[test]
+    fn callback_handoff_uses_exact_catalog_schema_and_preserves_empty_fingerprints() {
+        let original = roster();
+        let mut empty = original.clone();
+        empty[0]["handoff_callbacks"] = json!({});
+        assert_eq!(
+            fingerprint(&original.to_string(), "a").unwrap(),
+            fingerprint(&empty.to_string(), "a").unwrap()
+        );
+
+        let mut callback = original;
+        callback[0]["tools"].as_array_mut().unwrap().push(json!({
+            "type":"function", "name":"transfer_to_b", "description":"Transfer with a reason",
+            "inputSchema":{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"],"additionalProperties":false},
+            "deferLoading":false,
+        }));
+        callback[0]["handoff_callbacks"] = json!({"transfer_to_b":1});
+        assert!(fingerprint(&callback.to_string(), "a").is_ok());
+        callback[0]["handoff_callbacks"] = json!({"transfer_to_b":0});
+        assert!(fingerprint(&callback.to_string(), "a").is_err());
+    }
+
+    #[test]
+    fn pending_handoff_restore_requires_live_callback_acceptance() {
+        let open = |raw: Value| {
+            let raw = raw.to_string();
+            OpeningProfiles {
+                root_id: "a".into(),
+                roster: serde_json::from_str(&raw).unwrap(),
+                fingerprint: fingerprint(&raw, "a").unwrap(),
+            }
+        };
+        let mut raw = roster();
+        let builtin = open(raw.clone());
+        raw[0]["tools"].as_array_mut().unwrap().push(json!({
+            "type":"function", "name":"transfer_to_b", "description":"Authorize transfer",
+            "inputSchema":{"type":"object","properties":{"reason":{"type":"string"}},
+                "required":["reason"],"additionalProperties":false},
+            "deferLoading":false,
+        }));
+        raw[0]["handoff_callbacks"] = json!({"transfer_to_b":1});
+        let callback = open(raw);
+        let destination = AgentProfileReceipt {
+            profile_id: "b".into(),
+            epoch: 1,
+        };
+        builtin.validate_pending_source(&destination).unwrap();
+        let error = callback.validate_pending_source(&destination).unwrap_err();
+        assert!(error.to_string().contains("live callback acceptance"));
+        let name = ToolName::new(None, "transfer_to_b");
+        let saved = codex_protocol::agent_profile::AgentProfileHandoff {
+            source: AgentProfileReceipt {
+                profile_id: "a".into(),
+                epoch: 0,
+            },
+            target_profile_id: "b".into(),
+            call_id: "saved-call".into(),
+        };
+        callback.validate_pending_source(&saved.source).unwrap();
+        builtin
+            .validate_restored_handoff(&name, &saved, true)
+            .unwrap();
+        callback
+            .validate_restored_handoff(&name, &saved, false)
+            .unwrap();
+        let error = callback
+            .validate_restored_handoff(&name, &saved, true)
+            .unwrap_err();
+        assert!(error.to_string().contains("live acceptance"));
     }
 
     #[test]

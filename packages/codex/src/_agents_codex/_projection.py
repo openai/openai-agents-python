@@ -246,6 +246,16 @@ def project_model_output_item(
             }
             raw["type"] = "image_generation_call"
         return project_hosted_response_item(raw, turn_id)
+    if native["type"] == "Reasoning":
+        return {
+            "id": native["id"],
+            "turn_id": turn_id,
+            "type": "reasoning",
+            "summary": [
+                {"type": "summary_text", "text": text} for text in native.get("summary_text", [])
+            ],
+            "status": "completed" if done else "in_progress",
+        }
     if native["type"] != "AgentMessage":
         return project_web_search_item(native, done, turn_id)
     content = []
@@ -267,6 +277,28 @@ def project_model_output_item(
     if native.get("display_text") is not None:
         item["display_text"] = native["display_text"]
     return item
+
+
+def _function_output_fields(
+    output: Any,
+    *,
+    status: str,
+    success: bool | None = None,
+    error: Any = None,
+) -> dict[str, Any]:
+    if success is False:
+        status = "failed"
+    if status == "failed" and error is None:
+        error = (
+            output
+            if isinstance(output, str)
+            else "\n".join(part["text"] for part in output if part["type"] == "input_text")
+        ) or None
+    return {
+        "status": status,
+        "output": output if status == "completed" else None,
+        "error": error,
+    }
 
 
 class EventProjector:
@@ -463,16 +495,6 @@ class EventProjector:
     ) -> dict[str, Any] | None:
         kind, item_id = native["type"], native["id"]
         common = {"id": item_id, "turn_id": turn_id}
-        if kind == "Reasoning":
-            return {
-                **common,
-                "type": "reasoning",
-                "summary": [
-                    {"type": "summary_text", "text": text}
-                    for text in native.get("summary_text", [])
-                ],
-                "status": "completed" if done else "in_progress",
-            }
         if kind == "DynamicToolCall":
             return {
                 **common,
@@ -502,12 +524,6 @@ class EventProjector:
                 if content["type"] in {"inputText", "inputImage", "inputFile"}
             ]
         )
-        status = "failed" if native.get("success") is False else native["status"]
-        error = native.get("error")
-        if status == "failed" and error is None:
-            error = (
-                "\n".join(part["text"] for part in output if part["type"] == "input_text") or None
-            )
         return self._event(
             "agent.session.turn.item.added",
             turn_id,
@@ -517,9 +533,12 @@ class EventProjector:
                 "id": f"{native['id']}:output",
                 "turn_id": turn_id,
                 "call_id": native["id"],
-                "status": status,
-                "output": output if status == "completed" else None,
-                "error": error,
+                **_function_output_fields(
+                    output,
+                    status=native["status"],
+                    success=native.get("success"),
+                    error=native.get("error"),
+                ),
             },
         )
 
@@ -560,7 +579,11 @@ class EventProjector:
                 return []
             self._done_items.add(key)
             content = _response_content(
-                [part for part in native["content"] if part["type"] in {"text", "image", "file"}]
+                [
+                    part
+                    for part in native["content"]
+                    if part["type"] in {"text", "image", "file", "audio"}
+                ]
             )
             return [
                 self._event(

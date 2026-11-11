@@ -10,10 +10,14 @@ import pytest
 
 from agents import Agent, NativeProvider, function_tool
 from agents.realtime import (
+    RealtimeAgentConfig,
     RealtimeConfig,
     RealtimeConversationItemObserved,
     RealtimeDelegation,
     RealtimeHostedMcpToolsListed,
+    RealtimeLifecycle,
+    RealtimeProviderRequestError,
+    RealtimeRawProviderEvent,
     RealtimeResponse,
     RealtimeText,
     RealtimeToolCall,
@@ -21,6 +25,240 @@ from agents.realtime import (
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
 from tests.test_native_realtime_provider_history import observe_item
+
+
+@pytest.mark.parametrize("include_raw", [True, False])
+async def test_provider_frames_precede_typed_events(
+    realtime_peer: RealtimePeer, include_raw: bool
+) -> None:
+    peer = realtime_peer
+    rate_limits = {"type": "rate_limits.updated", "event_id": "rates", "rate_limits": []}
+    speech = {"type": "input_audio_buffer.speech_started", "item_id": "speech"}
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-raw-event", supports_websockets=False
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", include_raw_provider_events=include_raw)
+        ) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        assert peer.socket is not None
+        await peer.socket.send_json(rate_limits)
+        await peer.socket.send_json(speech)
+        frames = []
+        async for event in events:
+            if isinstance(event, RealtimeRawProviderEvent):
+                frames.append(event.event)
+            elif isinstance(event, RealtimeLifecycle) and event.status == "speech_started":
+                break
+        if include_raw:
+            assert [frame["type"] for frame in frames] == [
+                "session.updated",
+                "rate_limits.updated",
+                "input_audio_buffer.speech_started",
+            ]
+            assert frames[-2:] == [rate_limits, speech]
+        else:
+            assert frames == []
+
+
+@pytest.mark.parametrize("error_type", ["invalid_request_error", "server_error"])
+@pytest.mark.parametrize("unrelated_id", [None, "unrelated-event"])
+async def test_provider_rejection_releases_only_the_matching_response_create(
+    realtime_peer: RealtimePeer,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: str,
+    unrelated_id: str | None,
+) -> None:
+    peer = realtime_peer
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-rejection", supports_websockets=False
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        assert peer.socket is not None
+        send_json = peer.socket.send_json
+
+        async def hold_first_response(data: Any, *args: Any, **kwargs: Any) -> None:
+            if data.get("response", {}).get("id") != "voice-response-1":
+                await send_json(data, *args, **kwargs)
+
+        monkeypatch.setattr(peer.socket, "send_json", hold_first_response)
+        await voice.request_response()
+        first = await peer.frame(lambda frame: frame["type"] == "response.create")
+        first_index = peer.frames.index(first)
+        assert isinstance(first["event_id"], str)
+
+        async def reject(event_id: str | None) -> None:
+            error = {"type": error_type, "code": "small_provider_error"}
+            if event_id is not None:
+                error["event_id"] = event_id
+            await send_json({"type": "error", "error": error})
+            async for event in events:
+                if isinstance(event, RealtimeProviderRequestError):
+                    assert event == RealtimeProviderRequestError("small_provider_error", event_id)
+                    return
+            pytest.fail("provider rejection was not observed")
+
+        await reject(unrelated_id)
+        await voice.request_response()
+        # A provider-observed writer barrier follows the queued create command.
+        await voice.send_event({"type": "fixture.barrier"})
+        await peer.frame(lambda frame: frame["type"] == "fixture.barrier")
+        assert not any(
+            frame["type"] == "response.create" for frame in peer.frames[first_index + 1 :]
+        )
+        await reject(first["event_id"])
+        second = await peer.frame(
+            lambda frame: frame["type"] == "response.create", after=first_index + 1
+        )
+        assert second["event_id"] != first["event_id"]
+        async for event in events:
+            if isinstance(event, RealtimeResponse) and event.status == "done":
+                assert event.response_id == "voice-response-2"
+                break
+        else:
+            pytest.fail("the queued response did not finish")
+        assert peer.connections == 1
+
+
+@pytest.mark.parametrize("include_raw", [False, True])
+async def test_idle_provider_error_is_observed_before_same_connection_response(
+    realtime_peer: RealtimePeer, include_raw: bool
+) -> None:
+    peer = realtime_peer
+    error = {
+        "type": "error",
+        "error": {
+            "code": "small_provider_error",
+            "message": "Provider detail retained only in raw",
+        },
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-idle-error", supports_websockets=False
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", include_raw_provider_events=include_raw)
+        ) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        assert peer.socket is not None
+        await peer.socket.send_json(error)
+        raw_errors = []
+        async for event in events:
+            if isinstance(event, RealtimeRawProviderEvent) and event.event.get("type") == "error":
+                raw_errors.append(event.event)
+            if isinstance(event, RealtimeProviderRequestError):
+                assert event == RealtimeProviderRequestError("small_provider_error", None)
+                break
+        else:
+            pytest.fail("idle provider error was not observed")
+        assert raw_errors == ([error] if include_raw else [])
+        await voice.request_response()
+        async for event in events:
+            if isinstance(event, RealtimeResponse) and event.status == "done":
+                assert event.response_id == "voice-response-1"
+                break
+        else:
+            pytest.fail("the response after the provider error did not finish")
+        assert peer.connections == 1
+        assert peer.response_count == 1
+        assert peer.responses.requests == []
+
+
+async def test_rejected_raw_session_update_preserves_accepted_prompt_and_live_voice(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    accepted_prompt = {"id": "accepted-explicit-prompt"}
+    event_id = "rejected-raw-prompt-update"
+    target = Agent(
+        name="Target",
+        instructions="Target backend instructions.",
+        realtime=RealtimeAgentConfig(prompt={"id": "target-agent-prompt"}),
+    )
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-rejected-session-update",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Opening instructions.", provider=provider).session() as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", settings={"prompt": accepted_prompt})
+        ) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        peer.auto_ack_updates = False
+        cursor = len(peer.frames)
+        updating = asyncio.create_task(
+            voice.send_event(
+                {
+                    "type": "session.update",
+                    "event_id": event_id,
+                    "session": {"prompt": {"id": "rejected-prompt"}},
+                }
+            )
+        )
+        try:
+            submitted = await peer.frame(
+                lambda frame: frame.get("event_id") == event_id, after=cursor
+            )
+            assert submitted["type"] == "session.update"
+            assert submitted["session"]["prompt"] == {"id": "rejected-prompt"}
+            assert not updating.done()
+            assert peer.socket is not None
+            await peer.socket.send_json(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_prompt",
+                        "event_id": event_id,
+                        "message": "Synthetic prompt rejection.",
+                    },
+                }
+            )
+            with pytest.raises(RuntimeError, match="reject"):
+                await updating
+            async for event in events:
+                if isinstance(event, RealtimeProviderRequestError):
+                    assert event == RealtimeProviderRequestError("invalid_prompt", event_id)
+                    break
+            else:
+                pytest.fail("the correlated session-update rejection was not observed")
+            peer.auto_ack_updates = True
+            cursor = peer.frames.index(submitted, cursor) + 1
+            await voice.update_agent(target)
+            refreshed = await peer.frame(
+                lambda frame: frame["type"] == "session.update", after=cursor
+            )
+            assert refreshed["session"]["prompt"] == accepted_prompt
+            assert await voice.get_active_agent() is target
+            await voice.request_response()
+            async for event in events:
+                if isinstance(event, RealtimeResponse) and event.status == "done":
+                    assert event.response_id == "voice-response-1"
+                    break
+            else:
+                pytest.fail("the recovered voice response did not complete")
+            assert peer.connections == 1
+            assert not peer.disconnected.is_set()
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)
 
 
 async def test_raw_item_create_at_known_predecessor_and_retrieve(
@@ -113,7 +351,7 @@ async def test_raw_response_preserves_event_id_metadata_and_overrides(
     response = {
         "instructions": "Reply with a short synthetic sentence.",
         "output_modalities": ["text"],
-        "metadata": {"request": "synthetic-raw-response"},
+        "metadata": {f"request_{index}": f"synthetic-raw-response-{index}" for index in range(16)},
     }
     async with (
         timeout(20),
@@ -147,6 +385,7 @@ async def test_raw_response_preserves_event_id_metadata_and_overrides(
         )
         for key, value in response.items():
             assert frame["response"][key] == value
+        assert len(frame["response"]["metadata"]) == 16
         assert not any(
             frame["type"] == "conversation.item.create" for frame in peer.frames[cursor:]
         )
@@ -475,6 +714,113 @@ async def test_raw_detached_responses_keep_explicit_inputs_and_observed_history(
         ]
 
 
+async def test_overlapping_detached_responses_keep_independent_provider_scopes(
+    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer = realtime_peer
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-detached-scope",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        assert peer.socket is not None
+        send_json = peer.socket.send_json
+
+        async def hold_responses(frame: Any, *args: Any, **kwargs: Any) -> None:
+            if frame["type"] not in {"response.created", "response.done"}:
+                await send_json(frame, *args, **kwargs)
+
+        async def response_status(response_id: str, status: str, *, detached: bool) -> None:
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.response_id == response_id
+                    and event.status == status
+                ):
+                    assert event.out_of_band is detached
+                    return
+            raise AssertionError("Realtime stream ended before the response observation")
+
+        monkeypatch.setattr(peer.socket, "send_json", hold_responses)
+        await voice.send_event({"type": "response.create", "event_id": "linked"})
+        await peer.frame(lambda frame: frame.get("event_id") == "linked")
+        await send_json({"type": "response.created", "response": {"id": "linked-response"}})
+        await response_status("linked-response", "created", detached=False)
+
+        hosted_tool = {
+            "type": "mcp",
+            "server_label": "docs",
+            "server_url": "https://example.com/mcp",
+        }
+        request = {
+            "conversation": "none",
+            "input": [{"type": "item_reference", "id": "previous-mcp-catalog"}],
+            "tools": [hosted_tool],
+            "tool_choice": {"type": "mcp", "server_label": "docs", "name": "search"},
+        }
+        await voice.send_event(
+            {"type": "response.create", "event_id": "first-detached", "response": request}
+        )
+        first = await peer.frame(lambda frame: frame.get("event_id") == "first-detached")
+        assert first["response"] == request
+        second = asyncio.create_task(
+            voice.send_event(
+                {
+                    "type": "response.create",
+                    "event_id": "second-detached",
+                    "response": {"conversation": "none", "input": []},
+                }
+            )
+        )
+        try:
+            await send_json(
+                {
+                    "type": "response.created",
+                    "response": {"id": "detached-one", "conversation_id": None},
+                }
+            )
+            await response_status("detached-one", "created", detached=True)
+            await second
+            await peer.frame(lambda frame: frame.get("event_id") == "second-detached")
+            await send_json(
+                {
+                    "type": "response.created",
+                    "response": {"id": "detached-two", "conversation_id": None},
+                }
+            )
+            await response_status("detached-two", "created", detached=True)
+
+            await voice.interrupt(response_id="detached-two")
+            cancel = await peer.frame(lambda frame: frame["type"] == "response.cancel")
+            assert cancel["response_id"] == "detached-two"
+            await send_json({"type": "response.cancelled", "response_id": "detached-two"})
+            await response_status("detached-two", "cancelled", detached=True)
+
+            await send_json(
+                {
+                    "type": "response.done",
+                    "response": {"id": "detached-one", "status": "completed", "output": []},
+                }
+            )
+            await response_status("detached-one", "done", detached=True)
+            cursor = len(peer.frames)
+            await voice.interrupt()
+            cancel = await peer.frame(
+                lambda frame: frame["type"] == "response.cancel", after=cursor
+            )
+            assert cancel["response_id"] == "linked-response"
+        finally:
+            if not second.done():
+                second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
+
+
 async def test_detached_output_cannot_dispatch_tools_or_handoffs(
     realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -509,8 +855,8 @@ async def test_detached_output_cannot_dispatch_tools_or_handoffs(
             response_id = response["id"]
             detached = response_id == "voice-response-1"
             if detached:
-                # The local detached reservation still owns tool admission.
-                response = {**response, "conversation_id": "default-conversation"}
+                # The provider identifies output outside the default conversation.
+                response = {**response, "conversation_id": None}
             if data["type"] == "response.done":
                 calls = (
                     [

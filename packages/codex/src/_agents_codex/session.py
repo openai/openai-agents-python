@@ -51,15 +51,16 @@ from typing import (
 )
 from uuid import uuid4 as uuid4
 
-from pydantic import BaseModel as BaseModel, TypeAdapter as _TypeAdapter
+from pydantic import BaseModel as BaseModel, TypeAdapter as _TypeAdapter, ValidationError
 
 from ._agent_profiles import _AgentProfile, _capture_agent_graph, _check_handoff_tool_names
-from ._compat import cancel_once as cancel_once
+from ._compat import cancel_once as cancel_once, cancellation_requested
 from ._events import (
     CodeInterpreterCallItem,
     FileSearchCallItem,
     ImageGenerationCallItem,
     MessageItem,
+    ReasoningItem,
     SessionItem as SessionItem,
     WebSearchCallItem,
 )
@@ -67,6 +68,7 @@ from ._function_tools import (
     FunctionTool as FunctionTool,
     Tool as Tool,
     ToolContext as ToolContext,
+    ToolInputErrorContext as ToolInputErrorContext,
     ToolTimeoutError as ToolTimeoutError,
 )
 from ._history import project_history as project_history
@@ -78,7 +80,14 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
+from ._managed_workspace import (
+    _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
+    ManagedWorkspaceCheckpoint,
+    _capture_retired_workspace,
+    _ManagedWorkspaceSource,
+)
 from ._mcp_errors import _protect_mcp_methods
+from ._media import _audio_json, _check_audio_json
 from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._projection import (
     _error_code as _error_code,
@@ -86,6 +95,16 @@ from ._projection import (
     project_model_output_item,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._stored_history import (
+    StoredItemPage,
+    StoredMatchPage,
+    StoredSessionPage,
+    StoredTurnPage,
+    _item_page as _stored_item_page,
+    _options as _stored_options,
+    _turn_page as _stored_turn_page,
+)
+from ._tool_errors import ToolErrorContext, ToolErrorFormatter
 from ._trace_context import (
     TraceContext as TraceContext,
     _native_trace_context as _native_trace_context,
@@ -94,12 +113,16 @@ from ._trace_context import (
 from .agent import (
     _MAX_FUNCTION_CONCURRENCY_UNSET as _MAX_FUNCTION_CONCURRENCY_UNSET,
     _OBSERVATION_RETENTION_UNSET as _OBSERVATION_RETENTION_UNSET,
+    _SIWC_PROVIDER_PREFIX,
+    _SIWC_RESOURCE,
     Agent as Agent,
     CodexAccount as CodexAccount,
+    CodexLogin,
     ContextT as ContextT,
     ModelSettings as ModelSettings,
     NativeProvider as NativeProvider,
     OutputT as OutputT,
+    SignInWithChatGPT,
     _copy_model_settings as _copy_model_settings,
 )
 from .canonical_storage import (
@@ -107,8 +130,14 @@ from .canonical_storage import (
     SessionStoreCleanup as SessionStoreCleanup,
 )
 from .compaction import CompactionContext
-from .completion import CompletionContext, ContinueTurn
-from .computer import _CapturedComputer, _ComputerCall, _ComputerResources
+from .completion import (
+    CompletionContext,
+    ContinueTurn,
+    FinishToolBatch,
+    ToolBatchCompletionContext,
+    ToolBatchResult,
+)
+from .computer import _CapturedComputer, _ComputerCall, _ComputerResources, _ComputerTool
 from .decisions import DecisionProvider, _bind_decisions
 from .executor import (
     Environment as Environment,
@@ -117,9 +146,17 @@ from .executor import (
     _path_uri as _path_uri,
     _writable_roots as _writable_roots,
 )
+from .guardrails import (
+    GuardrailRecord,
+    GuardrailResult,
+    GuardrailTripwire,
+    InputGuardrail,
+    OutputGuardrail,
+)
 from .history import CanonicalHistorySnapshot, RecordedTurn as RecordedTurn
 from .input import UserInput as UserInput, _native_input as _native_input
 from .manual import (
+    _DEFAULT_APPROVAL_REASON as _DEFAULT_APPROVAL_REASON,
     _FORM_MODES as _FORM_MODES,
     _URL_ACCEPT as _URL_ACCEPT,
     ActionReply as ActionReply,
@@ -133,6 +170,7 @@ from .manual import (
     VerificationRequest as VerificationRequest,
     _CapturedApproval as _CapturedApproval,
     _CapturedManual as _CapturedManual,
+    _DefaultApprovalReason as _DefaultApprovalReason,
     _is_json_value as _is_json_value,
     _NativeQuestion as _NativeQuestion,
     _PreparedManualResult as _PreparedManualResult,
@@ -172,6 +210,7 @@ from .native_interception import (
     _NativeInterception as _NativeInterception,
 )
 from .observation import (
+    AgentProfileChanged as AgentProfileChanged,
     ApiRateLimitsUpdated as ApiRateLimitsUpdated,
     ContextCompacted as ContextCompacted,
     EventStream as EventStream,
@@ -179,6 +218,7 @@ from .observation import (
     HostedToolCallProgress,
     ModelOutputItemCompleted,
     OutputTextDelta as OutputTextDelta,
+    RawProviderEvent as RawProviderEvent,
     ResponseFactReceived as ResponseFactReceived,
     SubagentLifecycle as SubagentLifecycle,
     ToolFinished as ToolFinished,
@@ -218,6 +258,7 @@ from .schema import (
     _PreparedOutput as _PreparedOutput,
 )
 from .state import (
+    ApplicationToolOutput as ApplicationToolOutput,
     ChecklistState as ChecklistState,
     CheckpointStatus as CheckpointStatus,
     LocalStorage as LocalStorage,
@@ -244,6 +285,7 @@ from .tools import (
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
     WebSearch as WebSearch,
+    _capture_application_data,
     _capture_hosted_tools,
     _CapturedFunction as _CapturedFunction,
     _hosted_tool_name,
@@ -264,14 +306,17 @@ from .turn_receipt import (
 from .usage import (
     _MAX_SAFE_INTEGER,
     RunBudget,
+    RunUsage,
     TokenUsage,
     TokenUsageInfo as TokenUsageInfo,
     _token_usage_info as _token_usage_info,
+    _UsageCollector,
 )
 
 if TYPE_CHECKING:
-    from .realtime import RealtimeConfig, RealtimeSession
+    from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage
+    from .turn import ChildTurn
 
 _MutationResultT = TypeVar("_MutationResultT")
 _ResultT = TypeVar("_ResultT")
@@ -315,6 +360,8 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     result: dict[str, Any] = {}
     controls: dict[str, Any] = {}
     control_fields = {
+        "input_modalities",
+        "reset_tool_choice",
         "max_output_tokens",
         "temperature",
         "top_p",
@@ -398,6 +445,8 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
     if "request_controls" in captured:
         controls = captured["request_controls"]
         ordinary = {
+            "input_modalities",
+            "reset_tool_choice",
             "max_output_tokens",
             "temperature",
             "top_p",
@@ -682,8 +731,10 @@ class NativeError(RuntimeError):
     """The native conversation could not complete the submitted operation.
 
     ``status_code``, ``code`` and ``request_id`` contain available provider
-    metadata. Budget failures use an SDK-defined ``code``. ``category`` is the normalized
-    native failure category. Missing or discarded values remain ``None``.
+    metadata. For an unsupported ChatGPT plan capability, ``param`` contains
+    the provider's field path when available. Budget failures use an SDK-defined
+    ``code``. ``category`` is the normalized native failure category. Missing
+    or discarded values remain ``None``.
     Messages and metadata may contain provider-supplied information.
     effects describes only the failed operation, never earlier actions.
     unknown forbids assuming replay is safe.
@@ -699,12 +750,14 @@ class NativeError(RuntimeError):
         code: str | None = None,
         request_id: str | None = None,
         category: str | None = None,
+        param: str | None = None,
     ) -> None:
         super().__init__(*args)
         self.status_code = status_code
         self.code = code
         self.request_id = request_id
         self.category = category
+        self.param = param
         self._response_integrity_reason: ResponseIntegrityReason | None = None
 
     @property
@@ -828,6 +881,7 @@ def _native_error(error: dict[str, Any], message: str | None = None) -> NativeEr
         ),
         request_id=metadata.get("request_id"),
         category=_error_code(error),
+        param=metadata.get("param"),
     )
     reason = error.get("_sdk_response_integrity_reason")
     if isinstance(reason, str) and reason in get_args(ResponseIntegrityReason):
@@ -852,6 +906,15 @@ class _ManualBoundaryLost(RuntimeError):
     """No settled manual boundary remains at the pre-seal check."""
 
 
+@dataclass(frozen=True, slots=True)
+class ProducedItem:
+    """One accepted assistant or tool item and its producing Agent."""
+
+    item: SessionItem
+    agent: Agent[Any, Any]
+    handoff_target: Agent[Any, Any] | None = None
+
+
 @dataclass(frozen=True)
 class Completed(Generic[OutputT, TurnT]):
     """One completed root or captured child turn.
@@ -871,6 +934,8 @@ class Completed(Generic[OutputT, TurnT]):
     Session.items(). final_output contains display text without those ranges.
     One-shot runners populate state when called with return_state=True.
     Existing native checkpoint restrictions still apply.
+    One-shot runners populate history with conversation records for replay when
+    called with return_history=True. The destination Session supplies its instructions.
     """
 
     turn: TurnT
@@ -879,6 +944,19 @@ class Completed(Generic[OutputT, TurnT]):
     state: SessionState | None = field(default=None, repr=False)
     repair_attempts: tuple[RecordedTurn, ...] = ()
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
+    tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)
+    guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
+    history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
+    items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)
+    run_usage: RunUsage = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run_usage", cast("Turn[Any] | ChildTurn", self.turn).run_usage)
+
+    @property
+    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
+        """Detached application data from accepted tool results on this turn."""
+        return cast("Turn[Any] | ChildTurn", self.turn).application_tool_outputs
 
 
 def _future() -> asyncio.Future[Any]:
@@ -900,6 +978,7 @@ class _ToolCompletionProposal:
     call: ToolCallInfo
     wire: Any = field(repr=False)
     value: Any = field(repr=False)
+    batch_call_ids: tuple[str, ...] = ()
 
     def matches(self, payload: Mapping[str, Any]) -> bool:
         return (
@@ -907,6 +986,7 @@ class _ToolCompletionProposal:
             and payload.get("name") == self.call.tool.name
             and (payload.get("namespace") or "functions")
             == (self.call.tool.namespace or "functions")
+            and (payload.get("batch_call_ids") or []) == list(self.batch_call_ids)
             and json.dumps(payload.get("final_output"), sort_keys=True, allow_nan=False)
             == json.dumps(self.wire, sort_keys=True, allow_nan=False)
         )
@@ -922,6 +1002,7 @@ class _NativeCallback:
 @dataclass
 class _Submission:
     output: _PreparedOutput
+    run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     observation_after: int = 0
     accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
     completion: asyncio.Future[Any] = field(default_factory=_future)
@@ -933,9 +1014,19 @@ class _Submission:
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
+    terminal_observations: dict[str, ToolStarted] = field(default_factory=dict, repr=False)
+    pending_application_outputs: dict[str, ApplicationToolOutput] = field(
+        default_factory=dict, repr=False
+    )
     completion_continuations: int = 0
+    guardrail_results: list[GuardrailRecord] = field(default_factory=list)
+    guardrail_input: UserInput | None = field(default=None, repr=False)
+    input_guardrails_started: bool = False
+    input_guardrails_task: asyncio.Task[None] | None = field(default=None, repr=False)
     calls: set[str] = field(default_factory=set)
     mcp_calls: dict[str, str] = field(default_factory=dict)
+    mcp_names: dict[tuple[str, str], ToolRef] = field(default_factory=dict, repr=False)
+    mcp_call_names: dict[str, ToolRef] = field(default_factory=dict, repr=False)
     step_mcp: tuple[_MCP[Any], ...] | None = field(default=None, repr=False)
     stopping: bool = False
     cleanup_error: BaseException | None = None
@@ -965,7 +1056,7 @@ class _Submission:
     writable_roots: tuple[str, ...] | None = None
     parent_trace: TraceContext | None = field(default=None, repr=False)
     tracing: _CapturedTrace | None = field(default=None, repr=False)
-    realtime_tool: tuple[str, str, tuple[str, ...]] | None = None
+    realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None
     output_override: bool = False
     operation_declarations: tuple[Any, ...] | None = None
     operation_agent: Agent[Any, Any] | None = None
@@ -1006,14 +1097,28 @@ class _ChildCallbacks:
     """Application callbacks for one native child incarnation and turn."""
 
     handle: ChildInvocation
+    root_turn_id: str | None = None
+    run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     observation_after: int = 0
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
+    terminal_observations: dict[str, ToolStarted] = field(default_factory=dict, repr=False)
+    pending_application_outputs: dict[str, ApplicationToolOutput] = field(
+        default_factory=dict, repr=False
+    )
     completion_continuations: int = 0
+    guardrail_results: list[GuardrailRecord] = field(default_factory=list)
+    guardrail_input: tuple[dict[str, Any], ...] | None = field(default=None, repr=False)
+    input_guardrails_started: bool = False
+    input_guardrails_task: asyncio.Task[None] | None = field(default=None, repr=False)
+
     calls: set[str] = field(default_factory=set)
+    mcp_names: dict[tuple[str, str], ToolRef] = field(default_factory=dict, repr=False)
+    mcp_call_names: dict[str, ToolRef] = field(default_factory=dict, repr=False)
+    step_mcp: tuple[_MCP[Any], ...] | None = field(default=None, repr=False)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     observed: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
@@ -1111,6 +1216,7 @@ class _Invocation:
 _invocation: ContextVar[_Invocation | None] = ContextVar("native_agent_invocation", default=None)
 _CODEX_ACCOUNT_BASE_URL = "https://chatgpt.com/backend-api"
 _CODEX_RESPONSES_BASE_URL = f"{_CODEX_ACCOUNT_BASE_URL}/codex"
+_SIWC_RESPONSES_BASE_URL = _SIWC_RESOURCE
 
 
 @dataclass(repr=False)
@@ -1128,6 +1234,10 @@ class _RestoreDeclaration:
 _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
     "native_restore_declaration", default=None
 )
+
+_produced_items_restore: ContextVar[
+    tuple[Agent[Any, Any], SessionState, asyncio.Task[Any] | None] | None
+] = ContextVar("native_produced_items_restore", default=None)
 
 
 @contextmanager
@@ -1165,7 +1275,18 @@ def _project_progress(
 ) -> None:
     message = event["msg"]
     kind = message["type"]
-    if kind == "hosted_tool_call_progress" and event["id"] == turn_id:
+    if kind == "sdk_raw_provider_event" and event["id"] == turn_id:
+        buffer.append(
+            RawProviderEvent(
+                session_id=buffer.session_id,
+                turn_id=turn_id,
+                submission_id=submission_id,
+                source=message["source"],
+                transport=message["transport"],
+                payload=message["payload"],
+            )
+        )
+    elif kind == "hosted_tool_call_progress" and event["id"] == turn_id:
         buffer.append(
             HostedToolCallProgress(
                 session_id=buffer.session_id,
@@ -1239,14 +1360,18 @@ def _project_progress(
         elif kind == "item_completed":
             item = project_model_output_item(message["item"], True, turn_id)
             if item is not None and (
-                item["type"]
+                buffer.include_model_output_items
+                or item["type"]
                 in {
                     "web_search_call",
                     "file_search_call",
                     "code_interpreter_call",
                     "image_generation_call",
                 }
-                or any(part.get("annotations") for part in item["content"])
+                or (
+                    item["type"] == "message"
+                    and any(part.get("annotations") for part in item["content"])
+                )
             ):
                 buffer.append(
                     ModelOutputItemCompleted(
@@ -1255,6 +1380,7 @@ def _project_progress(
                         submission_id=submission_id,
                         item=cast(
                             MessageItem
+                            | ReasoningItem
                             | WebSearchCallItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
@@ -1340,6 +1466,7 @@ def _project_run_prefix(
             and kind
             in {
                 "_sdk_request_metadata",
+                "sdk_raw_provider_event",
                 "token_count",
                 "hosted_tool_call_progress",
                 "agent_message_content_delta",
@@ -1437,6 +1564,30 @@ class _OpeningOwner:
         # Keep its traceback from retaining the application's private environment.
         self.environment = None
 
+    def capture_api_key(
+        self,
+        provider: NativeProvider,
+        native: Any,
+        *,
+        auth: CodexLogin | SignInWithChatGPT | None,
+        selected: _RestoreDeclaration | None,
+        captured_api_key: str | None,
+    ) -> None:
+        if isinstance(auth, CodexLogin):
+            self.api_key = None
+        elif isinstance(auth, SignInWithChatGPT):
+            assert self.api_key is not None
+        elif provider.model_backend is not None:
+            self.api_key = "native-model-producer"
+        elif selected is not None:
+            self.api_key = selected.api_key
+        elif captured_api_key is not None:
+            self.api_key = captured_api_key
+        elif provider.api_key is None:
+            self.api_key = native._read_openai_api_key_from_env()
+        else:
+            self.api_key = provider.api_key
+
     async def acquire(self, operation: Any) -> Any:
         pending = asyncio.ensure_future(operation)
         try:
@@ -1465,7 +1616,19 @@ class _OpeningOwner:
         self.lease = None
         self.api_key = None
         value = _validate_output(output, info["output"], None)
+        # Successful native-only runs retain at most 256 events / 256 KiB.
+        # Project measured completions once; do not retain temporary event trees.
+        measured = _UsageCollector()
+        for event in json.loads(archive.json()):
+            if (
+                event is not None
+                and event.get("subagent_id") is None
+                and event.get("id") == info["receipt"]["turn_id"]
+                and event.get("msg", {}).get("type") == "raw_response_completed"
+            ):
+                measured.observe(event["msg"].get("token_usage"))
         result = _CompletedTurnOwner(
+            run_usage=measured.snapshot(),
             opening_agent=agent,
             session_id=info["thread_id"],
             turn_id=info["receipt"]["turn_id"],
@@ -1594,39 +1757,90 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
         await asyncio.sleep(0.01)
 
 
+class _FunctionBodyFailure(Exception):
+    def __init__(self, original: Exception) -> None:
+        super().__init__("Function callback failed")
+        self.original = original
+
+
+@dataclass(frozen=True)
+class _RecoverableFunctionCallback:
+    callback: Callable[..., Any]
+
+
 async def _call_callback(
-    callback: Callable[..., Any], admit: Callable[[], bool], /, *args: Any, **kwargs: Any
-) -> Any:
-    try:
-        with _owned_span("callback", "callback"):
-            return await _call_callback_body(callback, admit, *args, **kwargs)
-    finally:
-        # Release SDK-owned callback arguments only after the admitted body exits.
-        del callback, admit, args, kwargs
-
-
-async def _call_callback_body(
-    callback: Callable[..., Any],
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
     admit: Callable[[], bool],
     /,
     *args: Any,
     **kwargs: Any,
 ) -> Any:
+    try:
+        return await _call_callback_entered(callback, admit, args, kwargs)
+    finally:
+        del callback, admit, args, kwargs
+
+
+async def _call_callback_entered(
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
+    admit: Callable[[], bool],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    enter: Callable[[], None] | None = None,
+) -> Any:
+    try:
+        with _owned_span("callback", "callback"):
+            return await _call_callback_body(callback, admit, args, kwargs, enter)
+    finally:
+        # Release SDK-owned callback arguments only after the admitted body exits.
+        del callback, admit, args, kwargs, enter
+
+
+async def _call_callback_body(
+    callback: Callable[..., Any] | _RecoverableFunctionCallback,
+    admit: Callable[[], bool],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    enter: Callable[[], None] | None = None,
+) -> Any:
     """Run Python in its appropriate executor and retain ownership until exit."""
+    if isinstance(callback, _RecoverableFunctionCallback):
+        function = callback.callback
+        capture_error = True
+    else:
+        function = callback
+        capture_error = False
     worker: asyncio.Future[Any] | None = None
     value: Any = None
     try:
-        if inspect.iscoroutinefunction(callback):
-            return await callback(*args, **kwargs)
+        if inspect.iscoroutinefunction(function):
+            if enter is not None:
+                if not admit():
+                    return None
+                enter()
+            try:
+                return await function(*args, **kwargs)
+            except Exception as error:
+                if capture_error:
+                    raise _FunctionBodyFailure(error) from error
+                raise
         loop = asyncio.get_running_loop()
 
         async def admission() -> bool:
             # The asyncio and native ownership check belongs to the application's loop.
-            return admit()
+            allowed = admit()
+            if allowed and enter is not None:
+                enter()
+            return allowed
 
         def invoke_if_admitted() -> Any:
             if asyncio.run_coroutine_threadsafe(admission(), loop).result():
-                return callback(*args, **kwargs)
+                try:
+                    return function(*args, **kwargs)
+                except Exception as error:
+                    if capture_error:
+                        raise _FunctionBodyFailure(error) from error
+                    raise
             return None
 
         worker = loop.run_in_executor(None, copy_context().run, invoke_if_admitted)
@@ -1657,12 +1871,19 @@ async def _call_callback_body(
                 if inspect.iscoroutine(value):
                     value.close()
                 return None
-            return await value
+            try:
+                return await value
+            except Exception as error:
+                if capture_error:
+                    raise _FunctionBodyFailure(error) from error
+                raise
         return value
     finally:
         # Release SDK-owned callback arguments only after the admitted body exits.
         args = ()
         kwargs = {}
+        enter = None
+        callback = function = admit = cast(Any, None)
         del worker, value
 
 
@@ -1850,6 +2071,18 @@ def _split_tools(
                 )
             tool = replace(resource_server, tools=())
         elif isinstance(tool, ToolRef):
+            identity = getattr(tool, "_mcp_identity", None)
+            if identity is not None:
+                if identity not in mcp_pairs:
+                    raise CapabilityError("MCP tool identity must have been admitted at opening")
+                declaration = next(
+                    item
+                    for item in opening
+                    if isinstance(item, _MCP)
+                    and item.name == identity[0]
+                    and identity[1] in item.tools
+                )
+                tool = declaration.tool(identity[1])
             if tool in fixed:
                 if tool in retained:
                     raise CapabilityError("Operation tools must select distinct fixed capabilities")
@@ -1955,9 +2188,13 @@ def _split_tools(
                     tool.allowed_domains is not None
                     or tool.blocked_domains is not None
                     or tool.location is not None
+                    or tool.search_content_types is not None
+                    or tool.image_settings is not None
                 )
             ):
-                raise ValueError("WebSearch domain filters and location require route='hosted'")
+                raise ValueError(
+                    "WebSearch domain filters, location, and image controls require route='hosted'"
+                )
             if available is not None:
                 refs = _fixed_tool_refs((tool,), False, None, None)
                 if retained.intersection(refs):
@@ -2040,6 +2277,33 @@ def _selected_tool_refs(
 
 def _native_tool_refs(refs: Sequence[ToolRef]) -> str:
     return json.dumps([{"name": ref.name, "namespace": ref.namespace} for ref in refs])
+
+
+def _native_tool_output_parts(body: Any) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] | None = None
+    if isinstance(body, str):
+        parts = [{"type": "inputText", "text": body}]
+    elif isinstance(body, list):
+        parts = []
+        kinds = {
+            "input_text": "inputText",
+            "input_image": "inputImage",
+            "input_file": "inputFile",
+            "input_audio": "inputAudio",
+        }
+        for raw in body:
+            if not isinstance(raw, dict) or raw.get("type") not in kinds:
+                parts = None
+                break
+            part: dict[str, Any] = deepcopy(raw)
+            kind = part.pop("type")
+            if kind in {"input_image", "input_audio"}:
+                fields = {"image_url": "imageUrl", "file_id": "fileId", "audio_url": "audioUrl"}
+                part = {fields.get(key, key): value for key, value in part.items()}
+            parts.append({"type": kinds[kind], **part})
+    if parts is None:
+        raise ValueError("Unsupported native tool output")
+    return parts
 
 
 @dataclass
@@ -2131,19 +2395,86 @@ class _ProfileRuntime:
     instructions: str
 
 
+def _native_session_config(
+    *,
+    executor: Environment[Any] | None,
+    provider_config: dict[str, Any],
+    native_agents: NativeAgents[Any] | None,
+    deferred_schemas: bool,
+    allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
+    web_search: WebSearch | None,
+    web_search_config: dict[str, Any],
+    guidance_config: dict[str, Any],
+    checklist: bool,
+    goals: bool,
+    programmatic_tool_calling: bool,
+) -> dict[str, Any]:
+    return {
+        "include_permissions_instructions": executor is not None,
+        "include_environment_context": executor is not None,
+        **provider_config,
+        "agents.enabled": False,
+        "features.goals": goals,
+        **guidance_config,
+        "tools.update_plan.enabled": checklist,
+        "mcp_servers": {},
+        "features.non_prefixed_mcp_tool_names": False,
+        "features.code_mode": {
+            "enabled": programmatic_tool_calling,
+            "direct_only_tool_namespaces": (
+                ["collaboration"]
+                if programmatic_tool_calling
+                else _direct_tool_namespaces(
+                    allowed_tools,
+                    native_agents is not None or deferred_schemas,
+                )
+            ),
+        },
+        "features.code_mode_interrupt": programmatic_tool_calling,
+        "web_search": web_search.mode if web_search is not None else "disabled",
+        "features.standalone_web_search": (
+            web_search is not None and web_search.route == "standalone"
+        ),
+        **web_search_config,
+    }
+
+
+def _needs_before_complete(
+    agent: Agent[Any, Any],
+    input_guardrails: Sequence[InputGuardrail[Any]],
+    output_guardrails: Sequence[OutputGuardrail[Any]],
+) -> bool:
+    return agent.before_complete is not None or bool(
+        agent.output_guardrails or output_guardrails or agent.input_guardrails or input_guardrails
+    )
+
+
 def _capture_profile_runtimes(
     profiles: tuple[_AgentProfile, ...],
     root_catalog: _ToolCatalog,
     root_instructions: str,
     context: Any,
+    output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+    input_guardrails: Sequence[InputGuardrail[Any]] = (),
 ) -> tuple[dict[str, _ProfileRuntime], list[dict[str, Any]]]:
     captured: dict[str, _ProfileRuntime] = {}
     roster: list[dict[str, Any]] = []
     for index, profile in enumerate(profiles):
         declaration = profile.declaration
         tools, mcp, roles = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
-        catalog = root_catalog if index == 0 else _capture_tools(0, tools, context)
-        _check_handoff_tool_names((tool._ref for tool in catalog.tools), profile.handoffs)
+        catalog = (
+            root_catalog
+            if index == 0 and not profile.handoff_callbacks
+            else _capture_tools(root_catalog.generation if index == 0 else 0, tools, context)
+        )
+        _check_handoff_tool_names(
+            (
+                tool._ref
+                for slot, tool in enumerate(catalog.tools)
+                if slot not in profile.handoff_callbacks.values()
+            ),
+            profile.handoffs,
+        )
         _check_namespaced_tool_collisions(
             tools,
             _tool_names(mcp),
@@ -2173,10 +2504,25 @@ def _capture_profile_runtimes(
                 "terminal_slots": catalog.finish_slots(),
                 "step_defaults": list(range(len(catalog.tools))),
                 "handoffs": dict(profile.handoffs),
+                **(
+                    {"handoff_callbacks": dict(profile.handoff_callbacks)}
+                    if profile.handoff_callbacks
+                    else {}
+                ),
                 "transform_context": declaration.transform_context is not None,
                 "before_compact": declaration.before_compact is not None,
-                "before_complete": declaration.before_complete is not None,
-                "selecting_steps": False,
+                "before_complete": _needs_before_complete(
+                    declaration, input_guardrails, output_guardrails
+                ),
+                **(
+                    {"tool_batch_completion": True}
+                    if declaration.tool_batch_completion is not None
+                    else {}
+                ),
+                "selecting_steps": any(
+                    check.child_callback is not None
+                    for check in (*declaration.input_guardrails, *input_guardrails)
+                ),
                 "output_fingerprint": output.fingerprint,
                 # Fingerprinting uses admitted MCP identities, not credentials.
                 # Connection configs are completed only after environment entry.
@@ -2220,8 +2566,8 @@ def _install_profile_options(
         "roster": roster,
         "fingerprint": fingerprint,
     }
-    for flag in ("transform_context", "before_compact", "before_complete"):
-        options[f"_{flag}"] = any(row[flag] for row in roster)
+    for flag in ("transform_context", "before_compact", "before_complete", "tool_batch_completion"):
+        options[f"_{flag}"] = any(row.get(flag, False) for row in roster)
     grants = options["tool_policy"]["allowed_tools"]
     for profile in profiles:
         functions, servers, _ = _split_tools(
@@ -2233,6 +2579,11 @@ def _install_profile_options(
             for tool in functions
         )
         grants.extend(_tool_names(servers))
+        raw_grants = options["tool_policy"]["allowed_mcp_tools"]
+        for server in servers:
+            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True):
+                if not any(grant[:2] == [server.name, raw] for grant in raw_grants):
+                    raw_grants.append([server.name, raw, ref])
         grants.extend({"name": name, "namespace": "functions"} for name in profile.handoffs)
     options["tool_policy"]["allowed_tools"] = list(
         {tuple(sorted(grant.items())): grant for grant in grants}.values()
@@ -2572,6 +2923,7 @@ def _prepare_native_checkpoint(
     payload.pop("operation_tools", None)
     payload.pop("repair_turns", None)
     payload.pop("repair_items", None)
+    payload.pop("application_tool_outputs", None)
     if "_sdk_default_tools" in saved.agent_options:
         restored_defaults = tuple(
             ToolRef(**item) for item in saved.agent_options["_sdk_default_tools"]
@@ -2592,6 +2944,22 @@ def _prepare_native_checkpoint(
         # Idle selector names are SDK input, not native grants.
         payload.pop("step_mcp_tools", None)
     return json.dumps(payload), restored_override, restored_defaults, restored_resource_servers
+
+
+def _checkpoint_plan_provider(
+    saved: SessionState, auth: CodexLogin | SignInWithChatGPT | None
+) -> str | None:
+    saved_provider = (saved.root_metadata or {}).get("model_provider")
+    saved_plan_provider = (
+        saved_provider
+        if isinstance(saved_provider, str) and saved_provider.startswith(_SIWC_PROVIDER_PREFIX)
+        else None
+    )
+    if (saved.codex_login_binding is not None) != isinstance(auth, CodexLogin) or (
+        (saved_plan_provider is not None) != isinstance(auth, SignInWithChatGPT)
+    ):
+        raise ValueError("Checkpoint and Session must use the same authentication mode")
+    return saved_plan_provider
 
 
 def _check_restored_output_contract(saved: SessionState, output: _PreparedOutput) -> None:
@@ -2624,12 +2992,19 @@ class _EnvironmentLease:
         self._sync_run: _SyncRun | None = None
         self._woke_borrower = False
         self.interrupted = False
+        self._workspace_instructions: str | None = None
         self._owner = _create_task(self._hold(source))
 
     async def _hold(self, source: AbstractAsyncContextManager[Environment[Any]]) -> None:
         # Manager timeouts and task groups cancel this task, distinct from
         # cancellation of the borrowing application. Entry and exit stay together.
         async with source as environment:
+            if self._ready.cancelled():
+                return
+            instructions = getattr(source, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, None)
+            if instructions is not None and not isinstance(instructions, str):
+                raise TypeError("Workspace instructions must be captured text")
+            self._workspace_instructions = instructions
             self._ready.set_result(environment)
             try:
                 await asyncio.shield(self._retired)
@@ -2653,6 +3028,7 @@ class _EnvironmentLease:
             # Before successful entry, the source owns rollback. Cancellation must
             # join that entry and must never start native work from a late result.
             if not self._ready.done():
+                self._ready.cancel()
                 cancel_once(self._owner)
             await _close_after_error(error, lambda: _release_environment(self))
             self.raise_if_interrupted(error)
@@ -2825,13 +3201,104 @@ def _configure_storage_runtime(
 def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
     config: dict[str, Any] = {}
     if search is not None:
+        if search.search_context_size is not None:
+            config["tools.web_search.context_size"] = search.search_context_size
         if search.allowed_domains is not None:
             config["tools.web_search.allowed_domains"] = list(search.allowed_domains)
         if search.blocked_domains is not None:
             config["tools.web_search.blocked_domains"] = list(search.blocked_domains)
         if search.location is not None:
             config["tools.web_search.location"] = dict(search.location)
+        if search.search_content_types is not None:
+            config["tools.web_search.search_content_types"] = list(search.search_content_types)
+        if search.image_settings is not None:
+            image_settings = search.image_settings.copy()
+            # Native configuration uses signed 64-bit TOML integers.
+            max_results = image_settings.get("max_results")
+            if max_results is not None and (
+                isinstance(max_results, bool)
+                or not isinstance(max_results, int)
+                or not 0 <= max_results < 2**63
+            ):
+                raise ValueError(
+                    "WebSearch image max_results must be a non-negative integer below 2**63"
+                )
+            config["tools.web_search.image_settings"] = dict(image_settings)
     return config
+
+
+def _validate_siwc_opening_tools(
+    tools: Sequence[Tool[Any]],
+    *,
+    programmatic_tool_calling: bool,
+    deferred_schemas: bool,
+    has_other_agents: bool,
+) -> None:
+    if programmatic_tool_calling or deferred_schemas:
+        raise ValueError("Sign in with ChatGPT requires directly exposed tools")
+    if has_other_agents:
+        raise ValueError("Sign in with ChatGPT requires a single Agent")
+    if any(
+        isinstance(
+            tool, (*_HOSTED_TOOLS, _ComputerTool, WebSearch, ChatGPTAppsMCP, HostedVerificationMCP)
+        )
+        for tool in tools
+    ):
+        raise ValueError(
+            "Sign in with ChatGPT does not support hosted tools, computer tools, or WebSearch"
+        )
+
+
+async def _opening_provider_config(
+    provider: NativeProvider,
+    opening: _OpeningOwner,
+    *,
+    captured_api_key: str | None,
+    captured_siwc_provider: str | None,
+    saved_plan_provider: str | None,
+    standalone_web_search: bool,
+) -> dict[str, Any]:
+    auth = provider.auth
+    provider_id = "native_agent"
+    base_url = provider.base_url or "https://api.openai.com/v1"
+    routing: dict[str, Any] = provider._routing_config()
+    for name in (
+        "request_max_retries",
+        "stream_max_retries",
+        "stream_idle_timeout_ms",
+        "websocket_connect_timeout_ms",
+    ):
+        value = getattr(provider, name)
+        if value is not None:
+            routing[name] = value
+    if isinstance(auth, CodexLogin):
+        provider_id = "native_agent_codex_login"
+        base_url = _CODEX_RESPONSES_BASE_URL
+    elif isinstance(auth, SignInWithChatGPT):
+        if captured_api_key is None:
+            opening.api_key, provider_id = await auth._resolve()
+        else:
+            assert captured_siwc_provider is not None
+            opening.api_key = captured_api_key
+            provider_id = captured_siwc_provider
+        if saved_plan_provider is not None and saved_plan_provider != provider_id:
+            raise ValueError("Checkpoint requires the original ChatGPT registration")
+        base_url = _SIWC_RESPONSES_BASE_URL
+        routing.update(http_headers={}, request_max_retries=0, stream_max_retries=0)
+    return {
+        "model_provider": provider_id,
+        f"model_providers.{provider_id}": {
+            "name": "OpenAI" if isinstance(auth, CodexLogin) else "Native agent provider",
+            "base_url": base_url,
+            "wire_api": "responses",
+            "requires_openai_auth": True,
+            "supports_websockets": provider._websockets_enabled,
+            **routing,
+            # Both native web protocols require a compatible Responses
+            # provider. The declaration admits that provider capability.
+            "supports_standalone_web_search": standalone_web_search,
+        },
+    }
 
 
 def _configure_child_roles(
@@ -2868,6 +3335,7 @@ def _capture_opening_agent(
     """Detach declaration defaults before native opening can suspend."""
     return Agent[ContextT, OutputT](
         instructions=agent.instructions,
+        realtime=agent.realtime,
         name=agent.name,
         tools=agent.tools if tool_selection is None else tool_selection,
         handoffs=agent.handoffs,
@@ -2882,6 +3350,9 @@ def _capture_opening_agent(
         transform_context=agent.transform_context,
         before_compact=agent.before_compact,
         before_complete=agent.before_complete,
+        tool_batch_completion=agent.tool_batch_completion,
+        input_guardrails=agent.input_guardrails,
+        output_guardrails=agent.output_guardrails,
     )
 
 
@@ -2898,6 +3369,9 @@ def _supports_atomic_first_turn(
         and agent.transform_context is None
         and agent.before_compact is None
         and agent.before_complete is None
+        and agent.tool_batch_completion is None
+        and not agent.output_guardrails
+        and not agent.input_guardrails
         and all(
             isinstance(tool, FunctionTool)
             and tool._bind is not None
@@ -2922,7 +3396,7 @@ class Session(Generic[ContextT, OutputT]):
         agent: Agent[ContextT, OutputT],
         *,
         context: ContextT | None = None,
-        state: SessionState | None = None,
+        state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages_json: str | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -2935,16 +3409,31 @@ class Session(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         discover_agents_md: bool = False,
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         _captured_api_key: str | None = None,
+        _captured_siwc_provider: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
+        _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
+        if not isinstance(include_raw_provider_events, bool):
+            raise TypeError("include_raw_provider_events must be a bool")
+        managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
+        if isinstance(state, ManagedWorkspaceCheckpoint):
+            if managed_source is None:
+                raise ValueError("Managed checkpoint requires a current managed sandbox source")
+            captured_pair = managed_source.validate_resume(state)
+            state = captured_pair.conversation
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -2954,6 +3443,12 @@ class Session(Generic[ContextT, OutputT]):
         native_environment: dict[str, Any] | None = None
         session = None
         with opening:
+            input_guardrails = tuple(input_guardrails)
+            output_guardrails = tuple(output_guardrails)
+            if any(not isinstance(check, InputGuardrail) for check in input_guardrails):
+                raise TypeError("input_guardrails contains an invalid guardrail")
+            if any(not isinstance(check, OutputGuardrail) for check in output_guardrails):
+                raise TypeError("output_guardrails contains an invalid guardrail")
             retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
             if retention_omitted:
                 observation_retention = "bounded"
@@ -3018,7 +3513,9 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
-            codex_login = agent.provider.auth if agent.provider is not None else None
+            auth = agent.provider.auth if agent.provider is not None else None
+            codex_login = auth if isinstance(auth, CodexLogin) else None
+            uses_siwc = isinstance(auth, SignInWithChatGPT)
             programmatic_tool_calling = agent.programmatic_tool_calling
             instructions, instruction_receipts = _load_instruction_files(
                 agent.instructions, instruction_files
@@ -3035,15 +3532,16 @@ class Session(Generic[ContextT, OutputT]):
             restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None = None
             restored_resource_servers: tuple[str, ...] = ()
             restored_override = False
+            saved_plan_provider = None
             if state is not None:
                 if not isinstance(state, SessionState):
                     raise TypeError("state must be a SessionState")
                 # Capture caller-owned data before the first await. The native
                 # importer validates identities, revision, and current tool specs.
                 saved = SessionState.from_json(state.to_json())
-                _check_checkpoint(saved, instructions, graph=bool(profiles))
-                if (saved.codex_login_binding is not None) != (codex_login is not None):
-                    raise ValueError("Checkpoint and Session must use the same authentication mode")
+                saved_plan_provider = _checkpoint_plan_provider(saved, auth)
+                if not uses_siwc:
+                    _check_checkpoint(saved, instructions, graph=bool(profiles))
                 (
                     checkpoint,
                     restored_override,
@@ -3097,6 +3595,13 @@ class Session(Generic[ContextT, OutputT]):
             deferred_schemas = _has_deferred_tools(available) or any(
                 _has_deferred_tools(profile.declaration.tools) for profile in profiles
             )
+            if uses_siwc:
+                _validate_siwc_opening_tools(
+                    available,
+                    programmatic_tool_calling=programmatic_tool_calling,
+                    deferred_schemas=deferred_schemas,
+                    has_other_agents=native_agents is not None or bool(profiles),
+                )
             if state is not None and state.descendants and native_agents is None:
                 raise ValueError("Restoring child state requires current NativeAgents")
             if native_agents is not None:
@@ -3133,7 +3638,12 @@ class Session(Generic[ContextT, OutputT]):
             ):
                 catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
             profile_runtimes, profile_roster = _capture_profile_runtimes(
-                profiles, catalog, instructions, context
+                profiles,
+                catalog,
+                instructions,
+                context,
+                output_guardrails,
+                (*input_guardrails, *agent.input_guardrails),
             )
             restored_profile, operation_profile, operation_source = _restore_profile_sources(
                 native,
@@ -3216,9 +3726,11 @@ class Session(Generic[ContextT, OutputT]):
                 and storage is None
                 and resume is None
                 and opening.environment is None
+                and not input_guardrails
+                and not output_guardrails
                 and not instruction_files
                 and agent.provider is not None
-                and codex_login is None
+                and auth is None
                 and _supports_atomic_first_turn(
                     agent,
                     output_mode=output.mode,
@@ -3389,68 +3901,89 @@ class Session(Generic[ContextT, OutputT]):
                 opening.lease = provider_lease
                 engine = None
                 thread = None
-                provider_id = (
-                    "native_agent_codex_login" if codex_login is not None else "native_agent"
+                provider_config = await _opening_provider_config(
+                    provider,
+                    opening,
+                    captured_api_key=_captured_api_key,
+                    captured_siwc_provider=_captured_siwc_provider,
+                    saved_plan_provider=saved_plan_provider,
+                    standalone_web_search=web_search is not None
+                    and web_search.route == "standalone",
                 )
-                config = {
-                    "include_permissions_instructions": executor is not None,
-                    "include_environment_context": executor is not None,
-                    "model_provider": provider_id,
-                    f"model_providers.{provider_id}": {
-                        "name": "OpenAI" if codex_login is not None else "Native agent provider",
-                        "base_url": (
-                            _CODEX_RESPONSES_BASE_URL
-                            if codex_login is not None
-                            else provider.base_url or "https://api.openai.com/v1"
-                        ),
-                        "wire_api": "responses",
-                        "requires_openai_auth": True,
-                        "supports_websockets": provider._websockets_enabled,
-                        **provider._routing_config(),
-                        **{
-                            name: getattr(provider, name)
+                if uses_siwc and state is not None:
+                    _check_checkpoint(saved, instructions, graph=bool(profiles))
+
+                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
+                    private_run = (
+                        _atomic_first_turn
+                        and observation_retention == "bounded"
+                        and context is None
+                        and not owned_provider
+                        and provider is not None
+                        and provider.model_backend is None
+                        and provider.auth is None
+                        and not agent.handoffs
+                        and _tracing_context is None
+                        and (agent.output_type is None or agent.output_type is str)
+                        and not output.max_retries
+                    )
+                    use_completed_owner = (
+                        private_run and not available and _completed_input is not None
+                    )
+                    websockets_enabled = provider._websockets_enabled
+                    private_http = False
+                    # Conservative subset of SdkModelHttpPool::client eligibility;
+                    # explicit CA/proxy profiles keep their existing transport selection.
+                    if (
+                        private_run
+                        and (_private_text_run or use_completed_owner)
+                        and provider_config["model_provider"] == "native_agent"
+                        and provider.supports_websockets is None
+                        and websockets_enabled
+                        and not provider._routing_config()
+                        and sys.platform == "linux"
+                        and not any(
+                            name in os.environ
                             for name in (
-                                "request_max_retries",
-                                "stream_max_retries",
-                                "stream_idle_timeout_ms",
-                                "websocket_connect_timeout_ms",
+                                "HTTP_PROXY",
+                                "http_proxy",
+                                "HTTPS_PROXY",
+                                "https_proxy",
+                                "ALL_PROXY",
+                                "all_proxy",
+                                "REQUEST_METHOD",
+                                "CODEX_SANDBOX",
+                                "CODEX_CA_CERTIFICATE",
+                                "SSL_CERT_DIR",
+                                "SSL_CERT_FILE",
                             )
-                            if getattr(provider, name) is not None
-                        },
-                        # Both native web protocols require a compatible Responses
-                        # provider. The declaration admits that provider capability.
-                        "supports_standalone_web_search": (
-                            web_search is not None and web_search.route == "standalone"
-                        ),
-                    },
-                    "agents.enabled": False,
-                    "features.goals": goals,
-                    **guidance_config,
-                    "tools.update_plan.enabled": checklist,
-                    "mcp_servers": {},
-                    "features.non_prefixed_mcp_tool_names": False,
-                    "features.code_mode": {
-                        "enabled": programmatic_tool_calling,
-                        "direct_only_tool_namespaces": (
-                            ["collaboration"]
-                            if programmatic_tool_calling
-                            else _direct_tool_namespaces(
-                                allowed_tools,
-                                native_agents is not None or deferred_schemas,
-                            )
-                        ),
-                    },
-                    "features.code_mode_interrupt": programmatic_tool_calling,
-                    "web_search": web_search.mode if web_search is not None else "disabled",
-                    "features.standalone_web_search": (
-                        web_search is not None and web_search.route == "standalone"
-                    ),
-                    **web_search_config,
-                }
+                        )
+                    ):
+                        private_http = True
+                        websockets_enabled = False
+                    return use_completed_owner, websockets_enabled, private_http
+
+                use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
+                config = _native_session_config(
+                    executor=executor,
+                    provider_config=provider_config,
+                    native_agents=native_agents,
+                    deferred_schemas=deferred_schemas,
+                    allowed_tools=allowed_tools,
+                    web_search=web_search,
+                    web_search_config=web_search_config,
+                    guidance_config=guidance_config,
+                    checklist=checklist,
+                    goals=goals,
+                    programmatic_tool_calling=programmatic_tool_calling,
+                )
+
                 from . import telemetry
 
                 if telemetry._engine_options is not None:
                     config.update(json.loads(telemetry._engine_options))
+                if uses_siwc:
+                    config["features.unbounded_connection_retries"] = False
                 if programmatic_tool_calling:
                     config["features.code_mode_host"] = {
                         "enabled": True,
@@ -3468,18 +4001,13 @@ class Session(Generic[ContextT, OutputT]):
                     instructions,
                     project_guidance=project_guidance,
                 )
-                if provider.model_backend is not None:
-                    opening.api_key = "native-model-producer"
-                elif codex_login is not None:
-                    opening.api_key = None
-                elif selected is not None:
-                    opening.api_key = selected.api_key
-                elif _captured_api_key is not None:
-                    opening.api_key = _captured_api_key
-                elif provider.api_key is None:
-                    opening.api_key = native._read_openai_api_key_from_env()
-                else:
-                    opening.api_key = provider.api_key
+                opening.capture_api_key(
+                    provider,
+                    native,
+                    auth=auth,
+                    selected=selected,
+                    captured_api_key=_captured_api_key,
+                )
                 hosted_verification = next(
                     (server for server in allowed_mcp if type(server) is HostedVerificationMCP),
                     None,
@@ -3492,10 +4020,18 @@ class Session(Generic[ContextT, OutputT]):
                 options = {
                     "_hosted_tools": hosted_tools,
                     **guidance_options,
+                    **(
+                        {"user_instructions_appendix": lease._workspace_instructions}
+                        if lease is not None and lease._workspace_instructions is not None
+                        else {}
+                    ),
                     "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
-                    "_before_complete": agent.before_complete is not None,
+                    "_before_complete": _needs_before_complete(
+                        agent, input_guardrails, output_guardrails
+                    ),
+                    "_tool_batch_completion": agent.tool_batch_completion is not None,
                     **(
                         {"parent_trace": parent_trace.to_headers()}
                         if parent_trace is not None
@@ -3550,6 +4086,11 @@ class Session(Generic[ContextT, OutputT]):
                         else {}
                     ),
                     "tool_policy": {
+                        "allowed_mcp_tools": [
+                            [server.name, raw, ref]
+                            for server in allowed_mcp
+                            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
+                        ],
                         "allowed_tools": [
                             {
                                 "name": entry.name,
@@ -3649,7 +4190,7 @@ class Session(Generic[ContextT, OutputT]):
                             **(
                                 {
                                     "_capture_initial_config": True,
-                                    "_share_model_http": not owned_provider and codex_login is None,
+                                    "_share_model_http": not owned_provider and auth is None,
                                 }
                                 if checkpoint is None
                                 else {}
@@ -3674,19 +4215,7 @@ class Session(Generic[ContextT, OutputT]):
                 async def initialize_atomic() -> (
                     tuple[Any, Any, Any] | Completed[Any] | _RunHandoff
                 ):
-                    if (
-                        _completed_input is not None
-                        and observation_retention == "bounded"
-                        and context is None
-                        and not owned_provider
-                        and provider is not None
-                        and provider.model_backend is None
-                        and not available
-                        and not agent.handoffs
-                        and _tracing_context is None
-                        and (agent.output_type is None or agent.output_type is str)
-                        and not output.max_retries
-                    ):
+                    if use_completed_owner:
                         submission_id = uuid4().hex
                         owner = native._prepare_run_conversation(
                             json.dumps(config),
@@ -3697,13 +4226,14 @@ class Session(Generic[ContextT, OutputT]):
                             json.dumps(
                                 {
                                     "mode": "start_if_idle",
-                                    "input": _native_input(_completed_input),
+                                    "input": _native_input(cast(str, _completed_input)),
                                     "observation_submission_id": submission_id,
                                 }
                             ),
                             api_key=opening.api_key or "",
                             provider_lease=provider_lease,
                             _share_model_http=True,
+                            _private_http=private_http,
                         )
                         return await opening.run(owner, agent, output, submission_id)
                     return cast(
@@ -3718,6 +4248,7 @@ class Session(Generic[ContextT, OutputT]):
                                 api_key=opening.api_key or "",
                                 provider_lease=provider_lease,
                                 _share_model_http=True,
+                                _private_http=private_http,
                             )
                         ),
                     )
@@ -3776,11 +4307,18 @@ class Session(Generic[ContextT, OutputT]):
                     _start_readers=False,
                     _start_event_reader=handoff is None,
                     max_function_concurrency=max_function_concurrency,
+                    tool_error_formatter=tool_error_formatter,
                     observation_retention=observation_retention,
+                    include_model_output_items=include_model_output_items,
+                    include_raw_provider_events=include_raw_provider_events,
                 )
+                session._input_guardrails = input_guardrails
+                session._output_guardrails = output_guardrails
+                session._managed_workspace = managed_source
                 session._trace_context = _tracing_context
                 session._hosted_verification = hosted_verification or chatgpt_apps
                 session._chatgpt_apps = chatgpt_apps
+                session._uses_siwc = uses_siwc
                 if codex_login is not None:
                     account_id, plan_type, binding = engine._codex_account
                     session._codex_account = CodexAccount(
@@ -3806,6 +4344,9 @@ class Session(Generic[ContextT, OutputT]):
                 if checkpoint is not None:
                     session._repair_turns = saved.repair_turns
                     session._repair_items = saved.repair_items
+                    session._application_tool_outputs = [
+                        record.model_copy(deep=True) for record in saved.application_tool_outputs
+                    ]
                     recorded_policy = saved.executor_policy_digest
                     if (
                         recorded_policy == _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
@@ -3871,7 +4412,9 @@ class Session(Generic[ContextT, OutputT]):
                 await session._publish_opening_configuration(
                     settings=settings,
                     fresh=checkpoint is None and not _atomic_first_turn,
-                    hosted_search=web_search is not None and web_search.route == "hosted",
+                    validate_provider_model=(
+                        uses_siwc or (web_search is not None and web_search.route == "hosted")
+                    ),
                     instructions=instructions,
                     instruction_receipts=instruction_receipts,
                     mcp_config=mcp_config,
@@ -3895,14 +4438,23 @@ class Session(Generic[ContextT, OutputT]):
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
-                session._websockets_enabled = provider._websockets_enabled
+                session._websockets_enabled = websockets_enabled
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
+                    capture = _produced_items_restore.get()
+                    if (
+                        capture is not None
+                        and capture[0] is policy_agent
+                        and (capture[1] is state or capture[1] == state)
+                        and capture[2] is asyncio.current_task()
+                    ):
+                        session._start_produced_items()
                     session._manual_source_digest = hashlib.sha256(
                         saved.to_json().encode()
                     ).hexdigest()
                     active = _Submission(
                         restored_output,
+                        run_usage=_UsageCollector(saved.run_usage),
                         restored_pending=True,
                         observation_after=session._observations.sequence,
                         parent_trace=parent_trace,
@@ -3925,16 +4477,33 @@ class Session(Generic[ContextT, OutputT]):
                     session._last_turn = handle
                     session._restored_turn = handle
                     active.output_override = restored_override or restored_output_type is not None
+                    object.__setattr__(handle, "_guardrail_results", active.guardrail_results)
+                    object.__setattr__(handle, "_run_usage", active.run_usage)
+                    session._usage_roots[continuation.turn_id] = active.run_usage
                     active.handle = handle
                     session._register_request_observation(active, handle)
                     active.accepted.set_result(handle)
                     session._active = active
                     thread._select_steps(
-                        bool(session._profiles) or restored_operation_refs is not None,
+                        bool(session._profiles)
+                        or bool(session._mcp_tools)
+                        or restored_operation_refs is not None
+                        or any(
+                            isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                            for tool in session._bindings
+                        ),
                         _native_tool_refs(restored_operation_refs)
                         if restored_operation_refs is not None
                         else None,
-                        native_agents is not None and native_agents.before_step is not None,
+                        native_agents is not None
+                        and (
+                            native_agents.before_step is not None
+                            or session._has_child_input_guardrails()
+                            or any(
+                                isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                                for tool in session._bindings
+                            )
+                        ),
                     )
                     # The native reader can receive restored requests during preparation.
                     active.tracing = _capture(fallback=_tracing_context)
@@ -4147,19 +4716,29 @@ class Session(Generic[ContextT, OutputT]):
         _start_readers: bool = True,
         _start_event_reader: bool = True,
         max_function_concurrency: int | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
     ) -> None:
+        if tool_error_formatter is not None and not callable(tool_error_formatter):
+            raise TypeError("tool_error_formatter must be callable or None")
+        self._tool_error_formatter = tool_error_formatter
         self._trace_context: str | None = None
         self._provider_lease: Any = None
         self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
+        self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
+        self._produced_items_started = False
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._profiles: dict[str, _ProfileRuntime] = {}
+        self._voice_profiles: dict[str, _ProfileRuntime] = {}
         self._agent_profile_fingerprint: str | None = None
         self._profile_generation_high_water = catalog.generation
+        self._catalog_publication_lock = asyncio.Lock()
         self._profile_current: tuple[str, int] | None = None
         self._profile_catalogs: dict[tuple[str | None, int], _ToolCatalog] = {
             (None, catalog.generation): catalog
@@ -4172,8 +4751,12 @@ class Session(Generic[ContextT, OutputT]):
         self._parent_trace: TraceContext | None = None
         self._codex_account: CodexAccount | None = None
         self._codex_login_binding: str | None = None
+        self._uses_siwc = False
         self._native_options: str | None = None
         self._websockets_enabled = False
+        self._include_raw_provider_events = include_raw_provider_events
+        if include_raw_provider_events:
+            thread._enable_raw_provider_events()
         self._engine = engine
         self._native = thread
         # Issued snapshots belong to this Session's current native thread.
@@ -4219,6 +4802,8 @@ class Session(Generic[ContextT, OutputT]):
         self._executor_termination_attempted = False
         self._native_agents: NativeAgents[Any] | None = None
         self._interception: _NativeInterception | None = None
+        self._input_guardrails: tuple[InputGuardrail[Any], ...] = ()
+        self._output_guardrails: tuple[OutputGuardrail[Any], ...] = ()
         self._context = context
         self._default_output = output
         self._instructions = instructions
@@ -4228,10 +4813,14 @@ class Session(Generic[ContextT, OutputT]):
         self._url_completions: dict[tuple[str, str], ElicitationRequest] = {}
         self._url_completion_lock = asyncio.Lock()
         self._active: _Submission | None = None
+        self._usage_roots: weakref.WeakValueDictionary[str, _UsageCollector] = (
+            weakref.WeakValueDictionary()
+        )
         self._last_turn: Turn[Any] | None = None
         self._repair_turns: list[RecordedTurn] = []
         self._repair_receipts_incomplete = False
         self._repair_items: list[SessionItem] = []
+        self._application_tool_outputs: list[ApplicationToolOutput] = []
         self._restored_turn: Turn[OutputT] | None = None
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
         self._child_admissions: set[asyncio.Task[Turn[str]]] = set()
@@ -4241,6 +4830,8 @@ class Session(Generic[ContextT, OutputT]):
         self._mutation: asyncio.Task[Any] | None = None
         self._mutation_cancellable = False
         self._checkpoint_task: asyncio.Future[None] | None = None
+        self._stored_fork: Any = None
+        self._stored_fork_receipt: asyncio.Future[None] | None = None
         self._sealed_checkpoint: str | None = None
         self._manual_source_digest: str | None = None
         self._sealing = False
@@ -4253,12 +4844,17 @@ class Session(Generic[ContextT, OutputT]):
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
+        self._stored_close_action: Any | None = None
         self._scope_close_task: asyncio.Task[None] | None = None
         self._interaction_handler: _InteractionHandler | None = None
         self._interaction_error: BaseException | None = None
         self._sync_cleanup_owner = _sync_run.get()
         self._sync_cleanup_deferred = False
-        self._observations = _ObservationBuffer(self.id, retention=observation_retention)
+        self._observations = _ObservationBuffer(
+            self.id,
+            retention=observation_retention,
+            include_model_output_items=include_model_output_items,
+        )
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._plan_usage_reads: set[asyncio.Task[str]] = set()
         self._rate_limit_parent: Session[Any, Any] | None = None
@@ -4279,26 +4875,29 @@ class Session(Generic[ContextT, OutputT]):
         if _start_readers:
             self._start_readers()
 
-    def _start_readers(self) -> None:
-        self._start_interception()
+    def _start_readers(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
+        self._start_interception(pending)
+        if self._mcp_reader is not None:
+            return
+        configured = tuple(profile.profile.declaration for profile in self._profiles.values())
         if any(
-            server.transform_result is not None or server.request_metadata is not None
+            server._has_result_callback or server.request_metadata is not None
             for server in self._mcp_tools
         ) or any(
             isinstance(tool, _MCP)
-            and (tool.transform_result is not None or tool.request_metadata is not None)
-            for profile in self._profiles.values()
-            for tool in profile.profile.declaration.tools
+            and (tool._has_result_callback or tool.request_metadata is not None)
+            for agent in (*configured, *pending)
+            for tool in agent.tools
         ):
             self._mcp_reader = _create_task(self._read_mcp_results())
 
-    def _start_interception(self) -> None:
+    def _start_interception(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         if self._interception is not None:
-            self._interception.refresh()
-        elif _has_interceptors(self):
+            self._interception.refresh(pending)
+        elif _has_interceptors(self, pending):
             self._interception = _NativeInterception(self)
             with _clear_current():
-                self._interception.start()
+                self._interception.start(pending)
 
     @property
     def id(self) -> str:
@@ -4318,6 +4917,10 @@ class Session(Generic[ContextT, OutputT]):
         """
         return None if self._realtime is None else self._realtime.usage
 
+    def _check_realtime_provider(self) -> None:
+        if self._uses_siwc:
+            raise CapabilityError("Sign in with ChatGPT Sessions do not support Realtime")
+
     def realtime(self, *, config: RealtimeConfig | None = None) -> RealtimeSession:
         """Open a Realtime connection owned by this native Session.
 
@@ -4328,6 +4931,7 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_open()
         self._check_callback_operation("open voice in its own Session")
+        self._check_realtime_provider()
         from .realtime import RealtimeConfig, RealtimeSession
 
         return RealtimeSession(self, config=RealtimeConfig() if config is None else config)
@@ -4353,6 +4957,7 @@ class Session(Generic[ContextT, OutputT]):
         try:
             self._check_open()
             self._check_callback_operation("build Realtime SIP configuration in its own Session")
+            self._check_realtime_provider()
             from .realtime import RealtimeConfig, _build_realtime_sip_config
 
             return await _build_realtime_sip_config(
@@ -4366,7 +4971,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         settings: dict[str, Any],
         fresh: bool,
-        hosted_search: bool,
+        validate_provider_model: bool,
         instructions: str,
         instruction_receipts: Sequence[Mapping[str, Any]],
         mcp_config: str,
@@ -4378,8 +4983,8 @@ class Session(Generic[ContextT, OutputT]):
         default_handoffs: list[str] | None = None,
     ) -> None:
         thread = self._native
-        if hosted_search and (not fresh or "model" not in settings):
-            await self._publish_startup(thread._validate_hosted_search_model())
+        if validate_provider_model and (not fresh or "model" not in settings):
+            await self._publish_startup(thread._validate_provider_model())
         if fresh and settings:
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(settings)))
@@ -4455,17 +5060,22 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._join_mutation(asyncio.create_task(prepare()))
 
-    async def _realtime_function_tools(
-        self, tools: Sequence[FunctionTool[Any, Any, Any]] | None, *, allow_missing: bool = False
-    ) -> tuple[list[dict[str, Any]] | None, str | None]:
-        """Fence explicit declarations to the exact native source capture."""
-        self._check_open()
-        self._check_callback_operation("configure Realtime tools in its own Session")
-        if tools is None:
-            return None, None
-        if not tools:
-            return [], None
-        snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
+    async def _realtime_tool_selection(
+        self,
+        snapshot: Mapping[str, Any] | None = None,
+    ) -> tuple[
+        dict[str, Any],
+        Agent[Any, Any],
+        dict[str, Any] | None,
+        _ToolCatalog,
+        Sequence[Tool[Any]],
+        str,
+    ]:
+        if snapshot is None:
+            snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
+        if not isinstance(snapshot, Mapping):
+            raise NativeError("Invalid Realtime tool selection snapshot")
+        snapshot = dict(snapshot)
         receipt = snapshot["profile_receipt"]
         source_agent = self._agent_for_profile(receipt)
         generation = snapshot["catalog_generation"]
@@ -4484,6 +5094,68 @@ class Session(Generic[ContextT, OutputT]):
         selection_id = snapshot["selection_id"]
         if not isinstance(selection_id, str) or not selection_id:
             raise NativeError("Missing Realtime source selection identity")
+        return snapshot, source_agent, receipt, catalog, bindings, selection_id
+
+    async def _realtime_policy_source(
+        self, snapshot: Mapping[str, Any] | None = None
+    ) -> _RealtimePolicySource:
+        from .realtime import RealtimePolicyContext, RealtimeTool, _RealtimePolicySource
+
+        self._check_open()
+        self._check_callback_operation("configure Realtime policies in its own Session")
+        _, agent, receipt, catalog, _, selection_id = await self._realtime_tool_selection(snapshot)
+        profile = (
+            self._source_profile_runtime(receipt["profile_id"]).profile
+            if receipt is not None
+            else None
+        )
+        handoffs = dict.fromkeys((*profile.handoffs, *profile.handoff_callbacks)) if profile else {}
+        tools = [
+            RealtimeTool("handoff" if spec["name"] in handoffs else "function", spec["name"])
+            for spec in json.loads(catalog.native_specs())
+            if spec.get("type") == "function" and isinstance(spec.get("name"), str)
+        ]
+        if receipt is not None:
+            tools.extend(
+                RealtimeTool("handoff", name)
+                for name in handoffs
+                if not any(tool.name == name for tool in tools)
+            )
+        return _RealtimePolicySource(
+            RealtimePolicyContext(agent, self._context), tuple(tools), selection_id
+        )
+
+    def _realtime_handoff_source(
+        self, receipt: dict[str, Any] | None, name: str
+    ) -> Agent[Any, Any] | None:
+        agent = self._agent_for_profile(receipt)
+        if receipt is None:
+            return None
+        profile = self._source_profile_runtime(receipt["profile_id"]).profile
+        return agent if name in profile.handoffs or name in profile.handoff_callbacks else None
+
+    async def _realtime_function_tools(
+        self,
+        tools: Sequence[FunctionTool[Any, Any, Any]] | None,
+        *,
+        allow_missing: bool = False,
+        snapshot: Mapping[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """Fence explicit declarations to the exact native source capture."""
+        self._check_open()
+        self._check_callback_operation("configure Realtime tools in its own Session")
+        if tools is None:
+            return None, snapshot["selection_id"] if snapshot is not None else None
+        if not tools:
+            return [], snapshot["selection_id"] if snapshot is not None else None
+        (
+            snapshot,
+            source_agent,
+            receipt,
+            catalog,
+            bindings,
+            selection_id,
+        ) = await self._realtime_tool_selection(snapshot)
         captured = {tool._ref: tool for tool in catalog.tools}
         selected: list[dict[str, Any]] = []
         seen: set[ToolRef] = set()
@@ -4515,6 +5187,14 @@ class Session(Generic[ContextT, OutputT]):
 
     def _agent_for_profile(self, receipt: Mapping[str, Any] | None) -> Agent[Any, Any]:
         """Resolve a native source receipt without consulting the current Agent."""
+        if (
+            isinstance(receipt, Mapping)
+            and isinstance(receipt.get("profile_id"), str)
+            and receipt.get("profile_id") in getattr(self, "_voice_profiles", {})
+        ):
+            if type(receipt.get("epoch")) is not int or receipt["epoch"] < 0:
+                raise NativeError("Native voice source has an invalid Agent profile receipt")
+            return self._voice_profiles[receipt["profile_id"]].profile.declaration
         if not self._profiles:
             if receipt is not None or self._opening_agent is None:
                 raise NativeError("Native source does not belong to this Session's Agent graph")
@@ -4541,6 +5221,51 @@ class Session(Generic[ContextT, OutputT]):
         )
         return self._agent_for_profile(receipt)
 
+    def _original_agent_for_profile(self, receipt: Mapping[str, Any] | None) -> Agent[Any, Any]:
+        """Expose application identity after validating the captured source receipt."""
+        captured = self._agent_for_profile(receipt)
+        profile_id = receipt.get("profile_id") if receipt is not None else None
+        if isinstance(profile_id, str):
+            return self._source_profile_runtime(profile_id).profile.agent
+        return self._agent if self._agent is not None else captured
+
+    def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
+        receipt = (
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
+        return self._original_agent_for_profile(receipt)
+
+    async def _realtime_tool_enabled(
+        self,
+        message: Mapping[str, Any],
+        context: Any,
+        tool: ToolRef,
+        admitted: Callable[[], bool],
+    ) -> bool:
+        from .realtime_agents import RealtimeAgentContext
+
+        defaults = self._agent_for_message(message).realtime
+        if defaults is None or defaults.tool_enabled is None:
+            return True
+        profile = message.get("profile_id")
+        original = self._source_profile_runtime(profile).profile.agent if profile else self._agent
+        if original is None:
+            raise NativeError("Realtime tool has no source Agent")
+        enabled = await _call_callback(
+            defaults.tool_enabled, admitted, RealtimeAgentContext(context, original), tool
+        )
+        if type(enabled) is not bool:
+            raise TypeError("Realtime tool_enabled must return a bool")
+        return enabled
+
+    def _source_profile_runtime(self, profile_id: str) -> _ProfileRuntime:
+        runtime = self._profiles.get(profile_id) or self._voice_profiles.get(profile_id)
+        if runtime is None:
+            raise NativeError("Native request has an unknown captured Agent profile")
+        return runtime
+
     def _bindings_for_message(self, message: Mapping[str, Any]) -> Sequence[Tool[Any]]:
         declaration = self._agent_for_message(message)
         generation = message.get("generation")
@@ -4557,7 +5282,7 @@ class Session(Generic[ContextT, OutputT]):
         return declaration.tools
 
     def _catalog_for_message(self, message: Mapping[str, Any], generation: Any) -> _ToolCatalog:
-        if self._profiles:
+        if self._profiles or message.get("profile_id") in getattr(self, "_voice_profiles", {}):
             self._agent_for_message(message)
             catalog = self._profile_catalogs.get((message["profile_id"], generation))
             if catalog is None:
@@ -4725,6 +5450,7 @@ class Session(Generic[ContextT, OutputT]):
         response_id: str,
         call_ids: Sequence[str],
         stop_admission: asyncio.Event | None = None,
+        before_dispatch: Callable[[], Awaitable[Sequence[str]]] | None = None,
     ) -> Turn[None]:
         """Admit a response's tools to this generation's native tools root."""
         self._check_open()
@@ -4776,6 +5502,8 @@ class Session(Generic[ContextT, OutputT]):
             if self._active is not state:
                 continue
             assert turn.turn_id is not None
+            disabled = tuple(await before_dispatch()) if before_dispatch is not None else ()
+            check_generation()
             receipt = json.loads(
                 await self._native._submit_realtime_tools(
                     json.dumps(
@@ -4783,6 +5511,7 @@ class Session(Generic[ContextT, OutputT]):
                             "generation": generation,
                             "response_id": response_id,
                             "call_ids": selected,
+                            "disabled_call_ids": disabled,
                             "expected_root_turn_id": turn.turn_id,
                         }
                     )
@@ -4807,8 +5536,10 @@ class Session(Generic[ContextT, OutputT]):
                     if stop_admission is not None and stop_admission.is_set():
                         raise
         check_generation()
+        disabled = tuple(await before_dispatch()) if before_dispatch is not None else ()
+        check_generation()
         issued = await self._start(
-            [], _prepare_spec(None), realtime_tool=(generation, response_id, selected)
+            [], _prepare_spec(None), realtime_tool=(generation, response_id, selected, disabled)
         )
         state = self._owned_submission(issued)
         if state is None:
@@ -5118,6 +5849,15 @@ class Session(Generic[ContextT, OutputT]):
 
     def _check_open(self) -> None:
         self._check_loop()
+        managed = self._managed_workspace
+        if (
+            managed is not None
+            and managed.capture_task is not None
+            and not managed.capture_task.done()
+            and asyncio.current_task()
+            not in {managed.capture_task, self._checkpoint_task, self._close_task}
+        ):
+            raise SessionBusyError("Session is retiring a managed workspace checkpoint")
         if self._interaction_error is not None:
             raise self._interaction_error
         if (
@@ -5186,8 +5926,9 @@ class Session(Generic[ContextT, OutputT]):
         """Read a fresh Codex plan snapshot using this Session's saved login.
 
         Call before ``submit()`` to inspect provider-reported windows and credits.
-        Missing fields are unknown. An API-key Session returns ``None`` without an
-        account request. A failed account read raises ``RuntimeError``. This read
+        Missing fields are unknown. A Session using an API key or
+        ``SignInWithChatGPT`` returns ``None`` without an account request.
+        A failed account read raises ``RuntimeError``. This read
         uses the Session's cached credentials. If the access token has expired,
         renew the saved login and open a new Session before retrying.
         Closing the Session cancels pending plan usage reads.
@@ -5418,6 +6159,10 @@ class Session(Generic[ContextT, OutputT]):
                     raise CapabilityError(
                         "Writable roots cannot change while storage mounts are active"
                     )
+                if self._executor.read_only_roots:
+                    raise CapabilityError(
+                        "Writable roots cannot change while read_only_roots are active"
+                    )
                 if self._native_agents is not None:
                     raise CapabilityError("Writable roots cannot change with NativeAgents")
                 roots = _writable_roots(writable_roots)
@@ -5438,6 +6183,7 @@ class Session(Generic[ContextT, OutputT]):
                 parts,
                 output,
                 output_override=output_type is not None,
+                guardrail_input=deepcopy(input),
                 tools=tools,
                 before_step=before_step,
                 enqueue=if_busy != "reject",
@@ -5509,7 +6255,7 @@ class Session(Generic[ContextT, OutputT]):
                     captured = _capture()
                 request["tracing_context"] = captured.context
             try:
-                encoded = json.dumps(request)
+                encoded = _audio_json(request)
                 try:
                     response = await self._native._submit(encoded)
                 except RuntimeError as exc:
@@ -5576,7 +6322,7 @@ class Session(Generic[ContextT, OutputT]):
         # orphan an input Core has already accepted.
         self._check_open()
         self._check_graph_admission()
-        encoded = json.dumps({"input": _native_input(input)})
+        encoded = _audio_json({"input": _native_input(input)})
         try:
             receipt = await self._native._submit_child(
                 child_id, instance_id, encoded, None if turn is None else turn._native
@@ -5913,6 +6659,97 @@ class Session(Generic[ContextT, OutputT]):
             break
         raise InteractionExpiredError("Manual tool reply belongs to an expired declaration")
 
+    async def _realtime_function_enabled(
+        self, state: _CallbackState, message: dict[str, Any]
+    ) -> bool:
+        if (
+            not isinstance(state, _Submission)
+            or state.realtime_tool is None
+            or self._realtime is None
+            or self._realtime._config.is_tool_enabled is None
+        ):
+            return True
+        receipt = (
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
+        handoff_agent = self._realtime_handoff_source(receipt, message["tool"])
+        enabled = await self._realtime._tool_enabled(
+            handoff_agent if handoff_agent is not None else self._agent_for_message(message),
+            message["tool"],
+            "handoff" if handoff_agent is not None else "function",
+        )
+        if not enabled:
+            self._realtime._mark_tool_unavailable(message["callId"])
+        return enabled
+
+    async def _format_run_tool_error(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        entry: _CapturedFunction,
+        error: Exception,
+        phase: Literal["arguments", "execution"],
+        call: ToolCallInfo,
+        admit: Callable[[], bool],
+    ) -> str | None:
+        formatter = self._tool_error_formatter
+        if formatter is None or not entry._allow_run_error_formatter:
+            raise error
+        if not admit():
+            return None
+        default = (
+            f"Invalid arguments for function {entry.name!r}."
+            if phase == "arguments"
+            else f"Function {entry.name!r} failed."
+        )
+        context = ToolErrorContext(
+            context=entry.context, call=call, phase=phase, default_message=default, error=error
+        )
+        try:
+            text = await self._call_decision_callback(state, message, formatter, admit, context)
+        except Exception:
+            if not admit():
+                raise
+            text = None
+        if not admit():
+            return None
+        return text if isinstance(text, str) else default
+
+    async def _recover_tool_input(
+        self,
+        state: _CallbackState,
+        entry: _CapturedFunction,
+        message: dict[str, Any],
+        error: Exception,
+        original: Any,
+        admit: Callable[[], bool],
+        call: ToolCallInfo,
+    ) -> str | None:
+        callback = entry.input_error_function
+        if callback is None:
+            return await self._format_run_tool_error(
+                state, message, entry, error, "arguments", call, admit
+            )
+        if not admit():
+            return None
+        assert state.handle is not None
+        context = ToolInputErrorContext(
+            entry.context,
+            state.handle,
+            message["callId"],
+            call=call,
+            trace_context=_native_trace_context(message.get("_sdk_trace")),
+            realtime_usage=self.realtime_usage,
+        )
+        text = await _call_callback(callback, admit, context, error, deepcopy(original))
+        if not admit():
+            return None
+        if not isinstance(text, str):
+            raise TypeError("Function input_error_function must return str")
+        return text
+
     async def _prepare_managed_approval(
         self,
         state: _CallbackState,
@@ -5942,12 +6779,54 @@ class Session(Generic[ContextT, OutputT]):
                 acquired = True
             if not admit():
                 return
+            if not await self._realtime_function_enabled(state, message):
+                if admit():
+                    await self._respond(
+                        request,
+                        f"Tool {message['tool']} not found",
+                        _approval_rejection=True,
+                        _background=True,
+                    )
+                return
+            if not admit():
+                return
             if request._invocation not in state.manual_inputs:
-                with (
-                    _clear_current(),
-                    _owned_span("manual input validation", "validation", request._tracing_context),
-                ):
-                    arguments = entry.input_adapter.validate_python(deepcopy(message["arguments"]))
+                try:
+                    with (
+                        _clear_current(),
+                        _owned_span(
+                            "manual input validation", "validation", request._tracing_context
+                        ),
+                    ):
+                        arguments = entry.input_adapter.validate_python(
+                            deepcopy(message["arguments"])
+                        )
+                except ValidationError as error:
+                    if (
+                        (
+                            entry.function.input_error_function is None
+                            and not (
+                                self._tool_error_formatter is not None
+                                and entry.function._allow_run_error_formatter
+                            )
+                        )
+                        or message.get("_sdk_restored_approval")
+                        or "_sdk_effective_arguments" in message
+                    ):
+                        raise
+                    text = await self._recover_tool_input(
+                        state,
+                        entry.function,
+                        message,
+                        error,
+                        message["arguments"],
+                        admit,
+                        request.call,
+                    )
+                    if text is not None and admit():
+                        scope.active = False
+                        await self._decide_approval(request, False, reason=text)
+                    return
                 if not admit():
                     return
                 state.manual_inputs[request._invocation] = arguments
@@ -5975,6 +6854,8 @@ class Session(Generic[ContextT, OutputT]):
                 call=request.call,
                 realtime_usage=self.realtime_usage,
             )
+
+            object.__setattr__(context, "_usage_reporter", self._tool_usage_reporter(state, admit))
 
             if not admit():
                 return
@@ -6004,6 +6885,9 @@ class Session(Generic[ContextT, OutputT]):
                         effective_arguments=_snapshot_function_arguments(
                             function._arguments(parsed), function._ref
                         ),
+                    )
+                    object.__setattr__(
+                        context, "_usage_reporter", self._tool_usage_reporter(state, admit)
                     )
                     object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
                 elif not isinstance(decision, Allow):
@@ -6079,7 +6963,7 @@ class Session(Generic[ContextT, OutputT]):
         request: ApprovalRequested[Any],
         approve: bool,
         *,
-        reason: str = "Tool execution was rejected",
+        reason: str = _DEFAULT_APPROVAL_REASON,
         always: bool = False,
     ) -> None:
         self._check_loop()
@@ -6116,7 +7000,33 @@ class Session(Generic[ContextT, OutputT]):
                 raise
             self._observations.notify()
         else:
-            await self._respond(request, reason, _approval_rejection=True)
+            reply_reason = reason
+            if (
+                isinstance(reason, _DefaultApprovalReason)
+                and self._realtime is not None
+                and self._realtime._config.tool_error_formatter is not None
+                and self._active is not None
+                and self._active.realtime_tool is not None
+                and request.subagent_id is None
+            ):
+                if not self._native._check_manual_tool(request._grant):
+                    raise InteractionExpiredError("Managed approval is expired or already decided")
+                source_id = getattr(request, "_approval_source", None)
+                source_receipt = (
+                    None
+                    if source_id is None
+                    else {
+                        "profile_id": source_id,
+                        "epoch": getattr(request, "_approval_profile_epoch", None),
+                    }
+                )
+                reply_reason = await self._realtime._format_approval_rejection(
+                    self._agent_for_profile(source_receipt),
+                    request.name,
+                    request.call_id,
+                    reason,
+                )
+            await self._respond(request, reply_reason, _approval_rejection=True)
             self._approval_ready.pop(request._invocation, None)
         if always:
             self._approval_decisions[key] = (approve, reason)
@@ -6129,6 +7039,7 @@ class Session(Generic[ContextT, OutputT]):
         expected_json: str | None = None,
         prepared: _PreparedManualResult | None = None,
         _approval_rejection: bool = False,
+        _background: bool = False,
     ) -> Turn[Any]:
         self._check_loop()
         if (
@@ -6232,7 +7143,9 @@ class Session(Generic[ContextT, OutputT]):
         scope = _Invocation(self)
         token = _invocation.set(scope)
         output: str | None = None
+        application_output: ApplicationToolOutput | None = None
         try:
+            application_data = None
             if _approval_rejection:
                 output = json.dumps(ToolOutput.error(result).to_native())
             elif prepared is None:
@@ -6244,10 +7157,22 @@ class Session(Generic[ContextT, OutputT]):
                     if not self._native._check_manual_tool(request._grant):
                         raise InteractionExpiredError("Manual tool reply expired during validation")
                     output = entry._encode_result(value, expected_json=expected_json)
+                    if isinstance(value, ToolOutput):
+                        application_data = _capture_application_data(value.application_data)
             else:
                 output = prepared.output
+                application_data = prepared.application_data
+            if application_data is not None:
+                application_output = ApplicationToolOutput(
+                    submission_id=handle.submission_id,
+                    turn_id=request.turn_id,
+                    call_id=request.call_id,
+                    name=entry.name,
+                    namespace=entry.namespace,
+                    application_data=application_data,
+                )
         except Exception:
-            pass
+            output = None
         finally:
             scope.active = False
             _invocation.reset(token)
@@ -6265,9 +7190,15 @@ class Session(Generic[ContextT, OutputT]):
                 or self._broken
                 or (self._environment_lease is not None and self._environment_lease.interrupted)
                 or self._sealed_checkpoint is not None
-                or not await self._native._respond_manual_tool(request._grant, output)
+                or not await (
+                    self._native._respond_manual_tool(request._grant, output, False)
+                    if _background
+                    else self._native._respond_manual_tool(request._grant, output)
+                )
             ):
                 raise InteractionExpiredError("Manual tool reply is expired or already delivered")
+            if application_output is not None:
+                self._application_tool_outputs.append(application_output)
             self._observations.notify()
             if isinstance(state, _Submission) and state.restored_pending:
                 submission = state
@@ -6282,7 +7213,14 @@ class Session(Generic[ContextT, OutputT]):
 
         with _clear_current(), _private_task(deliver_and_continue()) as (delivery, delivered):
             state.add_callback(delivery)
-            return cast(Turn[Any], await _join(delivery, outcome=delivered))
+            try:
+                return cast(Turn[Any], await _join(delivery, outcome=delivered))
+            except asyncio.CancelledError as error:
+                # Retirement may cancel delivery after selecting a native failure.
+                # A passive caller's cancellation has a different identity.
+                if delivered.done() and delivered.exception() is error and state.failure.done():
+                    raise state.failure.result() from None
+                raise
 
     async def _continue_restored_turn(self, submission: _Submission) -> None:
         assert submission.handle is not None
@@ -6455,6 +7393,51 @@ class Session(Generic[ContextT, OutputT]):
 
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
 
+    def _start_produced_items(self) -> None:
+        if not self._produced_items_started:
+            self._native._start_produced_items()
+            self._produced_items_started = True
+
+    def _take_produced_items(self, turn: Turn[Any]) -> tuple[ProducedItem, ...]:
+        turn_id = turn.turn_id
+        if turn_id is None:
+            raise NativeError("Completed turn has no native identity")
+        try:
+            encoded = self._native._take_produced_items(turn_id)
+        except RuntimeError as error:
+            raise NativeError(str(error)) from error
+        captured = json.loads(encoded)
+        records = [
+            {"type": "turn_context", "payload": {"turn_id": turn_id}},
+            *(entry["record"] for entry in captured),
+        ]
+        item_record_indexes: dict[int, int] = {}
+        tool_success_by_record = {
+            index + 1: entry["tool_success"]
+            for index, entry in enumerate(captured)
+            if isinstance(entry.get("tool_success"), bool)
+        }
+        _, items = project_history(
+            records,
+            self.id,
+            item_record_indexes=item_record_indexes,
+            tool_success_by_record=tool_success_by_record,
+        )
+        produced = []
+        for item in items:
+            entry = captured[item_record_indexes[id(item)] - 1]
+            metadata = entry["record"].get("metadata") or {}
+            handoff = metadata.get("sdk_agent_handoff")
+            target = self._profiles.get(handoff["target_profile_id"]) if handoff else None
+            produced.append(
+                ProducedItem(
+                    item,
+                    self._original_agent_for_profile(entry["agent"]),
+                    target.profile.agent if target is not None else None,
+                )
+            )
+        return tuple(produced)
+
     async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
         """Original JSON object records from an idle Session.
 
@@ -6463,6 +7446,11 @@ class Session(Generic[ContextT, OutputT]):
         omitted prefixes. Imported unknown fields and missing IDs unchanged;
         current model context and projected ``items()`` available separately.
         """
+        return await self._capture_canonical_history(limit)
+
+    async def _capture_canonical_history(
+        self, limit: int | None, *, for_replay: bool = False
+    ) -> CanonicalHistorySnapshot:
         self._check_callback_operation("read canonical history from its own Session")
         self._check_idle_update()
         if limit is not None and (
@@ -6471,7 +7459,7 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("limit must be a nonnegative integer or None")
 
         async def capture() -> CanonicalHistorySnapshot:
-            value = json.loads(await self._native._canonical_history(limit))
+            value = json.loads(await self._native._canonical_history(limit, for_replay))
             return CanonicalHistorySnapshot(
                 value["revision"],
                 value["total"],
@@ -6479,6 +7467,19 @@ class Session(Generic[ContextT, OutputT]):
             )
 
         return await self._join_mutation(asyncio.create_task(capture()))
+
+    async def _run_history(self) -> tuple[dict[str, Any], ...]:
+        try:
+            snapshot = await self._capture_canonical_history(None, for_replay=True)
+        except NativeError:
+            raise
+        except RuntimeError as error:
+            raise NativeError(str(error)) from error
+        return tuple(
+            item
+            for item in snapshot.items
+            if item.get("type") != "message" or item.get("role") not in ("developer", "system")
+        )
 
     async def transact_history(
         self,
@@ -6726,6 +7727,8 @@ class Session(Generic[ContextT, OutputT]):
                     candidate=thread,
                 )
                 _check_mcp_receipt(receipt, self._mcp_tools, allowed_mcp, self._catalog.generation)
+            if self._include_raw_provider_events:
+                thread._enable_raw_provider_events()
             # From this point, retirement cannot roll back. Keep the old reader
             # attached until its own native EOF; do not end the Session stream.
             retiring = True
@@ -6961,6 +7964,8 @@ class Session(Generic[ContextT, OutputT]):
         handler: _InteractionHandler | None,
         *,
         return_state: bool = False,
+        return_history: bool = False,
+        return_items: bool = False,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
         """Own live replies and Session shutdown for a one-shot run."""
@@ -7080,6 +8085,10 @@ class Session(Generic[ContextT, OutputT]):
             result = await waiter
             if return_state:
                 result = replace(result, state=await self.save_state())
+            if return_history:
+                result = replace(result, history=await self._run_history())
+            if return_items:
+                result = replace(result, items=self._take_produced_items(result.turn))
         except BaseException as error:
             await _close_after_error(error, close)
             raise
@@ -7107,8 +8116,10 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: _RunBudget | None = None,
-        realtime_tool: tuple[str, str, tuple[str, ...]] | None = None,
+        run_usage: _UsageCollector | None = None,
+        realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
+        guardrail_input: UserInput | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         try:
@@ -7220,6 +8231,8 @@ class Session(Generic[ContextT, OutputT]):
                     slots = tuple(indices)
             state = _Submission(
                 output,
+                guardrail_input=guardrail_input,
+                run_usage=run_usage or _UsageCollector(),
                 observation_after=self._observations.sequence,
                 before_step=before_step,
                 prepare_request=prepare_request,
@@ -7242,7 +8255,9 @@ class Session(Generic[ContextT, OutputT]):
             )
             if input is not None:
                 # A queued root has no observation window until its own dispatch.
-                issued = _root_turn(self, None, uuid4().hex, state.completion, -1)
+                issued = _root_turn(
+                    self, None, uuid4().hex, state.completion, -1, state.guardrail_results
+                )
                 state.issued = issued
                 self._pending.append((state, input))
                 self._promote()
@@ -7701,120 +8716,124 @@ class Session(Generic[ContextT, OutputT]):
         default_slots: list[int] | None = None,
         default_handoffs: list[str] | None = None,
     ) -> None:
-        if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
-            raise ValueError("CustomStorage preview does not support manual tools")
-        assert self._opening_agent is not None
-        if self._native_agents is not None:
-            children = json.loads(await self._native.call("list_subagents"))
-            if self._child_admissions or any(
-                child.busy for child in self._child_callbacks.values()
-            ):
-                raise RuntimeError("Cannot replace tools while native children remain open")
-            for child in children:
-                if child["status"] == "active" and (
-                    candidate.tools != self._catalog.tools or child["runtime_loaded"]
+        async with self._catalog_publication_lock:
+            # A voice admission may have allocated catalogs while this replacement waited.
+            generation = max(self._catalog.generation, self._profile_generation_high_water) + 1
+            if candidate.generation != generation:
+                candidate = replace(candidate, generation=generation)
+            if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
+                raise ValueError("CustomStorage preview does not support manual tools")
+            assert self._opening_agent is not None
+            if self._native_agents is not None:
+                children = json.loads(await self._native.call("list_subagents"))
+                if self._child_admissions or any(
+                    child.busy for child in self._child_callbacks.values()
                 ):
-                    # Native startup copies the catalog before the event reader
-                    # registers an incarnation. Only actually cold records have
-                    # no native catalog, even if Python bindings still match.
                     raise RuntimeError("Cannot replace tools while native children remain open")
-        mcp_published = False
-        if allowed_mcp:
+                for child in children:
+                    if child["status"] == "active" and (
+                        candidate.tools != self._catalog.tools or child["runtime_loaded"]
+                    ):
+                        # Native startup copies the catalog before the event reader
+                        # registers an incarnation. Only actually cold records have
+                        # no native catalog, even if Python bindings still match.
+                        raise RuntimeError("Cannot replace tools while native children remain open")
+            mcp_published = False
+            if allowed_mcp:
+                try:
+                    receipt = await self._publish_startup(
+                        self._native._replace_mcp_servers(
+                            _mcp_config(
+                                mcp_tools,
+                                self._executor,
+                                allowed_mcp,
+                                programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
+                            ),
+                            _result_policies(mcp_tools, candidate.generation),
+                        )
+                    )
+                except BaseException as error:
+                    # MCP ValueErrors reject before publication. Other failures can
+                    # hide an accepted roster, unlike Python's RuntimeError contract.
+                    if not isinstance(error, ValueError):
+                        self._broken = True
+                    raise
+                try:
+                    _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, candidate.generation)
+                except NativeError:
+                    self._broken = True
+                    raise
+                mcp_published = True
             try:
-                receipt = await self._publish_startup(
-                    self._native._replace_mcp_servers(
-                        _mcp_config(
-                            mcp_tools,
-                            self._executor,
-                            allowed_mcp,
-                            programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
+                manual_slots = candidate.manual_slots()
+                if default_handoffs is None:
+                    default_handoffs = _handoff_default_names(
+                        self._default_tools, self._effective_handoffs()
+                    )
+                acknowledgement = await (
+                    self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        default_slots,
+                        json.dumps(
+                            {
+                                "mcp_tools": _mcp_profile_declarations(mcp_tools),
+                                "default_handoffs": default_handoffs,
+                            }
                         ),
-                        _result_policies(mcp_tools, candidate.generation),
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if self._profiles
+                    else self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        default_slots,
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if default_slots is not None
+                    else self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if manual_slots
+                    else self._native._replace_tools(
+                        candidate.generation, specs, terminal_slots=candidate.finish_slots()
                     )
                 )
             except BaseException as error:
-                # MCP ValueErrors reject before publication. Other failures can
-                # hide an accepted roster, unlike Python's RuntimeError contract.
-                if not isinstance(error, ValueError):
+                # Binding RuntimeErrors reject before publication. Transport failures
+                # and cancellation can hide an accepted generation, so fence those.
+                if (
+                    mcp_published
+                    or not isinstance(error, RuntimeError)
+                    or isinstance(error, _NativeCompletionError)
+                ):
                     self._broken = True
                 raise
-            try:
-                _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, candidate.generation)
-            except NativeError:
+            if type(acknowledgement) is not int or acknowledgement != candidate.generation:
                 self._broken = True
-                raise
-            mcp_published = True
-        try:
-            manual_slots = candidate.manual_slots()
-            if default_handoffs is None:
-                default_handoffs = _handoff_default_names(
-                    self._default_tools, self._effective_handoffs()
-                )
-            acknowledgement = await (
-                self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    default_slots,
-                    json.dumps(
-                        {
-                            "mcp_tools": _mcp_profile_declarations(mcp_tools),
-                            "default_handoffs": default_handoffs,
-                        }
-                    ),
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if self._profiles
-                else self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    default_slots,
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if default_slots is not None
-                else self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if manual_slots
-                else self._native._replace_tools(
-                    candidate.generation, specs, terminal_slots=candidate.finish_slots()
-                )
+                raise NativeError("Native tool replacement acknowledgement did not match")
+            # The binding publishes only after validation and its native idle check.
+            # Keep Python definitions unchanged until that exact generation is accepted.
+            self._catalog = candidate
+            self._profile_generation_high_water = max(
+                self._profile_generation_high_water, candidate.generation
             )
-        except BaseException as error:
-            # Binding RuntimeErrors reject before publication. Transport failures
-            # and cancellation can hide an accepted generation, so fence those.
-            if (
-                mcp_published
-                or not isinstance(error, RuntimeError)
-                or isinstance(error, _NativeCompletionError)
-            ):
-                self._broken = True
-            raise
-        if type(acknowledgement) is not int or acknowledgement != candidate.generation:
-            self._broken = True
-            raise NativeError("Native tool replacement acknowledgement did not match")
-        # The binding publishes only after validation and its native idle check.
-        # Keep Python definitions unchanged until that exact generation is accepted.
-        self._catalog = candidate
-        profile_id = self._profile_current[0] if self._profile_current is not None else None
-        self._profile_catalogs[(profile_id, candidate.generation)] = candidate
-        # An admitted opening leaf can be absent from a narrowed current descriptor.
-        # Capture the effective MCP roster published for this generation.
-        self._catalog_bindings[(profile_id, candidate.generation)] = (
-            *(binding for binding in self._bindings if not isinstance(binding, _MCP)),
-            *cast(tuple[HttpMCP[Any] | StdioMCP[Any], ...], mcp_tools),
-            *(binding for binding in self._bindings if isinstance(binding, _MCP)),
-        )
-        self._mcp_tools = mcp_tools
-        self._start_interception()
-        if self._mcp_reader is None and any(
-            s.transform_result is not None or s.request_metadata is not None for s in mcp_tools
-        ):
-            self._mcp_reader = _create_task(self._read_mcp_results())
+            profile_id = self._profile_current[0] if self._profile_current is not None else None
+            self._profile_catalogs[(profile_id, candidate.generation)] = candidate
+            # An admitted opening leaf can be absent from a narrowed current descriptor.
+            # Capture the effective MCP roster published for this generation.
+            self._catalog_bindings[(profile_id, candidate.generation)] = (
+                *(binding for binding in self._bindings if not isinstance(binding, _MCP)),
+                *cast(tuple[HttpMCP[Any] | StdioMCP[Any], ...], mcp_tools),
+                *(binding for binding in self._bindings if isinstance(binding, _MCP)),
+            )
+            self._mcp_tools = mcp_tools
+            self._start_readers()
 
     def _owned_submission(self, turn: Turn[Any]) -> _Submission | None:
         """Find only the active native owner or admission reserved by this Turn."""
@@ -7871,6 +8890,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise native_error
             payload_json = submission._native._tool_completion()
             tool_call = None
+            tool_batch_call_ids: tuple[str, ...] = ()
             if payload_json is not None:
                 payload = json.loads(payload_json)
                 if (
@@ -7881,17 +8901,19 @@ class Session(Generic[ContextT, OutputT]):
                 turn_id = submission.turn_id
                 if turn_id is None:
                     raise NativeError("Missing child tool completion owner")
-                tool_call = ToolCallInfo(
-                    tool=ToolRef(payload["name"], payload.get("namespace")),
-                    session_id=self.id,
-                    turn_id=turn_id,
-                    call_id=payload["call_id"],
-                    child_id=submission.child_id,
-                    child_incarnation=submission._native.incarnation,
-                    role=None,
-                    model=None,
-                    route="direct",
-                )
+                tool_batch_call_ids = tuple(payload.get("batch_call_ids") or ())
+                if not tool_batch_call_ids:
+                    tool_call = ToolCallInfo(
+                        tool=ToolRef(payload["name"], payload.get("namespace")),
+                        session_id=self.id,
+                        turn_id=turn_id,
+                        call_id=payload["call_id"],
+                        child_id=submission.child_id,
+                        child_incarnation=submission._native.incarnation,
+                        role=None,
+                        model=None,
+                        route="direct",
+                    )
             return cast(
                 Completed[_TurnT],
                 Completed(
@@ -7899,6 +8921,8 @@ class Session(Generic[ContextT, OutputT]):
                     cast(_TurnT, output),
                     _token_usage_info(json.loads(usage)),
                     tool_call=tool_call,
+                    tool_batch_call_ids=tool_batch_call_ids,
+                    guardrail_results=submission.guardrail_results,
                 ),
             )
         if self._owned_submission(submission) is not None or any(
@@ -8071,6 +9095,8 @@ class Session(Generic[ContextT, OutputT]):
         owners.add(pending)
 
         def finished(task: asyncio.Task[None]) -> None:
+            if task not in owners:
+                return
             error = asyncio.CancelledError() if task.cancelled() else task.exception()
             if not accepted.done():
                 if error is None:
@@ -8091,6 +9117,8 @@ class Session(Generic[ContextT, OutputT]):
             await asyncio.wait((accepted,))
         accepted.result()
         await _join(pending)
+        # A successful join can see a done task before its done callback runs.
+        finished(pending)
 
     async def _try_cancel_child(self, child: Subagent, turn: Turn[str]) -> bool:
         self._check_owner(turn)
@@ -8513,7 +9541,9 @@ class Session(Generic[ContextT, OutputT]):
         submission_id: str,
     ) -> _Submission:
         state = _Submission(self._default_output)
-        state.issued = _root_turn(self, None, submission_id, state.completion)
+        state.issued = _root_turn(
+            self, None, submission_id, state.completion, guardrail_results=state.guardrail_results
+        )
         self._register_request_observation(state, state.issued)
         self._active = state
         receipt = info.get("receipt")
@@ -8599,7 +9629,10 @@ class Session(Generic[ContextT, OutputT]):
             object.__setattr__(handle, "turn_id", receipt["turn_id"])
         if input is not None and state.continued_from is None:
             self._last_turn = handle
+        self._usage_roots[receipt["turn_id"]] = state.run_usage
+        object.__setattr__(handle, "_run_usage", state.run_usage)
         state.handle = handle
+        object.__setattr__(handle, "_guardrail_results", state.guardrail_results)
         assert handle.turn_id is not None
         self._observations.append(
             TurnStarted(
@@ -8715,15 +9748,30 @@ class Session(Generic[ContextT, OutputT]):
                         input is not None
                         and (
                             bool(self._profiles)
+                            or bool(
+                                self._input_guardrails or self._effective_agent().input_guardrails
+                            )
                             or state.budget is not None
                             or state.before_step is not None
+                            or bool(self._mcp_tools)
+                            or any(
+                                isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                                for tool in self._bindings
+                            )
                             or state.operation_slots is not None
                         ),
                         _native_tool_refs(state.operation_refs)
                         if state.operation_refs is not None
                         else None,
                         self._native_agents is not None
-                        and self._native_agents.before_step is not None,
+                        and (
+                            self._native_agents.before_step is not None
+                            or self._has_child_input_guardrails()
+                            or any(
+                                isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                                for tool in self._bindings
+                            )
+                        ),
                     )
                     if input is None:
                         tracing_args = {}
@@ -8744,11 +9792,12 @@ class Session(Generic[ContextT, OutputT]):
                             raise NativeError("Session ended before queued work was admitted")
                         request: dict[str, Any]
                         if state.realtime_tool is not None:
-                            generation, response_id, call_ids = state.realtime_tool
+                            generation, response_id, call_ids, disabled = state.realtime_tool
                             request = {
                                 "generation": generation,
                                 "response_id": response_id,
                                 "call_ids": call_ids,
+                                "disabled_call_ids": disabled,
                             }
                         else:
                             request = {
@@ -8787,6 +9836,12 @@ class Session(Generic[ContextT, OutputT]):
                                 await self._native._submit_realtime_tools(json.dumps(request))
                             )
                         else:
+                            try:
+                                _check_audio_json(request)
+                            except (ValueError, TypeError, RecursionError):
+                                # No input reached native admission. Retain the live Session.
+                                confirmed_rejection = True
+                                raise
                             receipt = json.loads(await self._native._submit(json.dumps(request)))
                 confirmed_rejection = receipt["status"] == "not_submitted"
                 handle = self._accept_submission(state, receipt, input)
@@ -8826,6 +9881,9 @@ class Session(Generic[ContextT, OutputT]):
                     if proposal is None or not proposal.matches(tool_payload):
                         raise NativeError("Terminal tool completion has no matching live proposal")
                     output = proposal.value
+                elif state.accepted_output is not None and not state.output.max_retries:
+                    (output,) = state.accepted_output
+                    state.accepted_output = None
                 elif not state.unsampled_steering and not state.output.max_retries:
                     output = self._validate_traced_output(state, text)
                 assert usage_request is not None
@@ -8865,13 +9923,19 @@ class Session(Generic[ContextT, OutputT]):
                         if state.cleanup_error is not None:
                             raise state.cleanup_error
                 if not state.unsampled_steering:
+                    committed_proposal = proposal if tool_payload is not None else None
+                    batch_call_ids = (
+                        committed_proposal.batch_call_ids if committed_proposal is not None else ()
+                    )
                     outcome = Completed(
                         handle,
                         output,
                         usage,
-                        tool_call=proposal.call
-                        if tool_payload is not None and proposal is not None
+                        tool_call=committed_proposal.call
+                        if committed_proposal is not None and not batch_call_ids
                         else None,
+                        tool_batch_call_ids=batch_call_ids,
+                        guardrail_results=tuple(state.guardrail_results),
                         repair_attempts=tuple(
                             deepcopy(t)
                             for t in self._repair_turns
@@ -9015,6 +10079,7 @@ class Session(Generic[ContextT, OutputT]):
         error: BaseException | None,
         outcome: Completed[Any] | None,
     ) -> None:
+        self._drain_terminal_observations(state)
         continuation: _Submission | None = None
         if state.cleanup_error is not None:
             if error is None:
@@ -9043,6 +10108,8 @@ class Session(Generic[ContextT, OutputT]):
                     preparation_index=state.preparation_index,
                     step_index=state.step_index,
                     budget=state.budget,
+                    run_usage=state.run_usage,
+                    guardrail_results=state.guardrail_results,
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
                     operation_refs=state.operation_refs,
@@ -9184,7 +10251,7 @@ class Session(Generic[ContextT, OutputT]):
             else self._effective_agent()
         )
         output = (
-            self._profiles[source_message["profile_id"]].output
+            self._source_profile_runtime(source_message["profile_id"]).output
             if source_message is not None and self._profiles and not state.output_override
             else state.output
         )
@@ -9257,12 +10324,19 @@ class Session(Generic[ContextT, OutputT]):
             self._repair_session = None
         if active is not None and not active():
             raise asyncio.CancelledError()
+        captured_siwc_provider = None
+        if self._uses_siwc:
+            assert self._native_options is not None
+            captured_siwc_provider = json.loads(self._native_options)["config"]["model_provider"]
         repair = await Session[ContextT, str]._open(
             declaration,
             context=self._context,
             _captured_api_key=self._model_api_key,
+            _captured_siwc_provider=captured_siwc_provider,
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
+            include_model_output_items=self._observations.include_model_output_items,
+            include_raw_provider_events=self._include_raw_provider_events,
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
@@ -9290,6 +10364,7 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                         _prepare_spec(str),
                         budget=state.budget,
+                        run_usage=state.run_usage,
                     )
                 except NativeError as error:
                     rejected = error._effects == "not_started"
@@ -9393,6 +10468,59 @@ class Session(Generic[ContextT, OutputT]):
             submission_id=submission_id,
         )
 
+    def _observe_function_finished(
+        self,
+        started: ToolStarted,
+        status: Literal["completed", "failed", "cancelled"],
+        output: ToolOutput | None = None,
+    ) -> None:
+        self._observations.append(
+            ToolFinished(
+                session_id=self.id,
+                turn_id=started.turn_id,
+                submission_id=started.submission_id,
+                call_id=started.call_id,
+                name=started.name,
+                namespace=started.namespace,
+                status=status,
+                output=output,
+            )
+        )
+
+    def _observe_accepted_tool_output(self, state: _CallbackState, item: Any) -> None:
+        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+            return
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str):
+            return
+        application_output = state.pending_application_outputs.pop(call_id, None)
+        if application_output is not None:
+            self._application_tool_outputs.append(application_output)
+        started = state.terminal_observations.pop(call_id, None)
+        if started is None:
+            return
+        output = None
+        try:
+            output = ToolOutput(
+                _native_tool_output_parts(item.get("output")),
+                application_data=deepcopy(application_output.application_data)
+                if application_output is not None
+                else None,
+            )
+            output._validate()
+        except (TypeError, ValueError):
+            output = None
+        self._observe_function_finished(started, "completed", output)
+
+    def _drain_terminal_observations(self, state: _CallbackState) -> None:
+        state.pending_application_outputs.clear()
+        pending = tuple(state.terminal_observations.values())
+        state.terminal_observations.clear()
+        for started in pending:
+            self._observe_function_finished(
+                started, "cancelled" if _native_callback_cancelled(state) else "completed"
+            )
+
     def _observe_mcp(self, event: dict[str, Any], state: _CallbackState) -> None:
         handle = state.handle
         assert handle is not None
@@ -9411,21 +10539,29 @@ class Session(Generic[ContextT, OutputT]):
             return
         assert handle.turn_id is not None
         invocation = message["invocation"]
-        servers = state.step_mcp if isinstance(state, _Submission) else None
+        servers = state.step_mcp
         for server in self._mcp_tools if servers is None else servers:
             if server.name != invocation["server"] or invocation["tool"] not in server.tools:
                 continue
-            selected = _tool_names((server,))[server.tools.index(invocation["tool"])]
+            identity = state.mcp_call_names.get(message["call_id"]) or state.mcp_names.get(
+                (server.name, invocation["tool"])
+            )
+            selected = (
+                {"name": identity.name, "namespace": identity.namespace}
+                if identity
+                else _tool_names((server,))[server.tools.index(invocation["tool"])]
+            )
             if kind == "mcp_tool_call_begin":
                 if isinstance(state, _Submission):
                     state.mcp_calls[message["call_id"]] = server.name
+                state.mcp_call_names[message["call_id"]] = ToolRef(**selected)
                 self._observations.append(
                     ToolStarted(
                         session_id=self.id,
                         submission_id=handle.submission_id,
                         turn_id=handle.turn_id,
                         call_id=message["call_id"],
-                        name=selected["name"],
+                        name=cast(str, selected["name"]),
                         namespace=selected["namespace"],
                         family="mcp",
                     )
@@ -9433,6 +10569,7 @@ class Session(Generic[ContextT, OutputT]):
             else:
                 if isinstance(state, _Submission):
                     state.mcp_calls.pop(message["call_id"], None)
+                state.mcp_call_names.pop(message["call_id"], None)
                 result = message["result"].get("Ok")
                 self._observations.append(
                     ToolFinished(
@@ -9440,7 +10577,7 @@ class Session(Generic[ContextT, OutputT]):
                         submission_id=handle.submission_id,
                         turn_id=handle.turn_id,
                         call_id=message["call_id"],
-                        name=selected["name"],
+                        name=cast(str, selected["name"]),
                         namespace=selected["namespace"],
                         family="mcp",
                         status=(
@@ -9568,6 +10705,7 @@ class Session(Generic[ContextT, OutputT]):
                 cancel_once(task)
             await asyncio.gather(*state.callbacks, return_exceptions=True)
         finally:
+            self._drain_terminal_observations(state)
             state.stopping = True
             state.tool_completion = None
             state.request_keys.clear()
@@ -9645,6 +10783,27 @@ class Session(Generic[ContextT, OutputT]):
                 await self._probe_child_url_completion(question, retire=True)
             self._observations.notify()
 
+    def _observe_profile_change(self, message: Mapping[str, Any], handle: Turn[Any] | None) -> None:
+        if message.get("thread_id") != self.id:
+            return
+        agent = self._agent_for_message(message)
+        previous_id = message.get("previous_profile_id")
+        previous = self._profiles.get(previous_id) if isinstance(previous_id, str) else None
+        self._observations.append(
+            AgentProfileChanged(
+                session_id=self.id,
+                submission_id=handle.submission_id if handle is not None else None,
+                turn_id=message.get("turn_id"),
+                profile_id=message["profile_id"],
+                profile_epoch=message["profile_epoch"],
+                agent_name=agent.name,
+                previous_profile_id=previous.profile.id if previous is not None else None,
+                previous_agent_name=previous.profile.declaration.name
+                if previous is not None
+                else None,
+            )
+        )
+
     async def _read_child_event(self, event: dict[str, Any]) -> None:
         if self._closing:
             return
@@ -9657,7 +10816,10 @@ class Session(Generic[ContextT, OutputT]):
             "turn_complete",
             "turn_aborted",
             "token_count",
+            "raw_response_completed",
             "hosted_tool_call_progress",
+            "raw_response_item",
+            "sdk_raw_provider_event",
         }:
             turn_id = turn_id or event["id"]
         if not turn_id and kind == "elicitation_request":
@@ -9697,7 +10859,13 @@ class Session(Generic[ContextT, OutputT]):
             return
         if not turn_id:
             return
-        if kind in {"token_count", "hosted_tool_call_progress"}:
+        if kind in {
+            "token_count",
+            "hosted_tool_call_progress",
+            "raw_response_item",
+            "raw_response_completed",
+            "sdk_raw_provider_event",
+        }:
             # Passive progress must not create a never-settling owner without
             # native admission.
             current = self._child_callbacks.get((event["subagent_id"], incarnation, turn_id))
@@ -9706,6 +10874,18 @@ class Session(Generic[ContextT, OutputT]):
             state = current
         else:
             state = self._child_callback_state(event["subagent_id"], incarnation, turn_id)
+        if kind == "sdk_raw_provider_event":
+            if (
+                state.stopping
+                or state.completion.done()
+                or (
+                    state.native_instance is not None
+                    and state.native_instance != event.get("subagent_instance_id")
+                )
+            ):
+                return
+            self._observe_progress(event, state.handle, event["subagent_id"])
+            return
         if state.completion.done():
             if kind == "item_completed":
                 self._observe_execution(
@@ -9715,9 +10895,23 @@ class Session(Generic[ContextT, OutputT]):
                     submission_id=state.handle.submission_id,
                 )
             return
+        if kind in {"task_started", "turn_started"} and state.root_turn_id is None:
+            origin = message.get("root_turn_id")
+            if isinstance(origin, str) and origin:
+                state.root_turn_id = origin
+                if origin == state.handle.turn_id:
+                    self._usage_roots[origin] = state.run_usage
+                else:
+                    parent = self._usage_roots.get(origin)
+                    if parent is not None and parent is not state.run_usage:
+                        parent.attach(state.run_usage)
+        if kind == "raw_response_completed" and event["id"] == state.handle.turn_id:
+            state.run_usage.observe(message.get("token_usage"))
         state.native_instance = event["subagent_instance_id"]
         if not state.observed.done():
             state.observed.set_result(None)
+        if kind == "raw_response_item":
+            self._observe_accepted_tool_output(state, message["item"])
         self._observe_mcp(event, state)
         self._observe_progress(event, state.handle, event["subagent_id"])
         if kind in {"task_complete", "turn_complete", "turn_aborted"}:
@@ -9781,6 +10975,45 @@ class Session(Generic[ContextT, OutputT]):
         ):
             state.failure.set_result(InteractionRequired("Native child requires interaction"))
 
+    async def _produce_model_stream(
+        self,
+        stream: Callable[..., Any],
+        request: Any,
+        request_id: int,
+        active: Callable[[], bool],
+    ) -> bool:
+        produced = await _call_callback(stream, active, request)
+        if produced is None and not active():
+            return False
+        iterator = aiter(produced)
+        event: Any = None
+        data: str | None = None
+        try:
+            if not active() or not self._native._start_model_producer_stream(request_id):
+                return False
+            while active():
+                try:
+                    event = await anext(iterator)
+                except StopAsyncIteration:
+                    return active()
+                if not active():
+                    return False
+                if not isinstance(event, Mapping):
+                    raise TypeError("NativeModel.stream must yield Responses event mappings")
+                data = json.dumps(dict(event), allow_nan=False)
+                if not await self._native._push_model_producer_event(request_id, data):
+                    return False
+            return False
+        finally:
+            try:
+                close = getattr(iterator, "aclose", None)
+                if callable(close):
+                    closed = close()
+                    if inspect.isawaitable(closed):
+                        await closed
+            finally:
+                del event, data, produced, iterator, request, stream
+
     async def _produce_model_response(self, state: _Submission, message: dict[str, Any]) -> None:
         request: Any = None
         produced: Any = None
@@ -9817,6 +11050,10 @@ class Session(Generic[ContextT, OutputT]):
                 backend = await _call_callback(backend.get_model, active, request.body["model"])
                 if not active():
                     return
+            stream = getattr(backend, "stream", None)
+            if callable(stream):
+                failed = not await self._produce_model_stream(stream, request, request_id, active)
+                return
 
             def invoke(request: ModelRequest) -> Any:
                 value: Any = None
@@ -9936,15 +11173,31 @@ class Session(Generic[ContextT, OutputT]):
         self,
         state: _CallbackState,
         message: dict[str, Any],
-        callback: Callable[..., Any],
+        callback: Callable[..., Any] | _RecoverableFunctionCallback,
         active: Callable[[], bool],
         /,
         *args: Any,
         **kwargs: Any,
     ) -> Any:
+        return await self._call_decision_callback_entered(
+            state, message, callback, active, None, args, kwargs
+        )
+
+    async def _call_decision_callback_entered(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        callback: Callable[..., Any] | _RecoverableFunctionCallback,
+        active: Callable[[], bool],
+        enter: Callable[[], None] | None,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
         if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
             provider = getattr(self, "_decisions_provider", None)
-            if getattr(self, "_profiles", None):
+            if getattr(self, "_profiles", None) or message.get("profile_id") in getattr(
+                self, "_voice_profiles", {}
+            ):
                 profile_provider = self._agent_for_message(message).decisions
                 if profile_provider is not None:
                     provider = profile_provider
@@ -9959,8 +11212,8 @@ class Session(Generic[ContextT, OutputT]):
                 ),
                 provider,
             ):
-                return await _call_callback(callback, active, *args, **kwargs)
-        return await _call_callback(callback, active, *args, **kwargs)
+                return await _call_callback_entered(callback, active, args, kwargs, enter)
+        return await _call_callback_entered(callback, active, args, kwargs, enter)
 
     async def _run_owned_context_callback(
         self,
@@ -10111,6 +11364,161 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
+    async def _check_output_guardrails(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        active: Callable[[], bool],
+        request: CompletionContext[Any],
+    ) -> None:
+        captured = self._agent_for_message(message)
+        checks = (*self._output_guardrails, *captured.output_guardrails)
+        if not checks:
+            return
+        agent = self._original_agent_for_message(message)
+
+        async def check(guardrail: OutputGuardrail[Any]) -> GuardrailRecord:
+            result = await self._call_decision_callback(
+                state,
+                message,
+                guardrail.callback,
+                active,
+                replace(request, final_output=deepcopy(request.final_output)),
+                agent,
+            )
+            if not active():
+                raise asyncio.CancelledError()
+            if not isinstance(result, GuardrailResult):
+                raise TypeError("Guardrail callback must return GuardrailResult")
+            record = GuardrailRecord(
+                kind="output",
+                name=guardrail.name,
+                result=result,
+                agent=agent,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                subagent_id=request.subagent_id,
+                tool_call=request.tool_call,
+            )
+            state.guardrail_results.append(record)
+            return record
+
+        tasks = [asyncio.create_task(check(guardrail)) for guardrail in checks]
+        tripped = None
+        try:
+            for done in asyncio.as_completed(tasks):
+                record = await done
+                if record.result.tripwire_triggered:
+                    tripped = record
+                    break
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if tripped is not None:
+            raise GuardrailTripwire(tripped, tuple(state.guardrail_results))
+
+    def _has_child_input_guardrails(self) -> bool:
+        checks = [*self._input_guardrails, *self._effective_agent().input_guardrails]
+        if self._profiles:
+            for runtime in self._profiles.values():
+                checks.extend(runtime.profile.declaration.input_guardrails)
+        return any(check.child_callback is not None for check in checks)
+
+    async def _await_input_guardrails(self, state: _CallbackState) -> None:
+        if state.input_guardrails_task is not None:
+            await state.input_guardrails_task
+        if state.failure.done():
+            raise state.failure.result()
+
+    async def _run_input_guardrails(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        agent: Agent[Any, Any],
+        checks: Sequence[InputGuardrail[Any]],
+        *,
+        step_index: int,
+    ) -> None:
+        if not checks:
+            return
+        assert (
+            state.handle is not None
+            and state.handle.turn_id is not None
+            and state.guardrail_input is not None
+        )
+
+        handle = state.handle
+        turn_id = handle.turn_id
+        assert turn_id is not None
+
+        def active() -> bool:
+            return (
+                not state.stopping
+                and not state.failure.done()
+                and (
+                    self._active is state
+                    if isinstance(state, _Submission)
+                    else not state.completion.done()
+                )
+            )
+
+        async def check(guardrail: InputGuardrail[Any]) -> GuardrailRecord:
+            if isinstance(state, _ChildCallbacks):
+                assert guardrail.child_callback is not None
+                result = await self._call_decision_callback(
+                    state,
+                    message,
+                    guardrail.child_callback,
+                    active,
+                    ChildStepContext(
+                        context=self._context, child=state.handle, step_index=step_index
+                    ),
+                    agent,
+                    deepcopy(state.guardrail_input),
+                )
+            else:
+                result = await self._call_decision_callback(
+                    state,
+                    message,
+                    guardrail.callback,
+                    active,
+                    handle,
+                    self._context,
+                    agent,
+                    deepcopy(state.guardrail_input),
+                )
+            if not isinstance(result, GuardrailResult):
+                raise TypeError("Guardrail callback must return GuardrailResult")
+            record = GuardrailRecord(
+                kind="input",
+                name=guardrail.name,
+                result=result,
+                agent=agent,
+                session_id=self.id,
+                turn_id=turn_id,
+                subagent_id=state.handle.child_id if isinstance(state, _ChildCallbacks) else None,
+            )
+            state.guardrail_results.append(record)
+            return record
+
+        tasks = [asyncio.create_task(check(guardrail)) for guardrail in checks]
+        tripped = None
+        try:
+            for done in asyncio.as_completed(tasks):
+                record = await done
+                if record.result.tripwire_triggered:
+                    tripped = record
+                    break
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if tripped is not None:
+            raise GuardrailTripwire(tripped, tuple(state.guardrail_results))
+
     async def _call_completion_callback(
         self,
         state: _CallbackState,
@@ -10119,6 +11527,7 @@ class Session(Generic[ContextT, OutputT]):
         active: Callable[[], bool],
         request: CompletionContext[ContextT],
     ) -> Any:
+        await self._await_input_guardrails(state)
         if (
             isinstance(state, _Submission)
             and self._profiles
@@ -10126,10 +11535,19 @@ class Session(Generic[ContextT, OutputT]):
             and state.realtime_tool is None
         ):
             self._agent_for_message(message)
-            state.output = self._profiles[message["profile_id"]].output
+            state.output = self._source_profile_runtime(message["profile_id"]).output
+        has_guards = bool(
+            self._output_guardrails or self._agent_for_message(message).output_guardrails
+        )
+        if not isinstance(state, _Submission):
+            decision = await self._call_decision_callback(state, message, callback, active, request)
+            if decision is None and has_guards:
+                await self._check_output_guardrails(
+                    state, message, active, replace(request, final_output=request.text or "")
+                )
+            return decision
         if (
-            not isinstance(state, _Submission)
-            or not state.output.max_retries
+            not (state.output.max_retries or has_guards)
             or state.unsampled_steering
             or state.realtime_tool is not None
         ):
@@ -10157,6 +11575,9 @@ class Session(Generic[ContextT, OutputT]):
                 invalid = True
                 issues = error.issues
             if not invalid:
+                await self._check_output_guardrails(
+                    state, message, active, replace(request, final_output=output)
+                )
                 state.accepted_output = (output,)
                 return None
             if state.graceful_requested:
@@ -10189,18 +11610,22 @@ class Session(Generic[ContextT, OutputT]):
                 return False
             return True
 
+        def continuation(decision: Any, name: str) -> dict[str, Any]:
+            if decision is None:
+                return {"action": "continue", "feedback": None}
+            if isinstance(decision, StopTurn):
+                return {"action": "stop"}
+            if not isinstance(decision, ContinueTurn):
+                allowed = "FinishToolBatch, " if name == "tool_batch_completion" else ""
+                raise TypeError(f"{name} must return {allowed}ContinueTurn, StopTurn or None")
+            if not isinstance(decision.instructions, str) or not decision.instructions.strip():
+                raise ValueError("ContinueTurn instructions must be a nonempty string")
+            return {"action": "continue", "feedback": decision.instructions}
+
         async def convert(_: object) -> dict[str, Any]:
             nonlocal proposal
-            catalog = self._catalog_for_message(message, message["generation"])
+            await self._await_input_guardrails(state)
             source_agent = self._agent_for_message(message)
-            entry = catalog.tools[message["slot"]]
-            declared = entry.declaration if isinstance(entry, _CapturedManual) else entry
-            if (
-                not declared.finish_turn
-                or entry.name != message["name"]
-                or (entry.namespace or "functions") != (message.get("namespace") or "functions")
-            ):
-                raise NativeError("Invalid captured terminal tool identity")
             child = isinstance(state, _ChildCallbacks)
             assert state.handle is not None
             if (
@@ -10210,36 +11635,91 @@ class Session(Generic[ContextT, OutputT]):
                 != (state.handle.instance_id if isinstance(state, _ChildCallbacks) else None)
             ):
                 raise NativeError("Invalid terminal tool owner")
-            text = message["text"]
-            if not isinstance(text, str):
-                raise OutputValidationError("")
             if (
                 self._profiles
                 and isinstance(state, _Submission)
                 and not state.output_override
                 and state.realtime_tool is None
             ):
-                state.output = self._profiles[message["profile_id"]].output
+                state.output = self._source_profile_runtime(message["profile_id"]).output
             output = _prepare_spec(None) if isinstance(state, _ChildCallbacks) else state.output
-            value, wire = output.terminal_value(text)
+            child_id = message["thread"] if child else None
+            child_instance = message["instance"] if child else None
+
+            def tool_call(receipt: Mapping[str, Any]) -> ToolCallInfo:
+                return ToolCallInfo(
+                    tool=ToolRef(receipt["name"], receipt.get("namespace")),
+                    session_id=self.id,
+                    turn_id=message["turn_id"],
+                    call_id=receipt["call_id"],
+                    child_id=child_id,
+                    child_incarnation=child_instance,
+                    role=None,
+                    model=message["model"],
+                    route="direct",
+                )
+
+            batch_call_ids: tuple[str, ...] = ()
+            raw_output = ""
+            if message["type"] == "_sdk_tool_batch_completion":
+                batch_callback = source_agent.tool_batch_completion
+                if batch_callback is None:
+                    raise NativeError("Captured tool batch callback unavailable")
+                results: list[ToolBatchResult] = []
+                for receipt in message["results"]:
+                    body = receipt["output"]
+                    tool_output = (
+                        ToolOutput.text(body)
+                        if isinstance(body, str)
+                        else ToolOutput(_native_tool_output_parts(body))
+                    )
+                    tool_output.success = receipt["succeeded"]
+                    results.append(
+                        ToolBatchResult(tool_call(receipt), receipt["arguments"], tool_output)
+                    )
+                if not results:
+                    raise NativeError("Captured tool batch is empty")
+                batch_call_ids = tuple(cast(str, result.call.call_id) for result in results)
+                call = results[0].call
+                decision = await self._call_decision_callback(
+                    state,
+                    message,
+                    batch_callback,
+                    admitted,
+                    ToolBatchCompletionContext(
+                        context=self._context,
+                        results=tuple(results),
+                        session_id=self.id,
+                        turn_id=message["turn_id"],
+                        subagent_id=child_id,
+                        model=message["model"],
+                    ),
+                )
+                if not isinstance(decision, FinishToolBatch):
+                    return continuation(decision, "tool_batch_completion")
+                value, wire = output.terminal_application_value(decision.output)
+            else:
+                catalog = self._catalog_for_message(message, message["generation"])
+                entry = catalog.tools[message["slot"]]
+                declared = entry.declaration if isinstance(entry, _CapturedManual) else entry
+                if (
+                    not declared.finish_turn
+                    or entry.name != message["name"]
+                    or (entry.namespace or "functions") != (message.get("namespace") or "functions")
+                ):
+                    raise NativeError("Invalid captured terminal tool identity")
+                raw_output = message["text"]
+                if not isinstance(raw_output, str):
+                    raise OutputValidationError("")
+                value, wire = output.terminal_value(raw_output)
+                call = tool_call({**message, "namespace": entry.namespace})
             # JSON persistence must never silently accept NaN or Infinity.
             try:
                 json.dumps(wire, allow_nan=False)
             except (TypeError, ValueError):
-                raise OutputValidationError(text) from None
-            call = ToolCallInfo(
-                tool=ToolRef(entry.name, entry.namespace),
-                session_id=self.id,
-                turn_id=message["turn_id"],
-                call_id=message["call_id"],
-                child_id=message["thread"] if child else None,
-                child_incarnation=message["instance"] if child else None,
-                role=None,
-                model=message["model"],
-                route="direct",
-            )
+                raise OutputValidationError(raw_output) from None
             callback = source_agent.before_complete
-            if callback is not None:
+            if callback is not None and message.get("guard_only") is not True:
                 decision = await self._call_decision_callback(
                     state,
                     message,
@@ -10253,24 +11733,33 @@ class Session(Generic[ContextT, OutputT]):
                         subagent_id=call.child_id,
                         model=message["model"],
                         continuation_count=state.completion_continuations,
-                        tool_call=call,
+                        tool_call=None if batch_call_ids else call,
+                        tool_batch_call_ids=batch_call_ids,
                         final_output=deepcopy(value),
                     ),
                 )
-                if isinstance(decision, StopTurn):
-                    return {"action": "stop"}
                 if decision is not None:
-                    if not isinstance(decision, ContinueTurn):
-                        raise TypeError(
-                            "before_complete must return ContinueTurn, StopTurn or None"
-                        )
-                    if (
-                        not isinstance(decision.instructions, str)
-                        or not decision.instructions.strip()
-                    ):
-                        raise ValueError("ContinueTurn instructions must be a nonempty string")
-                    return {"action": "continue", "feedback": decision.instructions}
-            proposal = _ToolCompletionProposal(message["step_id"], call, wire, value)
+                    return continuation(decision, "before_complete")
+            await self._check_output_guardrails(
+                state,
+                message,
+                admitted,
+                CompletionContext(
+                    context=self._context,
+                    text=None,
+                    session_id=self.id,
+                    turn_id=message["turn_id"],
+                    subagent_id=call.child_id,
+                    model=message["model"],
+                    continuation_count=state.completion_continuations,
+                    tool_call=None if batch_call_ids else call,
+                    tool_batch_call_ids=batch_call_ids,
+                    final_output=value,
+                ),
+            )
+            proposal = _ToolCompletionProposal(
+                message["step_id"], call, wire, value, batch_call_ids
+            )
             return {"action": "accept", "final_output": wire}
 
         def prepare() -> tuple[Callable[..., Any], object]:
@@ -10292,8 +11781,8 @@ class Session(Generic[ContextT, OutputT]):
                 message["instance"],
             )
             if decision["action"] == "accept":
-                state.tool_completion = proposal
-            else:
+                state.tool_completion = None if message.get("guard_only") else proposal
+            elif decision.get("feedback") is not None:
                 state.completion_continuations += 1
 
         def reject() -> None:
@@ -10322,7 +11811,20 @@ class Session(Generic[ContextT, OutputT]):
         def prepare() -> tuple[Callable[..., Any], CompletionContext[ContextT]]:
             callback = self._agent_for_message(message).before_complete
             if callback is None:
-                raise NativeError("Completion callback has no application owner")
+                if not (
+                    self._output_guardrails
+                    or self._agent_for_message(message).output_guardrails
+                    or self._agent_for_message(message).input_guardrails
+                    or self._input_guardrails
+                    or state.input_guardrails_started
+                ):
+                    raise NativeError("Completion callback has no application owner")
+
+                def default_completion(request: Any) -> None:
+                    return None
+
+                callback = default_completion
+
             return callback, CompletionContext(
                 context=cast(ContextT, self._context),
                 text=message["text"],
@@ -10390,16 +11892,90 @@ class Session(Generic[ContextT, OutputT]):
             assert state.handle is not None
             self._catalog_for_message(message, message["generation"])
             source_agent = self._agent_for_message(message)
+            checks = (*self._input_guardrails, *source_agent.input_guardrails)
+            guardrail_agent = self._original_agent_for_message(message)
+            if isinstance(state, _ChildCallbacks):
+                checks = tuple(check for check in checks if check.child_callback is not None)
+                if checks and not state.input_guardrails_started:
+                    initial = message.get("initial_input")
+                    if not isinstance(initial, list) or not all(
+                        isinstance(item, dict) for item in initial
+                    ):
+                        raise NativeError("Child guardrail lacks admitted initial input")
+                    state.guardrail_input = tuple(deepcopy(initial))
+            # Selection can repeat before the first provider request. Parallel
+            # input checks join at completion, not during this preparation.
+            if not state.input_guardrails_started and state.guardrail_input is not None:
+                state.input_guardrails_started = True
+                guardrail_step_index = state.step_index
+                await self._run_input_guardrails(
+                    state,
+                    message,
+                    guardrail_agent,
+                    tuple(check for check in checks if not check.run_in_parallel),
+                    step_index=guardrail_step_index,
+                )
+                parallel = tuple(check for check in checks if check.run_in_parallel)
+                if parallel:
+
+                    async def run_parallel() -> None:
+                        scope = _Invocation(self)
+                        token = _invocation.set(scope)
+                        try:
+                            await self._run_input_guardrails(
+                                state,
+                                message,
+                                guardrail_agent,
+                                parallel,
+                                step_index=guardrail_step_index,
+                            )
+                        except BaseException as error:
+                            if not state.stopping and not state.failure.done():
+                                state.failure.set_result(error)
+                            elif not isinstance(error, asyncio.CancelledError):
+                                state.retain_cleanup_error(error)
+                        finally:
+                            scope.active = False
+                            _invocation.reset(token)
+
+                    state.input_guardrails_task = self._start_native_callback(
+                        state, run_parallel(), None
+                    )
             if (
                 self._profiles
                 and isinstance(state, _Submission)
                 and not state.output_override
                 and state.realtime_tool is None
             ):
-                state.output = self._profiles[message["profile_id"]].output
+                state.output = self._source_profile_runtime(message["profile_id"]).output
             source_bindings = self._bindings_for_message(message)
+            mcp_names: dict[tuple[str, str], ToolRef] = {}
+            for item in message.get("mcp_names", ()):
+                key = (item["server"], item["tool"])
+                if key in mcp_names:
+                    raise CapabilityError("Ambiguous native MCP tool identity")
+                mcp_names[key] = ToolRef(item["name"], item["namespace"] or "functions")
+            state.mcp_names = mcp_names
+            declaration_names = {
+                ToolRef(**ref): (server.name, raw)
+                for server in source_bindings
+                if isinstance(server, _MCP)
+                for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
+            }
+
+            def resolve(ref: ToolRef) -> ToolRef:
+                identity = getattr(ref, "_mcp_identity", None) or declaration_names.get(ref)
+                if identity is None:
+                    return ToolRef(ref.name, ref.namespace or "functions")
+                actual = mcp_names.get(identity)
+                if actual is None:
+                    raise CapabilityError("MCP tool identity is outside the captured native step")
+                return actual
+
             source_handoffs = (
-                self._profiles[message["profile_id"]].profile.handoffs if self._profiles else None
+                self._source_profile_runtime(message["profile_id"]).profile.handoffs
+                if message.get("profile_id") is not None
+                else None
             )
             index = state.step_index
             state.step_index += 1
@@ -10542,7 +12118,7 @@ class Session(Generic[ContextT, OutputT]):
                         project_guidance=self._project_guidance,
                     )
                 )
-                refs = {ToolRef(ref.name, ref.namespace or "functions") for ref in refs}
+                refs = {resolve(ref) for ref in refs}
                 if not refs <= defaults:
                     raise CapabilityError(
                         "Step tools must select distinct admitted operation tools"
@@ -10552,7 +12128,36 @@ class Session(Generic[ContextT, OutputT]):
                     state, source_agent, source_bindings, source_handoffs
                 )
                 if ceiling is not None:
-                    refs.intersection_update(ceiling)
+                    refs.intersection_update(resolve(ref) for ref in ceiling)
+            for tool in source_bindings:
+                if not isinstance(tool, FunctionTool):
+                    continue
+                ref = resolve(tool.ref)
+                if ref not in refs:
+                    continue
+                enabled = tool.is_enabled
+                if callable(enabled):
+                    step_context = (
+                        ChildStepContext(
+                            context=self._context, child=state.handle, step_index=index
+                        )
+                        if isinstance(state, _ChildCallbacks)
+                        else self.active_turn or state.handle
+                    )
+                    predicate = enabled
+                    enabled = await self._call_decision_callback(
+                        state,
+                        message,
+                        lambda step, predicate=predicate: predicate(self._context, step),
+                        active,
+                        step_context,
+                    )
+                    if not active():
+                        return
+                if type(enabled) is not bool:
+                    raise TypeError("FunctionTool is_enabled must return a bool")
+                if not enabled:
+                    refs.discard(ref)
             candidates = {
                 ToolRef(item["name"], item["namespace"] or "functions")
                 for item in message["candidates"]
@@ -10579,21 +12184,20 @@ class Session(Generic[ContextT, OutputT]):
             if refs and search in candidates:
                 refs.add(search)
             selected = refs & candidates
-            if isinstance(state, _Submission):
-                # The native event reader drains the preceding sample before
-                # this selector. Core waits for our reply before the next sample.
-                state.step_mcp = tuple(
-                    replace(
-                        server,
-                        tools=tuple(
-                            name
-                            for name, ref in zip(server.tools, _tool_names((server,)), strict=True)
-                            if ToolRef(**ref) in selected
-                        ),
-                    )
-                    for server in source_bindings
-                    if isinstance(server, _MCP)
+            # The native event reader drains the preceding sample before
+            # this selector. Core waits for our reply before the next sample.
+            state.step_mcp = tuple(
+                replace(
+                    server,
+                    tools=tuple(
+                        name
+                        for name in server.tools
+                        if mcp_names.get((server.name, name)) in selected
+                    ),
                 )
+                for server in source_bindings
+                if isinstance(server, _MCP)
+            )
             selected_json = _native_tool_refs(tuple(selected))
         except BaseException as error:
             if _native_callback_cancelled(state):
@@ -10708,6 +12312,7 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_before_compact": self._before_compact,
             "_sdk_before_complete": self._before_complete,
             "_sdk_tool_completion": self._propose_tool_completion,
+            "_sdk_tool_batch_completion": self._propose_tool_completion,
         }
         reader_failure: BaseException | None = None
         pending_callback: dict[str, Any] | None = None
@@ -10732,6 +12337,13 @@ class Session(Generic[ContextT, OutputT]):
                 if self._realtime is not None and self._realtime._ingest(event):
                     continue
                 message = event.get("msg", {})
+                if (
+                    message.get("type") == "agent_profile_changed"
+                    and message.get("turn_id") is None
+                ):
+                    if not projected:
+                        self._observe_profile_change(message, None)
+                    continue
                 if message.get("type") == "_sdk_callback_cancel":
                     self._cancel_native_callback(message["receipt"], native=event_native)
                     continue
@@ -10913,6 +12525,14 @@ class Session(Generic[ContextT, OutputT]):
                         submission_id=started.submission_id if started is not None else None,
                     ):
                         continue
+                    late_item = message.get("item")
+                    if (
+                        self._observations.include_model_output_items
+                        and isinstance(late_item, dict)
+                        and late_item.get("type") in {"AgentMessage", "Reasoning"}
+                    ):
+                        self._observations._mark_gap()
+                        continue
                 if self._startup_failure is not None and (state is None or state.handle is None):
                     if not self._startup_failure.done() and message.get("type") in {
                         "exec_approval_request",
@@ -10990,12 +12610,18 @@ class Session(Generic[ContextT, OutputT]):
                     turn_id = turn_id or event["id"]
                 if turn_id and turn_id != handle.turn_id:
                     continue
+                if kind == "raw_response_completed" and event["id"] == handle.turn_id:
+                    state.run_usage.observe(message.get("token_usage"))
                 if (
                     kind == "raw_response_completed"
                     and event["id"] == handle.turn_id
                     and state.budget is not None
                 ):
                     state.budget.observe(message["token_usage"])
+                if kind == "agent_profile_changed":
+                    if not projected:
+                        self._observe_profile_change(message, handle)
+                    continue
                 # Observe delivered MCP ends before settled-policy failure bookkeeping.
                 self._observe_mcp(event, state)
                 if kind in {"task_complete", "turn_complete", "turn_aborted"}:
@@ -11078,6 +12704,7 @@ class Session(Generic[ContextT, OutputT]):
                     state.failure.set_result(NativeError("Native MCP result policy failed"))
                 elif kind == "raw_response_item" and event["id"] == handle.turn_id:
                     item = message["item"]
+                    self._observe_accepted_tool_output(state, item)
                     if item.get("type") == "message" and item.get("role") == "assistant":
                         texts = [
                             part["text"]
@@ -11093,7 +12720,12 @@ class Session(Generic[ContextT, OutputT]):
                         # Unknown-phase blank tails keep the previous final answer.
                         if not blank or item.get("phase") == "final_answer":
                             state.last_assistant_had_blank_final = blank
-                elif kind in {"agent_message_content_delta", "item_completed", "response_fact"}:
+                elif kind in {
+                    "agent_message_content_delta",
+                    "item_completed",
+                    "response_fact",
+                    "sdk_raw_provider_event",
+                }:
                     if not projected:
                         self._observe_progress(event, handle, self.id)
                 elif kind == "dynamic_tool_call_request" and not state.stopping:
@@ -11597,7 +13229,8 @@ class Session(Generic[ContextT, OutputT]):
                 if server is None
                 else (server.request_metadata if metadata else server.transform_result)
             )
-            if server is None or callback is None:
+            extractor = None if server is None or metadata else server.extract_application_data
+            if server is None or (callback is None and extractor is None):
                 raise NativeError("Native MCP callback does not match its captured declaration")
             assert state.handle is not None
 
@@ -11611,12 +13244,15 @@ class Session(Generic[ContextT, OutputT]):
 
             if not admitted():
                 return
+            ref = ToolRef(notice["callable_name"], notice["callable_namespace"])
+            application_output: ApplicationToolOutput | None = None
             if metadata:
+                assert callback is not None
                 context: Any = MCPMetadataContext(
                     self._context,
                     state.handle,
                     ToolCallInfo(
-                        tool=ToolRef(notice["callable_name"], notice["callable_namespace"]),
+                        tool=ref,
                         session_id=self.id,
                         turn_id=notice["turn_id"],
                         call_id=notice["call_id"] if notice.get("route") == "direct" else None,
@@ -11637,6 +13273,18 @@ class Session(Generic[ContextT, OutputT]):
                     MappingProxyType(deepcopy(notice["arguments"])),
                 )
                 value = await _call_callback(callback, admitted, context)
+                if not admitted():
+                    return
+                if (
+                    isinstance(state, _Submission)
+                    and state.realtime_tool is not None
+                    and not await self._realtime_tool_enabled(notice, self._context, ref, admitted)
+                ):
+                    # A non-object reply settles the metadata receipt as rejected.
+                    self._native._resolve_native_mcp_result(
+                        nonce, notice["turn_id"], notice["call_id"], "false"
+                    )
+                    return
                 if value is not None and not isinstance(value, Mapping):
                     raise TypeError("MCP request_metadata must return an object or None")
                 value = None if value is None else dict(value)
@@ -11649,15 +13297,48 @@ class Session(Generic[ContextT, OutputT]):
                     notice["call_id"],
                     notice["server_name"],
                     notice["tool_name"],
+                    arguments=MappingProxyType(deepcopy(notice["arguments"])),
                 )
-                value = await _call_callback(callback, admitted, context, notice["result"])
+                value = notice["result"]
+                if callback is not None:
+                    value = await _call_callback(callback, admitted, context, value)
+                if extractor is not None and admitted() and isinstance(value, dict):
+                    application_data = _capture_application_data(
+                        await _call_callback(extractor, admitted, context, deepcopy(value))
+                    )
+                    if application_data is not None:
+                        application_output = ApplicationToolOutput(
+                            submission_id=state.handle.submission_id,
+                            turn_id=notice["turn_id"],
+                            call_id=notice["call_id"],
+                            name=ref.name,
+                            namespace=ref.namespace,
+                            application_data=application_data,
+                        )
             if not admitted():
                 return
             reply = json.dumps(value, allow_nan=False)
-            accepted = self._native._resolve_native_mcp_result(
-                nonce, notice["turn_id"], notice["call_id"], reply
-            )
-            if not accepted and not state.stopping:
+            if application_output is None:
+                delivered = self._native._resolve_native_mcp_result(
+                    nonce, notice["turn_id"], notice["call_id"], reply
+                )
+            else:
+                assignment = asyncio.ensure_future(
+                    self._native._resolve_native_mcp_result_with_assignment(
+                        nonce, notice["turn_id"], notice["call_id"], reply
+                    )
+                )
+                try:
+                    delivered, _ = await _join(assignment)
+                finally:
+                    if (
+                        assignment.done()
+                        and not assignment.cancelled()
+                        and assignment.exception() is None
+                        and assignment.result()[1]
+                    ):
+                        self._application_tool_outputs.append(application_output)
+            if not delivered and not state.stopping:
                 raise NativeError("Native MCP result policy failed")
         except BaseException as error:
             if not state.stopping and not state.failure.done():
@@ -11685,16 +13366,65 @@ class Session(Generic[ContextT, OutputT]):
                 return False
             raise
 
-    async def _respond_tool(self, state: _CallbackState, reply: str) -> bool:
+    async def _respond_tool(
+        self,
+        state: _CallbackState,
+        reply: str,
+        *,
+        application_output: ApplicationToolOutput | None = None,
+    ) -> bool:
         # Keep the writer's result observable when its callback is cancelled.
-        # Native cancellation joins publication but discards the cancelled result.
-        pending = asyncio.ensure_future(self._native._respond_python_tool(reply))
+        response = (
+            self._native._respond_python_tool(reply, wait_for_acceptance=True)
+            if application_output is not None
+            else self._native._respond_python_tool(reply)
+        )
+        pending = asyncio.ensure_future(response)
         try:
             return cast(bool, await _join(pending))
         except asyncio.CancelledError:
             if not pending.cancelled() and (error := pending.exception()) is not None:
                 state.retain_cleanup_error(error)
             raise
+        finally:
+            if (
+                application_output is not None
+                and pending.done()
+                and not pending.cancelled()
+                and pending.exception() is None
+                and pending.result() is True
+            ):
+                self._application_tool_outputs.append(application_output)
+
+    def _tool_usage_reporter(
+        self, state: _CallbackState, admitted: Callable[[], bool]
+    ) -> Callable[[TokenUsage | None, int], None]:
+        scope = _invocation.get()
+
+        def report(usage: TokenUsage | None, requests: int) -> None:
+            owner = scope
+            try:
+                task = asyncio.current_task()
+            except RuntimeError:  # Synchronous function tools run in a joined worker.
+                task = None
+            if task is not None and cancellation_requested(task):
+                raise asyncio.CancelledError
+            while owner is not None:
+                if not owner.active:
+                    raise RuntimeError("Usage reporting callback is no longer active")
+                owner = owner.parent
+            if scope is None or _native_callback_cancelled(state) or not admitted():
+                raise RuntimeError("Usage reporting requires the admitted native invocation")
+            captured = _UsageCollector.capture(usage, requests)
+            if (task is not None and cancellation_requested(task)) or _native_callback_cancelled(
+                state
+            ):
+                raise asyncio.CancelledError
+            if not admitted():
+                raise RuntimeError("Usage reporting invocation is no longer admitted")
+            state.run_usage.add(captured)
+
+        return report
 
     async def _invoke_tool(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("tool callback", "callback", message.get("tracing_context")) as tracing:
@@ -11709,6 +13439,11 @@ class Session(Generic[ContextT, OutputT]):
         permit: asyncio.Semaphore | None = None
         acquired = False
         status: Literal["completed", "failed", "cancelled"] = "cancelled"
+        observed_output: ToolOutput | None = None
+        deferred_observation = False
+        application_call_id: str | None = None
+        application_data = None
+        accepted = False
         try:
             request = json.dumps(message)
             marker = message["_sdk_python_tool"]
@@ -11737,6 +13472,19 @@ class Session(Generic[ContextT, OutputT]):
             # native request before argument validation can execute that code.
             if not self._admit_tool(state, request):
                 return
+            if not await self._realtime_function_enabled(state, message):
+                reply = json.dumps(
+                    {
+                        "request": message,
+                        "response": ToolOutput.error(f"Tool {ref.name} not found").to_native(),
+                        "start_response": False,
+                    }
+                )
+                if self._admit_tool(state, request) and await self._respond_tool(state, reply):
+                    status = "failed"
+                return
+            if not self._admit_tool(state, request):
+                return
             assert state.handle is not None and state.handle.turn_id is not None
             code_origin = message["_sdk_code_origin"]
             started = ToolStarted(
@@ -11748,6 +13496,30 @@ class Session(Generic[ContextT, OutputT]):
                 namespace=ref.namespace,
             )
             self._observations.append(started)
+            realtime_tool = isinstance(state, _Submission) and state.realtime_tool is not None
+
+            async def respond_tool_denial(reason: str) -> None:
+                nonlocal status
+                denial = ToolOutput.error(reason)
+                denial._validate()
+                reply = json.dumps({"request": message, "response": denial.to_native()})
+                if self._admit_tool(state, request) and await self._respond_tool(state, reply):
+                    # A late send does not undo an already committed receipt.
+                    status = "failed"
+
+            async def admit_source_tool() -> bool:
+                enabled = await self._realtime_tool_enabled(
+                    message, entry.context, ref, lambda: self._admit_tool(state, request)
+                )
+                if not self._admit_tool(state, request):
+                    return False
+                if enabled:
+                    return True
+                await respond_tool_denial("Tool disabled by its source Agent")
+                return False
+
+            if realtime_tool and not await admit_source_tool():
+                return
             approved = None
             if managed_approval:
                 approved = self._approval_ready.pop(
@@ -11756,18 +13528,93 @@ class Session(Generic[ContextT, OutputT]):
                 if approved is None or not approved.approved:
                     raise NativeError("Managed approval arguments are no longer available")
             if approved is None:
-                parsed = entry._parse_arguments(
-                    message.get("_sdk_effective_arguments", message["arguments"])
-                )
+                try:
+                    parsed = entry._parse_arguments(
+                        message.get("_sdk_effective_arguments", message["arguments"])
+                    )
+                except (ValidationError, json.JSONDecodeError) as error:
+                    if "_sdk_effective_arguments" in message:
+                        raise
+                    call = ToolCallInfo(
+                        tool=ref,
+                        session_id=self.id,
+                        turn_id=state.handle.turn_id,
+                        call_id=message["callId"] if code_origin is None else None,
+                        child_id=state.handle.child_id
+                        if isinstance(state, _ChildCallbacks)
+                        else None,
+                        child_incarnation=state.handle.instance_id
+                        if isinstance(state, _ChildCallbacks)
+                        else None,
+                        role=None,
+                        model=message.get("_sdk_model"),
+                        route="direct" if code_origin is None else "code",
+                        cell_id=code_origin["cell_id"] if code_origin is not None else None,
+                        nested_call_id=code_origin["nested_call_id"]
+                        if code_origin is not None
+                        else None,
+                    )
+                    text = await self._recover_tool_input(
+                        state,
+                        entry,
+                        message,
+                        error,
+                        message["arguments"],
+                        lambda: self._admit_tool(state, request),
+                        call,
+                    )
+                    if text is not None:
+                        await respond_tool_denial(text)
+                    return
             else:
                 parsed = deepcopy(approved.value)
             kwargs = entry._arguments(parsed)
             approved_kwargs = (
                 _snapshot_function_arguments(kwargs, ref) if approved is not None else None
             )
-            raw_arguments = message["arguments"]
-            if isinstance(raw_arguments, str):
-                raw_arguments = json.loads(raw_arguments)
+            call = ToolCallInfo(
+                tool=ref,
+                session_id=self.id,
+                turn_id=state.handle.turn_id,
+                call_id=message["callId"] if code_origin is None else None,
+                child_id=state.handle.child_id if isinstance(state, _ChildCallbacks) else None,
+                child_incarnation=(
+                    state.handle.instance_id if isinstance(state, _ChildCallbacks) else None
+                ),
+                role=None,
+                model=message.get("_sdk_model"),
+                route="direct" if code_origin is None else "code",
+                cell_id=code_origin["cell_id"] if code_origin is not None else None,
+                nested_call_id=(code_origin["nested_call_id"] if code_origin is not None else None),
+            )
+
+            def make_context(
+                effective_arguments: Mapping[str, Any],
+            ) -> ToolContext[ContextT | None]:
+                raw_arguments = message["arguments"]
+                original_arguments = (
+                    json.loads(raw_arguments)
+                    if isinstance(raw_arguments, str)
+                    else deepcopy(raw_arguments)
+                )
+                assert state.handle is not None
+                tool_context = ToolContext(
+                    entry.context,
+                    state.handle,
+                    message["callId"],
+                    MappingProxyType(original_arguments),
+                    effective_arguments,
+                    trace_context=_native_trace_context(message.get("_sdk_trace")),
+                    realtime_usage=self.realtime_usage,
+                    call=call,
+                )
+                object.__setattr__(
+                    tool_context,
+                    "_usage_reporter",
+                    self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
+                )
+                return tool_context
+
             context = None
             if (
                 entry.context_parameter is not None
@@ -11779,34 +13626,7 @@ class Session(Generic[ContextT, OutputT]):
                     and entry.timeout_error_function is not None
                 )
             ):
-                context = ToolContext(
-                    entry.context,
-                    state.handle,
-                    message["callId"],
-                    MappingProxyType(deepcopy(raw_arguments)),
-                    _snapshot_function_arguments(kwargs, ref),
-                    trace_context=_native_trace_context(message.get("_sdk_trace")),
-                    realtime_usage=self.realtime_usage,
-                    call=ToolCallInfo(
-                        tool=ref,
-                        session_id=self.id,
-                        turn_id=state.handle.turn_id,
-                        call_id=message["callId"] if code_origin is None else None,
-                        child_id=state.handle.child_id
-                        if isinstance(state, _ChildCallbacks)
-                        else None,
-                        child_incarnation=(
-                            state.handle.instance_id if isinstance(state, _ChildCallbacks) else None
-                        ),
-                        role=None,
-                        model=message.get("_sdk_model"),
-                        route="direct" if code_origin is None else "code",
-                        cell_id=code_origin["cell_id"] if code_origin is not None else None,
-                        nested_call_id=(
-                            code_origin["nested_call_id"] if code_origin is not None else None
-                        ),
-                    ),
-                )
+                context = make_context(_snapshot_function_arguments(kwargs, ref))
             arguments_replaced = False
             if entry.before is not None:
                 assert context is not None
@@ -11817,14 +13637,7 @@ class Session(Generic[ContextT, OutputT]):
                     return
                 if isinstance(decision, Deny):
                     # A local denial never invokes the body or the after hook.
-                    denial = ToolOutput.error(decision.reason)
-                    denial._validate()
-                    reply = json.dumps({"request": message, "response": denial.to_native()})
-                    if self._admit_tool(state, request):
-                        accepted = await self._respond_tool(state, reply)
-                        # A late send does not undo an already committed receipt.
-                        if accepted:
-                            status = "failed"
+                    await respond_tool_denial(decision.reason)
                     return
                 if isinstance(decision, ReplaceArguments):
                     arguments_replaced = True
@@ -11856,171 +13669,283 @@ class Session(Generic[ContextT, OutputT]):
                     context = replace(
                         context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
                     )
+            if context is not None and context._usage_reporter is None:
+                object.__setattr__(
+                    context,
+                    "_usage_reporter",
+                    self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
+                )
             args: tuple[ToolContext[ContextT | None], ...] = ()
             parameter = entry.context_parameter
             if parameter is not None:
                 assert context is not None
                 args = (context,)
-            if not self._admit_tool(state, request):
-                return
-            timeout_output: ToolOutput | None = None
-            duration = entry.callback_timeout
-            if isinstance(entry, _CapturedComputer):
-                assert context is not None and isinstance(parsed, _ComputerCall)
-                value = await self._call_decision_callback(
-                    state,
-                    message,
-                    partial(
-                        entry.invoke,
-                        self._computer_resources,
-                        lambda: self._admit_tool(state, request),
-                    ),
-                    lambda: self._admit_tool(state, request),
-                    context,
-                    parsed,
-                )
-            elif duration is None:
-                value = await self._call_decision_callback(
-                    state,
-                    message,
-                    entry.callback,
-                    lambda: self._admit_tool(state, request),
-                    *args,
-                    **kwargs,
-                )
-            elif entry.timeout_behavior == "error_as_result":
-                loop = asyncio.get_running_loop()
-                cutoff = loop.time() + duration
-                expired = False
-                timeout_error = ToolTimeoutError(entry.name, duration)
-
-                def admit_body() -> bool:
-                    return not expired and self._admit_tool(state, request)
-
-                def expire_body(cancel_body: bool = True) -> None:
-                    nonlocal expired
-                    if self._closing or state.stopping or state.failure.done():
-                        return
-                    expired = True
-                    if cancel_body:
-                        cancel_once(body)
-
-                timer = loop.call_at(cutoff, expire_body)
-
-                value = None
-                body_error: BaseException | None = None
-
-                async def invoke_body() -> None:
-                    nonlocal value, body_error
-                    try:
-                        if admit_body():
-                            value = await self._call_decision_callback(
-                                state, message, entry.callback, admit_body, *args, **kwargs
-                            )
-                    except BaseException as error:
-                        # Transport every exit to the owner without letting
-                        # process-control exceptions escape this child task.
-                        body_error = error
-                    finally:
-                        timer.cancel()
-                        # Settle at body exit, before unrelated ready work can
-                        # delay the parent. Busy callbacks may outlast the timer.
-                        if loop.time() >= cutoff:
-                            expire_body(cancel_body=False)
-
-                try:
-                    body = asyncio.create_task(invoke_body())
-                    try:
-                        # Do not let parent cancellation cancel an already
-                        # unwinding body a second time and cut cleanup short.
-                        await asyncio.wait((body,))
-                    except BaseException as error:
-                        cancel_once(body)
-
-                        async def join_body() -> None:
-                            try:
-                                await _join(body)
-                            finally:
-                                if body_error is not None and not isinstance(
-                                    body_error, asyncio.CancelledError
-                                ):
-                                    state.retain_cleanup_error(body_error)
-
-                        await _close_after_error(error, join_body)
-                        raise
-                finally:
-                    timer.cancel()
-                if not self._admit_tool(state, request):
-                    if body_error is not None and not isinstance(
-                        body_error, asyncio.CancelledError
-                    ):
-                        state.retain_cleanup_error(body_error)
+            # The before hook may have yielded while the source grant changed.
+            if realtime_tool and entry.before is not None:
+                if not await admit_source_tool():
                     return
-                if isinstance(body_error, (SystemExit, KeyboardInterrupt)):
-                    raise body_error
-                if expired:
-                    # Discard late output before a formatter can fail. The child
-                    # task itself never owns a return value.
-                    value = None
-                    if body_error is not None:
-                        timeout_error.__cause__ = body_error
-                    # No late value is validated or serialized. Format only
-                    # under the still-live parent's native admission.
-                    text = str(timeout_error)
-                    if entry.timeout_error_function is not None:
+                from .realtime_agents import _CapturedHandoff, _HandoffAllowedAfterAwait
+
+                if isinstance(entry, _CapturedHandoff):
+                    source = self._agent_for_message(message).realtime
+                    if source is not None and source.tool_enabled is not None:
+                        # The source grant can suspend after the initial handoff check.
                         assert context is not None
-                        text = await self._call_decision_callback(
+                        handoff_decision = await self._call_decision_callback(
                             state,
                             message,
-                            entry.timeout_error_function,
+                            entry.before,
                             lambda: self._admit_tool(state, request),
                             context,
-                            timeout_error,
                         )
-                        if not self._admit_tool(state, request):
+                        if isinstance(handoff_decision, Deny):
+                            await respond_tool_denial(handoff_decision.reason)
                             return
-                        if not isinstance(text, str):
-                            raise TypeError("Function timeout_error_function must return str")
-                    timeout_output = ToolOutput.error(text)
-                    timeout_output._validate()
-                    value = None
-                elif body_error is not None:
-                    raise body_error
-            else:
-                loop = asyncio.get_running_loop()
-                cutoff = loop.time() + duration
-                callback_task = asyncio.current_task()
-                assert callback_task is not None
-                timeout_error = ToolTimeoutError(entry.name, duration)
+                        # An awaited handoff decision applies to this attempt.
+                        # Refresh the source grant after that application wait.
+                        if isinstance(handoff_decision, _HandoffAllowedAfterAwait):
+                            if not await admit_source_tool():
+                                return
+            if not self._admit_tool(state, request):
+                return
+            # The body can mutate validated arguments before raising. The original
+            # wire arguments are already isolated from validation and callback code.
+            formatter_arguments = approved_kwargs
+            if (
+                entry.error_function is not None
+                and context is None
+                and formatter_arguments is None
+                and not entry._reparse_error_arguments
+            ):
+                formatter_arguments = _snapshot_function_arguments(kwargs, ref)
+            failure_output: ToolOutput | None = None
+            duration = entry.callback_timeout
+            callback = (
+                _RecoverableFunctionCallback(entry.callback)
+                if entry.error_function is not None
+                or (self._tool_error_formatter is not None and entry._allow_run_error_formatter)
+                else entry.callback
+            )
 
-                def expire_callback(cancel_body: bool = True) -> None:
-                    if self._closing or state.stopping or state.failure.done():
-                        return
-                    # Every stop owner joins this same failure and cancellation.
-                    state.failure.set_result(timeout_error)
-                    if cancel_body:
-                        cancel_once(callback_task)
+            def enter_body() -> None:
+                if self._realtime is None:
+                    return
+                source = message.get("_sdk_realtime_tool_call")
+                if source is None:
+                    return
+                bindings = self._bindings_for_message(
+                    {**message, "generation": marker["generation"]}
+                )
+                original = next(
+                    (
+                        tool
+                        for tool in bindings
+                        if isinstance(tool, FunctionTool) and tool.ref == ref
+                    ),
+                    None,
+                )
+                if original is not None:
+                    self._realtime._tool_body_started(
+                        source, message["_sdk_realtime_tool_name"], original
+                    )
 
-                timer = loop.call_at(cutoff, expire_callback)
-                try:
+            async def invoke_body_callback(active: Callable[[], bool]) -> Any:
+                return await self._call_decision_callback_entered(
+                    state, message, callback, active, enter_body, args, kwargs
+                )
+
+            try:
+                if isinstance(entry, _CapturedComputer):
+                    assert context is not None and isinstance(parsed, _ComputerCall)
                     value = await self._call_decision_callback(
                         state,
                         message,
-                        entry.callback,
+                        partial(
+                            entry.invoke,
+                            self._computer_resources,
+                            lambda: self._admit_tool(state, request),
+                        ),
                         lambda: self._admit_tool(state, request),
-                        *args,
-                        **kwargs,
+                        context,
+                        parsed,
                     )
-                finally:
-                    timer.cancel()
-                    # A busy callback can cross the cutoff before timer dispatch.
-                    if loop.time() >= cutoff:
-                        expire_callback(cancel_body=False)
+                elif duration is None:
+                    value = await invoke_body_callback(lambda: self._admit_tool(state, request))
+                elif entry.timeout_behavior == "error_as_result":
+                    loop = asyncio.get_running_loop()
+                    cutoff = loop.time() + duration
+                    expired = False
+                    timeout_error = ToolTimeoutError(entry.name, duration)
+
+                    def admit_body() -> bool:
+                        return not expired and self._admit_tool(state, request)
+
+                    def expire_body(cancel_body: bool = True) -> None:
+                        nonlocal expired
+                        if self._closing or state.stopping or state.failure.done():
+                            return
+                        expired = True
+                        if cancel_body:
+                            cancel_once(body)
+
+                    timer = loop.call_at(cutoff, expire_body)
+
+                    value = None
+                    body_error: BaseException | None = None
+
+                    async def invoke_body() -> None:
+                        nonlocal value, body_error
+                        try:
+                            if admit_body():
+                                value = await invoke_body_callback(admit_body)
+                        except BaseException as error:
+                            # Transport every exit to the owner without letting
+                            # process-control exceptions escape this child task.
+                            body_error = error
+                        finally:
+                            timer.cancel()
+                            # Settle at body exit, before unrelated ready work can
+                            # delay the parent. Busy callbacks may outlast the timer.
+                            if loop.time() >= cutoff:
+                                expire_body(cancel_body=False)
+
+                    try:
+                        body = asyncio.create_task(invoke_body())
+                        try:
+                            # Do not let parent cancellation cancel an already
+                            # unwinding body a second time and cut cleanup short.
+                            await asyncio.wait((body,))
+                        except BaseException as error:
+                            cancel_once(body)
+
+                            async def join_body() -> None:
+                                try:
+                                    await _join(body)
+                                finally:
+                                    if body_error is not None and not isinstance(
+                                        body_error, asyncio.CancelledError
+                                    ):
+                                        state.retain_cleanup_error(
+                                            body_error.original
+                                            if isinstance(body_error, _FunctionBodyFailure)
+                                            else body_error
+                                        )
+
+                            await _close_after_error(error, join_body)
+                            raise
+                    finally:
+                        timer.cancel()
+                    if not self._admit_tool(state, request):
+                        if body_error is not None and not isinstance(
+                            body_error, asyncio.CancelledError
+                        ):
+                            state.retain_cleanup_error(
+                                body_error.original
+                                if isinstance(body_error, _FunctionBodyFailure)
+                                else body_error
+                            )
+                        return
+                    if isinstance(body_error, (SystemExit, KeyboardInterrupt)):
+                        raise body_error
+                    if expired:
+                        # Discard late output before a formatter can fail. The child
+                        # task itself never owns a return value.
+                        value = None
+                        if body_error is not None:
+                            timeout_error.__cause__ = (
+                                body_error.original
+                                if isinstance(body_error, _FunctionBodyFailure)
+                                else body_error
+                            )
+                        # No late value is validated or serialized. Format only
+                        # under the still-live parent's native admission.
+                        text = str(timeout_error)
+                        if entry.timeout_error_function is not None:
+                            assert context is not None
+                            text = await self._call_decision_callback(
+                                state,
+                                message,
+                                entry.timeout_error_function,
+                                lambda: self._admit_tool(state, request),
+                                context,
+                                timeout_error,
+                            )
+                            if not self._admit_tool(state, request):
+                                return
+                            if not isinstance(text, str):
+                                raise TypeError("Function timeout_error_function must return str")
+                        failure_output = ToolOutput.error(text)
+                        failure_output._validate()
+                        value = None
+                    elif body_error is not None:
+                        raise body_error
+                else:
+                    loop = asyncio.get_running_loop()
+                    cutoff = loop.time() + duration
+                    callback_task = asyncio.current_task()
+                    assert callback_task is not None
+                    timeout_error = ToolTimeoutError(entry.name, duration)
+
+                    def expire_callback(cancel_body: bool = True) -> None:
+                        if self._closing or state.stopping or state.failure.done():
+                            return
+                        # Every stop owner joins this same failure and cancellation.
+                        state.failure.set_result(timeout_error)
+                        if cancel_body:
+                            cancel_once(callback_task)
+
+                    timer = loop.call_at(cutoff, expire_callback)
+                    try:
+                        value = await invoke_body_callback(lambda: self._admit_tool(state, request))
+                    finally:
+                        timer.cancel()
+                        # A busy callback can cross the cutoff before timer dispatch.
+                        if loop.time() >= cutoff:
+                            expire_callback(cancel_body=False)
+            except _FunctionBodyFailure as failure:
+                if not self._admit_tool(state, request):
+                    state.retain_cleanup_error(failure.original)
+                    return
+                if entry.error_function is None:
+                    text = await self._format_run_tool_error(
+                        state,
+                        message,
+                        entry,
+                        failure.original,
+                        "execution",
+                        call,
+                        lambda: self._admit_tool(state, request),
+                    )
+                else:
+                    if context is None:
+                        if formatter_arguments is None:
+                            assert entry._reparse_error_arguments
+                            original_parsed = entry._parse_arguments(
+                                message.get("_sdk_effective_arguments", message["arguments"])
+                            )
+                            formatter_arguments = MappingProxyType(
+                                entry._arguments(original_parsed)
+                            )
+                            del original_parsed
+                        context = make_context(formatter_arguments)
+                    text = await self._call_decision_callback(
+                        state,
+                        message,
+                        entry.error_function,
+                        lambda: self._admit_tool(state, request),
+                        context,
+                        failure.original,
+                    )
+                if not self._admit_tool(state, request):
+                    return
+                if not isinstance(text, str):
+                    raise TypeError("Function error_function must return str") from None
+                failure_output = ToolOutput.error(text)
             if not self._admit_tool(state, request):
                 return
-            output: ToolOutput | None = timeout_output
+            output: ToolOutput | None = failure_output
             background = False
-            if timeout_output is None:
+            if failure_output is None:
                 background = isinstance(value, BackgroundResult)
                 content: Any = None
                 try:
@@ -12046,9 +13971,9 @@ class Session(Generic[ContextT, OutputT]):
                 if output is None:
                     # End ownership of the original admission request and every
                     # invocation data reference without altering caller-owned objects.
-                    del request, message, raw_arguments, parsed, kwargs, context, args, value
+                    del request, message, formatter_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
-            if entry.after is not None and timeout_output is None:
+            if entry.after is not None and failure_output is None:
                 assert context is not None
                 original_output = output
                 replacement = await self._call_decision_callback(
@@ -12079,21 +14004,52 @@ class Session(Generic[ContextT, OutputT]):
                     output = None
                 if output is None:
                     # The hook may have mutated the original callback result.
-                    del request, message, raw_arguments, parsed, kwargs, context, args, value
+                    del request, message, formatter_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
             assert output is not None
-            response: dict[str, Any] = {"request": message, "response": output.to_native()}
+            response_output = deepcopy(output.to_native())
+            response: dict[str, Any] = {"request": message, "response": response_output}
             if background:
                 response["start_response"] = False
             reply = json.dumps(response)
             del response
             if not self._admit_tool(state, request):
                 return
-            accepted = await self._respond_tool(state, reply)
+            nested_application_output = None
+            if started is not None:
+                application_data = _capture_application_data(output.application_data)
+                if application_data is not None:
+                    application_output = ApplicationToolOutput(
+                        submission_id=started.submission_id,
+                        turn_id=started.turn_id,
+                        call_id=started.call_id,
+                        name=started.name,
+                        namespace=started.namespace,
+                        application_data=application_data,
+                    )
+                    if code_origin is None:
+                        application_call_id = started.call_id
+                        state.pending_application_outputs[application_call_id] = application_output
+                    else:
+                        nested_application_output = application_output
+            if entry.finish_turn and response_output["success"] and started is not None:
+                if started.call_id in state.terminal_observations:
+                    raise NativeError("Repeated terminal tool observation identity")
+                state.terminal_observations[started.call_id] = started
+                deferred_observation = True
+            accepted = await self._respond_tool(
+                state, reply, application_output=nested_application_output
+            )
             # A retired receiver grants no delivery authority; the native owner
             # still supplies the selected terminal cause. Writer errors still raise.
             if accepted:
-                status = "completed" if output.success else "failed"
+                status = "completed" if response_output["success"] else "failed"
+                if not deferred_observation:
+                    observed_output = ToolOutput(
+                        deepcopy(response_output["contentItems"]),
+                        response_output["success"],
+                        application_data=deepcopy(application_data),
+                    )
         except BaseException as error:  # report every callback exit to its owner
             status = "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
             if _native_callback_cancelled(state):
@@ -12106,6 +14062,8 @@ class Session(Generic[ContextT, OutputT]):
         finally:
             approved = None
             approved_kwargs = None
+            if application_call_id is not None and not accepted:
+                state.pending_application_outputs.pop(application_call_id, None)
             if tracing is not None:
                 tracing.set_outcome(
                     status="ok"
@@ -12121,17 +14079,15 @@ class Session(Generic[ContextT, OutputT]):
                 )
             try:
                 if started is not None:
-                    self._observations.append(
-                        ToolFinished(
-                            session_id=self.id,
-                            turn_id=started.turn_id,
-                            submission_id=started.submission_id,
-                            call_id=started.call_id,
-                            name=started.name,
-                            namespace=started.namespace,
-                            status=status,
+                    if not deferred_observation:
+                        self._observe_function_finished(
+                            started, status, observed_output if status != "cancelled" else None
                         )
-                    )
+                    elif (
+                        status != "completed"
+                        and state.terminal_observations.pop(started.call_id, None) is not None
+                    ):
+                        self._observe_function_finished(started, status)
             finally:
                 scope.active = False
                 _invocation.reset(token)
@@ -12140,6 +14096,221 @@ class Session(Generic[ContextT, OutputT]):
                     # Fatal exits set state.failure above before opening a slot.
                     # Cleanup and the native reply ACK are already settled.
                     permit.release()
+
+    async def fork_stored(
+        self, *, before_turn_id: str | None = None, through_turn_id: str | None = None
+    ) -> str:
+        """Stored history branch, with the source Session remaining usable.
+
+        Idle LocalStorage root; fresh immutable ID at latest/before/through-turn.
+        History only: no descendant or native VM cloning. Subsequent opening
+        through the same LocalStorage and current Agent; no portable conversion.
+        """
+        self._check_callback_operation("fork stored history of its own Session")
+        self._check_idle_update()
+        if self._realtime is not None:
+            raise CapabilityError("Close native Realtime before a stored fork")
+        if not isinstance(self._storage, LocalStorage):
+            raise CapabilityError("Stored forks require native LocalStorage")
+        request = {}
+        for name, value in (
+            ("before_turn_id", before_turn_id),
+            ("through_turn_id", through_turn_id),
+        ):
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value:
+                raise ValueError("Stored fork turn IDs must be nonempty strings")
+            request[name] = value
+        if len(request) > 1:
+            raise ValueError("Choose either before_turn_id or through_turn_id")
+        self._check_checkpoint_admission(None)
+        gate: asyncio.Future[None] = self._loop.create_future()
+        self._checkpoint_task = gate
+        self._stored_fork_receipt = gate
+
+        async def prepare() -> None:
+            self._stored_fork = await self._native._fork_stored(json.dumps(request))
+            await self._stored_fork._retire_stored_fork()
+
+        try:
+            with _private_task(prepare()) as (pending, outcome):
+                try:
+                    await _join(pending, outcome=outcome)
+                    # Publication belongs to this public waiter, after cancellation
+                    # observation and every awaited write/retirement. No later await.
+                    candidate = self._stored_fork
+                    if candidate is None:
+                        raise NativeError("Native stored fork omitted its publication receipt")
+                    result = cast(str, candidate._publish_stored_fork())
+                    self._stored_fork = None
+                    self._stored_fork_receipt = None
+                    return result
+                except BaseException as error:
+                    await _close_after_error(error, self._discard_stored_fork)
+                    if self._broken:
+                        cast(Any, error).cleanup = self
+                    raise
+        finally:
+            self._checkpoint_task = None
+            if not gate.done():
+                gate.set_result(None)
+
+    async def _discard_stored_fork(self) -> None:
+        candidate = self._stored_fork
+        if candidate is None and self._stored_fork_receipt is None:
+            return
+        try:
+            if candidate is not None:
+                await candidate.close(discard_checkpoint_import=True)
+                if self._stored_fork is candidate:
+                    self._stored_fork = None
+            # Native startup may fail before returning a Python wrapper. Its
+            # exact raw receipt stays in the existing Engine registration.
+            await self._native._discard_stored_fork()
+            self._stored_fork_receipt = None
+        except BaseException:
+            self._broken = True
+            raise
+
+    async def revert_stored(self, *, before_turn_id: str) -> None:
+        """Core has been closing this Session before reverting its stored conversation.
+
+        The named turn and every later turn: excluded. Immutable Session.id;
+        subsequent opening through the same LocalStorage and current Agent.
+        Close/join before mutation; mandatory resource cleanup even on failure.
+        """
+        if not isinstance(before_turn_id, str) or not before_turn_id:
+            raise ValueError("before_turn_id must be a nonempty string")
+        await self._close_stored_history({"kind": "revert", "before_turn_id": before_turn_id})
+
+    async def delete_stored(self) -> None:
+        """Core has been closing this Session before deleting its stored conversation.
+
+        LocalStorage only; native writer/reference exclusion and sidecar cleanup.
+        Explicit rejection after a concurrent prior close; no silent success.
+        """
+        await self._close_stored_history({"kind": "delete"})
+
+    async def _close_stored_history(self, action: dict[str, Any]) -> None:
+        self._check_callback_operation("change stored history while closing its own Session")
+        self._check_idle_update()
+        if self._close_task is not None or self._scope_close_task is not None:
+            raise RuntimeError("Stored history operation requires an open Session before close")
+        self._stored_close_action = self._native._stored_history_close_action(json.dumps(action))
+        await self.aclose()
+
+    async def set_stored_name(self, name: str | None) -> str | None:
+        """Persist this LocalStorage Session's label; None clears it.
+
+        Surrounding whitespace trimmed; blank names rejected. Nonunique labels,
+        immutable Session identity; no alias or resume authority.
+        """
+        self._check_open()
+        self._check_callback_operation("set its own stored name")
+        if name is not None and not isinstance(name, str):
+            raise TypeError("name must be a string or None")
+        return cast(str | None, json.loads(await self._native._set_stored_name(json.dumps(name))))
+
+    async def stored_sessions(
+        self, *, limit: int = 50, cursor: str | None = None, archived: bool = False
+    ) -> StoredSessionPage:
+        """Committed native Exec application-session headers from this LocalStorage.
+
+        Exec source category, including SDK and exec applications; interactive CLI,
+        IDE and subagent source categories excluded. Native creation-order cursor;
+        active/approval-paused reads, without snapshot isolation or totals.
+        Archived collection only for archived=True; active collection otherwise.
+        Concurrent creation/deletion and transient indexed opening/fork records;
+        no stable pagination or publication promise. Potential short/empty pages
+        with a next cursor after deletion.
+        Fork-parent links from validated metadata; without opening the listed sessions
+        or loading their history. Existing materialization/flush of the current owner.
+
+        Page sizes 1 through 1000; default 50. Opaque cursors for the same options.
+        Paging with the returned cursor, including empty pages::
+
+            cursor: str | None = None
+            ids: list[str] = []
+            while True:
+                page = await session.stored_sessions(limit=50, cursor=cursor)
+                ids.extend(item["id"] for item in page["sessions"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+        """
+        self._check_open()
+        options = _stored_options(limit, cursor)
+        options.pop("descending")
+        if type(archived) is not bool:
+            raise TypeError("archived must be a bool")
+        value = await self._native._stored_history(
+            json.dumps({"kind": "sessions", **options, "archived": archived})
+        )
+        return cast(StoredSessionPage, json.loads(value))
+
+    async def stored_turns(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        direction: Literal["asc", "desc"] = "asc",
+        include_summary: bool = False,
+    ) -> StoredTurnPage:
+        """Core has been returning committed turn metadata and optional summary items.
+
+        Active/approval-paused availability. Opaque store cursors;
+        no complete history snapshot, original-item fidelity or CAS revision.
+        Full projected item detail through stored_items; explicit unsupported-store errors.
+        """
+        self._check_open()
+        options = _stored_options(limit, cursor, direction)
+        if type(include_summary) is not bool:
+            raise TypeError("include_summary must be a bool")
+        value = await self._native._stored_history(
+            json.dumps({"kind": "turns", **options, "include_items": include_summary})
+        )
+        return _stored_turn_page(json.loads(value))
+
+    async def stored_items(
+        self,
+        *,
+        turn_id: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+        direction: Literal["asc", "desc"] = "asc",
+    ) -> StoredItemPage:
+        """Core has been paging its committed item projections in creation order.
+
+        Store-owned JSON projections; raw originals through history_snapshot.
+        No hidden full-journal fallback for stores without an index.
+        """
+        self._check_open()
+        options = _stored_options(limit, cursor, direction)
+        if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
+            raise ValueError("turn_id must be a nonempty string or None")
+        value = await self._native._stored_history(
+            json.dumps({"kind": "items", **options, "turn_id": turn_id})
+        )
+        return _stored_item_page(json.loads(value))
+
+    async def search_history(
+        self, text: str, *, limit: int = 50, cursor: str | None = None
+    ) -> StoredMatchPage:
+        """Core has been searching indexed visible messages by literal substring.
+
+        Case-insensitive matching; UTF-16 match offsets within each snippet.
+        Inclusive turn_cursor for stored_turns at the matching turn.
+        """
+        self._check_open()
+        options = _stored_options(limit, cursor)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Stored history search requires nonempty text")
+        options.pop("descending")
+        value = await self._native._stored_history(
+            json.dumps({"kind": "search", **options, "text": text})
+        )
+        return cast(StoredMatchPage, json.loads(value))
 
     async def items(self, *, subagent_id: str | None = None) -> AsyncIterator[SessionItem]:
         """Iterate a snapshot of recorded items, including inherited child history."""
@@ -12256,6 +14427,46 @@ class Session(Generic[ContextT, OutputT]):
             return cast(NativeGoal, json.loads(value))
 
         return await self._join_mutation(asyncio.create_task(write()))
+
+    async def suspend_workspace(self) -> ManagedWorkspaceCheckpoint:
+        """Retire this owned sandbox Session and capture its paired workspace."""
+        self._check_loop()
+        self._check_callback_operation("suspend its managed workspace")
+        managed = self._managed_workspace
+        if managed is None:
+            raise CapabilityError(
+                "Managed workspace capture requires an owned managed sandbox source"
+            )
+        if managed.capture_task is not None:
+            return await asyncio.shield(managed.capture_task)
+        self._check_open()
+        self._check_portable_capture()
+        active = self._active
+        if active is not None:
+            self._check_manual_capture(active)
+        self._check_checkpoint_admission(active)
+        if any(
+            child.continuation is not None and not child.continuation.done()
+            for child in self._child_callbacks.values()
+        ):
+            raise SessionBusyError("Managed capture requires settled child continuations")
+        # Intent precedes export, so racing close cannot skip provider serialization.
+        managed.capture_requested = True
+
+        async def retire() -> ManagedWorkspaceCheckpoint:
+            try:
+                state = await self._checkpoint(active, managed_retire=True)
+            except BaseException as error:
+                managed.capture_requested = False
+                await _close_after_error(error, self.aclose)
+                raise
+            await self.aclose()
+            if managed.receipt is None:
+                raise NativeError("Managed provider retirement omitted its workspace receipt")
+            return _capture_retired_workspace(state.to_json(), managed.receipt)
+
+        managed.capture_task = asyncio.create_task(retire())
+        return await asyncio.shield(managed.capture_task)
 
     async def save_state(self) -> SessionState:
         """Snapshot an idle session without retiring it.
@@ -12423,6 +14634,7 @@ class Session(Generic[ContextT, OutputT]):
         before_seal: Callable[[], None] | None = None,
         fork: bool = False,
         probe: bool = False,
+        managed_retire: bool = False,
     ) -> SessionState:
         while True:
             self._check_checkpoint_admission(active)
@@ -12438,7 +14650,11 @@ class Session(Generic[ContextT, OutputT]):
             # These checks belong to the Session. Passive preparation must
             # neither cancel them nor hold checkpoint ownership across close.
             await asyncio.gather(*(asyncio.shield(task) for task in continuations))
-        with _private_task(self._capture_checkpoint(active, before_seal, fork, probe=probe)) as (
+        with _private_task(
+            self._capture_checkpoint(
+                active, before_seal, fork, probe=probe, managed_retire=managed_retire
+            )
+        ) as (
             pending,
             outcome,
         ):
@@ -12459,6 +14675,7 @@ class Session(Generic[ContextT, OutputT]):
         fork: bool,
         *,
         probe: bool = False,
+        managed_retire: bool = False,
     ) -> str:
         active_uses_executor = active is not None and (
             active.operation_refs is None
@@ -12657,6 +14874,10 @@ class Session(Generic[ContextT, OutputT]):
                 for turn in self._repair_turns
             ]
             payload["repair_items"] = self._repair_items
+            if self._application_tool_outputs:
+                payload["application_tool_outputs"] = [
+                    record.model_dump(mode="json") for record in self._application_tool_outputs
+                ]
             if active is not None and active.operation_refs is not None:
                 payload["operation_tools"] = [
                     {"name": ref.name, "namespace": ref.namespace} for ref in active.operation_refs
@@ -12667,6 +14888,11 @@ class Session(Generic[ContextT, OutputT]):
             payload["executor_policy_digest"] = executor_policy_digest
             if self._executor is not None and self._executor.read_only:
                 payload["executor_read_only"] = True
+            if active is not None:
+                usage = active.run_usage.snapshot()
+                payload["run_usage"] = {
+                    name: getattr(usage, name) for name in RunUsage.__dataclass_fields__
+                }
             _redact_checkpoint_executor_receipts(payload)
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions, graph=bool(self._profiles))
@@ -12682,6 +14908,8 @@ class Session(Generic[ContextT, OutputT]):
                 interaction.state = state
                 if not active.failure.done():
                     active.failure.set_result(interaction)
+            if managed_retire:
+                self._sealed_checkpoint = raw
             return raw
         except BaseException as error:
             if active is not None:
@@ -12860,6 +15088,12 @@ class Session(Generic[ContextT, OutputT]):
         self._closed = True
 
     async def _close_session(self) -> None:
+        # An unpublished fork retains the existing native imported-ID receipt.
+        # Join its public publication/rollback decision before database teardown.
+        # A failed delete leaves this close retryable with the same owner/store.
+        if self._stored_fork_receipt is not None:
+            await asyncio.gather(self._stored_fork_receipt, return_exceptions=True)
+        await self._discard_stored_fork()
         # Retire voice admission first. This Session owns the graph stop;
         # joining voice workflows now would cancel against a closing Session.
         if self._realtime is not None:
@@ -12999,7 +15233,10 @@ class Session(Generic[ContextT, OutputT]):
                             state.retain_cleanup_error(error)
                         raise
                     try:
+                        stored_action, self._stored_close_action = self._stored_close_action, None
                         await self._native.close()
+                        if stored_action is not None:
+                            await stored_action.apply()
                     except BaseException as error:
                         if state is not None and state.deferred_close is not None:
                             state.retain_cleanup_error(error)
@@ -13020,6 +15257,7 @@ class Session(Generic[ContextT, OutputT]):
                         ):
                             errors.append(result)
                     try:
+                        self._stored_close_action = None
                         await self._engine.close()
                         engine_closed = True
                     finally:

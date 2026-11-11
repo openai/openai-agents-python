@@ -146,7 +146,9 @@ def native_trace_child_env() -> dict[str, str]:
     [
         "native_case",
         "native_deadline_case",
+        "native_deadline_reset_case",
         "native_outcome_privacy_case",
+        "native_auth_case",
         pytest.param("native_batch_case", marks=pytest.mark.serial),
     ],
 )
@@ -368,6 +370,7 @@ async def native_deadline_case():
         handler = asyncio.current_task()
         handlers.add(handler)
         eof = None
+        trickling = False
         try:
             header = await reader.readuntil(b"\r\n\r\n")
             length = next(
@@ -377,7 +380,8 @@ async def native_deadline_case():
             )
             requests.append(json.loads(await reader.readexactly(length)))
             writer.write(b"HTTP/1.1 200 OK\r\n")
-            if len(requests) == 2:
+            trickling = len(requests) == 2
+            if trickling:
                 eof = asyncio.create_task(reader.read())
                 for _ in range(30):
                     done, _ = await asyncio.wait((eof,), timeout=0.02)
@@ -389,16 +393,25 @@ async def native_deadline_case():
                     await writer.drain()
             writer.write(b"Content-Length: 0\r\n\r\n")
             await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            if not trickling:
+                raise
+            first_closed.set()
         finally:
             if eof is not None and not eof.done():
                 eof.cancel()
                 await asyncio.gather(eof, return_exceptions=True)
             writer.close()
-            await writer.wait_closed()
-            handlers.discard(handler)
+            try:
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                if not trickling:
+                    raise
+                first_closed.set()
 
     server = await asyncio.start_server(receive, "127.0.0.1", 0)
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
+    configured = False
     try:
         # Warm the lazy HTTP transport before the bounded native request.
         warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
@@ -408,6 +421,7 @@ async def native_deadline_case():
             api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
         )
         await telemetry.configure(processors=[exporter])
+        configured = True
         with telemetry.trace("deadline-first"):
             pass
         flushed = await telemetry.force_flush()
@@ -422,12 +436,31 @@ async def native_deadline_case():
             record.get("span_data", {}).get("name") == "recovered-after-deadline"
             for record in records
         )
-        await telemetry.shutdown()
     finally:
-        server.close()
-        await server.wait_closed()
-        if handlers:
-            await asyncio.wait_for(asyncio.gather(*handlers), 1)
+        try:
+            if configured:
+                await telemetry.shutdown()
+        finally:
+            server.close()
+            await server.wait_closed()
+            if handlers:
+                await asyncio.wait_for(asyncio.gather(*handlers), 1)
+
+
+async def native_deadline_reset_case():
+    import asyncio
+
+    read = asyncio.StreamReader.read
+
+    async def reset_on_eof(reader, n=-1):
+        data = await read(reader, n)
+        if data == b"":
+            raise ConnectionResetError("synthetic Windows peer close")
+        return data
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(asyncio.StreamReader, "read", reset_on_eof)
+        await native_deadline_case()
 
 
 async def test_failed_root_descriptor_metadata_and_rotation_survive_delivery():
@@ -759,8 +792,167 @@ async def test_mixed_loss_batch_delivers_only_admitted_records(delivery_status):
         assert all(
             row.get("trace_id", row.get("id")) == "trace_" + fresh["trace_id"] for row in records
         )
-        state = exporter._traces["trace_" + fresh["trace_id"]]
-        assert (state.delivered_to is exporter._credentials[0]) is (delivery_status == 200)
         await exporter.on_trace_event({**fresh, "lifecycle": "end"})
         descriptors = [row for row in received[-1]["payload"]["data"] if row["object"] == "trace"]
         assert len(descriptors) == (1 if delivery_status == 503 else 0)
+
+
+async def test_original_snapshot_auth_groups_and_retired_forwarding():
+    from threading import Event
+    from types import MappingProxyType
+
+    from _agents_codex._trace_delivery import _trace_delivery_context, _TraceDeliveryOwner
+
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="fallback-key", organization="fallback-org", endpoint=endpoint
+        )
+        a = MappingProxyType({**completed_event(), "credential_required": True, "sequence": 2})
+        b = MappingProxyType(
+            {**completed_event(), "credential_required": True, "sequence": 3, "span_id": "c" * 16}
+        )
+        routes = {
+            "2": {"identity": "native-A", "headers": {"authorization": "Bearer scope-A"}},
+            "3": {"identity": "native-B", "headers": {"authorization": "Bearer scope-B"}},
+        }
+        owner = _TraceDeliveryOwner((a, b), routes, Event())
+        with _trace_delivery_context(owner, (a, b)):
+            with pytest.raises(RuntimeError):
+                await exporter.on_trace_event({**a, "name": "copied foreign root"})
+            await exporter.on_trace_events((a, b))
+        owner.retire()
+        with pytest.raises(RuntimeError):
+            await exporter.on_trace_event(a)
+        owner = _TraceDeliveryOwner((a,), routes, Event())
+        with _trace_delivery_context(owner, (a,)):
+            await exporter.on_trace_event(a)
+        owner.retire()
+        await exporter.on_trace_event({**completed_event(), "trace_id": "d" * 32, "sequence": 4})
+        headers = [
+            {key.lower(): value for key, value in item["headers"].items()} for item in received
+        ]
+        assert [item["authorization"] for item in headers] == [
+            "Bearer scope-A",
+            "Bearer scope-B",
+            "Bearer scope-A",
+            "Bearer fallback-key",
+        ]
+        assert all(item["openai-organization"] == "fallback-org" for item in headers)
+        assert [
+            sum(record["object"] == "trace" for record in item["payload"]["data"])
+            for item in received
+        ] == [1, 1, 1, 1]
+        assert received[0]["payload"]["data"][0]["workflow_name"] == completed_event()["name"]
+        public = json.dumps([item["payload"] for item in received])
+        assert not any(
+            value in public
+            for value in (
+                "scope-A",
+                "scope-B",
+                "fallback-key",
+                "credential_required",
+                "native-A",
+                "native-B",
+            )
+        )
+
+
+async def native_auth_case():
+    from collections.abc import Mapping
+
+    observed = []
+    groups = []
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="fallback-secret", organization="fallback-org", endpoint=endpoint
+        )
+
+        class Forwarder:
+            async def on_trace_event(self, event):
+                await self.on_trace_events((event,))
+
+            async def on_trace_events(self, events):
+                observed.extend(events)
+                groups.append(events)
+                scoped = next(
+                    (event for event in events if event.get("credential_required") is True), None
+                )
+                if scoped is not None:
+                    with pytest.raises(RuntimeError):
+                        await exporter.on_trace_event({**scoped, "name": "copied foreign root"})
+                await exporter.on_trace_events(events)
+
+        await telemetry.configure(processors=[Forwarder()])
+        a = telemetry.TraceExportCredentials(headers={"Authorization": "Bearer trace-secret-A"})
+        with telemetry.trace("authenticated-A", options={"export_credentials": a}) as root_a:
+            pass
+        del a
+        b = telemetry.TraceExportCredentials(headers={"Authorization": "Bearer trace-secret-B"})
+        with telemetry.trace("authenticated-B", options={"export_credentials": b}) as root_b:
+            pass
+        with telemetry.span(
+            "override-B-under-A", options={"parent": root_a.context, "export_credentials": b}
+        ):
+            pass
+        del b
+        with telemetry.span("late-child-A", options={"parent": root_a.context}):
+            pass
+        with telemetry.span("late-child-B", options={"parent": root_b.context}):
+            pass
+        with telemetry.trace("fallback"):
+            pass
+        result = await telemetry.force_flush()
+        assert result.status == "success"
+        expected = {
+            "Bearer trace-secret-A": {"authenticated-A", "late-child-A"},
+            "Bearer trace-secret-B": {"authenticated-B", "late-child-B", "override-B-under-A"},
+            "Bearer fallback-secret": {"fallback"},
+        }
+        for auth, names in expected.items():
+            requests = [
+                item
+                for item in received
+                if {key.lower(): value for key, value in item["headers"].items()}["authorization"]
+                == auth
+            ]
+            assert requests
+            assert all(
+                {key.lower(): value for key, value in item["headers"].items()}[
+                    "openai-organization"
+                ]
+                == "fallback-org"
+                for item in requests
+            )
+            records = [record for item in requests for record in item["payload"]["data"]]
+            assert {
+                record["span_data"]["name"]
+                for record in records
+                if record["object"] == "trace.span"
+            } == names
+            assert any(record["object"] == "trace" for record in records)
+        assert any(len({event["trace_id"] for event in events}) >= 2 for events in groups)
+
+        def plain(value):
+            if isinstance(value, Mapping):
+                return {key: plain(item) for key, item in value.items()}
+            if isinstance(value, (tuple, list)):
+                return [plain(item) for item in value]
+            return value
+
+        public = json.dumps(plain(observed))
+        assert not any(
+            secret in public
+            for secret in (
+                "trace-secret-A",
+                "trace-secret-B",
+                "fallback-secret",
+                "Authorization",
+                "authorization",
+            )
+        )
+        count = len(received)
+        scoped = next(event for event in observed if event.get("credential_required") is True)
+        with pytest.raises(RuntimeError):
+            await exporter.on_trace_event(scoped)
+        assert len(received) == count
+        await telemetry.shutdown()

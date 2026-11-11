@@ -226,6 +226,17 @@
       "aliases": [
         "API reference"
       ]
+    },
+    {
+      "id": "guardrails",
+      "path": "guardrails.md",
+      "aliases": [
+        "InputGuardrail",
+        "OutputGuardrail",
+        "GuardrailTripwire",
+        "function enablement",
+        "is_enabled"
+      ]
     }
   ]
 }

@@ -225,7 +225,13 @@ async def test_all_force_retires_manual_restore_during_its_last_reply(tmp_path, 
                 if replied is not None:
                     assert isinstance(replied, (asyncio.CancelledError, RuntimeError, ValueError))
                     if not isinstance(replied, asyncio.CancelledError):
-                        assert "sealed" in str(replied) or "expired" in str(replied)
+                        # Force retirement can close the native thread after
+                        # reply admission but before continuation acquires it.
+                        assert (
+                            "sealed" in str(replied)
+                            or "expired" in str(replied)
+                            or str(replied) == "Codex thread is closed"
+                        )
                 # Recovery may win first and already have sent its request.
                 # Stale manual grants cannot submit another request.
                 await join_interrupt_cleanup(restored)
@@ -279,7 +285,11 @@ async def test_force_retires_manual_restore_without_executor(responses: Response
                 if replied is not None:
                     assert isinstance(replied, (asyncio.CancelledError, RuntimeError, ValueError))
                     if not isinstance(replied, asyncio.CancelledError):
-                        assert "sealed" in str(replied) or "expired" in str(replied)
+                        assert (
+                            "sealed" in str(replied)
+                            or "expired" in str(replied)
+                            or str(replied) == "Codex thread is closed"
+                        )
                 await join_interrupt_cleanup(restored)
                 count = len(responses.requests)
                 with pytest.raises((RuntimeError, ValueError)):

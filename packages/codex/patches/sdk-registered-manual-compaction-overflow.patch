@@ -1,0 +1,64 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 7040936092f3b1fe82fe77b1bf2c2d8e8b5aa127..832d20f7504ea891147cf7454a62e506ca36a740 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1689,7 +1689,7 @@ impl ModelClientSession {
+                 ) && self
+                     .client
+                     .auth_manager()
+-                    .is_some_and(|manager| manager.terminal_auto_compaction_limit_errors()))
++                    .is_some_and(|manager| manager.uses_app_managed_model_oauth()))
+     }
+
+     pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index deedfd1452cd5e5698f48182c4e5498dc658e071..d43452c12c34d0db55f80b749e5d1b9092dbecbc 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -491,12 +491,11 @@ async fn run_compact_task_inner_impl(
+                 return Err(e);
+             }
+             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
+-                if matches!(compaction_metadata.trigger(), CompactionTrigger::Auto)
+-                    && sess
+-                        .services
+-                        .model_client
+-                        .auth_manager()
+-                        .is_some_and(|manager| manager.terminal_auto_compaction_limit_errors())
++                if sess
++                    .services
++                    .model_client
++                    .auth_manager()
++                    .is_some_and(|manager| manager.uses_app_managed_model_oauth())
+                 {
+                     return Err(e);
+                 }
+diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
+index dc337c72099d5e1ce537b7e7fe5ab2879ba21128..820a75004802f7deb0e632d5803cfe73e20d652d 100644
+--- a/codex-rs/login/src/auth/manager.rs
++++ b/codex-rs/login/src/auth/manager.rs
+@@ -284,8 +284,8 @@ pub trait ExternalAuth: Send + Sync {
+         true
+     }
+
+-    /// Whether turn-owned automatic Responses compaction should surface limit errors immediately.
+-    fn terminal_auto_compaction_limit_errors(&self) -> bool {
++    /// Whether model OAuth credentials are managed by the application.
++    fn uses_app_managed_model_oauth(&self) -> bool {
+         false
+     }
+
+@@ -3246,10 +3246,10 @@ impl AuthManager {
+         self.saved_chatgpt.is_some()
+     }
+
+-    /// Returns the external provider's policy for turn-owned automatic Responses compaction limits.
+-    pub fn terminal_auto_compaction_limit_errors(&self) -> bool {
++    /// Whether the external provider uses application-managed model OAuth credentials.
++    pub fn uses_app_managed_model_oauth(&self) -> bool {
+         self.external_auth_provider()
+-            .is_some_and(|auth| auth.terminal_auto_compaction_limit_errors())
++            .is_some_and(|auth| auth.uses_app_managed_model_oauth())
+     }
+
+     /// Returns the precise kind of credentials backing the current authentication.

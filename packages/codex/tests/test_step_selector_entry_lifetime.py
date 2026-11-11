@@ -46,19 +46,27 @@ def owner(callback):
         _native_agents=SimpleNamespace(before_step=callback),
         _catalog=catalog,
         _context=None,
+        _agent=None,
         _profiles={},
         _profile_catalogs={(None, 7): catalog},
         _catalog_bindings={(None, 7): ()},
-        _opening_agent=SimpleNamespace(tools=(), programmatic_tool_calling=False),
+        _opening_agent=SimpleNamespace(
+            tools=(), programmatic_tool_calling=False, input_guardrails=()
+        ),
+        _input_guardrails=(),
         _fail_unhandled_questions=False,
     )
     for method in (
         "_select_step_body",
         "_call_decision_callback",
+        "_call_decision_callback_entered",
         "_catalog_for_message",
         "_agent_for_profile",
         "_agent_for_message",
+        "_original_agent_for_profile",
+        "_original_agent_for_message",
         "_bindings_for_message",
+        "_drain_terminal_observations",
     ):
         setattr(session, method, getattr(Session, method).__get__(session, Session))
     message = {

@@ -34,6 +34,7 @@ from ._events import (
     FunctionCallStatus as FunctionCallStatus,
     ImageGenerationCallItem,
     MessageItem,
+    ReasoningItem,
     WebSearchCallItem,
 )
 from ._mcp_errors import _protect_mcp_methods
@@ -44,6 +45,7 @@ from .response_facts import (
     RecordedResponseFactSummary as RecordedResponseFactSummary,
     _summarize_response_fact,
 )
+from .tools import ToolOutput as ToolOutput
 from .usage import TokenUsageInfo as TokenUsageInfo
 
 if TYPE_CHECKING:
@@ -143,6 +145,16 @@ class ResponseFactReceived(_SubmissionEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RawProviderEvent(_SubmissionEvent):
+    """A Responses provider JSON object captured before native event decoding."""
+
+    source: Literal["responses"]
+    transport: Literal["sse", "websocket", "json"]
+    payload: dict[str, JsonValue] = field(repr=False)
+    type: Literal["raw_provider_event"] = field(default="raw_provider_event", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class HostedToolCallSummary:
     """Identity and status of a hosted call, without provider payloads."""
 
@@ -154,7 +166,10 @@ class HostedToolCallSummary:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelOutputItemCompleted(_SubmissionEvent):
-    """A completed hosted tool call or an assistant message with annotations.
+    """A completed assistant message, provider reasoning summary, or hosted call.
+
+    Open the Session with include_model_output_items=True to record ordinary
+    assistant messages and provider reasoning summaries.
 
     FileSearch, CodeInterpreter, and ImageGeneration calls default to
     HostedToolCallSummary. Read with
@@ -165,6 +180,7 @@ class ModelOutputItemCompleted(_SubmissionEvent):
 
     item: (
         MessageItem
+        | ReasoningItem
         | WebSearchCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
@@ -222,6 +238,27 @@ class ContextCompacted(_SubmissionEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class AgentProfileChanged(_Event):
+    """A committed change of captured Agent identity, in native commit order.
+
+    Initial/restored bindings and same-profile configuration refreshes are silent.
+    Idle updates have no submission or turn. Names come from the admitted graph,
+    independently of later mutations to the original public Agent objects.
+    The previous profile identifies the committed source, including unnamed Agents.
+    Older native events can omit that identity.
+    """
+
+    profile_id: str
+    profile_epoch: int
+    agent_name: str | None
+    submission_id: str | None = None
+    turn_id: str | None = None
+    previous_profile_id: str | None = None
+    previous_agent_name: str | None = None
+    type: Literal["agent_profile_changed"] = field(default="agent_profile_changed", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ToolStarted(_SubmissionEvent):
     """A function was admitted, or native MCP handling began before any approval.
 
@@ -240,6 +277,9 @@ class ToolFinished(_SubmissionEvent):
     """A function settled, or Core delivered an MCP end with its result status.
 
     MCP cancellation may have no end event. Status does not imply effect rollback.
+    With include_execution_details=True, output is the acknowledged post-hook
+    function callback response. It is absent for other completions and cancelled
+    delivery. The recorded conversation remains authoritative for model input.
     """
 
     call_id: str
@@ -247,6 +287,7 @@ class ToolFinished(_SubmissionEvent):
     namespace: str | None
     status: Literal["completed", "failed", "cancelled"]
     family: Literal["function", "mcp"] = "function"
+    output: ToolOutput | None = None
     type: Literal["tool_finished"] = field(default="tool_finished", init=False)
 
 
@@ -315,12 +356,14 @@ class EventGap(_Event):
 
 Observation: TypeAlias = (
     TurnStarted
+    | AgentProfileChanged
     | ModelRequestDispatching
     | ModelResponseLinked
     | TurnFinished
     | SubagentLifecycle
     | OutputTextDelta
     | ResponseFactReceived
+    | RawProviderEvent
     | ModelOutputItemCompleted
     | HostedToolCallProgress
     | UsageUpdated
@@ -340,16 +383,21 @@ class _ObservationBuffer:
     """One retained event log; publishing never awaits or invokes application code."""
 
     def __init__(
-        self, session_id: str, *, retention: Literal["bounded", "all"] = "bounded"
+        self,
+        session_id: str,
+        *,
+        retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
     ) -> None:
         self.retention: Literal["bounded", "all"] = retention
+        self.include_model_output_items = include_model_output_items
         self.session_id = session_id
         self.loop = asyncio.get_running_loop()
-        self.records: list[tuple[Observation, int, int]] | deque[tuple[Observation, int, int]] = (
-            [] if retention == "all" else deque()
-        )
+        self.records: (
+            list[tuple[Observation, int, int, bool]] | deque[tuple[Observation, int, int, bool]]
+        ) = [] if retention == "all" else deque()
         self.characters = 0
-        self.image_characters = 0
+        self.payload_characters = 0
         self.sequence = 0
         self.closed = False
         self.changed = asyncio.Event()
@@ -368,7 +416,7 @@ class _ObservationBuffer:
 
     def turn_started(self, turn_id: str) -> TurnStarted | None:
         """Find the retained owner of a late native completion."""
-        for event, _, _ in reversed(self.records):
+        for event, _, _, _ in reversed(self.records):
             if isinstance(event, TurnStarted) and event.turn_id == turn_id:
                 return event
         return None
@@ -389,6 +437,7 @@ class _ObservationBuffer:
                     ),
                     0,
                     0,
+                    False,
                 )
             )
             self.notify()
@@ -396,51 +445,93 @@ class _ObservationBuffer:
         # Drop the prefix so the retained observations form a contiguous suffix.
         self.records.clear()
         self.characters = 0
-        self.image_characters = 0
+        self.payload_characters = 0
         self.notify()
 
     def append(self, event: _ObservationT) -> _ObservationT | None:
         if self.closed:
             return None
         event = replace(event, sequence=self.sequence + 1)
+        retained_event = event
+        details_lost = False
+        payload_size = 0
         size = sum(
             len(value)
             for definition in fields(event)
             if isinstance(value := getattr(event, definition.name), str)
         )
-        if isinstance(event, (ExecutionItemCompleted, ModelOutputItemCompleted)):
+        if (
+            isinstance(event, ModelOutputItemCompleted)
+            and not isinstance(event.item, HostedToolCallSummary)
+            and event.item["type"] == "web_search_call"
+            and "results" in event.item
+        ):
+            search_metadata = event.item.copy()
+            results = search_metadata.pop("results")
+            size += len(json.dumps(search_metadata, ensure_ascii=False, separators=(",", ":")))
+            payload_size = len(json.dumps(results, ensure_ascii=False, separators=(",", ":")))
+            if self.retention == "bounded" and payload_size > 16 * 1024 * 1024:
+                retained_event = replace(event, item=search_metadata)
+                payload_size = 0
+                details_lost = True
+        elif isinstance(event, (ExecutionItemCompleted, ModelOutputItemCompleted)):
             size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
+        if isinstance(event, ToolFinished) and event.output is not None:
+            size += len(
+                json.dumps(event.output.to_native(), ensure_ascii=False, separators=(",", ":"))
+            )
         if isinstance(event, ResponseFactReceived):
             size += len(json.dumps(event.record, ensure_ascii=False, separators=(",", ":")))
-        image_size = 0
-        if isinstance(event, HostedToolCallProgress):
+        elif isinstance(event, RawProviderEvent) and self.retention == "bounded":
+            payload_size = len(json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")))
+        elif isinstance(event, HostedToolCallProgress):
             metadata = event.event
             partial = metadata.get("partial_image_b64")
             if metadata.get(
                 "type"
             ) == "response.image_generation_call.partial_image" and isinstance(partial, str):
-                image_size = len(partial)
+                payload_size = len(partial)
                 metadata = {
                     key: value for key, value in metadata.items() if key != "partial_image_b64"
                 }
             size += len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
-        if self.retention == "bounded" and (size > 65_536 or image_size > 16 * 1024 * 1024):
+        if self.retention == "bounded" and (size > 65_536 or payload_size > 16 * 1024 * 1024):
             # The parent receives the full event below; this eviction is local.
             self._mark_gap(forward=False)
         else:
             self.sequence += 1
-            self.records.append((event, size, image_size))
+            self.records.append((retained_event, size, payload_size, details_lost))
             self.characters += size
-            self.image_characters += image_size
+            self.payload_characters += payload_size
+            if self.retention == "bounded" and self.payload_characters > 32 * 1024 * 1024:
+                # Search details have been yielding before compact events or image previews.
+                for index, (previous, metadata_size, detail_size, _) in enumerate(self.records):
+                    if (
+                        detail_size
+                        and isinstance(previous, ModelOutputItemCompleted)
+                        and not isinstance(previous.item, HostedToolCallSummary)
+                        and previous.item["type"] == "web_search_call"
+                    ):
+                        search_item = previous.item.copy()
+                        search_item.pop("results", None)
+                        self.records[index] = (
+                            replace(previous, item=search_item),
+                            metadata_size,
+                            0,
+                            True,
+                        )
+                        self.payload_characters -= detail_size
+                        if self.payload_characters <= 32 * 1024 * 1024:
+                            break
             while self.retention == "bounded" and (
                 len(self.records) > 256
                 or self.characters > 65_536
-                or self.image_characters > 32 * 1024 * 1024
+                or self.payload_characters > 32 * 1024 * 1024
             ):
                 assert isinstance(self.records, deque)
-                _, removed, removed_image = self.records.popleft()
+                _, removed, removed_payload, _ = self.records.popleft()
                 self.characters -= removed
-                self.image_characters -= removed_image
+                self.payload_characters -= removed_payload
             self.notify()
         if self.repair_parent is not None and isinstance(event, _SubmissionEvent):
             buffer, parent_id = self.repair_parent
@@ -517,9 +608,28 @@ class EventStream(AsyncIterator[Observation]):
                     )
                 # Retained sequences are contiguous; start after this reader's cursor.
                 for index in range(self._after - oldest + 1, len(records)):
-                    event, _, _ = records[index]
+                    event, _, _, details_lost = records[index]
                     if event.sequence > self._after:
                         self._after = event.sequence
+                        if (
+                            isinstance(event, RawProviderEvent)
+                            and not self._include_execution_details
+                        ):
+                            continue
+                        if self._turn is not None and not isinstance(event, EventGap):
+                            owners = {step.submission_id for step in self._turn._steps()}
+                            own_turn = getattr(event, "submission_id", None) in owners
+                            if (
+                                not own_turn
+                                and getattr(event, "parent_submission_id", None) not in owners
+                            ):
+                                continue
+                            if (
+                                own_turn
+                                and isinstance(event, TurnFinished)
+                                and self._turn.child_id is not None
+                            ):
+                                self._closed = True
                         if isinstance(event, ResponseFactReceived):
                             event = replace(
                                 event,
@@ -527,6 +637,8 @@ class EventStream(AsyncIterator[Observation]):
                                 if self._include_execution_details
                                 else _summarize_response_fact(event.record),
                             )
+                        elif isinstance(event, RawProviderEvent):
+                            event = replace(event, payload=deepcopy(event.payload))
                         elif isinstance(event, ModelOutputItemCompleted):
                             model_item = event.item
                             if (
@@ -544,6 +656,14 @@ class EventStream(AsyncIterator[Observation]):
                                     turn_id=model_item["turn_id"],
                                     status=model_item["status"],
                                 )
+                            elif (
+                                not self._include_execution_details
+                                and not isinstance(model_item, HostedToolCallSummary)
+                                and model_item["type"] == "web_search_call"
+                            ):
+                                model_item = model_item.copy()
+                                model_item.pop("results", None)
+                                model_item = deepcopy(model_item)
                             else:
                                 model_item = deepcopy(model_item)
                             event = replace(event, item=model_item)
@@ -558,6 +678,13 @@ class EventStream(AsyncIterator[Observation]):
                                         "type": event_type if isinstance(event_type, str) else None
                                     }
                                 ),
+                            )
+                        elif isinstance(event, ToolFinished):
+                            event = replace(
+                                event,
+                                output=deepcopy(event.output)
+                                if self._include_execution_details
+                                else None,
                             )
                         elif isinstance(event, ExecutionItemCompleted):
                             item = event.item
@@ -574,15 +701,15 @@ class EventStream(AsyncIterator[Observation]):
                                     "native_status": item.get("native_status"),
                                 }
                             event = replace(event, item=item)
-                        if self._turn is None or isinstance(event, EventGap):
-                            return event
-                        owners = {step.submission_id for step in self._turn._steps()}
-                        if getattr(event, "submission_id", None) in owners:
-                            if isinstance(event, TurnFinished) and self._turn.child_id is not None:
-                                self._closed = True
-                            return event
-                        if getattr(event, "parent_submission_id", None) in owners:
-                            return event
+                        return (
+                            EventGap(
+                                session_id=event.session_id,
+                                sequence=event.sequence,
+                                first_sequence=event.sequence,
+                            )
+                            if details_lost and self._include_execution_details
+                            else event
+                        )
                 if self._buffer.closed:
                     break
                 if self._turn is not None:

@@ -23,13 +23,52 @@ import agents
 _RUNTIME = Path(_agents_codex.__file__).parent
 _PACKAGE = Path(agents.__file__).parent
 _LEAVES = {"config", "version"}
+# Only these compatibility modules forward to the retained Classic implementation.
+# Other public leaves keep the native-only, explicit-import facade contract.
+_CLASSIC_VOICE_MODULES = {
+    "realtime.agent",
+    "realtime.audio_formats",
+    "realtime.config",
+    "realtime.events",
+    "realtime.handoffs",
+    "realtime.items",
+    "realtime.model",
+    "realtime.model_events",
+    "realtime.model_inputs",
+    "realtime.openai_realtime",
+    "realtime.runner",
+    "realtime.session",
+    "realtime.testing",
+    "voice.events",
+    "voice.exceptions",
+    "voice.imports",
+    "voice.input",
+    "voice.model",
+    "voice.models.openai_model_provider",
+    "voice.models.openai_stt",
+    "voice.models.openai_tts",
+    "voice.pipeline",
+    "voice.pipeline_config",
+    "voice.result",
+    "voice.testing",
+    "voice.utils",
+}
+_CLASSIC_WORKFLOW_NAMES = {
+    "SingleAgentVoiceWorkflow",
+    "SingleAgentWorkflowCallbacks",
+    "VoiceWorkflowBase",
+    "VoiceWorkflowHelper",
+}
 _PUBLIC_MODULES = sorted(
-    ".".join(path.relative_to(_PACKAGE).with_suffix("").parts)
-    for path in _PACKAGE.rglob("*.py")
-    if path.relative_to(_PACKAGE).parts[0] not in {"classic", "migration"}
-    and "_runtime" not in path.relative_to(_PACKAGE).parts
-    and path.name != "__init__.py"
-    and path.stem not in _LEAVES
+    {
+        ".".join(path.relative_to(_PACKAGE).with_suffix("").parts)
+        for path in _PACKAGE.rglob("*.py")
+        if path.relative_to(_PACKAGE).parts[0] not in {"classic", "migration"}
+        and "_runtime" not in path.relative_to(_PACKAGE).parts
+        and path.name != "__init__.py"
+        and path.stem not in _LEAVES
+    }
+    | _CLASSIC_VOICE_MODULES
 )
 
 
@@ -56,7 +95,6 @@ def test_public_modules_only_forward_to_the_runtime(module: str) -> None:
         if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
             assert isinstance(statement.value.value, str), path
         elif isinstance(statement, ast.ImportFrom):
-            assert not any(alias.name == "*" for alias in statement.names), path
             target = (
                 importlib.util.resolve_name(
                     "." * statement.level + (statement.module or ""),
@@ -65,6 +103,16 @@ def test_public_modules_only_forward_to_the_runtime(module: str) -> None:
                 if statement.level
                 else statement.module
             )
+            if module in _CLASSIC_VOICE_MODULES:
+                assert target == "agents.classic." + module, (path, target)
+                assert [(alias.name, alias.asname) for alias in statement.names] == [("*", None)]
+                forwarded = True
+                continue
+            assert not any(alias.name == "*" for alias in statement.names), path
+            if module == "voice.workflow" and target == "agents.classic.voice.workflow":
+                assert {alias.name for alias in statement.names} == _CLASSIC_WORKFLOW_NAMES
+                assert all(alias.asname == alias.name for alias in statement.names), path
+                continue
             if module == "experimental.mcp_tasks" and target == "agents.experimental":
                 assert [(alias.name, alias.asname) for alias in statement.names] == [
                     ("_mcp_tasks_wire", "wire")
@@ -183,6 +231,7 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     "agents.classic.sandbox.entries",
                     "agents.classic.sandbox.entries.mounts",
                     "agents.classic.sandbox.manifest",
+                    "agents.classic.sandbox.remote_mount_policy",
                     "agents.classic.sandbox.session.sandbox_client",
                     "agents.classic.sandbox.session.sandbox_session",
                 }:
@@ -202,12 +251,19 @@ def test_facades_preserve_public_object_identity(module: str) -> None:
     if module in {"experimental._mcp_tasks_wire", "experimental.mcp_tasks"}:
         _require_mcp_tasks()
     public = importlib.import_module("agents." + module)
-    runtime = importlib.import_module("_agents_codex." + module)
+    runtime = importlib.import_module(
+        ("agents.classic." if module in _CLASSIC_VOICE_MODULES else "_agents_codex.") + module
+    )
     for name, value in vars(public).items():
         if module == "experimental.mcp_tasks" and name == "wire":
             assert value is importlib.import_module("agents.experimental._mcp_tasks_wire")
         elif not name.startswith("_"):
-            assert getattr(runtime, name) is value, (module, name)
+            owner = (
+                importlib.import_module("agents.classic.voice.workflow")
+                if module == "voice.workflow" and name in _CLASSIC_WORKFLOW_NAMES
+                else runtime
+            )
+            assert getattr(owner, name) is value, (module, name)
 
 
 @pytest.mark.parametrize(

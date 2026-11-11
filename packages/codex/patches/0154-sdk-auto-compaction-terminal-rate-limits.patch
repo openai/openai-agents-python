@@ -1,0 +1,194 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 536d2855f5dc5d3787dad9583d715427483759a1..bb9e814f0fe4c88a410ecc85d04b375a8667d544 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -132,8 +132,11 @@ use crate::context::ContextualUserFragment;
+ use crate::cyber_access_program;
+ use crate::feedback_tags;
+ use crate::responses_metadata::CodexResponsesMetadata;
++use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::subagent_header_value;
+ use crate::util::emit_feedback_auth_recovery_tags;
++use codex_analytics::CompactionPhase;
++use codex_analytics::CompactionTrigger;
+ use codex_feedback::FeedbackRequestTags;
+ use codex_feedback::emit_feedback_request_tags_with_auth_env;
+ use codex_login::auth::AgentIdentityAuthPolicy;
+@@ -1655,6 +1658,24 @@ impl ModelClientSession {
+                 .is_some_and(|manager| manager.uses_saved_chatgpt_login())
+     }
+ 
++    pub(crate) fn terminal_limit_errors(
++        &self,
++        request_kind: Option<CodexResponsesRequestKind>,
++    ) -> bool {
++        let turn_owned = match request_kind {
++            Some(CodexResponsesRequestKind::Turn) => true,
++            Some(CodexResponsesRequestKind::Compaction(metadata)) => {
++                matches!(metadata.trigger(), CompactionTrigger::Auto)
++                    && matches!(
++                        metadata.phase(),
++                        CompactionPhase::PreTurn | CompactionPhase::MidTurn
++                    )
++            }
++            _ => false,
++        };
++        turn_owned && self.saved_login_limits_need_attention()
++    }
++
+     pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
+         let previous = self
+             .client
+@@ -1699,10 +1720,7 @@ impl ModelClientSession {
+             },
+             compression,
+             turn_state: Some(Arc::clone(&self.turn_state)),
+-            terminal_limit_errors: matches!(
+-                responses_metadata.request_kind,
+-                Some(crate::responses_metadata::CodexResponsesRequestKind::Turn)
+-            ) && self.saved_login_limits_need_attention(),
++            terminal_limit_errors: self.terminal_limit_errors(responses_metadata.request_kind),
+         }
+     }
+ 
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 2b8574003c8a8c5084560c81bfc548e067157ae4..cf366daa12392a259db64e2b5d0d702b69cf2f2a 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -21,6 +21,7 @@ use crate::hook_runtime::PreCompactHookOutcome;
+ use crate::hook_runtime::run_post_compact_hooks;
+ use crate::hook_runtime::run_pre_compact_hooks;
+ use crate::responses_metadata::CodexResponsesMetadata;
++use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::CompactionTurnMetadata;
+ use crate::responses_retry::ResponsesStreamRequest;
+ use crate::responses_retry::ResponsesStreamRetryState;
+@@ -48,6 +49,8 @@ use codex_protocol::models::ContentItem;
+ #[cfg(test)]
+ use codex_protocol::models::ImageReference;
+ use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::ApiRateLimits;
++use codex_protocol::protocol::CodexErrorInfo;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TruncationPolicy;
+@@ -251,6 +254,11 @@ async fn run_remote_compact_task_inner_impl(
+         return Ok(());
+     }
+ 
++    let terminal_limit_errors = client_session.as_deref().is_some_and(|client| {
++        client.terminal_limit_errors(Some(CodexResponsesRequestKind::Compaction(
++            compaction_metadata,
++        )))
++    });
+     let attempt = run_remote_compact_v2_attempt(
+         sess,
+         step_context,
+@@ -264,7 +272,9 @@ async fn run_remote_compact_task_inner_impl(
+         Ok(attempt) => (attempt, turn_context),
+         Err(error) => {
+             let fallback_turn_context = &replacement_step_context.turn;
+-            if !should_retry_with_current_model(&error, turn_context, fallback_turn_context) {
++            if (terminal_limit_errors && is_usage_or_rate_limit(&error))
++                || !should_retry_with_current_model(&error, turn_context, fallback_turn_context)
++            {
+                 return Err(error);
+             }
+             sess.set_last_known_step_context(replacement_step_context)
+@@ -296,7 +306,8 @@ async fn run_remote_compact_task_inner_impl(
+             match fallback_result {
+                 Ok(attempt) => (attempt, fallback_turn_context),
+                 Err(fallback_error)
+-                    if matches!(fallback_error.details(), CodexErrorDetails::Fatal(_)) =>
++                    if matches!(fallback_error.details(), CodexErrorDetails::Fatal(_))
++                        || (terminal_limit_errors && is_usage_or_rate_limit(&fallback_error)) =>
+                 {
+                     return Err(fallback_error);
+                 }
+@@ -392,6 +403,17 @@ struct RemoteCompactionV2Output {
+     token_usage: Option<TokenUsage>,
+ }
+ 
++fn is_usage_or_rate_limit(error: &CodexErr) -> bool {
++    matches!(
++        error.to_codex_protocol_error(),
++        CodexErrorInfo::UsageLimitExceeded
++            | CodexErrorInfo::RateLimitExceeded
++            | CodexErrorInfo::ResponseTooManyFailedAttempts {
++                http_status_code: Some(429)
++            }
++    )
++}
++
+ async fn run_remote_compaction_request_v2(
+     sess: &Session,
+     step_context: &StepContext,
+@@ -405,9 +427,12 @@ async fn run_remote_compaction_request_v2(
+         .info()
+         .stream_max_retries()
+         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
++    let terminal_limit_errors =
++        client_session.terminal_limit_errors(responses_metadata.request_kind);
+     let mut retry_state = ResponsesStreamRetryState::default();
+     loop {
+         sess.ensure_rollout_durable().await?;
++        let mut stream_api_rate_limits = None;
+         let result = match client_session
+             .stream(
+                 prompt,
+@@ -425,12 +450,21 @@ async fn run_remote_compaction_request_v2(
+             )
+             .await
+         {
+-            Ok(stream) => collect_compaction_output(sess, turn_context, stream).await,
++            Ok(stream) => {
++                collect_compaction_output(sess, turn_context, stream, &mut stream_api_rate_limits)
++                    .await
++            }
+             Err(err) => Err(err),
+         };
+ 
+         match result {
+             Ok(compaction_output) => return Ok(compaction_output),
++            Err(err) if terminal_limit_errors && is_usage_or_rate_limit(&err) => {
++                if let Some(snapshot) = err.api_rate_limits().cloned().or(stream_api_rate_limits) {
++                    sess.emit_api_rate_limits(turn_context, snapshot).await;
++                }
++                return Err(err);
++            }
+             Err(err) => {
+                 handle_response_stream_error(
+                     &mut retry_state,
+@@ -451,6 +485,7 @@ async fn collect_compaction_output(
+     sess: &Session,
+     turn_context: &TurnContext,
+     mut stream: ResponseStream,
++    stream_api_rate_limits: &mut Option<ApiRateLimits>,
+ ) -> CodexResult<RemoteCompactionV2Output> {
+     let mut output_item_count = 0usize;
+     let mut compaction_count = 0usize;
+@@ -461,6 +496,9 @@ async fn collect_compaction_output(
+     let mut response_fact_budget = codex_protocol::response_facts::ResponseFactBudget::default();
+     while let Some(event) = stream.next().await {
+         match event? {
++            ResponseEvent::ApiRateLimits(snapshot) => {
++                *stream_api_rate_limits = Some(snapshot);
++            }
+             ResponseEvent::OutputItemDone(item) => {
+                 output_item_count += 1;
+                 if let ResponseItem::Compaction { .. } = item {
+@@ -1343,9 +1381,11 @@ mod tests {
+ 
+         let (sess, turn_context, rx) =
+             crate::session::tests::make_session_and_context_with_rx().await;
+-        let output = collect_compaction_output(&sess, &turn_context, stream)
+-            .await
+-            .expect("compaction should be collected");
++        let mut stream_api_rate_limits = None;
++        let output =
++            collect_compaction_output(&sess, &turn_context, stream, &mut stream_api_rate_limits)
++                .await
++                .expect("compaction should be collected");
+ 
+         assert_eq!(output.compaction_output, compaction);
+         assert_eq!(output.response_id, "resp-compact");

@@ -7,6 +7,8 @@ import base64
 import hashlib
 import inspect
 import json
+import re
+from collections import deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -18,11 +20,14 @@ from collections.abc import (
 )
 from contextlib import contextmanager
 from contextvars import Context, copy_context
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
+from pydantic import AnyUrl
 from typing_extensions import NotRequired, TypedDict
 
 from ._lifecycle import _close_after_error, _join, _retain_cleanup_error
@@ -33,6 +38,14 @@ from .realtime_adapter import (
     RealtimeAdapterContext as RealtimeAdapterContext,
     _clear_adapter_error_frames,
     _RealtimeAdapterDriver,
+)
+from .realtime_agents import (
+    RealtimeAgentConfig as RealtimeAgentConfig,
+    RealtimeAgentContext as RealtimeAgentContext,
+    RealtimeHandoff as RealtimeHandoff,
+    _capture_voice_graph,
+    _resolve_realtime_configuration,
+    realtime_handoff as realtime_handoff,
 )
 from .realtime_guardrails import (
     RealtimeGuardrailEvent as RealtimeGuardrailEvent,
@@ -62,6 +75,7 @@ from .realtime_settings import (
     NativeRealtimeSettings as NativeRealtimeSettings,
     NativeRealtimeToolChoice as NativeRealtimeToolChoice,
     NativeRealtimeToolChoiceFunction as NativeRealtimeToolChoiceFunction,
+    NativeRealtimeToolChoiceMcp as NativeRealtimeToolChoiceMcp,
     NativeRealtimeTracing as NativeRealtimeTracing,
     NativeRealtimeTranscription as NativeRealtimeTranscription,
     serialize_realtime_session_update as _serialize_update,
@@ -77,6 +91,7 @@ from .voice.workflow import NativeSessionVoiceWorkflow
 
 if TYPE_CHECKING:
     from ._function_tools import FunctionTool
+    from .agent import Agent
     from .session import Session
     from .turn import Turn
 
@@ -114,17 +129,118 @@ class RealtimeSIP:
 
 
 @dataclass(frozen=True)
+class RealtimePolicyContext:
+    """Captured source declaration and current application context for voice policies."""
+
+    agent: Agent[Any, Any]
+    context: Any
+    realtime_usage: RealtimeUsage | None = None
+
+
+@dataclass(frozen=True)
+class RealtimeTool:
+    """A captured declaration; predicates only narrow the native tool ceiling."""
+
+    type: Literal["function", "handoff"]
+    name: str
+
+
+@dataclass(frozen=True)
+class RealtimeToolErrorContext:
+    kind: Literal["approval_rejected"]
+    tool_type: Literal["function"]
+    tool_name: str
+    call_id: str
+    default_message: str
+    run_context: RealtimePolicyContext
+
+
+@dataclass(frozen=True)
+class _RealtimePolicySource:
+    context: RealtimePolicyContext
+    tools: tuple[RealtimeTool, ...]
+    selection_id: str
+
+
+@contextmanager
+def _voice_callback_scope(
+    session: Session[Any, Any], *, adapter: object | None = None
+) -> Iterator[None]:
+    from .session import _Invocation, _invocation
+
+    guard = _Invocation(session, realtime_adapter=adapter)
+    token = _invocation.set(guard)
+    try:
+        yield
+    finally:
+        guard.active = False
+        _invocation.reset(token)
+
+
+async def _resolve_realtime_policy(
+    session: Session[Any, Any],
+    config: RealtimeConfig,
+    *,
+    check: Callable[[], None],
+    usage: RealtimeUsage | None = None,
+    profile_update: bool = False,
+    source_snapshot: Mapping[str, Any] | None = None,
+) -> tuple[str | None, list[str] | None, str | None]:
+    instructions = config.instructions
+    enabled = config.is_tool_enabled
+    if not callable(instructions) and enabled is None:
+        return (None if profile_update else instructions), None, None
+    source = await (
+        session._realtime_policy_source()
+        if source_snapshot is None
+        else session._realtime_policy_source(source_snapshot)
+    )
+    check()
+    context = replace(source.context, realtime_usage=usage)
+    with _voice_callback_scope(session):
+        resolved = instructions(context) if callable(instructions) else instructions
+        if inspect.isawaitable(resolved):
+            resolved = await resolved
+        check()
+        if callable(instructions) and not isinstance(resolved, str):
+            raise TypeError("Realtime instructions callback must return a string")
+        disabled = None
+        if enabled is not None:
+            disabled = []
+            for tool in source.tools:
+                accepted = enabled(context, tool)
+                if inspect.isawaitable(accepted):
+                    accepted = await accepted
+                check()
+                if type(accepted) is not bool:
+                    raise TypeError("Realtime tool predicate must return a bool")
+                if not accepted:
+                    disabled.append(tool.name)
+    return (
+        (None if profile_update and not callable(instructions) else resolved),
+        disabled,
+        source.selection_id,
+    )
+
+
+@dataclass(frozen=True)
 class RealtimeConfig:
     """Native Realtime configuration; defaults to a server WebSocket.
 
-    ``api_key`` may be a string or a synchronous/asynchronous callback. It is
-    resolved once for this connection and never replaces the Session's auth.
-    Closing during resolution cancels the owned callback before connecting.
+    ``api_key`` may be a string or a synchronous/asynchronous callback. The
+    connection resolves it once when ``headers`` is omitted. The Session keeps
+    its own auth. Closing during resolution cancels the callback before connecting.
+
+    ``url`` selects an exact trusted application WebSocket endpoint. An override
+    never inherits provider credentials; supply ``api_key`` or ``headers`` when
+    authentication is needed. ``headers`` replaces all application headers,
+    including authentication; an empty mapping sends none. These options apply
+    to built-in WebSockets and SIP attachment, not WebRTC or custom adapters.
     """
 
     model: str | None = None
     voice: str | None = None
-    instructions: str | None = None
+    instructions: str | Callable[[RealtimePolicyContext], str | Awaitable[str]] | None = None
     settings: NativeRealtimeSettings | None = field(default=None, repr=False)
     transport: RealtimeWebRTC | RealtimeSIP | None = None
     tools: tuple[FunctionTool[Any, Any, Any], ...] | None = None
@@ -135,6 +251,15 @@ class RealtimeConfig:
     api_key: str | Callable[[], str | Awaitable[str]] | None = field(default=None, repr=False)
     adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)
     output_modality: Literal["audio", "text"] = "audio"
+    include_raw_provider_events: bool = False
+    is_tool_enabled: (
+        Callable[[RealtimePolicyContext, RealtimeTool], bool | Awaitable[bool]] | None
+    ) = field(default=None, repr=False)
+    tool_error_formatter: (
+        Callable[[RealtimeToolErrorContext], str | None | Awaitable[str | None]] | None
+    ) = field(default=None, repr=False)
+    url: str | None = field(default=None, repr=False)
+    headers: Mapping[str, str] | None = field(default=None, repr=False)
 
 
 async def _prepare_realtime_params(
@@ -147,7 +272,27 @@ async def _prepare_realtime_params(
 ) -> dict[str, Any]:
     """Project the same captured native source for connection and call acceptance."""
     try:
-        function_tools, selection_id = await session._realtime_function_tools(tools)
+        source_snapshot = None
+        if callable(config.instructions) or config.is_tool_enabled is not None:
+            source_snapshot = (await session._realtime_tool_selection())[0]
+        owner = session._realtime
+        instructions, allowed, policy_selection = await _resolve_realtime_policy(
+            session,
+            config,
+            check=(lambda: owner._check_live(require_ready=False))
+            if owner is not None
+            else session._check_open,
+            usage=owner.usage if owner is not None else None,
+            source_snapshot=source_snapshot,
+        )
+        (
+            instructions,
+            settings,
+            function_tools,
+            selection_id,
+        ) = await _resolve_realtime_configuration(
+            session, instructions, settings, tools, source_snapshot=source_snapshot
+        )
         params: dict[str, Any] = {
             "settings": settings,
             "function_tools": function_tools,
@@ -174,8 +319,14 @@ async def _prepare_realtime_params(
                 "voice": config.voice,
             },
         }
-        if config.instructions is not None:
-            params["params"]["prompt"] = config.instructions
+        if policy_selection is not None and selection_id is None:
+            params["expected_selection_id"] = policy_selection
+        if allowed is not None:
+            params["disabled_tool_names"] = allowed
+        if instructions is not None:
+            params["params"]["prompt"] = instructions
+        if config.include_raw_provider_events:
+            params["include_raw_provider_events"] = True
         return params
     finally:
         del config
@@ -207,6 +358,7 @@ async def _build_realtime_sip_config(
             transport={"type": "websocket"},
         )
         prepared.pop("hosted_mcp_auto_response")
+        prepared.pop("include_raw_provider_events", None)
         request = json.dumps(prepared)
         return cast(
             dict[str, Any],
@@ -371,11 +523,19 @@ class RealtimeLifecycle:
 
 @dataclass(frozen=True)
 class RealtimeResponse:
+    """Response lifecycle and retained issuing-Agent/application context.
+
+    Terminal context: the original issuing source, including after voice Agent
+    replacement. No application Agent on a bare native Session: no context.
+    """
+
     status: Literal["created", "done", "cancelled"]
     response_id: str | None
     usage: RealtimeUsage | None = None
-    # Detached connection total at this event, including this accepted response.
+    # Connection total at this event, including this accepted response.
     cumulative_usage: RealtimeUsage | None = None
+    out_of_band: bool = False
+    run_context: RealtimePolicyContext | None = None
 
 
 @dataclass(frozen=True)
@@ -387,10 +547,26 @@ class RealtimeDelegation:
 
 @dataclass(frozen=True)
 class RealtimeToolCall:
+    """Native call lifecycle and original application identity.
+
+    Started: batch submission. Executing: callable entry after required approval
+    and input policies, without an assertion of completed application effects.
+    Arguments: original provider JSON. Output: exact Core-accepted model-visible
+    text, including selected fallbacks. Tool: original application declaration,
+    or None without body admission.
+    """
+
     call_id: str
     name: str
-    status: Literal["started", "completed", "failed"]
+    status: Literal["started", "executing", "completed", "failed"]
     error: Exception | None = None
+    arguments: str | None = None
+    item_id: str | None = None
+    namespace: str | None = None
+    response_id: str | None = None
+    tool: FunctionTool[Any, Any, Any] | None = field(default=None, repr=False)
+    output: str | None = None
+    run_context: RealtimePolicyContext | None = None
 
 
 @dataclass(frozen=True)
@@ -567,6 +743,21 @@ class RealtimeHistory:
     completed: bool
 
 
+@dataclass(frozen=True)
+class RealtimeRawProviderEvent:
+    """A provider JSON frame before native event projection."""
+
+    event: dict[str, Any] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class RealtimeProviderRequestError:
+    """A rejected provider request on a connection that can continue."""
+
+    code: str | None
+    event_id: str | None
+
+
 RealtimeEvent: TypeAlias = (
     RealtimeAudio
     | RealtimeText
@@ -584,6 +775,8 @@ RealtimeEvent: TypeAlias = (
     | RealtimeHostedMcpApprovalRequested
     | RealtimeHostedMcpToolsListed
     | RealtimeHostedMcpCallCompleted
+    | RealtimeRawProviderEvent
+    | RealtimeProviderRequestError
 )
 
 
@@ -593,6 +786,18 @@ class _Delegation:
     response_id: str | None = None
     task: asyncio.Task[None] | None = None
     retired: bool = False
+
+
+@dataclass
+class _FunctionIdentity:
+    name: str
+    source_profile: dict[str, Any] | None
+    unavailable: bool = False
+    arguments: str | None = None
+    item_id: str | None = None
+    namespace: str | None = None
+    response_id: str | None = None
+    tool: FunctionTool[Any, Any, Any] | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -614,6 +819,8 @@ class _FunctionCall:
 @dataclass
 class _GuardrailItem:
     snapshot: RealtimeGuardrailInput
+    checks: tuple[RealtimeOutputGuardrail, ...] = ()
+    out_of_band: bool = False
     text_work: int = 0
     retired: bool = False
     threshold_count: int = 0
@@ -627,6 +834,111 @@ class _ReceivedAudio:
     rate: int
     completed: bool = False
     retired: bool = False
+
+
+def _observation_snapshot(event: RealtimeEvent) -> RealtimeEvent:
+    # Keep the bounded shared payload private when observers mutate raw JSON.
+    if isinstance(event, RealtimeRawProviderEvent):
+        return RealtimeRawProviderEvent(deepcopy(event.event))
+    if isinstance(event, RealtimeHostedMcpToolsListed):
+        return replace(
+            event,
+            tools=tuple(
+                replace(tool, input_schema=deepcopy(tool.input_schema)) for tool in event.tools
+            ),
+        )
+    return event
+
+
+class _ObservationBuffer(AsyncIterator[RealtimeEvent]):
+    """One bounded passive reader; closing it never closes its media owner."""
+
+    def __init__(self, owner: RealtimeSession, *, max_events: int, max_bytes: int) -> None:
+        self._owner = owner
+        self._max_events = max_events
+        self._max_bytes = max_bytes
+        self._events: deque[tuple[RealtimeEvent, int]] = deque()
+        self._bytes = 0
+        self._changed = asyncio.Event()
+        self._terminal = False
+        self._error: BaseException | None = None
+        self._reading = False
+        self._joined = False
+
+    def append(self, event: RealtimeEvent, size: int) -> None:
+        if self._terminal:
+            return
+        if len(self._events) >= self._max_events or self._bytes + size > self._max_bytes:
+            self.finish(RuntimeError("Realtime subscriber capacity exceeded; consume promptly"))
+            return
+        self._events.append((event, size))
+        self._bytes += size
+        self._changed.set()
+
+    def finish(self, error: BaseException | None) -> None:
+        if self._terminal:
+            return
+        if error is not None:
+            self._events.clear()
+            self._bytes = 0
+        self._terminal = True
+        self._error = error
+        self._owner._subscribers.discard(self)
+        self._changed.set()
+
+    def discard_response_audio(self, response_id: str) -> None:
+        self._events = deque(
+            (event, size)
+            for event, size in self._events
+            if not isinstance(event, (RealtimeAudio, RealtimeText))
+            or event.response_id != response_id
+        )
+        self._bytes = sum(size for _, size in self._events)
+
+    def __aiter__(self) -> _ObservationBuffer:
+        return self
+
+    async def __anext__(self) -> RealtimeEvent:
+        if self._reading:
+            raise RuntimeError("Realtime subscriber already has an active reader")
+        self._reading = True
+        try:
+            while True:
+                if (
+                    self._terminal
+                    and not self._joined
+                    and self._owner._terminal.done()
+                    and self._error is self._owner._terminal.result()
+                ):
+                    if self._error is not None:
+                        await _close_after_error(self._error, self._owner.aclose)
+                    else:
+                        await self._owner.aclose()
+                    self._joined = True
+                if self._events:
+                    event, size = self._events.popleft()
+                    self._bytes -= size
+                    return _observation_snapshot(event)
+                if self._terminal:
+                    if self._error is not None:
+                        raise self._error
+                    raise StopAsyncIteration
+                self._changed.clear()
+                await self._changed.wait()
+        except asyncio.CancelledError:
+            await self.aclose()
+            raise
+        finally:
+            self._reading = False
+
+    async def aclose(self) -> None:
+        """Release only this subscription and wake a pending reader."""
+        self._events.clear()
+        self._bytes = 0
+        self._error = None
+        self._terminal = True
+        self._owner._subscribers.discard(self)
+        self._changed.set()
 
 
 class RealtimeSession:
@@ -660,12 +972,75 @@ class RealtimeSession:
     def __init__(self, session: Session[Any, Any], *, config: RealtimeConfig) -> None:
         self._session = session
         self._config = config
+        if (
+            config.instructions is not None
+            and not isinstance(config.instructions, str)
+            and not callable(config.instructions)
+        ):
+            raise TypeError("Realtime instructions must be a string or callback")
+        if config.is_tool_enabled is not None and not callable(config.is_tool_enabled):
+            raise TypeError("Realtime is_tool_enabled must be a callback")
+        if config.tool_error_formatter is not None and not callable(config.tool_error_formatter):
+            raise TypeError("Realtime tool_error_formatter must be a callback")
+        if config.url is not None or config.headers is not None:
+            if config.adapter is not None or isinstance(config.transport, RealtimeWebRTC):
+                raise ValueError("url and headers require a built-in WebSocket connection")
+        if config.url is not None:
+            if not isinstance(config.url, str):
+                raise TypeError("url must be a WebSocket URL string")
+            try:
+                parsed_url = urlsplit(config.url)
+                port = parsed_url.port
+                valid_url = (
+                    parsed_url.scheme in {"ws", "wss"}
+                    and parsed_url.hostname is not None
+                    and parsed_url.username is None
+                    and parsed_url.password is None
+                    and "#" not in config.url
+                    and (port is None or 0 <= port <= 65535)
+                )
+                if valid_url:
+                    # Validate host syntax with the Rust URL parser used at activation.
+                    AnyUrl(config.url)
+            except ValueError:
+                valid_url = False
+            if not valid_url:
+                raise ValueError(
+                    "url requires ws or wss, a valid host and port, and no credentials or fragments"
+                )
+        if config.headers is not None:
+            if not isinstance(config.headers, Mapping):
+                raise TypeError("headers must map strings to strings")
+            headers = dict(config.headers)
+            if any(
+                not isinstance(name, str) or not isinstance(value, str)
+                for name, value in headers.items()
+            ):
+                raise TypeError("headers must map strings to strings")
+            for name, value in headers.items():
+                if not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name):
+                    raise ValueError("Invalid Realtime header name")
+                if any(char != "\t" and not 0x20 <= ord(char) <= 0x7E for char in value):
+                    raise ValueError("Invalid Realtime header value")
+            config = replace(config, headers=headers)
+            self._config = config
         self._input_lock = asyncio.Lock()
         self._input_count = 0
         self._input_bytes = 0
         self._pending_audio_commits = 0
         self._selected_tools = tuple(config.tools) if config.tools is not None else None
+        self._direct_tools = self._selected_tools
         self._guardrails = tuple(config.output_guardrails)
+        sources = tuple(
+            runtime.profile.declaration for runtime in getattr(session, "_profiles", {}).values()
+        ) or (getattr(session, "_opening_agent", None),)
+        defaults = tuple(getattr(source, "realtime", None) for source in sources)
+        self._has_agent_guardrails = any(
+            source is not None and source.output_guardrails for source in defaults
+        )
+        self._has_agent_prompt = any(
+            source is not None and source.prompt is not None for source in defaults
+        )
         if any(not isinstance(check, RealtimeOutputGuardrail) for check in self._guardrails):
             raise TypeError("output_guardrails must contain RealtimeOutputGuardrail objects")
         threshold = config.guardrail_text_threshold
@@ -684,6 +1059,8 @@ class RealtimeSession:
         self._playback: dict[tuple[str, str, int], RealtimePlaybackPosition] = {}
         if type(config.automatically_trigger_response_for_mcp_tool_calls) is not bool:
             raise TypeError("automatically_trigger_response_for_mcp_tool_calls must be a bool")
+        if type(config.include_raw_provider_events) is not bool:
+            raise TypeError("include_raw_provider_events must be a bool")
         # Keys disappear when the bounded event queue and the application release
         # a request. Native code owns revocation and one-time write admission.
         self._mcp_approvals: WeakKeyDictionary[RealtimeHostedMcpApprovalRequested, str] = (
@@ -694,6 +1071,10 @@ class RealtimeSession:
         except BaseException as error:
             _clear_adapter_error_frames(error)
             raise
+        self._prompt_settings = (
+            {"prompt": deepcopy(self._settings["prompt"])} if "prompt" in self._settings else {}
+        )
+        self._instructions_override = None if callable(config.instructions) else config.instructions
         if config.adapter is not None:
             if not callable(getattr(config.adapter, "connect", None)):
                 raise TypeError("adapter must provide an async connect method")
@@ -738,12 +1119,21 @@ class RealtimeSession:
         )
         self._queue: asyncio.Queue[tuple[RealtimeEvent, int]] = asyncio.Queue(self._EVENT_LIMIT)
         self._changed = asyncio.Event()
+        self._subscribers: set[_ObservationBuffer] = set()
+        self._passive_observation = False
+        self._primary_owned = False
         self._delegations: dict[str, _Delegation] = {}
         self._functions: dict[str, _FunctionCall] = {}
         self._function_roots: dict[str, asyncio.Task[None]] = {}
         self._profile_updates: set[asyncio.Task[None]] = set()
+        self._agent_update_lock = asyncio.Lock()
+        self._configuration_lock = asyncio.Lock()
+        self._voice_profile_ids: set[str] = set()
+        self._voice_target: dict[str, Any] | None = None
+        self._agent_admissions = 0
+        self._voice_registry_used = False
         self._pending_functions: dict[str, tuple[str, str | None]] = {}
-        self._function_names: dict[str, str] = {}
+        self._function_names: dict[str, _FunctionIdentity] = {}
         self._finished_functions: set[str] = set()
         self._seen: dict[str, int] = {}
         self._terminal_requests: dict[str, None] = {}
@@ -761,6 +1151,61 @@ class RealtimeSession:
         self._response_id: str | None = None
         self._context: Context | None = None
         self._session_shutdown = False
+
+    def _event_context(self, receipt: Mapping[str, Any] | None) -> RealtimePolicyContext | None:
+        if receipt is None and self._session._agent is None:
+            return None
+        return RealtimePolicyContext(
+            self._session._original_agent_for_profile(receipt), self._session._context, self.usage
+        )
+
+    def _function_event(
+        self,
+        call_id: str,
+        name: str,
+        status: Literal["started", "executing", "completed", "failed"],
+        error: Exception | None = None,
+        output: str | None = None,
+    ) -> RealtimeToolCall:
+        captured = self._function_names.get(call_id)
+        if captured is None:
+            return RealtimeToolCall(call_id, name, status, error, output=output)
+        return RealtimeToolCall(
+            call_id,
+            name,
+            status,
+            error,
+            arguments=captured.arguments,
+            item_id=captured.item_id,
+            namespace=captured.namespace,
+            response_id=captured.response_id,
+            tool=captured.tool,
+            output=output,
+            run_context=self._event_context(captured.source_profile),
+        )
+
+    def _tool_body_started(
+        self, source: Any, wire_name: str, tool: FunctionTool[Any, Any, Any]
+    ) -> None:
+        if not isinstance(source, dict) or source.get("generation") != self._generation:
+            return
+        call_id = source.get("provider_call_id")
+        if not isinstance(call_id, str):
+            return
+        captured = self._function_names.get(call_id)
+        owned = self._functions.get(call_id)
+        if (
+            captured is None
+            or owned is None
+            or owned.retired
+            or captured.tool is not None
+            or captured.name != wire_name
+            or captured.item_id != source.get("provider_item_id")
+            or captured.response_id != source.get("provider_response_id")
+        ):
+            return
+        captured.tool = tool
+        self._emit(self._function_event(call_id, captured.name, "executing"))
 
     @property
     def usage(self) -> RealtimeUsage | None:
@@ -837,15 +1282,23 @@ class RealtimeSession:
             if prepared.get("generation") != self._generation:
                 raise RuntimeError("Native Realtime preparation returned a different generation")
             self._check_live(require_ready=False)
-            self._credentials = asyncio.create_task(self._resolve_api_key())
             api_key: str | None = None
             try:
-                try:
-                    api_key = await self._credentials
-                finally:
-                    self._credentials = None
+                if self._config.headers is None:
+                    self._credentials = asyncio.create_task(self._resolve_api_key())
+                    try:
+                        api_key = await self._credentials
+                    finally:
+                        self._credentials = None
                 self._check_live(require_ready=False)
-                result = await self._call("activate", api_key=api_key)
+                result = await self._call(
+                    "activate",
+                    api_key=api_key,
+                    connection_options={
+                        "url": self._config.url,
+                        "headers": self._config.headers,
+                    },
+                )
             finally:
                 api_key = None
             self._call_id = result["call_id"]
@@ -858,6 +1311,8 @@ class RealtimeSession:
             self._config = replace(
                 self._config,
                 api_key=None,
+                url=None,
+                headers=None,
                 settings=None,
                 transport=self._config.transport if self._start_succeeded else None,
             )
@@ -865,15 +1320,78 @@ class RealtimeSession:
 
     @contextmanager
     def _callback_scope(self, *, adapter: bool = False) -> Iterator[None]:
-        from .session import _Invocation, _invocation
-
-        guard = _Invocation(self._session, realtime_adapter=self if adapter else None)
-        token = _invocation.set(guard)
-        try:
+        with _voice_callback_scope(self._session, adapter=self if adapter else None):
             yield
-        finally:
-            guard.active = False
-            _invocation.reset(token)
+
+    def _mark_tool_unavailable(self, call_id: str) -> None:
+        if (call := self._function_names.get(call_id)) is not None:
+            call.unavailable = True
+
+    async def _handoff_policy(self, owned: _FunctionCall) -> Sequence[str]:
+        from .session import TurnStoppedError
+
+        if self._config.is_tool_enabled is None:
+            return ()
+        disabled: list[str] = []
+        for call_id, name in owned.names.items():
+            self._check_live()
+            if owned.stop_admission.is_set():
+                raise TurnStoppedError("Realtime response retired before dispatch")
+            call = self._function_names.get(call_id)
+            if call is None:
+                raise RuntimeError("Realtime call retired before dispatch")
+            agent = self._session._realtime_handoff_source(call.source_profile, name)
+            if agent is not None and not await self._tool_enabled(agent, name, "handoff"):
+                disabled.append(call_id)
+                self._mark_tool_unavailable(call_id)
+        return disabled
+
+    async def _tool_enabled(
+        self, agent: Agent[Any, Any], name: str, kind: Literal["function", "handoff"] = "function"
+    ) -> bool:
+        predicate = self._config.is_tool_enabled
+        if predicate is None:
+            return True
+        self._check_live()
+        with self._callback_scope():
+            result = predicate(
+                RealtimePolicyContext(agent, self._session._context, self.usage),
+                RealtimeTool(kind, name),
+            )
+            if inspect.isawaitable(result):
+                result = await result
+        self._check_live()
+        if type(result) is not bool:
+            raise TypeError("Realtime tool predicate must return a bool")
+        return result
+
+    async def _format_approval_rejection(
+        self, agent: Agent[Any, Any], name: str, call_id: str, default: str
+    ) -> str:
+        formatter = self._config.tool_error_formatter
+        if formatter is None:
+            return default
+        self._check_live()
+        result: object = None
+        try:
+            with self._callback_scope():
+                value = formatter(
+                    RealtimeToolErrorContext(
+                        "approval_rejected",
+                        "function",
+                        name,
+                        call_id,
+                        default,
+                        RealtimePolicyContext(agent, self._session._context, self.usage),
+                    )
+                )
+                result = await value if inspect.isawaitable(value) else value
+        except Exception:
+            pass
+        self._check_live()
+        if result is not None and not isinstance(result, str):
+            raise TypeError("Realtime tool error formatter must return a string or None")
+        return default if result is None else result
 
     async def _resolve_api_key(self) -> str | None:
         source = self._config.api_key
@@ -896,6 +1414,7 @@ class RealtimeSession:
         if self._entered or self._terminal.done():
             raise RuntimeError("RealtimeSession cannot be entered again")
         self._session._check_callback_operation("realtime")
+        self._session._check_realtime_provider()
         previous = self._session._realtime
         if previous is not None and previous._startup_failed:
             await previous.aclose()
@@ -1057,6 +1576,11 @@ class RealtimeSession:
 
                 async def send(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                     try:
+                        if snapshot.get("type") == "session.update":
+                            await self._publish_settings_update(
+                                snapshot.get("session", {}), event=snapshot
+                            )
+                            return None
                         if serialized:
                             async with self._input_lock:
                                 self._check_live()
@@ -1198,8 +1722,24 @@ class RealtimeSession:
                 raise RuntimeError(f"A Realtime adapter callback cannot {operation}")
             scope = scope.parent
 
+    async def _publish_settings_update(
+        self, update: dict[str, Any], *, event: dict[str, Any] | None = None
+    ) -> None:
+        async with self._configuration_lock:
+            self._check_live()
+            # Both native operations await this revision's provider receipt.
+            if event is None:
+                await self._call("update", update=update)
+            else:
+                await self._call("send_event", event=event)
+            instructions = update.get("instructions")
+            if isinstance(instructions, str):
+                self._instructions_override = instructions
+            if "prompt" in update:
+                self._prompt_settings = {"prompt": deepcopy(update["prompt"])}
+
     async def update(self, update: NativeRealtimeSessionUpdate) -> None:
-        """Submit sparse settings; remote confirmation arrives through events.
+        """Apply sparse settings and wait for provider confirmation.
 
         Omitted fields preserve existing values. Explicit nulls remain null;
         the provider decides which settings can change during a live session.
@@ -1211,13 +1751,139 @@ class RealtimeSession:
             self._check_live()
             self._check_adapter_operation("update its own Realtime session")
             payload = _serialize_update(update)
-            await _join(asyncio.create_task(self._call("update", update=payload)))
+
+            await _join(asyncio.create_task(self._publish_settings_update(payload)))
         except BaseException as error:
             _clear_adapter_error_frames(error)
             raise
         finally:
             # Completed serializer frames and this active frame can retain MCP secrets.
             del update, payload
+
+    async def update_agent(self, agent: Agent[Any, Any]) -> None:
+        """Authorize a fresh voice-only Agent graph and wait for provider ACK.
+
+        Existing issued calls keep their original callbacks and approval source.
+        The new Agent controls direct voice tools, instructions and handoffs.
+        It must share the Session's provider, output contract and runtime grants.
+        Accepted graph identities and callbacks remain retained until voice cleanup.
+        A configuration callback failure leaves the acknowledged Agent active.
+        A failure during native publication closes the voice session.
+
+        The background_agent bridge continues using the caller-owned Session
+        and its original backend tool selection, including acknowledged Session
+        updates. This operation does not change those attached backend defaults.
+        Closing voice cancels pending configuration callbacks and releases its
+        transient graph before checkpointing resumes.
+        """
+        self._session._check_callback_operation("change its own Realtime Agent")
+        self._check_live()
+
+        async def publish() -> None:
+            async with self._agent_update_lock, self._input_lock:
+                self._check_live()
+                self._agent_admissions += 1
+                prefix = f"voice_{self._generation}_{self._agent_admissions}_"
+                runtimes, roster = _capture_voice_graph(self._session, agent, prefix)
+                if len(self._voice_profile_ids) + len(runtimes) > self._HANDOFF_LIMIT:
+                    raise RuntimeError("Realtime Agent graph capacity exceeded")
+                expected = self._voice_target
+                if expected is None:
+                    snapshot = json.loads(
+                        await self._session._native.call("realtime_tool_selection_sdk", "{}")
+                    )
+                    expected = snapshot["profile_receipt"]
+
+                async def admit() -> dict[str, Any]:
+                    async with self._session._catalog_publication_lock:
+                        self._session._start_readers(
+                            tuple(runtime.profile.declaration for runtime in runtimes.values())
+                        )
+                        self._voice_registry_used = True
+                        receipt = json.loads(
+                            await self._session._native._admit_realtime_agent_graph(
+                                self._generation,
+                                json.dumps(roster),
+                                next(iter(runtimes)),
+                                json.dumps(expected),
+                            )
+                        )
+                        invalid_receipt = "Native voice graph returned an invalid source receipt"
+                        high_water = receipt.get("generation_high_water")
+                        if type(high_water) is not int or high_water < 0:
+                            self._finish(RuntimeError(invalid_receipt))
+                            raise RuntimeError(invalid_receipt)
+                        self._session._profile_generation_high_water = max(
+                            self._session._profile_generation_high_water, high_water
+                        )
+                        error = receipt.get("error")
+                        if isinstance(error, str):
+                            raise RuntimeError(error)
+                        catalogs = receipt.get("catalogs")
+                        active = receipt.get("active")
+                        if (
+                            not isinstance(catalogs, dict)
+                            or catalogs.keys() != runtimes.keys()
+                            or len(set(catalogs.values())) != len(catalogs)
+                            or any(
+                                type(value) is not int or not 0 <= value <= high_water
+                                for value in catalogs.values()
+                            )
+                            or not isinstance(active, dict)
+                            or active.get("profile_id") not in runtimes
+                            or type(active.get("epoch")) is not int
+                            or active["epoch"] < 0
+                        ):
+                            self._finish(RuntimeError(invalid_receipt))
+                            raise RuntimeError(invalid_receipt)
+                        for key, runtime in runtimes.items():
+                            if (
+                                key in self._session._profiles
+                                or key in self._session._voice_profiles
+                            ):
+                                raise RuntimeError("Native voice graph reused a captured identity")
+                            captured = replace(
+                                runtime, catalog=replace(runtime.catalog, generation=catalogs[key])
+                            )
+                            self._session._voice_profiles[key] = captured
+                            self._session._profile_catalogs[(key, catalogs[key])] = captured.catalog
+                            self._session._catalog_bindings[(key, catalogs[key])] = (
+                                captured.profile.declaration.tools
+                            )
+                            self._voice_profile_ids.add(key)
+                        return active
+
+                # Record native admission before teardown. Owner shutdown can
+                # then cancel the configuration callbacks in this publish task.
+                active = await _join(asyncio.create_task(admit()))
+                self._check_live()
+                await self._apply_profile(None, active, unpublished_profiles=tuple(runtimes))
+
+        task = asyncio.create_task(publish())
+        self._profile_updates.add(task)
+        task.add_done_callback(self._profile_updates.discard)
+        try:
+            await _join(task)
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
+
+    async def get_active_agent(self) -> Agent[Any, Any]:
+        """Return the acknowledged voice Agent without changing Session defaults."""
+        self._check_live()
+        self._session._check_callback_operation("inspect its own Realtime Agent")
+        if self._voice_target is not None:
+            return self._session._voice_profiles[self._voice_target["profile_id"]].profile.agent
+        return await self._session.get_active_agent()
+
+    def _forget_voice_profiles(self, keys: Iterable[str]) -> None:
+        for key in keys:
+            runtime = self._session._voice_profiles.pop(key, None)
+            if runtime is not None:
+                catalog_key = (key, runtime.catalog.generation)
+                self._session._profile_catalogs.pop(catalog_key, None)
+                self._session._catalog_bindings.pop(catalog_key, None)
+            self._voice_profile_ids.discard(key)
 
     async def approve_hosted_mcp(
         self,
@@ -1319,11 +1985,12 @@ class RealtimeSession:
         """Observe bounded media and lifecycle events with one active consumer."""
         if self._consuming:
             raise RuntimeError("RealtimeSession already has an event consumer")
+        self._primary_owned = True
         self._consuming = True
         try:
             while True:
                 if not self._queue.empty():
-                    yield self._dequeue()
+                    yield _observation_snapshot(self._dequeue())
                 elif self._terminal.done():
                     if (error := self._terminal.result()) is not None:
                         await _close_after_error(error, self.aclose)
@@ -1337,8 +2004,40 @@ class RealtimeSession:
         finally:
             self._consuming = False
 
+    def subscribe(
+        self, *, max_events: int = 128, max_bytes: int = 8 * 1024 * 1024
+    ) -> _ObservationBuffer:
+        """Observe future events on this connection without consuming events().
+
+        Each subscriber has an independent bounded queue. Overflow fails only
+        that subscriber. At most 16 subscriptions may be active, each retaining
+        at most 128 events and 8 MiB. Closing or cancelling a subscriber releases
+        only its reader. Use contextlib.aclosing when stopping iteration early.
+        Until events() first acquires ownership, subscribing allows the bounded
+        primary backlog to drop its oldest observations under pressure. Once
+        events() acquires ownership, its existing strict capacity policy applies.
+        Native failures propagate to every reader; successful closure emits the
+        closed lifecycle event. Subscriptions do not replay earlier events.
+        """
+        self._check_live()
+        if type(max_events) is not int or not 0 < max_events <= self._EVENT_LIMIT:
+            raise ValueError(f"max_events must be between 1 and {self._EVENT_LIMIT}")
+        if type(max_bytes) is not int or not 0 < max_bytes <= self._BUFFER_BYTES_LIMIT:
+            raise ValueError(f"max_bytes must be between 1 and {self._BUFFER_BYTES_LIMIT}")
+        if len(self._subscribers) >= self._PENDING_LIMIT:
+            raise RuntimeError("Realtime subscriber count capacity exceeded")
+        subscriber = _ObservationBuffer(self, max_events=max_events, max_bytes=max_bytes)
+        self._subscribers.add(subscriber)
+        self._passive_observation = True
+        return subscriber
+
     @staticmethod
     def _buffer_size(event: RealtimeEvent | RealtimeHistoryItem) -> int:
+        if isinstance(event, RealtimeRawProviderEvent):
+            try:
+                return _hosted_mcp_schema_size(event.event, RealtimeSession._BUFFER_BYTES_LIMIT)
+            except RuntimeError:
+                raise RuntimeError("Realtime raw provider event capacity exceeded") from None
         if isinstance(event, RealtimeHostedMcpToolsListed):
             return _hosted_mcp_catalog_size(
                 event.item_id,
@@ -1355,6 +2054,12 @@ class RealtimeSession:
             if isinstance(event, RealtimeResponse)
             else 0
         )
+        if (
+            isinstance(event, (RealtimeResponse, RealtimeToolCall))
+            and event.run_context is not None
+            and event.run_context.realtime_usage is not None
+        ):
+            usage_bytes += 4 * len(json.dumps(vars(event.run_context.realtime_usage)))
         values = list(vars(event).values())
         for value in tuple(values):
             if isinstance(
@@ -1411,6 +2116,11 @@ class RealtimeSession:
         if self._terminal.done():
             return
         size = self._buffer_size(event)
+        if self._passive_observation and not self._primary_owned:
+            while not self._queue.empty() and (
+                self._queue.full() or self._queue_bytes + size > self._BUFFER_BYTES_LIMIT
+            ):
+                self._dequeue()
         if self._queue_bytes + size > self._BUFFER_BYTES_LIMIT:
             self._finish(
                 RuntimeError("Realtime event byte capacity exceeded; consume events promptly")
@@ -1421,6 +2131,9 @@ class RealtimeSession:
             self._queue_bytes += size
         except asyncio.QueueFull:
             self._finish(RuntimeError("Realtime event buffer overflow; consume events promptly"))
+            return
+        for subscriber in tuple(self._subscribers):
+            subscriber.append(event, size)
         self._changed.set()
 
     def _finish(self, error: BaseException | None) -> None:
@@ -1440,9 +2153,17 @@ class RealtimeSession:
                 while not self._queue.empty():
                     self._dequeue()
             self._terminal.set_result(error)
+            self._finish_subscribers(error)
         self._changed.set()
         if self._entered and not self._session_shutdown and not was_terminal:
             self._schedule_close()
+
+    def _finish_subscribers(self, error: BaseException | None) -> None:
+        for subscriber in tuple(self._subscribers):
+            if error is None:
+                event = RealtimeLifecycle("closed")
+                subscriber.append(event, self._buffer_size(event))
+            subscriber.finish(error)
 
     def _schedule_close(self) -> asyncio.Task[None]:
         if self._closing is None or (
@@ -1528,6 +2249,12 @@ class RealtimeSession:
                 await _close_after_error(closed_error, self._cancel_work)
                 raise closed_error
         await self._cancel_work()
+        if self._voice_registry_used:
+            if not self._graph_closed:
+                await self._session._native._restore_realtime_agent_graph(self._generation)
+            self._forget_voice_profiles(tuple(self._voice_profile_ids))
+            self._voice_target = None
+            self._voice_registry_used = False
         if self._session._realtime is self:
             self._session._realtime = None
 
@@ -1543,6 +2270,7 @@ class RealtimeSession:
             function.stop_admission.set()
         if not self._terminal.done():
             self._terminal.set_result(None)
+            self._finish_subscribers(None)
         self._changed.set()
         if self._session_shutdown and not self._graph_closed:
             pending = self._session._close_task
@@ -1644,7 +2372,11 @@ class RealtimeSession:
             for item in self._guardrail_items.values()
             if item.task is not None
             and item.task is not asyncio.current_task()
-            and (response_id is None or item.snapshot.response_id == response_id)
+            and (
+                response_id is None
+                and not item.out_of_band
+                or item.snapshot.response_id == response_id
+            )
         )
         cleanup = asyncio.create_task(
             self._cancel_work(
@@ -1856,7 +2588,22 @@ class RealtimeSession:
             self._finish(error)
 
     def _record_guardrail_text(self, value: dict[str, Any], *, final: bool) -> None:
-        if not self._guardrails:
+        if not self._guardrails and not getattr(self, "_has_agent_guardrails", False):
+            return
+        agent = self._session._agent_for_profile(value.get("profile_receipt"))
+        defaults = getattr(agent, "realtime", None)
+        candidates = (
+            *(defaults.output_guardrails if defaults is not None else ()),
+            *self._guardrails,
+        )
+        seen: set[int] = set()
+        unique_checks: list[RealtimeOutputGuardrail] = []
+        for check in candidates:
+            if id(check) not in seen:
+                seen.add(id(check))
+                unique_checks.append(check)
+        checks = tuple(unique_checks)
+        if not checks:
             return
         response_id, item_id = value.get("response_id"), value.get("item_id")
         kind = value.get("output_kind")
@@ -1886,10 +2633,12 @@ class RealtimeSession:
                     content_index=value.get("content_index"),
                     output_index=value.get("output_index"),
                     output_kind=kind,
-                    agent=self._session._agent_for_profile(value.get("profile_receipt")),
+                    agent=agent,
                     context=self._session._context,
                     final=False,
-                )
+                ),
+                checks=checks,
+                out_of_band=bool(value.get("out_of_band")),
             )
             self._guardrail_items[key] = owned
         if owned.retired:
@@ -1959,7 +2708,11 @@ class RealtimeSession:
             ):
                 retained.append(event)
         for event in retained:
-            self._emit(event)
+            size = self._buffer_size(event)
+            self._queue.put_nowait((event, size))
+            self._queue_bytes += size
+        for subscriber in tuple(self._subscribers):
+            subscriber.discard_response_audio(response_id)
 
     def _retire_response_output(self, response_id: str) -> None:
         if response_id not in self._guardrail_trips:
@@ -2008,7 +2761,7 @@ class RealtimeSession:
         try:
             while self._live and not owned.retired and owned.pending is not None:
                 snapshot, owned.pending = owned.pending, None
-                for guardrail in self._guardrails:
+                for guardrail in owned.checks or self._guardrails:
                     if (
                         not self._live
                         or owned.retired
@@ -2057,8 +2810,8 @@ class RealtimeSession:
                         try:
                             await self.interrupt(
                                 snapshot.response_id,
-                                playback=playback,
-                                feedback=guardrail.feedback,
+                                playback=None if owned.out_of_band else playback,
+                                feedback=None if owned.out_of_band else guardrail.feedback,
                             )
                         except Exception as error:
                             # Local preflight errors leave the owner live. A
@@ -2183,9 +2936,12 @@ class RealtimeSession:
         if len(self._profile_updates) >= self._PENDING_LIMIT:
             raise RuntimeError("Realtime profile update capacity exceeded")
         assert self._context is not None
-        task = self._context.copy().run(
-            asyncio.create_task, self._apply_profile(response_id, target)
-        )
+
+        async def apply() -> None:
+            async with self._agent_update_lock:
+                await self._apply_profile(response_id, target)
+
+        task = self._context.copy().run(asyncio.create_task, apply())
         self._profile_updates.add(task)
         task.add_done_callback(self._profile_updates.discard)
         task.add_done_callback(self._delegation_done)
@@ -2193,9 +2949,14 @@ class RealtimeSession:
     async def _sync_active_profile(
         self, *, include_mono: bool = False, delegation_id: str | None = None
     ) -> None:
-        target = json.loads(await self._session._native._active_agent_profile())
-        if target is not None or include_mono or delegation_id is not None:
-            await self._apply_profile(None, target, delegation_id=delegation_id)
+        async with self._agent_update_lock:
+            if not self._live:
+                return
+            target = self._voice_target or json.loads(
+                await self._session._native._active_agent_profile()
+            )
+            if target is not None or include_mono or delegation_id is not None:
+                await self._apply_profile(None, target, delegation_id=delegation_id)
 
     async def _apply_profile(
         self,
@@ -2203,25 +2964,108 @@ class RealtimeSession:
         target: dict[str, Any] | None,
         *,
         delegation_id: str | None = None,
+        unpublished_profiles: tuple[str, ...] | None = None,
     ) -> None:
-        definitions, selection_id = await self._session._realtime_function_tools(
-            self._selected_tools, allow_missing=True
-        )
-        if not self._live:
-            return
-        # Core validates this exact committed target and captures its settings.
-        # Await the provider ACK outside the sole native event reader.
-        await self._call(
-            "update",
-            update={},
-            profile={
-                "response_id": response_id,
-                "delegation_id": delegation_id,
-                "target": target,
-                "function_tools": definitions,
-                "expected_selection_id": selection_id,
-            },
-        )
+        source_profile = None
+        source_snapshot = None
+        has_new_guardrails = False
+        has_new_prompt = False
+        try:
+            for key in unpublished_profiles or ():
+                defaults = self._session._voice_profiles[key].profile.declaration.realtime
+                if defaults is not None:
+                    has_new_guardrails |= bool(defaults.output_guardrails)
+                    has_new_prompt |= defaults.prompt is not None
+            if target is not None and target["profile_id"] in self._voice_profile_ids:
+                source_profile = self._session._voice_profiles[target["profile_id"]].profile
+                source_snapshot = json.loads(
+                    await self._session._native._realtime_agent_source(
+                        self._generation, json.dumps(target)
+                    )
+                )
+            policy_config = replace(
+                self._config,
+                instructions=self._instructions_override
+                if self._instructions_override is not None
+                else self._config.instructions,
+            )
+            if source_snapshot is None and (
+                callable(policy_config.instructions) or policy_config.is_tool_enabled is not None
+            ):
+                source_snapshot = (await self._session._realtime_tool_selection())[0]
+            policy_instructions, disabled, policy_selection = await _resolve_realtime_policy(
+                self._session,
+                policy_config,
+                check=self._check_live,
+                usage=self.usage,
+                source_snapshot=source_snapshot,
+            )
+            instructions, update, definitions, selection_id = await _resolve_realtime_configuration(
+                self._session,
+                policy_instructions,
+                self._prompt_settings,
+                None if unpublished_profiles is not None else self._direct_tools,
+                target=target,
+                allow_missing=True,
+                reset_prompt=self._has_agent_prompt or has_new_prompt,
+                source_snapshot=source_snapshot,
+                source_profile=source_profile,
+            )
+        except BaseException as error:
+            if self._live and unpublished_profiles is not None:
+                assert target is not None
+                try:
+                    await self._session._native._discard_realtime_agent_graph(
+                        self._generation, json.dumps(target)
+                    )
+                except BaseException as cleanup_error:
+                    _retain_cleanup_error(error, cleanup_error, ())
+                    self._finish(cleanup_error)
+                else:
+                    self._forget_voice_profiles(unpublished_profiles)
+            raise
+        async with self._configuration_lock:
+            if not self._live or (response_id is not None and response_id in self._guardrail_trips):
+                return
+            # Settings can settle while the Agent's configuration callbacks run.
+            update.update(self._prompt_settings)
+            if self._instructions_override is not None:
+                instructions = self._instructions_override
+            if instructions is not None:
+                update["instructions"] = instructions
+            # Output can arrive as soon as the provider accepts the new source.
+            previous_guardrails = self._has_agent_guardrails
+            self._has_agent_guardrails |= has_new_guardrails
+            try:
+                acknowledgement = await self._call(
+                    "update",
+                    update=update,
+                    profile={
+                        "response_id": response_id,
+                        "delegation_id": delegation_id,
+                        "target": target,
+                        "function_tools": definitions,
+                        "expected_selection_id": selection_id
+                        if selection_id is not None
+                        else policy_selection,
+                        "disabled_tool_names": disabled,
+                    },
+                )
+                if isinstance(acknowledgement, dict) and acknowledgement.get("applied") is False:
+                    self._has_agent_guardrails = previous_guardrails
+                    return
+            except BaseException as error:
+                self._has_agent_guardrails = previous_guardrails
+                if unpublished_profiles is not None:
+                    # A failed native reply can leave publication uncertain.
+                    # Keep the sources until the voice owner closes.
+                    self._finish(error)
+                raise
+            if unpublished_profiles is not None:
+                self._direct_tools = None
+                self._has_agent_prompt |= has_new_prompt
+            if source_profile is not None and target is not None:
+                self._voice_target = dict(target)
 
     def _start_function_batch(self, value: dict[str, Any]) -> None:
         call_ids: tuple[str, ...] = tuple(value.get("function_call_ids") or ())
@@ -2245,7 +3089,7 @@ class RealtimeSession:
         for call_id, name in names.items():
             del self._pending_functions[call_id]
             self._functions[call_id] = owned
-            self._emit(RealtimeToolCall(call_id, name, "started"))
+            self._emit(self._function_event(call_id, name, "started"))
         if self._live:
             assert self._context is not None
             owned.task = self._context.copy().run(asyncio.create_task, self._run_functions(owned))
@@ -2264,6 +3108,7 @@ class RealtimeSession:
                     response_id=owned.response_id,
                     call_ids=tuple(owned.names),
                     stop_admission=owned.stop_admission,
+                    before_dispatch=lambda: self._handoff_policy(owned),
                 )
             )
             owned.submission = submission
@@ -2365,6 +3210,7 @@ class RealtimeSession:
             function.stop_admission.set()
         if not self._terminal.done():
             self._terminal.set_result(None)
+            self._finish_subscribers(None)
         self._changed.set()
 
     async def _native_shutdown(self) -> None:
@@ -2427,13 +3273,21 @@ class RealtimeSession:
             name, value = payload, {}
         else:
             name, value = next(iter(payload.items()))
+        out_of_band = name == "DetachedResponse"
+        if out_of_band:
+            name, value = next(iter(value.items()))
         if not self._live and name not in {
             "HistoryItemStarted",
             "HistoryItemCompleted",
             "HistoryTranscriptDelta",
         }:
             return
-        if name == "HostedMcpApprovalRequested":
+        if name == "RawProviderEvent":
+            if self._config.include_raw_provider_events:
+                self._emit(RealtimeRawProviderEvent(value["event"]))
+        elif name == "ProviderRequestError":
+            self._emit(RealtimeProviderRequestError(value["code"], value["event_id"]))
+        elif name == "HostedMcpApprovalRequested":
             profile = value.get("profile_receipt") or {}
             request = RealtimeHostedMcpApprovalRequested(
                 value["request_id"],
@@ -2456,7 +3310,9 @@ class RealtimeSession:
                     (tool["name"], tool.get("description"), tool["input_schema"])
                     for tool in value["tools"]
                 ),
-                self._BUFFER_BYTES_LIMIT - self._queue_bytes,
+                self._BUFFER_BYTES_LIMIT
+                if self._passive_observation and not self._primary_owned
+                else self._BUFFER_BYTES_LIMIT - self._queue_bytes,
             )
             self._emit(
                 RealtimeHostedMcpToolsListed(
@@ -2475,7 +3331,9 @@ class RealtimeSession:
             error = value.get("error")
             if error is not None and not isinstance(error, str):
                 try:
-                    if self._queue.full():
+                    if self._queue.full() and not (
+                        self._passive_observation and not self._primary_owned
+                    ):
                         raise RuntimeError("Realtime hosted MCP event capacity exceeded")
                     metadata_size = 4 * sum(
                         len(text)
@@ -2492,7 +3350,13 @@ class RealtimeSession:
                     )
                     _hosted_mcp_schema_size(
                         error,
-                        self._BUFFER_BYTES_LIMIT - self._queue_bytes - metadata_size,
+                        self._BUFFER_BYTES_LIMIT
+                        - (
+                            0
+                            if self._passive_observation and not self._primary_owned
+                            else self._queue_bytes
+                        )
+                        - metadata_size,
                         json_text=True,
                     )
                 except RuntimeError:
@@ -2562,23 +3426,61 @@ class RealtimeSession:
             # eventual completion dedup entry, so terminal publication cannot
             # exhaust the identity budget after native work has completed.
             self._reserve_request(
-                call_id, call_id, call_id, value["name"], value.get("response_id") or ""
+                call_id,
+                call_id,
+                call_id,
+                value["name"],
+                value.get("response_id") or "",
+                value["arguments"],
+                value["item_id"],
+                value.get("namespace") or "",
             )
             self._pending_functions[call_id] = (value["name"], value.get("response_id"))
-            self._function_names[call_id] = value["name"]
+            receipt = value.get("source_profile")
+            if receipt is not None:
+                epoch = receipt.get("epoch") if isinstance(receipt, dict) else None
+                if not isinstance(epoch, str) or not epoch.isascii() or not epoch.isdecimal():
+                    raise RuntimeError("Invalid native Realtime source profile")
+                receipt = {"profile_id": receipt.get("profile_id"), "epoch": int(epoch)}
+            self._function_names[call_id] = _FunctionIdentity(
+                value["name"],
+                receipt,
+                arguments=value["arguments"],
+                item_id=value["item_id"],
+                namespace=value.get("namespace"),
+                response_id=value.get("response_id"),
+            )
+        elif name == "FunctionCallRejected":
+            call_id, function_name = value.get("call_id"), value.get("name")
+            if not isinstance(call_id, str) or not isinstance(function_name, str):
+                raise RuntimeError("Invalid native Realtime rejected call")
+            self._emit(
+                RealtimeToolCall(
+                    call_id,
+                    function_name,
+                    "failed",
+                    RuntimeError(f"Tool {function_name} not found"),
+                )
+            )
         elif name == "FunctionCallFinished":
             call_id = value["call_id"]
             if call_id in self._finished_functions:
                 return
-            function_name = self._function_names.get(call_id)
-            if function_name is None:
+            identity = self._function_names.get(call_id)
+            if identity is None:
                 raise RuntimeError("Realtime result has no registered function call")
             self._finished_functions.add(call_id)
             if call_id not in self._functions and call_id not in self._pending_functions:
                 self._finish_request(call_id)
             self._emit(
-                RealtimeToolCall(
-                    call_id, function_name, "completed" if value["succeeded"] else "failed"
+                self._function_event(
+                    call_id,
+                    identity.name,
+                    "completed" if value["succeeded"] else "failed",
+                    RuntimeError(f"Tool {identity.name} not found")
+                    if identity.unavailable
+                    else None,
+                    output=value.get("output"),
                 )
             )
         elif name == "Error":
@@ -2596,7 +3498,12 @@ class RealtimeSession:
                 value.get("content_index"),
                 value.get("output_index"),
             )
-            if audio.response_id and audio.item_id and audio.content_index is not None:
+            if (
+                not out_of_band
+                and audio.response_id
+                and audio.item_id
+                and audio.content_index is not None
+            ):
                 key = (audio.response_id, audio.item_id, audio.content_index)
                 width = 1 if audio.format in {"g711_ulaw", "g711_alaw"} else 2
                 stride = width * audio.num_channels
@@ -2640,9 +3547,10 @@ class RealtimeSession:
                 else "cancelled"
             )
             if name == "ResponseCreated":
-                self._response_id = value.get("response_id")
+                if not out_of_band:
+                    self._response_id = value.get("response_id")
             else:
-                if value.get("response_id") in {None, self._response_id}:
+                if not out_of_band and value.get("response_id") in {None, self._response_id}:
                     self._response_id = None
                 for key, received in self._audio_samples.items():
                     if key[0] == value.get("response_id"):
@@ -2663,9 +3571,16 @@ class RealtimeSession:
                     return
                 self._usage_totals = totals
             self._emit(
-                RealtimeResponse(status, value.get("response_id"), reported_usage, self.usage)
+                RealtimeResponse(
+                    status,
+                    value.get("response_id"),
+                    reported_usage,
+                    self.usage,
+                    out_of_band,
+                    run_context=self._event_context(value.get("profile_receipt")),
+                )
             )
-            if name == "ResponseDone":
+            if name == "ResponseDone" and not out_of_band:
                 self._start_function_batch(value)
         elif name in {
             "InputTranscriptDelta",
@@ -2676,7 +3591,10 @@ class RealtimeSession:
             if name.startswith("Output"):
                 if value.get("response_id") in self._guardrail_trips:
                     return
-                self._record_guardrail_text(value, final=name.endswith("Done"))
+                self._record_guardrail_text(
+                    {**value, "out_of_band": True} if out_of_band else value,
+                    final=name.endswith("Done"),
+                )
             self._emit(
                 RealtimeText(
                     "user" if name.startswith("Input") else "assistant",

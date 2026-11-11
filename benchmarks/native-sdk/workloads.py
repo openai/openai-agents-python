@@ -71,6 +71,7 @@ WORKLOADS = {
             output_chars=65536,
         ),
         Workload("input_64k", mode="oneshot", iterations=15, input_chars=65536),
+        Workload("input_512k", mode="oneshot", iterations=15, input_chars=512 * 1024),
         Workload("history_32", iterations=20, prefill=32, input_chars=256, output_chars=256),
         Workload("history_256", iterations=20, prefill=256, input_chars=256, output_chars=256),
         Workload("concurrency_8", iterations=20, concurrency=8),

@@ -47,6 +47,8 @@ pub(crate) struct ToolOutcomes {
     pub response_observation_id: String,
     pub call_ids: Vec<String>,
     pub outcomes: Vec<(String, bool)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_call_ids: Vec<String>,
 }
 
 impl ToolOutcomes {
@@ -139,6 +141,7 @@ impl ToolOutcomes {
             .filter_map(|id| known.get(id).map(|success| (id.clone(), *success)))
             .collect();
         Ok(Some(Self {
+            held_call_ids: Vec::new(),
             response_observation_id: record.id.clone(),
             call_ids,
             outcomes,
@@ -180,8 +183,10 @@ impl ToolOutcomes {
     pub(crate) fn candidates(
         &self,
         turn: &str,
+        held_outputs: Vec<(ResponseItemEnvelope, bool)>,
     ) -> codex_extension_api::RecoveredToolCompletionCandidates {
         codex_extension_api::RecoveredToolCompletionCandidates {
+            held_outputs,
             turn_id: turn.to_owned(),
             response_observation_id: self.response_observation_id.clone(),
             call_ids: self.call_ids.clone(),
@@ -193,6 +198,8 @@ impl ToolOutcomes {
 pub(crate) struct Frame {
     tool_outcomes: Option<ToolOutcomes>,
     fresh: Option<crate::python_tools::FreshTerminalReceipts>,
+    terminal_calls: HashSet<String>,
+    batch_completion: bool,
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
@@ -328,6 +335,7 @@ pub(crate) fn validate_for_opening(
             .is_some_and(|(receipt, _)| receipt == &source),
         "Pending calls differ from the active Agent source"
     );
+    opening.validate_pending_source(&source)?;
     let accepted = crate::agent_profiles::validate_restored(opening, &history)?;
     let (specs, manual_slots) = opening.restore_catalog(&history, &state["managed_tool_specs"])?;
     let mut frame = validate_frame(state, &accepted.text, &specs, &manual_slots)?;
@@ -341,22 +349,22 @@ pub(crate) fn validate_for_opening(
             original == &handoff.source && graph == &opening.fingerprint,
             "Handoff differs from its original call source or admitted graph"
         );
-        opening.validate_restored_handoff(&name, &handoff)?;
         // A canonical target receipt proves that this handoff already applied.
         // Buffered sibling results have no later transition and stay pending.
-        if let Some(index) = result_indices.get(&handoff.call_id) {
-            if let Some((_, next, next_graph)) = transitions
+        let next_transition = result_indices.get(&handoff.call_id).and_then(|index| {
+            transitions
                 .iter()
                 .find(|(next_index, _, _)| next_index > index)
-            {
-                ensure!(
-                    next.profile_id == handoff.target_profile_id
-                        && handoff.source.epoch.checked_add(1) == Some(next.epoch)
-                        && *next_graph == opening.fingerprint,
-                    "Handoff does not match its next accepted Agent transition"
-                );
-                continue;
-            }
+        });
+        opening.validate_restored_handoff(&name, &handoff, next_transition.is_none())?;
+        if let Some((_, next, next_graph)) = next_transition {
+            ensure!(
+                next.profile_id == handoff.target_profile_id
+                    && handoff.source.epoch.checked_add(1) == Some(next.epoch)
+                    && *next_graph == opening.fingerprint,
+                "Handoff does not match its next accepted Agent transition"
+            );
+            continue;
         }
         ensure!(
             handoff.source == source,
@@ -747,6 +755,8 @@ fn validate_frame(
         handoffs,
         tool_outcomes,
         fresh: None,
+        terminal_calls: HashSet::new(),
+        batch_completion: false,
         turn,
         pending: admitted,
         order,
@@ -909,12 +919,13 @@ impl Frame {
             if let Some(outcomes) = &mut self.tool_outcomes {
                 outcomes.record(&key.call, value.success);
             }
-            if value.success {
+            if value.success || self.batch_completion {
                 crate::python_tools::FreshTerminalReceipts::record(
                     &mut self.fresh,
                     generation,
                     key,
                     invocation,
+                    self.batch_completion,
                 );
             }
             self.accepted.insert(
@@ -1009,6 +1020,22 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
         .thread_extension_data()
         .get::<crate::python_tools::PythonTools>()
         .context("Manual continuation requires current tools")?;
+    frame.terminal_calls = tools.private_terminal_calls(
+        captured.as_deref(),
+        &history,
+        &frame.order.iter().cloned().collect(),
+    )?;
+    frame.batch_completion = captured
+        .as_ref()
+        .and_then(|source| {
+            source
+                .profile
+                .data
+                .get::<crate::python_tools::ProfileCatalog>()
+        })
+        .map_or(tools.tool_batch_completion_enabled, |catalog| {
+            catalog.tool_batch_completion
+        });
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
     let model = crate::checkpoint::managed_settings(&history, source_id)
         .map(|settings| settings.model.as_str());
@@ -1094,15 +1121,69 @@ pub(crate) async fn continue_if_ready(
         }
         current.take().expect("Checked continuation")
     };
-    let outputs = frame
+    let saved_held_ids: HashSet<_> = frame
+        .tool_outcomes
+        .as_ref()
+        .map(|outcomes| outcomes.held_call_ids.iter().cloned().collect())
+        .unwrap_or_default();
+    ensure!(
+        saved_held_ids.len()
+            == frame
+                .tool_outcomes
+                .as_ref()
+                .map_or(0, |outcomes| outcomes.held_call_ids.len())
+            && saved_held_ids
+                .iter()
+                .all(|id| frame.accepted.contains_key(id) && frame.terminal_calls.contains(id)),
+        "Invalid held terminal reply identities"
+    );
+    // Erasing a checkpoint hint cannot publish an actual current terminal reply.
+    let held_ids = &frame.terminal_calls;
+    ensure!(
+        held_ids.is_empty() || frame.tool_outcomes.is_some(),
+        "Terminal continuation lacks completed-response facts"
+    );
+    if let Some(outcomes) = &mut frame.tool_outcomes {
+        outcomes.held_call_ids = frame
+            .order
+            .iter()
+            .filter(|id| held_ids.contains(*id))
+            .cloned()
+            .collect();
+    }
+    let held_outputs = frame
         .order
         .iter()
+        .filter(|id| held_ids.contains(*id))
+        .map(|id| {
+            let output = frame.accepted[id].clone();
+            let success = frame
+                .tool_outcomes
+                .as_ref()
+                .and_then(|outcomes| {
+                    outcomes
+                        .outcomes
+                        .iter()
+                        .find(|(call, _)| call == id)
+                        .map(|(_, success)| *success)
+                })
+                // Missing historical success cannot authorize terminal completion.
+                .unwrap_or(false);
+            Ok((output, success))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let outputs: Vec<_> = frame
+        .order
+        .iter()
+        .filter(|call| !held_ids.contains(*call))
         .map(|call| frame.accepted[call].clone())
         .collect();
-    thread
-        .thread
-        .inject_response_item_envelopes(outputs)
-        .await?;
+    if !outputs.is_empty() {
+        thread
+            .thread
+            .inject_sdk_response_item_envelopes(outputs, Some(&frame.turn))
+            .await?;
+    }
     let mut recovery_options = match frame.state["native_continuation"].get("output_schema") {
         Some(schema) => serde_json::json!({"output_schema":schema}),
         None => serde_json::json!({}),
@@ -1112,12 +1193,23 @@ pub(crate) async fn continue_if_ready(
     if let Some(source) = operation_declaration_source {
         recovery_options["operation_declaration_source"] = serde_json::to_value(source)?;
     }
-    let terminal = match (frame.tool_outcomes.take(), frame.fresh.take()) {
-        (Some(outcomes), Some(fresh)) => {
+    let reset_tool_choice = thread
+        .thread
+        .thread_settings_snapshot()
+        .await
+        .request_controls
+        .reset_tool_choice
+        .flatten()
+        == Some(true);
+    let terminal = match frame.tool_outcomes.take() {
+        Some(outcomes)
+            if frame.fresh.is_some() || !held_outputs.is_empty() || reset_tool_choice =>
+        {
             Some(crate::python_tools::RecoveredToolCompletionSeed::new(
                 frame.turn.clone(),
                 outcomes,
-                fresh,
+                frame.fresh.take(),
+                held_outputs,
             ))
         }
         _ => None,
@@ -1425,9 +1517,34 @@ pub(crate) async fn capture(
         }
     }
     let start = active_start.context("Core lost the pending turn history")?;
+    let held_outputs = tools.held_tool_outputs(&turn);
+    let mut held_ids = HashSet::new();
+    for (output, succeeded) in held_outputs {
+        let ResponseItem::FunctionCallOutput {
+            call_id: Some(id), ..
+        } = &output.item
+        else {
+            anyhow::bail!("Invalid held terminal output");
+        };
+        ensure!(
+            held_ids.insert(id.clone()) && !outputs.contains_key(id),
+            "Duplicate held terminal output"
+        );
+        if let Some(outcomes) = tool_outcomes.as_mut() {
+            ensure!(
+                outcomes.call_ids.contains(id),
+                "Held terminal output has no sampled call"
+            );
+            outcomes.record(id, succeeded);
+            outcomes.held_call_ids.push(id.clone());
+        } else {
+            anyhow::bail!("Held terminal output has no sampled batch");
+        }
+        outputs.insert(id.clone(), output);
+    }
     let prefix = calls
         .iter()
-        .take_while(|(id, _)| outputs.contains_key(id))
+        .take_while(|(id, _)| outputs.contains_key(id) && !held_ids.contains(id))
         .count();
     let order: Vec<String> = calls
         .iter()

@@ -203,14 +203,43 @@ async def test_realtime_handoff_defaults_reject_excluded_route(
         ):
             await peer.frame(lambda frame: frame["type"] == "session.update")
             await peer.function("transfer_to_c", {}, "excluded-route")
-            # Native rejects unadvertised calls before application dispatch and
-            # closes the transport; its internal rejection text is not a wire event.
-            with pytest.raises(RuntimeError, match="Realtime connection closed unexpectedly"):
-                async for event in events:
-                    if isinstance(event, RealtimeToolCall) and event.call_id == "excluded-route":
-                        pytest.fail("Excluded handoff entered application dispatch")
+            notices = []
+            async for event in events:
+                if isinstance(event, RealtimeToolCall) and event.call_id == "excluded-route":
+                    notices.append(event)
+                    break
+            assert notices[0].status == "failed"
+            assert str(notices[0].error) == "Tool transfer_to_c not found"
+            output = await peer.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "excluded-route"
+            )
+            assert output["item"]["output"] == "Tool transfer_to_c not found"
+            await owner.update({"instructions": "Excluded handoff rejected."})
             assert await session.get_active_agent() is active
+            assert (
+                sum(
+                    frame.get("item", {}).get("call_id") == "excluded-route"
+                    for frame in peer.frames
+                )
+                == 1
+            )
+            assert not any(frame["type"] == "response.create" for frame in peer.frames)
+            await owner.aclose()
+            notices.extend(
+                [
+                    event
+                    async for event in events
+                    if isinstance(event, RealtimeToolCall) and event.call_id == "excluded-route"
+                ]
+            )
+            # The failed observation accompanies rejection; no started call or agent switch occurs.
+            assert [event.status for event in notices] == ["failed"]
         assert peer.responses.requests == []
+        peer.responses.respond(assistant_output("Caller remains open"))
+        assert (await (await session.submit("Continue")).get_result()).final_output == (
+            "Caller remains open"
+        )
+        assert await session.get_active_agent() is active
 
 
 async def test_handoff_uses_leaf_captured_model_request_controls(responses) -> None:

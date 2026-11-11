@@ -58,9 +58,7 @@ def test_sdk_archive_has_current_native_api_and_licenses(sdk_wheel):
     assert len(names) == len(set(names)), "Duplicate archive ownership"
     assert not any(name.startswith(("codex_agents/", "codex_agents.libs/")) for name in names)
     assert not any(
-        name.startswith(
-            ("agents/models/", "agents/run_internal/", "agents/extensions/", "agents/memory/")
-        )
+        name.startswith(("agents/models/", "agents/run_internal/", "agents/memory/"))
         for name in names
     )
     python = {name for name in names if name.endswith(".py")}
@@ -139,11 +137,17 @@ def test_sdk_metadata_separates_native_classic_and_a2a_dependencies(
                 "extra": extra,
             }
             selected_expected = expected | (classic if extra == "classic" else set())
-            # Hatch expands each integration's local classic dependency into its requirements.
+            # Hatch expands local extra references into wheel requirements.
             for value in extra_dependencies.get(extra, []):
                 requirement = Requirement(value)
                 if requirement.name == "openai-agents":
-                    assert requirement == Requirement("openai-agents[classic]")
+                    if extra == "classic-dapr":
+                        assert requirement == Requirement("openai-agents[classic,dapr]")
+                        selected_expected.update(
+                            Requirement(dependency) for dependency in extra_dependencies["dapr"]
+                        )
+                    else:
+                        assert requirement == Requirement("openai-agents[classic]")
                     selected_expected |= classic
                 else:
                     selected_expected.add(requirement)

@@ -19,6 +19,7 @@ from agents.classic.sandbox.session.sandbox_client import BaseSandboxClientOptio
 from agents.classic.testing.sandbox import scripted_sandbox_session
 from agents.sandbox import (
     BaseSandboxClient,
+    Dir,
     DockerVolumeMountStrategy,
     Manifest,
     S3Mount,
@@ -875,6 +876,29 @@ async def test_native_sandbox_pure_utilities_preserve_behavior() -> None:
     assert attempts == 2
 
 
+def test_native_sandbox_truncation_exposes_formatted_output_and_original_token_count() -> None:
+    from agents.sandbox import (
+        TruncationPolicy,
+        formatted_truncate_text,
+        formatted_truncate_text_with_token_count,
+        truncate_with_token_budget,
+    )
+
+    text = "a" * 64 + "\n" + "é" * 80 + "\n" + "z" * 64
+    policy = TruncationPolicy.tokens(30)
+    bounded, count = truncate_with_token_budget(text, policy)
+    formatted, formatted_count = formatted_truncate_text_with_token_count(text, 30)
+
+    assert count == formatted_count == 73
+    assert bounded.startswith("a")
+    assert formatted.startswith("Total output lines: 3\n\n")
+    assert formatted == formatted_truncate_text(text, policy)
+    for result in (bounded, formatted):
+        assert result.endswith("z")
+        assert "tokens truncated" in result
+        assert len(result.encode("utf-8")) <= policy.byte_budget()
+
+
 @pytest.mark.parametrize("mode", ["borrowed", "resume"])
 @pytest.mark.parametrize("mismatch", ["root", "topology", "credentials", "environment"])
 async def test_live_mount_authority_must_match_before_gateway_or_resume(mode, mismatch) -> None:
@@ -1041,3 +1065,205 @@ async def test_borrowed_docker_checks_live_host_bind_authority(tmp_path: Path, c
             async with source:
                 pytest.fail("Changed host authority must fail before gateway connection")
         assert "connect" not in events and not {"close", "delete"}.intersection(events)
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+async def test_borrowed_limits_apply_before_gateway_and_persist(supplied: bool) -> None:
+    from agents.sandbox import SandboxArchiveLimits, SandboxConcurrencyLimits
+
+    events: list[str] = []
+    client = Client(events)
+    session = await client.create(manifest=Manifest(), options=Options())
+    client.backend_id = session.state.type
+    old_archive = SandboxArchiveLimits(max_members=11)
+    session._set_archive_limits(old_archive)
+    session._set_concurrency_limits(SandboxConcurrencyLimits(manifest_entries=7))
+    archive = SandboxArchiveLimits(max_members=3)
+    concurrency = SandboxConcurrencyLimits(manifest_entries=2)
+    events.clear()
+
+    def assert_limits():
+        assert session._archive_limits == (archive if supplied else old_archive)
+        assert session._max_manifest_entry_concurrency == (2 if supplied else 7)
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected is session
+        assert_limits()
+        events.append("connect")
+        try:
+            yield Environment(url="wss://executor.invalid", cwd="/workspace")
+        finally:
+            events.append("gateway")
+
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(),
+        options=Options(),
+        session=session,
+        connect=connect,
+        **({"archive_limits": archive, "concurrency_limits": concurrency} if supplied else {}),
+    ):
+        assert_limits()
+    assert_limits()
+    assert events == ["connect", "gateway"]
+
+
+@pytest.mark.parametrize("failure", ["manifest", "provider"])
+async def test_borrowed_failed_authority_preserves_limits(failure: str) -> None:
+    from agents.sandbox import SandboxArchiveLimits, SandboxConcurrencyLimits
+
+    client = Client([])
+    session = await client.create(manifest=Manifest(), options=Options())
+    client.backend_id = session.state.type
+    archive = SandboxArchiveLimits(max_members=11)
+    session._set_archive_limits(archive)
+    session._set_concurrency_limits(SandboxConcurrencyLimits(manifest_entries=7))
+
+    async def reject(*args, **kwargs):
+        raise ValueError("Borrowed authority rejected")
+
+    if failure == "manifest":
+        session._validate_manifest_application = reject
+    else:
+        client.assert_borrowed_session_authority = reject
+
+    @asynccontextmanager
+    async def connect(selected):
+        pytest.fail("Rejected authority must not connect")
+        yield
+
+    with pytest.raises(ValueError, match="Borrowed authority rejected"):
+        async with sandbox_environment(
+            client,
+            manifest=Manifest(),
+            options=Options(),
+            session=session,
+            connect=connect,
+            archive_limits=SandboxArchiveLimits(max_members=3),
+            concurrency_limits=SandboxConcurrencyLimits(manifest_entries=2),
+        ):
+            pytest.fail("Rejected authority must not yield")
+    assert session._archive_limits == archive
+    assert session._max_manifest_entry_concurrency == 7
+
+
+async def test_workspace_guidance_captures_prepared_resource_without_private_values() -> None:
+    from _agents_codex.session import _EnvironmentLease, _release_environment
+
+    class PreparedClient(Client):
+        async def create(self, *, manifest=None, options, snapshot=None):
+            selected = await super().create(manifest=manifest, options=options, snapshot=snapshot)
+            start = selected.start
+
+            async def prepare():
+                await start()
+                selected.state.manifest.root = "/prepared"
+
+            selected.start = prepare
+            return selected
+
+    client = PreparedClient([])
+    manifest = Manifest(
+        entries={
+            "data": declaration(read_only=False, secret_access_key="SYNTHETIC_MOUNT_SECRET"),
+            "notes": Dir(),
+        },
+        environment={"value": {"PRIVATE": "SYNTHETIC_ENV_SECRET"}},
+        remote_mount_command_allowlist=["cat"],
+    )
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected.state.manifest.root == "/prepared"
+        yield Environment(
+            url="wss://synthetic-executor.invalid",
+            headers={"Authorization": "SYNTHETIC_HEADER_SECRET"},
+            cwd="/prepared/project",
+            read_only=True,
+        )
+
+    source = sandbox_environment(
+        client,
+        manifest=manifest,
+        options=Options(labels={"private": "SYNTHETIC_PROVIDER_SECRET"}),
+        connect=connect,
+    )
+    manifest.entries.clear()
+    lease = _EnvironmentLease(source)
+    try:
+        await lease.acquire()
+        text = lease._workspace_instructions
+        assert isinstance(text, str)
+        assert text.count("# Current SDK workspace snapshot") == 1
+        assert '"workspace": "/prepared"' in text
+        assert 'Working directory: "/prepared/project"' in text
+        assert "Executor read-only: true" in text
+        assert "/prepared/data" in text and "read+write" in text
+        assert "/prepared/notes" in text
+        assert "untrusted data" in text and "`cat`" in text
+        assert "copy it back" in text
+        assert "Use `apply_patch` directly" not in text
+        for secret in (
+            "SYNTHETIC_MOUNT_SECRET",
+            "SYNTHETIC_ENV_SECRET",
+            "SYNTHETIC_HEADER_SECRET",
+            "SYNTHETIC_PROVIDER_SECRET",
+            "synthetic-executor.invalid",
+        ):
+            assert secret not in text
+        assert client.session is not None
+        client.session.state.manifest.root = "/later"
+        assert lease._workspace_instructions == text
+    finally:
+        await _release_environment(lease)
+    assert client.events == ["create", "start", "close", "delete"]
+
+
+async def test_failed_gateway_does_not_publish_workspace_guidance() -> None:
+    from _agents_codex.session import _EnvironmentLease
+
+    client = Client([])
+
+    @asynccontextmanager
+    async def connect(selected):
+        raise RuntimeError("gateway failed")
+        yield Environment(url="wss://synthetic.invalid", cwd="/workspace")
+
+    lease = _EnvironmentLease(
+        sandbox_environment(client, manifest=Manifest(), options=Options(), connect=connect)
+    )
+    with pytest.raises(RuntimeError, match="gateway failed"):
+        await lease.acquire()
+    assert lease._workspace_instructions is None
+    assert client.events == ["create", "start", "close", "delete"]
+
+
+async def test_cancelled_gateway_cannot_publish_late_workspace_guidance() -> None:
+    from _agents_codex.session import _EnvironmentLease
+
+    client = Client([])
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @asynccontextmanager
+    async def connect(selected):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        yield Environment(url="wss://synthetic.invalid", cwd="/workspace")
+
+    lease = _EnvironmentLease(
+        sandbox_environment(client, manifest=Manifest(), options=Options(), connect=connect)
+    )
+    opening = asyncio.create_task(lease.acquire())
+    await entered.wait()
+    opening.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert lease._workspace_instructions is None
+    assert client.events == ["create", "start", "close", "delete"]

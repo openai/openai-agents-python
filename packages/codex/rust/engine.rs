@@ -35,6 +35,15 @@ mod scoped;
 
 pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
+enum NativeThreadRegistration {
+    Owner(Weak<std::sync::Mutex<crate::NativeThreadOwner>>),
+    UnpublishedStoredFork {
+        source: ThreadId,
+        id: ThreadId,
+        thread: Arc<CodexThread>,
+    },
+}
+
 pub struct EngineState {
     pub manager: Arc<ThreadManager>,
     runtime_parent: Option<Arc<EngineState>>,
@@ -59,9 +68,9 @@ pub struct EngineState {
     // MemoryThreadStore cannot persist extension mode. Retain only provenance
     // for this engine/store lifetime, including after the live owner closes.
     managed_thread_ids: Mutex<HashSet<ThreadId>>,
-    // Only the PyO3 slot is tracked, weakly: this must not keep a ThreadState
-    // (which itself owns its EngineState) alive.
-    native_threads: std::sync::Mutex<Vec<Weak<std::sync::Mutex<crate::NativeThreadOwner>>>>,
+    // Live slots stay weak: ThreadState owns this Engine. An unpublished fork
+    // retains only its exact Core writer/ID, including when wrapping fails.
+    native_threads: std::sync::Mutex<Vec<NativeThreadRegistration>>,
     pub startup_warnings: Vec<String>,
     pub(crate) codex_account: Option<crate::auth::CodexAccount>,
     pub(crate) plan_usage_client: OnceLock<codex_backend_client::Client>,
@@ -77,6 +86,8 @@ pub struct EngineState {
 
 const CODEX_LOGIN_PROVIDER: &str = "native_agent_codex_login";
 const CODEX_LOGIN_PROVIDER_PREFIX: &str = "native_agent_codex_login_";
+pub(crate) const SIWC_PROVIDER_PREFIX: &str = "native_agent_siwc_";
+const SIWC_VERIFIED_PROVIDER_PREFIX: &str = "native_agent_siwc_verified_";
 
 impl EngineState {
     pub(crate) fn owns_runtime_services(&self) -> bool {
@@ -97,7 +108,18 @@ impl EngineState {
         Ok(())
     }
 
+    pub(crate) fn validate_siwc_resume_provider(stored: &str, current: &str) -> anyhow::Result<()> {
+        ensure!(
+            (!stored.starts_with(SIWC_PROVIDER_PREFIX)
+                && !current.starts_with(SIWC_PROVIDER_PREFIX))
+                || (current.starts_with(SIWC_VERIFIED_PROVIDER_PREFIX) && stored == current),
+            "Saved thread and Session must use the same authentication mode and ChatGPT registration"
+        );
+        Ok(())
+    }
+
     fn validate_resume_provider(stored: &str, current: &str) -> anyhow::Result<()> {
+        Self::validate_siwc_resume_provider(stored, current)?;
         ensure!(
             (!stored.starts_with(CODEX_LOGIN_PROVIDER_PREFIX)
                 && !current.starts_with(CODEX_LOGIN_PROVIDER_PREFIX))
@@ -107,7 +129,18 @@ impl EngineState {
         Ok(())
     }
 
-    pub(crate) fn validate_hosted_search(config: &Config, info: &ModelInfo) -> anyhow::Result<()> {
+    fn requires_model_validation(config: &Config) -> bool {
+        config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX)
+            || (config.web_search_mode.value()
+                != codex_protocol::config_types::WebSearchMode::Disabled
+                && !config.features.enabled(Feature::StandaloneWebSearch))
+    }
+
+    pub(crate) fn validate_provider_model(config: &Config, info: &ModelInfo) -> anyhow::Result<()> {
+        ensure!(
+            !config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX) || info.use_responses_lite,
+            "Sign in with ChatGPT requires a native model with Responses Lite support"
+        );
         // Lite selects Core's standalone executor even with its feature flag
         // off. A hosted grant must not silently acquire that other route.
         ensure!(
@@ -154,20 +187,14 @@ impl EngineState {
         Ok(())
     }
 
-    pub(crate) async fn validate_hosted_search_model(&self, model: &str) -> anyhow::Result<()> {
-        if self.service_config.web_search_mode.value()
-            != codex_protocol::config_types::WebSearchMode::Disabled
-            && !self
-                .service_config
-                .features
-                .enabled(Feature::StandaloneWebSearch)
-        {
+    pub(crate) async fn validate_model(&self, model: &str) -> anyhow::Result<()> {
+        if Self::requires_model_validation(&self.service_config) {
             let info = self
                 .manager
                 .get_models_manager()
                 .get_model_info(model, &self.service_config.to_models_manager_config())
                 .await;
-            Self::validate_hosted_search(&self.service_config, &info)?;
+            Self::validate_provider_model(&self.service_config, &info)?;
         }
         Ok(())
     }
@@ -279,6 +306,7 @@ impl EngineState {
             Self::check_controlled_config(&config)?;
         }
         let native_agents = runtime_options.native_agents();
+        let siwc = config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX);
         let initial_model = initial_models
             .as_ref()
             .and_then(|models| models.root.clone());
@@ -325,7 +353,7 @@ impl EngineState {
             )?;
             (manager, Some(account))
         } else {
-            (crate::auth::manager(&config, api_key).await?, None)
+            (crate::auth::manager(&config, api_key, siwc).await?, None)
         };
         let goals_enabled = runtime_options.native_goal_store_enabled();
         let storage_home = (goals_enabled || local_home.is_some()).then(|| LocalStorageHome {
@@ -340,10 +368,13 @@ impl EngineState {
             credential_directory: codex_account
                 .as_ref()
                 .and_then(|account| account.credential_directory.as_deref()),
+            saved_login_home_alias: codex_account
+                .as_ref()
+                .and_then(|account| account.auth_home_alias.as_deref()),
         };
         let environment_options = runtime_options.environment()?;
         if let Some(environment) = &environment_options {
-            environment.validate_storage_mounts(
+            environment.validate_read_grants(
                 &config,
                 LocalPrivatePaths {
                     storage_home,
@@ -419,6 +450,14 @@ impl EngineState {
                 .await?;
             Self::validate_resume_provider(&stored.model_provider, &config.model_provider_id)?;
         }
+        // A custom read owns the exclusive writer. Resolve its saved model
+        // during startup, when the Engine can retry cleanup on rejection.
+        let defer_custom_siwc_model = siwc
+            && config.model.is_none()
+            && runtime_options.sdk_resume_thread_id().is_some()
+            && store
+                .as_any()
+                .is::<crate::canonical_storage::CanonicalStore>();
         let provider = codex_model_provider::create_model_provider(
             config.model_provider.clone(),
             Some(auth.clone()),
@@ -446,10 +485,7 @@ impl EngineState {
                 ModelsResponse { models: catalog },
             ))
         } else {
-            if config.web_search_mode.value()
-                != codex_protocol::config_types::WebSearchMode::Disabled
-                && !config.features.enabled(Feature::StandaloneWebSearch)
-            {
+            if Self::requires_model_validation(&config) && !defer_custom_siwc_model {
                 let model = if checkpoint {
                     initial_model.clone()
                 } else {
@@ -466,14 +502,18 @@ impl EngineState {
                                     .is::<crate::canonical_storage::CanonicalStore>(),
                             "SDK resume requires current native canonical storage"
                         );
-                        let model = store
+                        let stored = store
                             .read_thread(ReadThreadParams {
                                 thread_id: id,
                                 include_archived: true,
                                 include_history: false,
                             })
-                            .await?
-                            .model;
+                            .await?;
+                        Self::validate_siwc_resume_provider(
+                            &stored.model_provider,
+                            &config.model_provider_id,
+                        )?;
+                        let model = stored.model;
                         if let Some(local) = &local_checklist_store {
                             local.expect_resume_model(id, model.clone())?;
                         }
@@ -499,7 +539,7 @@ impl EngineState {
                     let info = models
                         .get_model_info(&model, &config.to_models_manager_config())
                         .await;
-                    Self::validate_hosted_search(&config, &info)?;
+                    Self::validate_provider_model(&config, &info)?;
                 }
             }
             models
@@ -515,7 +555,11 @@ impl EngineState {
             ),
             (None, None) => {
                 crate::environment::for_unattached_threads(
-                    &config, /*sdk_local*/ false, /*private_read_deny*/ None,
+                    &config,
+                    /*sdk_local*/ false,
+                    /*private_read_deny*/ None,
+                    #[cfg(target_os = "macos")]
+                    Vec::new(),
                 )
                 .await?
             }
@@ -626,7 +670,9 @@ impl EngineState {
             recovery,
             cloud_config,
             service_config: config,
-            model_http_pool: None,
+            // The isolated HTTP pool enables Core's redirect rejection when
+            // the provider declares its fixed routing, including on restore.
+            model_http_pool: siwc.then(codex_http_client::SdkModelHttpPool::default),
             // Session opening captures one configuration for its owned runtime
             // and immediate first thread. Raw creation retains its prior behavior.
             initial_config_available: AtomicBool::new(
@@ -667,6 +713,12 @@ impl EngineState {
         initial_messages: Option<crate::initial_messages::Batch>,
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
+        let private_http = options.private_http;
+        let private_disposable = options.private_disposable
+            && options.permits_private_disposable()
+            && initial_messages.is_none()
+            && history.is_none()
+            && python_specs.as_ref().is_some_and(Vec::is_empty);
         if initial_messages.is_some() {
             ensure!(
                 history.is_none() && python_specs.is_some() && options.permits_initial_config(),
@@ -692,6 +744,7 @@ impl EngineState {
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
         let before_complete = options.before_complete;
+        let tool_batch_completion = options.tool_batch_completion;
         let resume = options.sdk_resume_thread_id;
         let sdk_history = options.take_sdk_history(history.is_some(), python_specs.is_some())?;
         let (mut startup, instructions) = self.build_startup(options, initial_config).await?;
@@ -704,6 +757,16 @@ impl EngineState {
             && let Some(profile) = &self.managed_execution
         {
             startup.thread_extension_init.insert(profile.clone());
+        }
+        if private_disposable
+            && initial_config.is_some()
+            && self.managed_execution.is_some()
+            && self.goals.is_none()
+        {
+            startup.config.ephemeral = true;
+            startup
+                .thread_extension_init
+                .insert(codex_core::PrivateDisposableRun::default());
         }
         if let Some(id) = resume {
             ensure!(
@@ -723,6 +786,30 @@ impl EngineState {
                 &stored.model_provider,
                 &startup.config.model_provider_id,
             )?;
+            if startup.config.model.is_none()
+                && config::sdk_resume_thread_id(&self.runtime_json)? == Some(id)
+            {
+                startup.config.model = self.service_config.model.clone();
+                if startup.config.model.is_none()
+                    && startup
+                        .config
+                        .model_provider_id
+                        .starts_with(SIWC_PROVIDER_PREFIX)
+                {
+                    let model = self
+                        .manager
+                        .get_models_manager()
+                        .get_default_model(
+                            &stored.model,
+                            false,
+                            RefreshStrategy::OnlineIfUncached,
+                            startup.config.http_client_factory(),
+                        )
+                        .await;
+                    self.validate_model(&model).await?;
+                    startup.config.model = Some(model);
+                }
+            }
             startup.initial_history = self.history_from_stored(stored).await?;
             ensure!(
                 startup
@@ -732,11 +819,6 @@ impl EngineState {
                     .is_empty(),
                 "SDK resume cannot authorize saved startup tools; use an SDK-created thread"
             );
-            if startup.config.model.is_none()
-                && config::sdk_resume_thread_id(&self.runtime_json)? == Some(id)
-            {
-                startup.config.model = self.service_config.model.clone();
-            }
         }
         if let Some(history) = history {
             startup.initial_history = history;
@@ -757,6 +839,7 @@ impl EngineState {
                 transform_context,
                 before_compact,
                 before_complete,
+                tool_batch_completion,
             )?;
         }
         if let Some(items) = sdk_history {
@@ -767,7 +850,9 @@ impl EngineState {
                     .collect(),
             );
         }
-        let native = self.start_prepared(startup, instructions).await?;
+        let native = self
+            .start_prepared_with_transport(startup, instructions, private_http)
+            .await?;
         if let Some(batch) = initial_messages {
             let state = native
                 .current()
@@ -785,12 +870,22 @@ impl EngineState {
     // The caller holds lifecycle through validation, native import and start.
     pub(crate) async fn start_prepared(
         self: &Arc<Self>,
-        mut startup: StartThreadOptions,
+        startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
     ) -> anyhow::Result<NativeThread> {
-        if let Some(pool) = &self.model_http_pool {
-            startup.thread_extension_init.insert(pool.clone());
-        }
+        self.start_prepared_with_transport(startup, instructions, false)
+            .await
+    }
+
+    async fn start_prepared_with_transport(
+        self: &Arc<Self>,
+        mut startup: StartThreadOptions,
+        instructions: Arc<options::ThreadInstructions>,
+        private_http: bool,
+    ) -> anyhow::Result<NativeThread> {
+        // build_startup has already validated the unchanged provider against the
+        // retained Engine. Only this owned thread config receives the restriction.
+        prepare_private_transport(&mut startup, self.model_http_pool.as_ref(), private_http)?;
         if self.runtime_parent.is_some() {
             ensure!(
                 matches!(&startup.initial_history, InitialHistory::New),
@@ -887,6 +982,9 @@ impl EngineState {
                 .await?;
         }
         self.agent_graph.remove_checkpoint_edges(imported).await;
+        for id in imported {
+            self.finish_stored_fork(*id);
+        }
         {
             let mut creation_times = self.restored_creation_times.lock().await;
             for id in imported {
@@ -985,6 +1083,7 @@ impl EngineState {
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
         let before_complete = options.before_complete;
+        let tool_batch_completion = options.tool_batch_completion;
         let agent_profiles = options.agent_profiles.take();
         let profile_files = options.sdk_instruction_files.clone().unwrap_or_default();
         let (mut startup, instructions) = self.build_startup(options, None).await?;
@@ -1016,6 +1115,7 @@ impl EngineState {
             transform_context,
             before_compact,
             before_complete,
+            tool_batch_completion,
         )?;
         // Compare and publish under the same retained writer, including the
         // ordinary missing-result append. Preparation alone is not publication.
@@ -1170,13 +1270,91 @@ impl EngineState {
         id_or_path: &str,
         nth_user_message: Option<usize>,
         boundary: ForkSelection,
+        options: options::ThreadOptions,
+        python_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
+    ) -> anyhow::Result<NativeThread> {
+        Box::pin(self.fork_owned(
+            id_or_path,
+            nth_user_message,
+            boundary,
+            options,
+            python_specs,
+            false,
+        ))
+        .await
+    }
+
+    pub(crate) async fn fork_stored(
+        self: &Arc<Self>,
+        source: &Arc<ThreadState>,
+        boundary: ForkBoundary,
+    ) -> anyhow::Result<NativeThread> {
+        ensure!(
+            self.local_checklist_store.is_some(),
+            "stored forks require native LocalStorage"
+        );
+        ensure!(
+            self.manager
+                .list_agent_subtree_thread_ids(source.id)
+                .await?
+                .iter()
+                .all(|id| *id == source.id),
+            "stored fork requires a root without descendants"
+        );
+        let tools = source
+            .thread
+            .thread_extension_data()
+            .get::<crate::python_tools::PythonTools>()
+            .context("stored fork requires current managed tools")?;
+        let specs = match crate::agent_profiles::active_specs(&source.thread).await? {
+            Some(specs) => specs,
+            None => tools.current_specs()?,
+        };
+        let text = source
+            .instructions
+            .0
+            .read()
+            .map_err(|_| anyhow::anyhow!("thread instructions unavailable"))?
+            .clone();
+        let mut options: options::ThreadOptions = serde_json::from_value(serde_json::json!({
+            "instructions": text,
+            "share_instructions_with_subagents": source.instructions.1,
+            "config": { "mcp_servers": {} },
+        }))?;
+        if let Some((profiles, files)) = crate::agent_profiles::opening(&source.thread) {
+            options.agent_profiles = Some(profiles);
+            options.sdk_instruction_files = Some(files);
+        }
+        let boundary = match boundary {
+            ForkBoundary::Latest => ForkSelection::Latest,
+            ForkBoundary::BeforeTurn(id) => ForkSelection::BeforeTurn(id),
+            ForkBoundary::ThroughTurn(id) => ForkSelection::ThroughTurn(id),
+        };
+        Box::pin(self.fork_owned(
+            &source.id.to_string(),
+            None,
+            boundary,
+            options,
+            Some(serde_json::from_value(specs)?),
+            true,
+        ))
+        .await
+    }
+
+    async fn fork_owned(
+        self: &Arc<Self>,
+        id_or_path: &str,
+        nth_user_message: Option<usize>,
+        boundary: ForkSelection,
         mut options: options::ThreadOptions,
         python_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
+        stored: bool,
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
         let before_complete = options.before_complete;
+        let tool_batch_completion = options.tool_batch_completion;
         let agent_profiles = options.agent_profiles.take();
         let profile_files = options.sdk_instruction_files.clone().unwrap_or_default();
         ensure!(
@@ -1200,6 +1378,10 @@ impl EngineState {
                 );
                 tools.check_idle(&thread).await?;
                 source_code = crate::checkpoint::code_state_for_thread(self, id).await?;
+                ensure!(
+                    !stored || source_code.is_none(),
+                    "stored history forks cannot retain native code-mode state"
+                );
                 ensure!(
                     source_code.is_none()
                         || (nth_user_message.is_none()
@@ -1255,9 +1437,13 @@ impl EngineState {
             python_specs.is_none() || managed_parent,
             "managed tools can only fork from a live replaceable session"
         );
-        let stored = self.stored(id_or_path).await?;
+        let record = self.stored(id_or_path).await?;
+        ensure!(
+            !stored || record.history_mode == ThreadHistoryMode::Paginated,
+            "stored forks require native paginated history"
+        );
         let extension_events = self.extension_events.subscribe();
-        let (snapshot, history) = if stored.history_mode == ThreadHistoryMode::Paginated {
+        let (snapshot, history, prepared) = if record.history_mode == ThreadHistoryMode::Paginated {
             ensure!(
                 nth_user_message.is_none(),
                 "paginated history uses before_turn or through_turn boundaries instead of user-message indexes"
@@ -1270,7 +1456,7 @@ impl EngineState {
             let prepared = self
                 .store
                 .prepare_fork(PrepareForkParams {
-                    thread_id: stored.thread_id,
+                    thread_id: record.thread_id,
                     boundary,
                 })
                 .await?;
@@ -1278,10 +1464,11 @@ impl EngineState {
                 ForkSnapshot::Interrupted,
                 InitialHistory::Resumed(ResumedHistory {
                     conversation_id: prepared.source_thread_id,
-                    history: prepared.model_context,
+                    history: Arc::clone(&prepared.model_context),
                     history_revision: None,
                     rollout_path: None,
                 }),
+                Some(prepared),
             )
         } else {
             ensure!(
@@ -1292,7 +1479,7 @@ impl EngineState {
                 .map(ForkSnapshot::TruncateBeforeNthUserMessage)
                 .unwrap_or(ForkSnapshot::Interrupted);
             let history = self.history(id_or_path).await?;
-            (snapshot, history)
+            (snapshot, history, None)
         };
         if let Some(specs) = python_specs {
             // The native fork will select its own boundary. Install against
@@ -1307,17 +1494,53 @@ impl EngineState {
                 transform_context,
                 before_compact,
                 before_complete,
+                tool_batch_completion,
             )?;
         }
-        let new = self
-            .manager
-            .fork_thread_from_history(snapshot, startup, history)
-            .await?;
+        let new = if stored {
+            self.manager
+                .fork_prepared_thread(
+                    startup,
+                    prepared.context("Stored fork boundary unavailable")?,
+                )
+                .await?
+        } else {
+            drop(prepared);
+            self.manager
+                .fork_thread_from_history(snapshot, startup, history)
+                .await?
+        };
         let fork_id = new.thread_id;
+        if stored {
+            self.native_threads
+                .lock()
+                .expect("native threads poisoned")
+                .push(NativeThreadRegistration::UnpublishedStoredFork {
+                    source: ThreadId::from_string(id_or_path)?,
+                    id: fork_id,
+                    thread: Arc::clone(&new.thread),
+                });
+        }
         if let Some(snapshot) = source_code {
             self.interception.stage_code_state(fork_id, snapshot);
         }
-        let mut native = self.wrap(new, instructions, extension_events).await?;
+        let mut native =
+            match self.wrap(new, instructions, extension_events).await {
+                Ok(native) => native,
+                Err(error) if stored => {
+                    // wrap may remove the manager entry even when its first shutdown
+                    // attempt fails. Retain the exact raw candidate as cleanup proof.
+                    let cleanup = self
+                        .discard_stored_forks(Some(ThreadId::from_string(id_or_path)?))
+                        .await;
+                    return match cleanup {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(error
+                            .context(format!("Stored fork {fork_id} cleanup failed: {cleanup}"))),
+                    };
+                }
+                Err(error) => return Err(error),
+            };
         if managed_parent {
             // This owned ID is imported from fork history, never the source
             // ID. The SDK can discard its temporary writer after export.
@@ -1426,6 +1649,7 @@ impl EngineState {
     }
 
     async fn close_locked(&self) -> anyhow::Result<()> {
+        self.discard_stored_forks(None).await?;
         if self.runtime_parent.is_some() {
             return self.close_scope().await;
         }
@@ -1477,23 +1701,70 @@ impl EngineState {
         Ok(())
     }
 
+    // Caller holds lifecycle; no wrapper/manager lookup substitutes for the
+    // exact writer's positive shutdown receipt. Failed deletion keeps the entry.
+    pub(crate) async fn discard_stored_forks(
+        &self,
+        source: Option<ThreadId>,
+    ) -> anyhow::Result<()> {
+        let pending: Vec<_> = self
+            .native_threads
+            .lock()
+            .expect("native threads poisoned")
+            .iter()
+            .filter_map(|entry| match entry {
+                NativeThreadRegistration::UnpublishedStoredFork {
+                    source: owner,
+                    id,
+                    thread,
+                } if source.is_none_or(|source| source == *owner) => {
+                    Some((*id, Arc::clone(thread)))
+                }
+                _ => None,
+            })
+            .collect();
+        for (id, thread) in pending {
+            thread.shutdown_and_wait().await?;
+            self.manager.remove_thread_if_matches(&id, &thread).await;
+            self.rollback_checkpoint_import(&[id], None).await?;
+            self.event_owners.lock().await.remove(&id);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_stored_fork(&self, id: ThreadId) -> bool {
+        let mut threads = self.native_threads.lock().expect("native threads poisoned");
+        let before = threads.len();
+        threads.retain(|entry| {
+            !matches!(entry, NativeThreadRegistration::UnpublishedStoredFork { id: pending, .. } if *pending == id)
+        });
+        threads.len() != before
+    }
+
     pub(crate) fn register_native_thread(
         &self,
         owner: &Arc<std::sync::Mutex<crate::NativeThreadOwner>>,
     ) {
         let mut threads = self.native_threads.lock().expect("native threads poisoned");
-        threads.retain(|thread| thread.strong_count() != 0);
-        threads.push(Arc::downgrade(owner));
+        threads.retain(|entry| match entry {
+            NativeThreadRegistration::Owner(thread) => thread.strong_count() != 0,
+            NativeThreadRegistration::UnpublishedStoredFork { .. } => true,
+        });
+        threads.push(NativeThreadRegistration::Owner(Arc::downgrade(owner)));
     }
 
     pub(crate) fn release_native_threads(&self) {
-        for thread in self
+        let threads: Vec<_> = self
             .native_threads
             .lock()
             .expect("native threads poisoned")
             .drain(..)
-            .filter_map(|thread| thread.upgrade())
-        {
+            .filter_map(|entry| match entry {
+                NativeThreadRegistration::Owner(thread) => thread.upgrade(),
+                NativeThreadRegistration::UnpublishedStoredFork { .. } => None,
+            })
+            .collect();
+        for thread in threads {
             thread
                 .lock()
                 .expect("native thread owner poisoned")
@@ -1519,6 +1790,10 @@ impl EngineState {
                 .codex_account
                 .as_ref()
                 .and_then(|account| account.credential_directory.as_deref()),
+            saved_login_home_alias: self
+                .codex_account
+                .as_ref()
+                .and_then(|account| account.auth_home_alias.as_deref()),
         }
     }
 
@@ -2083,7 +2358,7 @@ fn native_event(
     {
         event.msg = retained;
     }
-    let mut value = serde_json::to_value(&event)?;
+    let mut value = event.sdk_json()?;
     if session_reader
         && let EventMsg::RealtimeConversationRealtime(realtime) = &event.msg
         && let codex_protocol::protocol::RealtimeEvent::HandoffRequested(handoff) =
@@ -2807,6 +3082,43 @@ impl ThreadState {
     }
 }
 
+fn prepare_private_transport(
+    startup: &mut StartThreadOptions,
+    pool: Option<&codex_http_client::SdkModelHttpPool>,
+    private_http: bool,
+) -> anyhow::Result<()> {
+    if private_http {
+        let config = &mut startup.config;
+        let provider = &mut config.model_provider;
+        ensure!(
+            pool.is_some()
+                && matches!(&startup.initial_history, InitialHistory::New)
+                && config.model_provider_id == "native_agent"
+                && provider.requires_openai_auth
+                && provider.supports_websockets
+                && provider.base_url.as_deref() == Some("https://api.openai.com/v1")
+                && !provider.has_request_routing_overrides(),
+            "private HTTP requires the implicit default SDK Responses provider on a fresh thread"
+        );
+        provider.supports_websockets = false;
+        if let Some(selected) = config.model_providers.get_mut(&config.model_provider_id) {
+            selected.supports_websockets = false;
+        }
+    }
+    if let Some(pool) = pool {
+        startup.thread_extension_init.insert(pool.clone());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "private_http_tests.rs"]
+mod private_http_tests;
+
+#[cfg(test)]
+#[path = "stored_fork_tests.rs"]
+mod stored_fork_tests;
+
 #[cfg(test)]
 #[path = "response_history_tests.rs"]
 mod response_history_tests;
@@ -2881,6 +3193,8 @@ mod rebuild_consumer_tests {
             async move {
                 for (call_id, verified) in [("failure-call", Some(false)), ("legacy-call", None)] {
                     let specs = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                        strict: false,
+                        output_schema: None,
                         name: "reserve".into(),
                         description: "Record the known reservation outcome".into(),
                         input_schema: json!({
@@ -2925,6 +3239,8 @@ mod rebuild_consumer_tests {
                                 ..Default::default()
                             },
                         ),
+                        asynchronous: None,
+                        status: None,
                     };
                     let earlier_output = ResponseItem::FunctionCallOutput {
                         id: None,
@@ -2954,6 +3270,8 @@ mod rebuild_consumer_tests {
                                 ..Default::default()
                             },
                         ),
+                        asynchronous: None,
+                        status: None,
                     };
                     // Use Core's public history entry point, which records,
                     // checkpoints and flushes through the real local writer.

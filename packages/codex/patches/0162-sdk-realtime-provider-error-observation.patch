@@ -1,0 +1,119 @@
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+@@ -1741,19 +1741,18 @@
+             Some("error") if media && state.accepted.is_some() => {
+                 let error = &event["error"];
+                 let code = error["code"].as_str();
+-                if !matches!(
+-                    error["type"].as_str(),
+-                    Some("invalid_request_error" | "rate_limit_error")
+-                ) || matches!(code, Some("session_expired" | "session_closed"))
++                // Steady-state provider rejections are observations. Initial and
++                // unconfirmed configuration updates are handled above; explicit
++                // session termination still follows the fatal transport path.
++                if !error.is_object() || matches!(code, Some("session_expired" | "session_closed"))
+                 {
+                     return FrameObservation::default();
+                 }
+                 let event_id = error["event_id"]
+                     .as_str()
+                     .filter(|id| !id.is_empty() && id.len() <= 256);
+-                if state.response_create_pending && event_id.is_none() {
+-                    return FrameObservation::default();
+-                }
++                // Only exact request correlation can release a pending create.
++                // An uncorrelated observation leaves its guard and ownership intact.
+                 let rejected_response_create = state.response_create_pending
+                     && event_id.is_some()
+                     && state.pending_response_event_id.as_deref() == event_id;
+@@ -2412,6 +2411,90 @@
+     }
+ 
+     #[test]
++    fn steady_state_uncorrelated_provider_errors_are_observations() {
++        for error in [
++            json!({"code":"small_provider_error"}),
++            json!({"type":"server_error", "code":"server_error", "message":"private detail"}),
++            json!({"type":"invalid_request_error", "code":"invalid_value"}),
++            json!({"type":"rate_limit_error", "code":"rate_limit_exceeded"}),
++        ] {
++            let observer = accepted_observer();
++            let configuration = observer.configuration();
++            let original = configuration.accepted().unwrap();
++            let observed =
++                observer.observe_frame(&json!({"type":"error", "error":error}).to_string(), true);
++            let rejection = observed.request_error.unwrap();
++            assert_eq!(rejection.code.as_deref(), error["code"].as_str());
++            assert_eq!(rejection.event_id, None);
++            assert!(!rejection.rejected_default_response_create);
++            assert!(Arc::ptr_eq(&original, &configuration.accepted().unwrap()));
++            assert!(!observer.mismatched());
++            assert!(!format!("{rejection:?}").contains("private detail"));
++        }
++    }
++
++    #[test]
++    fn uncorrelated_provider_error_preserves_pending_response_create_owner() {
++        for event_id in [None, Some("unrelated-request")] {
++            let observer = accepted_hosted_observer();
++            let configuration = observer.configuration();
++            let response = json!({"metadata":{"request":"owned"}});
++            configuration.observe_response_create(&response).unwrap();
++            let mut wire = json!({"type":"response.create", "response":response});
++            configuration.identify_response_create(&mut wire);
++            let (original_id, original_metadata, original_owner, original_guard) = {
++                let state = configuration.inner.state.lock().unwrap();
++                (
++                    state.pending_response_event_id.clone(),
++                    state.pending_response_metadata.clone(),
++                    state.pending_create_owner.clone(),
++                    state.pending_create_guard.clone().unwrap(),
++                )
++            };
++            let mut error = json!({"type":"server_error", "code":"temporary_error"});
++            if let Some(event_id) = event_id {
++                error["event_id"] = json!(event_id);
++            }
++            let observed =
++                observer.observe_frame(&json!({"type":"error", "error":error}).to_string(), true);
++            assert!(
++                !observed
++                    .request_error
++                    .unwrap()
++                    .rejected_default_response_create
++            );
++            assert!(configuration.response_create_pending());
++            let state = configuration.inner.state.lock().unwrap();
++            assert_eq!(state.pending_response_event_id, original_id);
++            assert_eq!(state.pending_response_metadata, original_metadata);
++            assert!(Arc::ptr_eq(
++                state.pending_create_owner.as_ref().unwrap(),
++                original_owner.as_ref().unwrap(),
++            ));
++            assert!(!original_guard.is_retired());
++            drop(state);
++            assert!(!observer.mismatched());
++        }
++    }
++
++    #[test]
++    fn terminal_or_malformed_steady_state_errors_keep_fatal_classification() {
++        for error in [
++            json!(null),
++            json!({"code":"session_expired"}),
++            json!({"code":"session_closed"}),
++        ] {
++            let observer = accepted_observer();
++            assert!(
++                observer
++                    .observe_frame(&json!({"type":"error", "error":error}).to_string(), true,)
++                    .request_error
++                    .is_none()
++            );
++        }
++    }
++
++    #[test]
+     fn provider_errors_settle_readiness_without_exposing_payload() {
+         let (observer, state) = SessionReadiness::channel(Some(json!({})), true);
+         observer

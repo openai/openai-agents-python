@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
+import socketserver
 import ssl
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -976,3 +979,197 @@ async def test_websocket_malformed_terminal_retires_socket_before_next_request()
             assert len(provider.requests) == 2
             assert provider.connections == 2
             assert not provider.http_requests
+
+
+@pytest.mark.parametrize("ca_variable", ["SSL_CERT_FILE", "CODEX_CA_CERTIFICATE"])
+async def test_plain_websocket_rechecks_custom_ca_before_fresh_connections(
+    ca_variable: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    for variable in ("SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_CA_CERTIFICATE"):
+        monkeypatch.delenv(variable, raising=False)
+    async with timeout(30), peer() as server:
+        shared = NativeProvider(
+            base_url=server.url,
+            api_key="synthetic-ws-key",
+            supports_websockets=True,
+            request_max_retries=0,
+            stream_max_retries=0,
+        )
+        server.providers.append(shared)
+        agent = Agent(
+            instructions="Keep plain transport and fresh custom trust validation.", provider=shared
+        )
+        server.respond(assistant_output("default trust"))
+        first = await agent.run("default trust input")
+        assert first.final_output == "default trust"
+        connections_before_error = server.connections
+        upgrades_before_error = len(server.upgrades)
+        frames_before_error = len(server.frames)
+        monkeypatch.setenv(ca_variable, str(tmp_path / "missing-custom-ca.pem"))
+        server.respond(assistant_output("HTTP fallback"))
+        fallback = await agent.run("custom CA validation must precede a plain connection")
+        assert fallback.final_output == "HTTP fallback"
+        assert len(server.requests) == 2
+        assert len(server.http_requests) == 1
+        assert server.connections == connections_before_error
+        assert len(server.upgrades) == upgrades_before_error
+        assert len(server.frames) == frames_before_error
+        monkeypatch.delenv(ca_variable)
+        server.respond(assistant_output("fresh recovery"))
+        recovered = await agent.run("fresh recovery input")
+        assert recovered.final_output == "fresh recovery"
+        assert (
+            len({first.turn.session_id, fallback.turn.session_id, recovered.turn.session_id}) == 3
+        )
+        assert len(server.requests) == 3
+        assert len(server.http_requests) == 1
+        assert server.connections == connections_before_error + 1
+        assert len(server.upgrades) == upgrades_before_error + 1
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("trust_proxy", [True, False])
+async def test_websocket_provider_verifies_https_proxy_including_http_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, trust_proxy: bool
+) -> None:
+    from urllib.parse import urlsplit
+
+    from tests.test_sdk_session_tls import TLS_FIXTURES
+
+    for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    for name in ("server-A.pem", "server-A.key"):
+        (tmp_path / name).write_text(TLS_FIXTURES[name])
+    context.load_cert_chain(tmp_path / "server-A.pem", tmp_path / "server-A.key")
+    if trust_proxy:
+        ca = tmp_path / "ca-A.pem"
+        ca.write_text(TLS_FIXTURES[ca.name])
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    prefixes: list[bytes] = []
+    handshake_failures: list[str] = []
+    handshake_successes: list[bool] = []
+    post_handshake_closures: list[str] = []
+    accepted_data: list[bytes] = []
+    loop = asyncio.get_running_loop()
+    attempt_observed = asyncio.Event()
+
+    class Proxy(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.settimeout(5)
+            # Peek without consuming ClientHello before the real TLS handshake.
+            prefix = self.request.recv(1, socket.MSG_PEEK)
+            prefixes.append(prefix)
+            if prefix != b"\x16":
+                if prefix:
+                    loop.call_soon_threadsafe(attempt_observed.set)
+                return
+            try:
+                secured = context.wrap_socket(self.request, server_side=True)
+            except OSError as error:
+                handshake_failures.append(
+                    str(getattr(error, "reason", None) or type(error).__name__)
+                )
+                loop.call_soon_threadsafe(attempt_observed.set)
+                return
+            handshake_successes.append(True)
+            with secured:
+                data = b""
+                try:
+                    while b"\r\n" not in data and len(data) < 1024:
+                        chunk = secured.recv(min(256, 1024 - len(data)))
+                        if not chunk:
+                            post_handshake_closures.append("EOF")
+                            break
+                        data += chunk
+                except OSError as error:
+                    post_handshake_closures.append(
+                        str(getattr(error, "reason", None) or type(error).__name__)
+                    )
+                finally:
+                    if data:
+                        accepted_data.append(data.split(b"\r\n", 1)[0])
+                    loop.call_soon_threadsafe(attempt_observed.set)
+
+    proxy = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Proxy)
+    serving = asyncio.create_task(asyncio.to_thread(proxy.serve_forever, poll_interval=0.01))
+    proxy_url = f"https://127.0.0.1:{proxy.server_address[1]}"
+    for name in (
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ):
+        monkeypatch.setenv(name, proxy_url)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    try:
+        async with timeout(30), peer() as destination:
+            destination.respond(assistant_output("unexpected proxy bypass"))
+            provider = NativeProvider(
+                base_url=destination.url,
+                api_key="synthetic-proxy-key",
+                supports_websockets=True,
+                request_max_retries=0,
+                stream_max_retries=0,
+            )
+            request = asyncio.create_task(
+                Agent(instructions="Keep proxy TLS verification.", provider=provider).run(
+                    "Do not send a request through an untrusted proxy."
+                )
+            )
+            try:
+                # Observe the handshake before stopping Core's connection-retry loop.
+                await attempt_observed.wait()
+            finally:
+                request.cancel()
+                try:
+                    with pytest.raises((asyncio.CancelledError, NativeError)):
+                        await request
+                finally:
+                    await provider.aclose()
+            assert not destination.requests
+            assert not destination.http_requests
+            assert not destination.upgrades
+    finally:
+        # shutdown joins serve_forever; server_close joins every request thread.
+        try:
+            await asyncio.to_thread(proxy.shutdown)
+            await serving
+        finally:
+            await asyncio.to_thread(proxy.server_close)
+    assert any(prefix == b"\x16" for prefix in prefixes)
+    assert all(prefix in (b"", b"\x16") for prefix in prefixes), "plaintext reached the HTTPS proxy"
+    rejection_errors = {
+        "TLSV1_ALERT_UNKNOWN_CA",
+        "UNEXPECTED_EOF_WHILE_READING",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+    }
+    assert all(reason in rejection_errors | {"EOF"} for reason in post_handshake_closures), (
+        post_handshake_closures
+    )
+    if trust_proxy:
+        assert handshake_successes, "the trusted proxy never completed TLS negotiation"
+        # Proxy policy can select WebSocket CONNECT or the existing HTTP fallback.
+        # Both routes must verify proxy TLS before sending application data.
+        authority = urlsplit(destination.url).netloc
+        expected = {
+            f"CONNECT {authority} HTTP/1.1".encode(),
+            f"POST {destination.url}/responses HTTP/1.1".encode(),
+        }
+        assert accepted_data and all(line in expected for line in accepted_data), accepted_data
+    else:
+        assert all(reason in rejection_errors for reason in handshake_failures), handshake_failures
+        if sys.platform == "win32":
+            # SChannel: final TLS bytes before certificate validation.
+            assert handshake_failures or post_handshake_closures
+        else:
+            assert handshake_failures
+            assert not handshake_successes, "the untrusted proxy completed TLS negotiation"
+        assert not accepted_data, "an untrusted proxy accepted CONNECT or application data"

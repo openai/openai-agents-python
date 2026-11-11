@@ -1,0 +1,241 @@
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -680,6 +680,12 @@
+     turn_context: &Arc<TurnContext>,
+     pending_input_item: &TurnInput,
+ ) -> HookRuntimeOutcome {
++    if sess.private_disposable() && sess.hooks().is_empty() {
++        return HookRuntimeOutcome {
++            should_stop: false,
++            additional_contexts: Vec::new(),
++        };
++    }
+     match pending_input_item {
+         TurnInput::UserInput { content, .. } => {
+             let request = UserPromptSubmitRequest {
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -26,6 +26,8 @@
+ mod responses_metadata;
+ mod responses_retry;
+ pub(crate) mod session;
++#[doc(hidden)]
++pub use session::PrivateDisposableRun;
+ pub use codex_protocol::turn_input::NotSubmittedReason;
+ pub use codex_protocol::turn_input::RecoverTurnRequest;
+ pub use codex_protocol::turn_input::StartIfIdleSubmission;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -511,6 +511,13 @@
+         })
+ }
+ 
++/// Genuine response records for one private, nonresumable SDK execution.
++#[doc(hidden)]
++#[derive(Default)]
++pub struct PrivateDisposableRun {
++    records: std::sync::Mutex<Vec<codex_protocol::protocol::ResponseObservationRecord>>,
++}
++
+ pub(crate) const INITIAL_SUBMIT_ID: &str = "";
+ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+ const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
+@@ -2637,7 +2644,7 @@
+             warn!("failed to persist realtime history: {error}");
+         }
+         // Persist the event into rollout storage; the store applies its persistence policy.
+-        if persist {
++        if persist && self.live_thread().is_some() {
+             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
+             self.persist_rollout_items(&rollout_items).await;
+         }
+@@ -4523,6 +4530,11 @@
+     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
+     async fn send_raw_response_items(&self, turn_context: &TurnContext, items: &[ResponseItem]) {
+         for item in items {
++            if self.private_disposable()
++                && matches!(item, ResponseItem::Message { role, .. } if role == "user")
++            {
++                continue;
++            }
+             self.send_event(
+                 turn_context,
+                 EventMsg::RawResponseItem(RawResponseItemEvent { item: item.clone() }),
+@@ -5188,13 +5200,23 @@
+         Ok(())
+     }
+ 
++    pub(crate) fn private_disposable(&self) -> bool {
++        self.services
++            .thread_extension_data
++            .get::<PrivateDisposableRun>()
++            .is_some()
++    }
++
+     pub(crate) async fn record_response_observation(
+         &self,
+         turn_context: &TurnContext,
+         observation: codex_protocol::protocol::ResponseObservation,
+     ) -> CodexResult<Option<String>> {
+-        // Ephemeral sessions deliberately have no retained history sink.
+-        if self.live_thread().is_none() {
++        let private = self
++            .services
++            .thread_extension_data
++            .get::<PrivateDisposableRun>();
++        if self.live_thread().is_none() && private.is_none() {
+             return Ok(None);
+         }
+         let id = Uuid::now_v7().to_string();
+@@ -5204,6 +5226,15 @@
+             turn_id: turn_context.sub_id.clone(),
+             observation,
+         };
++        if self.live_thread().is_none() {
++            private
++                .expect("private response owner")
++                .records
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .push(record);
++            return Ok(Some(id));
++        }
+         if !self
+             .persist_rollout_items(&[RolloutItem::ResponseObservationRecord(record)])
+             .await
+@@ -5479,6 +5510,26 @@
+                 }],
+             )
+             .await;
++        if self.private_disposable() {
++            self.record_prepared_conversation_items(
++                turn_context,
++                model_info,
++                prepared_items,
++                image_preparations,
++                None,
++            )
++            .await;
++            for contributor in self.services.extensions.turn_lifecycle_contributors() {
++                contributor
++                    .on_user_input_recorded(
++                        &self.services.thread_extension_data,
++                        turn_context.extension_data.as_ref(),
++                        client_id.as_deref(),
++                    )
++                    .await;
++            }
++            return;
++        }
+         let mut user_message_item = UserMessageItem::new(input);
+         apply_prepared_image_file_ids(
+             &mut user_message_item,
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1711,6 +1711,15 @@
+                     thread_id,
+                 }),
+             )?;
++            if thread_extension_data
++                .get::<super::PrivateDisposableRun>()
++                .is_some()
++            {
++                anyhow::ensure!(
++                    managed_execution && config.ephemeral && hooks.is_empty(),
++                    "private execution requires managed empty native hooks"
++                );
++            }
+             for warning in hooks.startup_warnings() {
+                 post_session_configured_events.push(Event {
+                     id: INITIAL_SUBMIT_ID.to_owned(),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -13924,3 +13924,48 @@
+ ) -> super::step_settings::StepSettings {
+     turn.next_step_settings.load().selected().clone()
+ }
++
++#[tokio::test]
++async fn private_response_record_retains_the_returned_identity_and_received_facts() {
++    use codex_protocol::protocol::{
++        ResponseIncompleteReason, ResponseObservation, ResponseObservationStatus,
++    };
++
++    let (session, context) = make_session_and_context().await;
++    assert!(session.live_thread().is_none());
++    let observation = ResponseObservation {
++        response_id: Some("synthetic-response".to_string()),
++        upstream_request_id: Some("synthetic-provider-request".to_string()),
++        status: ResponseObservationStatus::Incomplete,
++        incomplete_reason: Some(ResponseIncompleteReason::MaxOutputTokens),
++        usage: None,
++    };
++    // Ordinary ephemeral sessions keep their existing absent-record behavior.
++    assert!(
++        session
++            .record_response_observation(&context, observation.clone())
++            .await
++            .unwrap()
++            .is_none()
++    );
++    session
++        .services
++        .thread_extension_data
++        .insert(super::PrivateDisposableRun::default());
++    let id = session
++        .record_response_observation(&context, observation.clone())
++        .await
++        .unwrap()
++        .unwrap();
++    let owner = session
++        .services
++        .thread_extension_data
++        .get::<super::PrivateDisposableRun>()
++        .unwrap();
++    let records = owner.records.lock().unwrap();
++    assert_eq!(records.len(), 1);
++    assert_eq!(records[0].id, id);
++    assert_eq!(records[0].thread_id, session.thread_id);
++    assert_eq!(records[0].turn_id, context.sub_id);
++    assert_eq!(records[0].observation, observation);
++}
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -273,6 +273,16 @@
+         })
+     }
+ 
++    /// Records committed private user input without requiring a rendered item.
++    fn on_user_input_recorded<'a>(
++        &'a self,
++        _thread_store: &'a ExtensionData,
++        _turn_store: &'a ExtensionData,
++        _client_id: Option<&'a str>,
++    ) -> ExtensionFuture<'a, ()> {
++        Box::pin(std::future::ready(()))
++    }
++
+     /// Observes a completed item without changing it or delaying streamed deltas.
+     fn on_item_completed<'a>(
+         &'a self,
+diff --git a/codex-rs/hooks/src/registry.rs b/codex-rs/hooks/src/registry.rs
+--- a/codex-rs/hooks/src/registry.rs
++++ b/codex-rs/hooks/src/registry.rs
+@@ -68,6 +68,11 @@
+ }
+ 
+ impl Hooks {
++    #[doc(hidden)]
++    pub fn is_empty(&self) -> bool {
++        self.after_agent.is_empty() && self.engine.handlers.is_empty()
++    }
++
+     /// Bind this session's hook runtime and output files to its thread, rejecting unloadable
+     /// required managed hooks.
+     pub fn new(

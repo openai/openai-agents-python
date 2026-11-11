@@ -19,6 +19,7 @@ class Adapter:
         sync_tool: bool = False,
         response_mode: str = "streaming",
         transport: str = "http",
+        default_host: bool = False,
     ):
         if transport not in ("http", "websocket") or (
             transport == "websocket" and response_mode != "streaming"
@@ -32,12 +33,9 @@ class Adapter:
         provider_options = {"response_mode": "buffered"} if response_mode == "buffered" else {}
         self.stream = stream
         self.tool_calls = 0
-        self.provider = NativeProvider(
-            base_url=base_url,
-            api_key="synthetic-benchmark-key",
-            supports_websockets=transport == "websocket",
-            **provider_options,
-        )
+        if not default_host:
+            provider_options.update(base_url=base_url, supports_websockets=transport == "websocket")
+        self.provider = NativeProvider(api_key="synthetic-benchmark-key", **provider_options)
 
         def synchronous_echo(value: str) -> str:
             """Return the supplied value unchanged."""

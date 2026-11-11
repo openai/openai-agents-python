@@ -1,0 +1,251 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+index 1795076cf343efa35e90ad866425cd3adb4ce84f..07025b629a163306154cb47dc3897b139fa1346b 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+@@ -267,10 +267,12 @@ enum PendingPhase {
+ #[derive(Clone)]
+ enum ReceiptState {
+     Pending,
++    Rejected,
+     Accepted(Arc<RealtimeAcceptedConfiguration>),
+     Failed(ReadyState),
+ }
+ struct PendingConfiguration {
++    recoverable_rejection: bool,
+     hosted_owned: bool,
+     native_source: Option<Arc<dyn RealtimeNativeSource>>,
+     caller_managed_functions: Option<Arc<BTreeSet<String>>>,
+@@ -286,10 +288,20 @@ pub struct RealtimeConfigurationReceipt {
+     result: watch::Receiver<ReceiptState>,
+ }
+ impl RealtimeConfigurationReceipt {
++    /// Exact negative acceptance of an ordinary live update, without retiring its connection.
++    pub fn is_definitely_rejected(&self) -> bool {
++        matches!(*self.result.borrow(), ReceiptState::Rejected)
++    }
++
+     pub async fn wait(mut self) -> Result<Arc<RealtimeAcceptedConfiguration>, ApiError> {
+         loop {
+             match self.result.borrow_and_update().clone() {
+                 ReceiptState::Pending => {}
++                ReceiptState::Rejected => {
++                    return Err(invalid(
++                        "Provider rejected this Realtime configuration revision",
++                    ));
++                }
+                 ReceiptState::Accepted(snapshot) => return Ok(snapshot),
+                 ReceiptState::Failed(state) => {
+                     return Err(invalid(match state {
+@@ -642,6 +654,7 @@ impl RealtimeConfiguration {
+         payload["event_id"] = Value::String(id.clone());
+         let (completion, result) = watch::channel(ReceiptState::Pending);
+         state.pending = Some(PendingConfiguration {
++            recoverable_rejection: source.is_none(),
+             hosted_owned: accepted.hosted_owned
+                 || update.settings.hosted_mcp_tools.is_some()
+                 || update.raw_tools.is_some(),
+@@ -1530,6 +1543,7 @@ impl SessionReadiness {
+                         hosted_mcp: Default::default(),
+                         accepted: None,
+                         pending: Some(PendingConfiguration {
++                            recoverable_rejection: false,
+                             hosted_owned: wait_for_update,
+                             native_source,
+                             caller_managed_functions: None,
+@@ -1678,6 +1692,37 @@ impl SessionReadiness {
+                             .zip(event["error"]["event_id"].as_str())
+                             .is_some_and(|(request, referred)| request == referred)
+                 });
++                // Only the exact, explicitly rejected ordinary live revision can roll back.
++                // Initial admission and source/profile revisions remain fail-closed.
++                if rejected
++                    && media
++                    && state.accepted.is_some()
++                    && state
++                        .pending
++                        .as_ref()
++                        .is_some_and(|pending| pending.recoverable_rejection)
++                    && definite_application_update_error(&event["error"])
++                {
++                    if let Some(completion) =
++                        state.pending.take().and_then(|pending| pending.completion)
++                    {
++                        completion.send_replace(ReceiptState::Rejected);
++                    }
++                    self.configuration
++                        .inner
++                        .signal
++                        .send_replace(ReadyState::Ready);
++                    return FrameObservation {
++                        request_error: Some(
++                            codex_protocol::protocol::RealtimeProviderRequestError {
++                                code: event["error"]["code"].as_str().map(str::to_owned),
++                                event_id: event["error"]["event_id"].as_str().map(str::to_owned),
++                                rejected_default_response_create: false,
++                            },
++                        ),
++                        ..FrameObservation::default()
++                    };
++                }
+                 let failure = if rejected {
+                     ReadyState::Rejected
+                 } else {
+@@ -2253,8 +2298,130 @@ fn contains_expected_at(accepted: &Value, expected: &Value, site: MatchSite) ->
+     }
+ }
+ 
++// A definite provider rejection needs a complete typed error and exact bounded reference.
++fn definite_application_update_error(error: &Value) -> bool {
++    error.is_object()
++        && error["type"] == "invalid_request_error"
++        && error["message"].is_string()
++        && error["event_id"]
++            .as_str()
++            .is_some_and(|id| !id.is_empty() && id.len() <= 256)
++        && error
++            .get("param")
++            .is_none_or(|value| value.is_null() || value.is_string())
++        && error.get("code").is_none_or(|value| {
++            value.is_null()
++                || value.as_str().is_some_and(|code| {
++                    !code.is_empty()
++                        && code.len() <= 128
++                        && code
++                            .bytes()
++                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
++                        && !matches!(code, "session_expired" | "session_closed")
++                })
++        })
++}
++
+ #[cfg(test)]
+ mod tests {
++    #[tokio::test]
++    async fn exact_application_update_rejection_preserves_acceptance_and_next_work() {
++        let observer = accepted_observer();
++        let configuration = observer.configuration();
++        let original = configuration.accepted().unwrap();
++        let reservation = configuration.reserve_update(&g711_update()).unwrap();
++        let receipt = reservation.receipt();
++        reservation.arm().unwrap();
++        let observed = observer.observe_frame(&json!({"type":"error","error":{
++            "type":"invalid_request_error", "code":"invalid_value", "message":"private detail", "event_id":reservation.id
++        }}).to_string(), true);
++        let error = observed.request_error.unwrap();
++        assert_eq!(error.event_id.as_deref(), Some(reservation.id.as_str()));
++        assert_eq!(error.code.as_deref(), Some("invalid_value"));
++        assert!(!error.rejected_default_response_create);
++        assert!(receipt.is_definitely_rejected());
++        assert!(receipt.clone().wait().await.is_err());
++        assert!(Arc::ptr_eq(&original, &configuration.accepted().unwrap()));
++        assert!(!observer.mismatched());
++        let next = configuration.reserve_update(&g711_update()).unwrap();
++        let next_receipt = next.receipt();
++        next.arm().unwrap();
++        let accepted = configuration
++            .inner
++            .state
++            .lock()
++            .unwrap()
++            .pending
++            .as_ref()
++            .unwrap()
++            .contract
++            .clone();
++        acknowledge(&observer, accepted);
++        assert!(next_receipt.wait().await.is_ok());
++        assert!(receipt.is_definitely_rejected());
++        assert!(configuration.observe_response_create(&json!({})).is_ok());
++    }
++
++    #[tokio::test]
++    async fn ambiguous_malformed_initial_and_source_update_errors_remain_terminal() {
++        for mode in [
++            "wrong-id",
++            "unarmed",
++            "not-media",
++            "missing-message",
++            "bad-code",
++            "closed",
++            "rate-limit",
++            "source",
++        ] {
++            let observer = accepted_observer();
++            let configuration = observer.configuration();
++            let reservation = if mode == "source" {
++                configuration.reserve_update_with_source(
++                    &g711_update(),
++                    Arc::new(TestSource(AgentProfileReceipt {
++                        profile_id: "source".into(),
++                        epoch: 1,
++                    })),
++                )
++            } else {
++                configuration.reserve_update(&g711_update())
++            }
++            .unwrap();
++            let receipt = reservation.receipt();
++            if mode != "unarmed" {
++                reservation.arm().unwrap();
++            }
++            let mut error = json!({"type":"invalid_request_error","code":"invalid_value","message":"private","event_id":reservation.id});
++            match mode {
++                "wrong-id" => error["event_id"] = json!("another-request"),
++                "missing-message" => {
++                    error.as_object_mut().unwrap().remove("message");
++                }
++                "bad-code" => error["code"] = json!(42),
++                "closed" => error["code"] = json!("session_closed"),
++                "rate-limit" => error["type"] = json!("rate_limit_error"),
++                _ => {}
++            }
++            assert!(
++                observer
++                    .observe_frame(
++                        &json!({"type":"error","error":error}).to_string(),
++                        mode != "not-media"
++                    )
++                    .request_error
++                    .is_none()
++            );
++            assert!(!receipt.is_definitely_rejected(), "{mode}");
++            assert!(receipt.wait().await.is_err(), "{mode}");
++            assert!(configuration.accepted().is_err(), "{mode}");
++        }
++        let (observer, _) = SessionReadiness::channel(Some(json!({})), true);
++        let observer = observer.unwrap();
++        assert!(observer.observe_frame(r#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"private","event_id":"initial"}}"#, true).request_error.is_none());
++        assert!(observer.configuration().accepted().is_err());
++    }
++
+     use super::*;
+     use serde_json::json;
+ 
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 29b3809d6d1540e42b307fbf48e9f9cb2839db97..35d90293ca4ab1d97f16e794d75d9b7696c6ec67 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -5595,8 +5595,12 @@ async fn handle_sdk_realtime_command(
+             delegation,
+             mut reply,
+         } => {
++            let mut definite_rejection = false;
+             let accepted = match async {
+-                writer.send_reserved_update(reservation).await?.wait().await
++                let receipt = writer.send_reserved_update(reservation).await?;
++                let result = receipt.clone().wait().await;
++                definite_rejection = receipt.is_definitely_rejected();
++                result
+             }
+             .await
+             {
+@@ -5607,6 +5611,9 @@ async fn handle_sdk_realtime_command(
+                             "Realtime settings update was rejected".into(),
+                         )));
+                     }
++                    if definite_rejection && continuation.is_none() && delegation.is_none() {
++                        return Ok(());
++                    }
+                     return Err(error.into());
+                 }
+             };

@@ -1,0 +1,47 @@
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -88,6 +88,8 @@
+ /// and application completion policy before accepting it; the host may still discard
+ /// the proposal if steering or cancellation wins the final reservation.
+ pub struct ToolCompletionInput<'a> {
++    /// Validate the held result without granting terminal completion.
++    pub guard_only: bool,
+     pub turn_id: &'a str,
+     pub model: &'a str,
+     pub call: &'a codex_protocol::models::ResponseItem,
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2648,7 +2648,7 @@
+     tools: &SettledDirectTools,
+     cancellation: &CancellationToken,
+ ) -> CodexResult<Option<codex_protocol::protocol::ToolTurnCompletion>> {
+-    if !tools.all_succeeded || tools.calls.is_empty() {
++    if tools.calls.is_empty() {
+         return Ok(None);
+     }
+     if tools.calls.len() != tools.outputs.len() {
+@@ -2675,6 +2675,7 @@
+         for contributor in sess.services.extensions.turn_lifecycle_contributors() {
+             let decision = contributor
+                 .propose_tool_completion(codex_extension_api::ToolCompletionInput {
++                    guard_only: !tools.all_succeeded,
+                     turn_id: &step.turn.sub_id,
+                     model: &step.settings.model_info.slug,
+                     call,
+@@ -2712,6 +2713,8 @@
+                     }
+                     return Ok(None);
+                 }
++                Some(codex_extension_api::ToolCompletionDecision::Accept { .. })
++                    if !tools.all_succeeded => continue,
+                 Some(codex_extension_api::ToolCompletionDecision::Accept { final_output }) => {
+                     return Ok(Some(codex_protocol::protocol::ToolTurnCompletion {
+                         call_id: call_id.clone(),
+@@ -3343,6 +3346,7 @@
+                             .any(|contributor| {
+                                 contributor.hold_tool_completion(
+                                     codex_extension_api::ToolCompletionInput {
++                                        guard_only: false,
+                                         turn_id: &turn_context.sub_id,
+                                         model: &step_context.settings.model_info.slug,
+                                         call,

@@ -21,6 +21,7 @@ from ._public import (
     preserve_module_identity as _preserve_module_identity,
     type_alias_constructor as _type_alias_constructor,
 )
+from .input import InputAudio as _InputAudio
 from .subagents import Subagent as Subagent
 
 if TYPE_CHECKING:
@@ -586,6 +587,7 @@ class WebSearchCallItem(TypedDict):
     turn_id: str
     status: OutputItemStatus
     action: WebSearchAction | None
+    results: NotRequired[list[JsonValue]]
 
 
 class _HostedCallItem(TypedDict):
@@ -634,6 +636,26 @@ class FunctionCallOutputItem(TypedDict):
     output: str | list[InputText | InputImage | InputFile] | None
     error: str | None
     reconciliation: NotRequired[Literal["applied", "not_applied"]]
+
+
+class ToolSearchCallItem(TypedDict):
+    type: Literal["tool_search_call"]
+    id: str
+    turn_id: str
+    call_id: str | None
+    execution: str
+    arguments: JsonValue
+    status: FunctionCallStatus
+
+
+class ToolSearchOutputItem(TypedDict):
+    type: Literal["tool_search_output"]
+    id: str
+    turn_id: str
+    call_id: str | None
+    execution: str
+    tools: list[JsonValue]
+    status: FunctionCallStatus
 
 
 class McpCallItem(TypedDict):
@@ -755,11 +777,16 @@ class UserMessageItem(TypedDict):
     role: Literal["user"]
     status: Literal["completed"]
     phase: None
-    content: list[InputText | InputImage | InputFile]
+    content: list[InputText | InputImage | InputFile | _InputAudio]
 
 
 SessionItem = _PublicTypeAliasType(
-    "SessionItem", OutputItem | FunctionCallOutputItem | UserMessageItem
+    "SessionItem",
+    OutputItem
+    | FunctionCallOutputItem
+    | ToolSearchCallItem
+    | ToolSearchOutputItem
+    | UserMessageItem,
 )
 
 
