@@ -1209,6 +1209,10 @@ _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
     "native_restore_declaration", default=None
 )
 
+_produced_items_restore: ContextVar[
+    tuple[Agent[Any, Any], SessionState, asyncio.Task[Any] | None] | None
+] = ContextVar("native_produced_items_restore", default=None)
+
 
 @contextmanager
 def _private_task(
@@ -4314,6 +4318,14 @@ class Session(Generic[ContextT, OutputT]):
                 session._websockets_enabled = websockets_enabled
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
+                    capture = _produced_items_restore.get()
+                    if (
+                        capture is not None
+                        and capture[0] is policy_agent
+                        and (capture[1] is state or capture[1] == state)
+                        and capture[2] is asyncio.current_task()
+                    ):
+                        session._start_produced_items()
                     session._manual_source_digest = hashlib.sha256(
                         saved.to_json().encode()
                     ).hexdigest()
@@ -4591,6 +4603,7 @@ class Session(Generic[ContextT, OutputT]):
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
+        self._produced_items_started = False
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._profiles: dict[str, _ProfileRuntime] = {}
@@ -7190,6 +7203,11 @@ class Session(Generic[ContextT, OutputT]):
             return json.loads(result)
 
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
+
+    def _start_produced_items(self) -> None:
+        if not self._produced_items_started:
+            self._native._start_produced_items()
+            self._produced_items_started = True
 
     def _take_produced_items(self, turn: Turn[Any]) -> tuple[ProducedItem, ...]:
         turn_id = turn.turn_id

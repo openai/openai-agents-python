@@ -638,8 +638,8 @@
     },
     {
       "path": "sdk-produced-run-items.patch",
-      "sha256": "99300c496843def958c783d2560f9b5a2e7fc647e34affa60dba75ab3462a0b3"
+      "sha256": "0d65f4cb3f7007df37dd45b71a80bb4fdd1adb2ac6f9be39d520ff405abd7f23"
     }
   ],
-  "result_tree": "210be83005953e8100850403f9d664d7874b63d8"
+  "result_tree": "74244efbe27a5a12318ef1f8e887f367d41e6ad8"
 }

@@ -1166,7 +1166,7 @@ pub(crate) async fn continue_if_ready(
     if !outputs.is_empty() {
         thread
             .thread
-            .inject_response_item_envelopes(outputs)
+            .inject_sdk_response_item_envelopes(outputs, Some(&frame.turn))
             .await?;
     }
     let mut recovery_options = match frame.state["native_continuation"].get("output_schema") {

@@ -80,9 +80,14 @@ def _legacy_execution(message: dict[str, Any], turn_id: str) -> dict[str, Any] |
 def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
     kind = raw["type"]
     item_id = raw.get("id")
-    if kind in {"function_call", "custom_tool_call", "computer_call"}:
+    if kind in {"function_call", "custom_tool_call", "computer_call", "tool_search_call"}:
         item_id = item_id or raw.get("call_id")
-    elif kind in {"function_call_output", "custom_tool_call_output", "computer_call_output"}:
+    elif kind in {
+        "function_call_output",
+        "custom_tool_call_output",
+        "computer_call_output",
+        "tool_search_output",
+    }:
         item_id = item_id or (f"{raw['call_id']}:output" if raw.get("call_id") else None)
     if not item_id:
         return None
@@ -104,6 +109,25 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
         }
     if kind == "reasoning":
         return {**common, "summary": raw["summary"], "status": None}
+    if kind in {"tool_search_call", "tool_search_output"}:
+        execution = raw.get("execution")
+        if not isinstance(execution, str):
+            return None
+        call_id = raw.get("call_id")
+        status = raw.get("status")
+        is_output = kind == "tool_search_output"
+        if status not in ("in_progress", "completed", "failed", "incomplete"):
+            status = "completed" if is_output else "in_progress"
+        search_item = {
+            **common,
+            "call_id": call_id if isinstance(call_id, str) else None,
+            "execution": execution,
+            "status": status,
+        }
+        if is_output:
+            tools = raw.get("tools")
+            return {**search_item, "tools": tools if isinstance(tools, list) else []}
+        return {**search_item, "arguments": raw.get("arguments")}
     if kind in {"function_call", "custom_tool_call", "computer_call"}:
         name = "computer" if kind == "computer_call" else raw["name"]
         if kind != "computer_call" and raw.get("namespace"):
@@ -197,7 +221,7 @@ def project_history(
         original_input: JsonValue | None = None,
     ) -> _HistoryItem:
         kind = item["type"]
-        is_output = kind == "function_call_output"
+        is_output = kind in {"function_call_output", "tool_search_output"}
         is_execution = kind in _EXECUTION_TYPES
         # Execution records describe what ran. Keep them separate from the model's call and output.
         identity = (
@@ -206,7 +230,7 @@ def project_history(
             item["id"],
         )
         occurrence = identities.get(identity)
-        call_key = (item["turn_id"], item.get("call_id", item["id"]))
+        call_key = (item["turn_id"], item.get("call_id") or item["id"])
         call = None if is_execution else latest_calls.get(call_key)
         if is_output and call is not None:
             if call.output is None:
@@ -231,8 +255,8 @@ def project_history(
             occurrence.native = native
             occurrence.recorded_id = recorded_id
         identities[identity] = occurrence
-        if kind == "function_call":
-            if not native:
+        if kind in {"function_call", "tool_search_call"}:
+            if kind == "function_call" and not native:
                 occurrence.original_input = original_input
             latest_calls[call_key] = occurrence
         elif is_output and call is not None:

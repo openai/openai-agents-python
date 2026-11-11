@@ -1813,6 +1813,7 @@ class Agent(Generic[ContextT, OutputT]):
             if not isinstance(input, str):
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
+        produced_items_token = None
         try:
             from ._function_tools import FunctionTool
             from .manual import _CapturedApproval
@@ -1823,6 +1824,7 @@ class Agent(Generic[ContextT, OutputT]):
                 InteractionRequired,
                 NativeError,
                 _handoff_default_names,
+                _produced_items_restore,
                 _split_tools,
             )
             from .state import SessionState
@@ -1978,12 +1980,20 @@ class Agent(Generic[ContextT, OutputT]):
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_completed_input"] = input
+            if return_items and resume_manual:
+                assert state is not None
+                produced_items_token = _produced_items_restore.set(
+                    (self, state, asyncio.current_task())
+                )
             async with session_factory(
                 context=cast(SessionContextT, context),
                 **options,
             ) as session:
                 from .session import Completed
 
+                if produced_items_token is not None:
+                    _produced_items_restore.reset(produced_items_token)
+                    produced_items_token = None
                 if isinstance(session, Completed):
                     return session
                 if (
@@ -2109,7 +2119,7 @@ class Agent(Generic[ContextT, OutputT]):
                     session._interaction_handler is None and not pause_manual
                 )
                 if return_items:
-                    session._native._start_produced_items()
+                    session._start_produced_items()
                 if resume_manual:
                     restored = session.restored_turn
                     if restored is None:
@@ -2146,6 +2156,8 @@ class Agent(Generic[ContextT, OutputT]):
                     result = replace(result, items=session._take_produced_items(result.turn))
                 return result
         finally:
+            if produced_items_token is not None:
+                _produced_items_restore.reset(produced_items_token)
             options.pop("trace_options", None)
             del trace_options
 

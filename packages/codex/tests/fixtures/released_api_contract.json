@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "4a4ca2481459f4e8db399de2db405be37deaadf6",
+  "baseline_commit": "ec277f8fcaeabac83cbae9f41f4ae1d8bec7bbb8",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -2536,6 +2536,8 @@
           "class ImageGenerationCallItem(_HostedCallItem):\n    type: Literal['image_generation_call']\n    result: str | None\n    revised_prompt: str | None",
           "class FunctionCallItem(TypedDict):\n    type: Literal['function_call']\n    id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue\n    status: FunctionCallStatus",
           "class FunctionCallOutputItem(TypedDict):\n    type: Literal['function_call_output']\n    id: str\n    turn_id: str\n    call_id: str\n    status: FunctionCallStatus\n    output: str | list[InputText | InputImage | InputFile] | None\n    error: str | None\n    reconciliation: NotRequired[Literal['applied', 'not_applied']]",
+          "class ToolSearchCallItem(TypedDict):\n    type: Literal['tool_search_call']\n    id: str\n    turn_id: str\n    call_id: str | None\n    execution: str\n    arguments: JsonValue\n    status: FunctionCallStatus",
+          "class ToolSearchOutputItem(TypedDict):\n    type: Literal['tool_search_output']\n    id: str\n    turn_id: str\n    call_id: str | None\n    execution: str\n    tools: list[JsonValue]\n    status: FunctionCallStatus",
           "class McpCallItem(TypedDict):\n    type: Literal['mcp_call']\n    id: str\n    turn_id: str\n    server_label: str\n    name: str\n    arguments: JsonValue\n    status: FunctionCallStatus\n    output: JsonValue\n    error: JsonValue\n    call_id: NotRequired[str]\n    thread_id: NotRequired[str | None]\n    native_status: NotRequired[str | None]",
           "class CommandExecutionItem(TypedDict):\n    type: Literal['command_execution']\n    id: str\n    turn_id: str\n    command: str\n    cwd: str | None\n    status: FunctionCallStatus\n    output: str | None\n    exit_code: int | None\n    duration_ms: int | None\n    argv: NotRequired[list[str]]\n    call_id: NotRequired[str]\n    thread_id: NotRequired[str | None]\n    native_status: NotRequired[str | None]",
           "class PatchExecutionItem(TypedDict):\n    type: Literal['patch_execution']\n    id: str\n    turn_id: str\n    thread_id: str | None\n    call_id: str\n    status: FunctionCallStatus\n    native_status: str | None\n    changes: dict[str, JsonValue]\n    stdout: str | None\n    stderr: str | None",
@@ -2550,7 +2552,7 @@
           "class WaitForSubagentsCallItem(_SubagentCallItem):\n    type: Literal['wait_for_subagents_call']\n    sender_agent_id: str",
           "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | FileSearchCallItem | CodeInterpreterCallItem | ImageGenerationCallItem)",
           "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile | _InputAudio]",
-          "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | UserMessageItem)"
+          "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | ToolSearchCallItem | ToolSearchOutputItem | UserMessageItem)"
         ],
         "exports": {},
         "imports": [
