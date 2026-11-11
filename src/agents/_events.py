@@ -94,6 +94,8 @@ from _agents_codex._events import (
     SessionItem as SessionItem,
     SessionRequiresActionEvent as SessionRequiresActionEvent,
     SessionSnapshot as SessionSnapshot,
+    ShellCallItem as ShellCallItem,
+    ShellCallOutputItem as ShellCallOutputItem,
     StreamError as StreamError,
     Subagent as Subagent,
     SubagentActiveEvent as SubagentActiveEvent,
