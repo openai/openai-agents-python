@@ -9,7 +9,6 @@ archive='^https://archive[.]ubuntu[.]com/ubuntu/?([[:space:]]|$)'
 if [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted && -f "$mirror_list" ]] &&
   grep -Eq "$azure" "$mirror_list" &&
   grep -Eq "$archive" "$mirror_list" &&
-  ! getent ahosts azure.archive.ubuntu.com >/dev/null &&
-  getent ahosts archive.ubuntu.com >/dev/null; then
-  sudo sed -i -E "\\@$azure@d" "$mirror_list"
+  ! timeout 10s getent ahosts azure.archive.ubuntu.com >/dev/null; then
+  sudo sed -i -E "s@$azure@https://mirrors.edge.kernel.org/ubuntu\\1@" "$mirror_list"
 fi

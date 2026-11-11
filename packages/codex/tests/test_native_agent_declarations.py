@@ -15,6 +15,7 @@ from agents import (
     NativeProvider,
     function_tool,
 )
+from agents.realtime import RealtimeAgentConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses  # noqa: F401
 from tests.test_native_agent_checkpoints import message, peer
@@ -41,20 +42,22 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "realtime",
         "input_guardrails",
         "output_guardrails",
+        "tool_batch_completion",
         "hosted_prompt",
     )
     assert tuple(field.name for field in fields(Agent)) == expected_fields
     assert Agent.__match_args__ == expected_fields
-    agent = Agent(instructions="Answer.", name="Voice")
+    realtime = RealtimeAgentConfig(instructions="Answer aloud.")
+    agent = Agent(instructions="Answer.", name="Voice", realtime=realtime)
     match agent:
         case Agent("Answer.", "Voice"):
             pass
         case _:
             pytest.fail("Existing positional class patterns must retain the agent name")
     match agent:
-        case Agent(_, _, _, _, _, _, _, _, _, _, _, _, decisions, realtime):
+        case Agent(_, _, _, _, _, _, _, _, _, _, _, _, decisions, voice):
             assert decisions is None
-            assert realtime is None
+            assert voice == realtime
     parameters = tuple(signature(Agent).parameters.values())
     assert tuple(parameter.name for parameter in parameters) == (
         "instructions",
@@ -70,6 +73,7 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "transform_context",
         "before_compact",
         "before_complete",
+        "tool_batch_completion",
         "realtime",
         "input_guardrails",
         "output_guardrails",

@@ -61,7 +61,7 @@ from ._lifecycle import (
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _MAX_AUDIO_INPUT_BYTES, _check_audio_json, _contains_audio
 from ._public import preserve_module_identity as _preserve_module_identity
-from ._tool_errors import ToolErrorFormatter
+from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
@@ -975,11 +975,11 @@ class Agent(Generic[ContextT, OutputT]):
     transform_context: _ContextTransform[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
-    tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     decisions: DecisionProvider | None
     realtime: RealtimeAgentConfig | None
     input_guardrails: tuple[InputGuardrail[ContextT], ...]
     output_guardrails: tuple[OutputGuardrail[ContextT], ...]
+    tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     hosted_prompt: HostedPromptSource | None
 
     def __setattr__(self, name: str, value: object) -> None:
