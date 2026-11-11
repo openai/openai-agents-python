@@ -12,37 +12,17 @@ jobs:
     runs-on:
       group: codex-runners
       labels: codex-linux-x64
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Check signed Ubuntu sandbox package downloads
+      - name: Install the native sandbox prerequisites
         shell: bash
         run: |
           set -euo pipefail
-          apt_options=(-o Acquire::Retries=0 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o APT::Update::Error-Mode=any)
-
-          timeout 25 bash .github/scripts/use-ubuntu-archive-if-needed.sh || true
-          if sudo timeout 80 apt-get "${apt_options[@]}" update &&
-            sudo timeout 80 apt-get "${apt_options[@]}" install --download-only --yes bubblewrap dnsmasq-base; then
-            echo 'Sandbox packages resolved from the existing runner sources.'
-            exit 0
-          fi
-
-          for archive in https://mirrors.edge.kernel.org/ubuntu https://mirrors.mit.edu/ubuntu; do
-            source_dir=$(mktemp -d "$RUNNER_TEMP/sandbox-apt.XXXXXX")
-            chmod 755 "$source_dir"
-            mkdir "$source_dir/lists"
-            printf 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] %s %s main universe\n' \
-              "$archive" noble "$archive" noble-updates "$archive" noble-security > "$source_dir/ubuntu.list"
-            source_options=(-o "Dir::Etc::sourcelist=$source_dir/ubuntu.list" -o Dir::Etc::sourceparts=- -o "Dir::State::Lists=$source_dir/lists")
-            if sudo timeout 75 apt-get "${apt_options[@]}" "${source_options[@]}" update &&
-              sudo timeout 75 apt-get "${apt_options[@]}" "${source_options[@]}" install --download-only --yes bubblewrap dnsmasq-base; then
-              printf 'Sandbox packages resolved from %s.\n' "$archive"
-              exit 0
-            fi
-          done
-
-          echo 'Ubuntu sandbox package downloads failed.' >&2
-          exit 1
+          bash .github/scripts/use-ubuntu-archive-if-needed.sh
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes bubblewrap dnsmasq-base
+          bwrap --version
+          dnsmasq --version
