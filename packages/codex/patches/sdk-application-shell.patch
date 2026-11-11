@@ -51,7 +51,7 @@ index 6dd8e2e4f26be2c5ddaf33ed16c552e51146b62e..71bfaa87c2a7db2e9711cfc5e8f0e1cb
              remove_first_matching(items, |i| {
                  matches!(
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index 729130d90885d2dc974a3a491df0df0d6117554c..8291b3aa9f355228bc8e185393dd12155fd9cf0f 100644
+index 729130d90885d2dc974a3a491df0df0d6117554c..39e356f9b2170f7a07c9c99f7c99a6487d4f387d 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -1,5 +1,7 @@
@@ -70,7 +70,7 @@ index 729130d90885d2dc974a3a491df0df0d6117554c..8291b3aa9f355228bc8e185393dd1215
  use codex_memories_read::citations::parse_memory_citation;
  use codex_memories_read::citations::thread_ids_from_memory_citation;
  use codex_protocol::error::CodexErr;
-@@ -301,6 +302,60 @@ pub(crate) async fn finalize_non_tool_response_item(
+@@ -301,6 +302,66 @@ pub(crate) async fn finalize_non_tool_response_item(
      })
  }
  
@@ -98,16 +98,22 @@ index 729130d90885d2dc974a3a491df0df0d6117554c..8291b3aa9f355228bc8e185393dd1215
 +    };
 +    if is_call {
 +        let hosted = passive
-+            && (matches!(
-+                fields
-+                    .get("environment")
-+                    .and_then(|environment| environment.get("type"))
-+                    .and_then(serde_json::Value::as_str),
-+                Some("container_auto" | "container_reference")
-+            ) || fields
-+                .get("container_id")
-+                .and_then(serde_json::Value::as_str)
-+                .is_some_and(|container_id| !container_id.trim().is_empty()));
++            && match fields.get("environment") {
++                Some(environment) => {
++                    match environment.get("type").and_then(serde_json::Value::as_str) {
++                        Some("container_auto") => true,
++                        Some("container_reference") => environment
++                            .get("container_id")
++                            .and_then(serde_json::Value::as_str)
++                            .is_some_and(|container_id| !container_id.trim().is_empty()),
++                        _ => false,
++                    }
++                }
++                None => fields
++                    .get("container_id")
++                    .and_then(serde_json::Value::as_str)
++                    .is_some_and(|container_id| !container_id.trim().is_empty()),
++            };
 +        store
 +            .get_or_init(HostedShellCalls::default)
 +            .0
@@ -131,7 +137,7 @@ index 729130d90885d2dc974a3a491df0df0d6117554c..8291b3aa9f355228bc8e185393dd1215
  #[instrument(level = "trace", skip_all)]
  pub(crate) async fn handle_output_item_done(
      ctx: &mut HandleOutputCtx,
-@@ -311,7 +366,15 @@ pub(crate) async fn handle_output_item_done(
+@@ -311,7 +372,15 @@ pub(crate) async fn handle_output_item_done(
      let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
      ctx.tool_runtime.observe_requested_item(&item);
  
@@ -496,10 +502,10 @@ index 8115fe4a1b18e470cc1925d9b7422d3541275c2f..98e8d570686d66d2033c930dac52806e
              .flatten()
              .and_then(|call| {
 diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
-index b518485e322f848ad62a24aefd21213373bfa4ea..e23d4c356d253dc53e57a9ef1662e502dd8cc69c 100644
+index b518485e322f848ad62a24aefd21213373bfa4ea..1a4e8587dd68b42461497ca16ab98262842b5ec4 100644
 --- a/codex-rs/core/src/tools/router_tests.rs
 +++ b/codex-rs/core/src/tools/router_tests.rs
-@@ -44,6 +44,86 @@ use super::tool_log_payload;
+@@ -44,6 +44,89 @@ use super::tool_log_payload;
  
  struct ExtensionEchoContributor;
  
@@ -568,7 +574,10 @@ index b518485e322f848ad62a24aefd21213373bfa4ea..e23d4c356d253dc53e57a9ef1662e502
 +    else {
 +        unreachable!()
 +    };
-+    provider_fields.insert("environment".into(), json!({"type": "container_reference"}));
++    provider_fields.insert(
++        "environment".into(),
++        json!({"type": "container_reference", "container_id": "cntr_reference"}),
++    );
 +    assert!(
 +        local_router
 +            .build_model_tool_call(hosted_call)
@@ -586,7 +595,7 @@ index b518485e322f848ad62a24aefd21213373bfa4ea..e23d4c356d253dc53e57a9ef1662e502
  #[test]
  fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
      let payload = ToolPayload::Function {
-@@ -660,6 +740,7 @@ fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<Str
+@@ -660,6 +743,7 @@ fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<Str
              | ToolSpec::CodeInterpreter(_)
              | ToolSpec::ImageGeneration(_)
              | ToolSpec::Shell(_)

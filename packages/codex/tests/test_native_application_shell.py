@@ -128,6 +128,9 @@ async def test_application_shell_gates_execution_and_replays_typed_output(
         "paired",
         "typed-auto",
         "typed-reference",
+        "missing-reference-id",
+        "blank-reference-id",
+        "numeric-reference-id",
         "unrelated",
         "duplicate-output",
         "duplicate-call",
@@ -153,7 +156,12 @@ async def test_application_shell_accepts_only_paired_provider_container_receipts
     }
     hosted_markers = {
         "typed-auto": {"environment": {"type": "container_auto"}},
-        "typed-reference": {"environment": {"type": "container_reference"}},
+        "typed-reference": {
+            "environment": {"type": "container_reference", "container_id": "cntr-hosted"}
+        },
+        "missing-reference-id": {"environment": {"type": "container_reference"}},
+        "blank-reference-id": {"environment": {"type": "container_reference", "container_id": " "}},
+        "numeric-reference-id": {"environment": {"type": "container_reference", "container_id": 0}},
         "empty-environment": {"environment": {}},
         "unknown-environment": {"environment": {"type": "unknown"}},
         "numeric-container": {"container_id": 0},
