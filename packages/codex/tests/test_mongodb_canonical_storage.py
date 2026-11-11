@@ -62,6 +62,8 @@ def mongodb_client(tmp_path: Path, unused_tcp_port):
                 str(unused_tcp_port),
                 "--dbpath",
                 str(directory),
+                "--wiredTigerCacheSizeGB",
+                "0.25",
                 "--quiet",
             ],
             stdout=output,
@@ -76,7 +78,7 @@ def mongodb_client(tmp_path: Path, unused_tcp_port):
             connectTimeoutMS=1000,
         ) as probe:
             started = time.monotonic()
-            startup_timeout = 20
+            startup_timeout = 60 if sys.platform == "win32" else 20
             while process.poll() is None and time.monotonic() - started < startup_timeout:
                 try:
                     probe.admin.command("ping")
