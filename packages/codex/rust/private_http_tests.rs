@@ -117,6 +117,11 @@ async fn private_http_rejects_explicit_http_without_mutating_provider_or_pool() 
 fn private_http_policy_cannot_be_set_by_json_options() {
     let ordinary: options::ThreadOptions = serde_json::from_str("{}").unwrap();
     assert!(!ordinary.private_http);
+    assert!(!ordinary.process_private_http);
+    for key in ["process_private_http", "_process_private_http"] {
+        let value = json!({(key): true});
+        assert!(serde_json::from_value::<options::ThreadOptions>(value).is_err());
+    }
     assert!(serde_json::from_str::<options::ThreadOptions>(r#"{"private_http":true}"#).is_err());
     assert!(serde_json::from_str::<options::ThreadOptions>(r#"{"_private_http":true}"#).is_err());
 }
@@ -141,4 +146,52 @@ async fn private_http_rejects_both_sign_in_with_chatgpt_provider_names() {
                 .is_none()
         );
     }
+}
+
+#[tokio::test]
+async fn process_http_intent_declines_hooks_and_preserves_ordinary_startup() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let config = json!({
+        "model": "gpt-5.2", "model_provider": "native_agent",
+        "model_providers.native_agent": {
+            "name": "Idle fallback fixture", "base_url": "http://127.0.0.1:9/v1",
+            "wire_api": "responses", "requires_openai_auth": false,
+            "supports_websockets": false, "request_max_retries": 0, "stream_max_retries": 0
+        },
+        "approval_policy": "never", "sandbox_mode": "read-only",
+        "web_search": "disabled", "agents.enabled": false, "features.code_mode": false,
+        "features.shell_snapshot": false
+    });
+    let runtime = json!({"codex_home": directory.path(), "cwd": directory.path()});
+    let engine = Arc::new(
+        EngineState::new(config.to_string(), runtime.to_string(), false, None)
+            .await
+            .unwrap(),
+    );
+    let mut options: options::ThreadOptions = serde_json::from_value(json!({
+        "_application_instructions": "", "tool_policy": {"allowed_tools": []},
+        "_before_complete": true
+    }))
+    .unwrap();
+    options.process_private_http = true;
+    // Real Engine startup without a turn; no model request or WS prewarm.
+    let outcome = engine
+        .start_with_initial_messages(options, None, Some(Vec::new()), true, None)
+        .await;
+    let observed = outcome.as_ref().ok().map(|native| {
+        native.current().map(|state| {
+            state
+                .thread
+                .thread_extension_data()
+                .get::<codex_http_client::SdkModelHttpPool>()
+                .is_some()
+        })
+    });
+    let closed = engine.close().await;
+    closed.expect("join actual engine before reporting an assertion failure");
+    assert!(
+        !observed
+            .expect("ordinary startup survives an optimization miss")
+            .expect("capture actual live thread before close")
+    );
 }

@@ -434,22 +434,24 @@ impl Engine {
         })
     }
 
-    #[pyo3(signature = (options_json, specs_json, initial_messages_json=None))]
+    #[pyo3(signature = (options_json, specs_json, initial_messages_json=None, *, _process_private_http=false))]
     fn _start_initial_replaceable_thread<'py>(
         &self,
         py: Python<'py>,
         options_json: &str,
         specs_json: &str,
         initial_messages_json: Option<&str>,
+        _process_private_http: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let lease = self
             .managed_lease
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
-        let options: options::ThreadOptions =
+        let mut options: options::ThreadOptions =
             config::decode(serde_json::from_str(options_json).map_err(py_error)?)
                 .map_err(py_error)?;
+        options.process_private_http = _process_private_http;
         let initial_messages = initial_messages_json
             .map(initial_messages::Batch::capture)
             .transpose()
@@ -3861,6 +3863,7 @@ fn _open_conversation<'py>(
         _share_model_http,
         _private_http,
         false,
+        false,
     )?;
     async_bridge::future_factory_into_py(py, move || opening)
 }
@@ -3876,6 +3879,7 @@ fn conversation_opening(
     share_model_http: bool,
     private_http: bool,
     private_disposable: bool,
+    process_private_http: bool,
 ) -> PyResult<
     impl std::future::Future<
         Output = PyResult<(
@@ -3903,7 +3907,14 @@ fn conversation_opening(
     }
     let instructions = options.application_instructions.clone().unwrap_or_default();
     let files = options.sdk_instruction_files.clone().unwrap_or_default();
-    let specs = serde_json::from_str(specs_json).map_err(py_error)?;
+    let specs: Vec<codex_protocol::dynamic_tools::DynamicToolSpec> =
+        serde_json::from_str(specs_json).map_err(py_error)?;
+    let process_private_http = process_private_http
+        && private_http
+        && private_disposable
+        && cfg!(target_os = "linux")
+        && options.permits_private_disposable()
+        && specs.is_empty();
     let settings_value: serde_json::Value = serde_json::from_str(settings_json)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let has_settings = settings_value
@@ -3916,8 +3927,12 @@ fn conversation_opening(
             .conversation_engine(config_json, runtime_json, api_key, share_model_http)
             .await?;
         if private_http {
-            // Only this scope selects the retained handshake-fresh owner.
-            state.model_http_pool = Some(lease.private_model_http_pool()?);
+            // Only this scope selects an idle transport owner, never the parent.
+            state.model_http_pool = Some(if process_private_http {
+                private_http::process_pool()
+            } else {
+                lease.private_model_http_pool()?
+            });
         }
         let mut engine = Engine::new(state);
         lease.register_engine(engine.inner.clone())?;
@@ -3977,7 +3992,7 @@ fn conversation_opening(
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, input_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false))]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, input_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false, _process_private_http=false))]
 fn _prepare_run_conversation(
     config_json: String,
     runtime_json: String,
@@ -3989,6 +4004,7 @@ fn _prepare_run_conversation(
     provider_lease: PyRef<'_, provider_owner::NativeProviderLease>,
     _share_model_http: bool,
     _private_http: bool,
+    _process_private_http: bool,
 ) -> PyResult<agent_run::NativeRun> {
     provider_lease.inner.check_live()?;
     if !provider_lease.inner.keeps_unpublished_owner() {
@@ -4007,6 +4023,7 @@ fn _prepare_run_conversation(
         _share_model_http,
         _private_http,
         true,
+        _process_private_http,
     )?;
     Ok(agent_run::NativeRun::new(
         opening,

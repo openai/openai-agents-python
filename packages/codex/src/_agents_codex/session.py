@@ -3570,7 +3570,6 @@ class Session(Generic[ContextT, OutputT]):
                 and not input_guardrails
                 and not output_guardrails
                 and not instruction_files
-                and agent.provider is not None
                 and auth is None
                 and _supports_atomic_first_turn(
                     agent,
@@ -3579,6 +3578,14 @@ class Session(Generic[ContextT, OutputT]):
                     tools=available,
                 )
             )
+            # Owned defaults keep ordinary startup and its existing close custody.
+            _private_default_opening = (
+                _atomic_first_turn
+                and _private_text_run
+                and agent.provider is None
+                and not available
+            )
+            _atomic_first_turn = _atomic_first_turn and agent.provider is not None
             environment = opening.environment
         try:
             if environment is not None and not isinstance(environment, Environment):
@@ -3756,10 +3763,9 @@ class Session(Generic[ContextT, OutputT]):
 
                 def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
                     private_run = (
-                        _atomic_first_turn
+                        (_atomic_first_turn or _private_default_opening)
                         and observation_retention == "bounded"
                         and context is None
-                        and not owned_provider
                         and provider is not None
                         and provider.model_backend is None
                         and provider.auth is None
@@ -3805,6 +3811,7 @@ class Session(Generic[ContextT, OutputT]):
                     return use_completed_owner, websockets_enabled, private_http
 
                 use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
+                _atomic_first_turn = _atomic_first_turn or use_completed_owner
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
@@ -4074,6 +4081,11 @@ class Session(Generic[ContextT, OutputT]):
                             provider_lease=provider_lease,
                             _share_model_http=True,
                             _private_http=private_http,
+                            **(
+                                {"_process_private_http": True}
+                                if private_http and owned_provider
+                                else {}
+                            ),
                         )
                         return await opening.run(owner, agent, output, submission_id)
                     return cast(
@@ -4097,6 +4109,8 @@ class Session(Generic[ContextT, OutputT]):
                 if _atomic_first_turn:
                     acquired = await initialize_atomic()
                     if isinstance(acquired, Completed):
+                        if owned_provider:
+                            await provider.aclose()
                         return cast("Completed[OutputT]", acquired)
                     if isinstance(acquired, _RunHandoff):
                         handoff = acquired
@@ -4128,6 +4142,11 @@ class Session(Generic[ContextT, OutputT]):
                             json.dumps(options),
                             native_specs,
                             initial_messages_json=initial_messages_json,
+                            **(
+                                {"_process_private_http": True}
+                                if private_http and owned_provider
+                                else {}
+                            ),
                         )
                         if checkpoint is None
                         else engine.restore_checkpoint(
@@ -4390,6 +4409,13 @@ class Session(Generic[ContextT, OutputT]):
             runtime.pop("environment", None)
             environment = executor = None
             pending_environment = None
+            session_cleanup = getattr(error, "cleanup", None)
+            session_owns_provider = (
+                owned_provider
+                and isinstance(session_cleanup, Session)
+                and not session_cleanup._closed
+                and session_cleanup._owned_provider is provider
+            )
             if lease is not None:
                 await _close_after_error(error, lambda: opening.fail_environment(lease))
                 if opening.lease is not None and not lease._retired.done():
@@ -4397,7 +4423,7 @@ class Session(Generic[ContextT, OutputT]):
                     # pending. Expose its existing owner to supported aclose.
                     assert provider is not None
                     provider._defer_opening(opening, lease)
-            if owned_provider:
+            if owned_provider and not session_owns_provider:
                 assert provider is not None
                 await _close_after_error(error, provider.aclose)
             try:
@@ -4421,7 +4447,9 @@ class Session(Generic[ContextT, OutputT]):
                     and not vars(provider).get("_closed", False)
                     and (owned_provider or opening.lease is not None)
                 ):
-                    cast(Any, error).cleanup = provider
+                    cast(Any, error).cleanup = (
+                        session_cleanup if session_owns_provider else provider
+                    )
                     if owned_provider:
                         cast(Any, error).provider = provider
 
@@ -9200,6 +9228,8 @@ class Session(Generic[ContextT, OutputT]):
                     raise handoff.cancelled
         except BaseException as error:
             await _close_after_error(error, self.aclose)
+            if not self._closed or self._environment_lease is not None:
+                cast(Any, error).cleanup = self
             raise
 
     def _adopt_run(
