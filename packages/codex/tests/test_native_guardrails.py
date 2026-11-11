@@ -13,6 +13,7 @@ from agents import (
     Agent,
     GuardrailResult,
     GuardrailTripwire,
+    InputGuardrail,
     NativeOutput,
     OutputGuardrail,
     ToolContext,
@@ -22,10 +23,12 @@ from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_native_agent import provider
 
 
-async def test_converted_output_guards_share_one_parse_and_source_owner(responses):
+@pytest.mark.parametrize("profiled", [False, True])
+async def test_converted_output_guards_share_one_parse_and_source_owner(responses, profiled):
     parsed = []
     observed = []
     raw = []
+    input_seen = []
 
     class Answer(BaseModel):
         count: int
@@ -41,13 +44,22 @@ async def test_converted_output_guards_share_one_parse_and_source_owner(response
         request.final_output.count = 99
         return GuardrailResult(False, {"checked": 7})
 
+    def check_input(turn, context, source, value):
+        assert source is agent
+        input_seen.append(value)
+        return GuardrailResult(False)
+
     responses.respond(assistant_output('{"count":7}'))
     agent = Agent(
         instructions="Answer.",
         provider=provider(responses),
         output_type=NativeOutput(Answer),
+        handoffs=[Agent(name="Unused", instructions="Unused", output_type=NativeOutput(Answer))]
+        if profiled
+        else [],
         before_complete=lambda request: raw.append(request.text),
         output_guardrails=[OutputGuardrail("agent-check", check)],
+        input_guardrails=[InputGuardrail("agent-input", check_input, run_in_parallel=False)],
     )
     async with (
         timeout(20),
@@ -57,15 +69,21 @@ async def test_converted_output_guards_share_one_parse_and_source_owner(response
         result = await turn.get_result()
         assert result.final_output.count == 7
         assert parsed == [7]
-        assert sorted(r.name for r in result.guardrail_results) == ["agent-check", "run-check"]
+        assert sorted(r.name for r in result.guardrail_results) == [
+            "agent-check",
+            "agent-input",
+            "run-check",
+        ]
+        assert input_seen == ["begin"]
         assert turn.guardrail_results == result.guardrail_results
+        assert all(record.agent is agent for record in result.guardrail_results)
         assert all(
             r.turn_id == turn.turn_id and r.session_id == session.id
             for r in result.guardrail_results
         )
     assert raw == ['{"count":7}']
     assert len(observed) == 2
-    assert all(source.name == agent.name for _, source in observed)
+    assert all(source is agent for _, source in observed)
     assert replace(agent, name="copy").output_guardrails == agent.output_guardrails
 
 
@@ -288,11 +306,13 @@ async def test_explicit_child_input_guards_block_or_overlap_then_trip(
 
     def root_check(turn, context, agent, value):
         assert isinstance(turn, Turn)
+        assert agent is original_agent
         roots.append(value)
         return GuardrailResult(False)
 
     async def child_check(context, agent, value):
         assert isinstance(context, ChildStepContext)
+        assert agent is original_agent
         assert context.step_index == 0
         encoded = json.dumps(value)
         assert "Execute the requested native work." in encoded
@@ -318,13 +338,14 @@ async def test_explicit_child_input_guards_block_or_overlap_then_trip(
         guard = InputGuardrail(
             "initial-input", root_check, run_in_parallel=parallel, child_callback=child_check
         )
-        async with Agent(
+        original_agent = Agent(
             instructions="Spawn alpha and beta.",
             model="gpt-5.5",
             tools=[NativeAgents(max_children=2)],
             provider=peer.provider(websocket=False),
             input_guardrails=[guard],
-        ).session(environment=declaration(executor)) as session:
+        )
+        async with original_agent.session(environment=declaration(executor)) as session:
             try:
                 root = await session.submit("root-only-sentinel")
                 await entered.wait()
@@ -341,6 +362,7 @@ async def test_explicit_child_input_guards_block_or_overlap_then_trip(
                     assert child.turn is not None
                     with pytest.raises(GuardrailTripwire) as error:
                         await child.turn.get_result()
+                    assert error.value.record.agent is original_agent
                     assert error.value.record.subagent_id == child.id
                     assert error.value.record.turn_id == child.turn.turn_id
                 assert roots == ["root-only-sentinel"]

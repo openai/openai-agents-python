@@ -4966,6 +4966,13 @@ class Session(Generic[ContextT, OutputT]):
         )
         return self._agent_for_profile(receipt)
 
+    def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
+        captured = self._agent_for_message(message)
+        profile_id = message.get("profile_id")
+        if isinstance(profile_id, str):
+            return self._source_profile_runtime(profile_id).profile.agent
+        return self._agent if self._agent is not None else captured
+
     async def _realtime_tool_enabled(
         self,
         message: Mapping[str, Any],
@@ -10838,10 +10845,11 @@ class Session(Generic[ContextT, OutputT]):
         active: Callable[[], bool],
         request: CompletionContext[Any],
     ) -> None:
-        agent = self._agent_for_message(message)
-        checks = (*self._output_guardrails, *agent.output_guardrails)
+        captured = self._agent_for_message(message)
+        checks = (*self._output_guardrails, *captured.output_guardrails)
         if not checks:
             return
+        agent = self._original_agent_for_message(message)
 
         async def check(guardrail: OutputGuardrail[Any]) -> GuardrailRecord:
             result = await self._call_decision_callback(
@@ -11308,6 +11316,7 @@ class Session(Generic[ContextT, OutputT]):
             self._catalog_for_message(message, message["generation"])
             source_agent = self._agent_for_message(message)
             checks = (*self._input_guardrails, *source_agent.input_guardrails)
+            guardrail_agent = self._original_agent_for_message(message)
             if isinstance(state, _ChildCallbacks):
                 checks = tuple(check for check in checks if check.child_callback is not None)
                 if checks and not state.input_guardrails_started:
@@ -11325,7 +11334,7 @@ class Session(Generic[ContextT, OutputT]):
                 await self._run_input_guardrails(
                     state,
                     message,
-                    source_agent,
+                    guardrail_agent,
                     tuple(check for check in checks if not check.run_in_parallel),
                     step_index=guardrail_step_index,
                 )
@@ -11339,7 +11348,7 @@ class Session(Generic[ContextT, OutputT]):
                             await self._run_input_guardrails(
                                 state,
                                 message,
-                                source_agent,
+                                guardrail_agent,
                                 parallel,
                                 step_index=guardrail_step_index,
                             )
