@@ -17,6 +17,7 @@ jobs:
           #include <mach/mig_errors.h>
           #include <mach/ndr.h>
           #include <mach/task_special_ports.h>
+          #include <servers/bootstrap.h>
           #include <errno.h>
           #include <fcntl.h>
           #include <signal.h>
@@ -28,6 +29,10 @@ jobs:
           #include <sys/wait.h>
           #include <time.h>
           #include <unistd.h>
+          
+          static const char *self;
+          static const mach_msg_id_t sentinel_id = 0x434458;
+          struct sentinel { mach_msg_header_t h; uint32_t global_matches_task; };
           
           static const char *names[] = {
             "com.apple.system.opendirectoryd.libinfo_debug",
@@ -79,6 +84,7 @@ jobs:
               int null=open("/dev/null",O_RDWR);
               if (null<0 || dup2(null,STDOUT_FILENO)<0 || dup2(null,STDERR_FILENO)<0) _exit(124);
               if (null>2) close(null);
+              if (mode==2) execl(self,self,"--post-exec",command,(char*)NULL);
               if (!strcmp(command,"id")) execl("/usr/bin/id","id","-F",(char*)NULL);
               else execl("/usr/bin/ssh","ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",(char*)NULL);
               _exit(125);
@@ -97,6 +103,11 @@ jobs:
               if (kr!=KERN_SUCCESS) { printf("{\"receive_error\":%d}\n",kr); break; }
               received++;
               unsigned count=0; const char *service=identity(message.bytes,message.h.msgh_size);
+              if (message.h.msgh_id==sentinel_id && message.h.msgh_size==sizeof(struct sentinel)) {
+                struct sentinel *note=(void*)&message;
+                printf("{\"command\":\"%s\",\"post_exec_bootstrap_present\":true,\"global_matches_task\":%s}\n",command,note->global_matches_task?"true":"false");
+                service="probe-post-exec-sentinel";
+              }
               if ((message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && message.h.msgh_size>=sizeof(mach_msg_header_t)+sizeof(mach_msg_body_t)) {
                 mach_msg_body_t *body=(void*)(message.bytes+sizeof(mach_msg_header_t));
                 count=body->msgh_descriptor_count;
@@ -141,7 +152,23 @@ jobs:
               if(old) vm_deallocate(task,(vm_address_t)old,old_count*sizeof(mach_port_t));
             }
           }
-          int main(void) {
+          int main(int argc, char **argv) {
+            self=argv[0];
+            if (argc==3 && !strcmp(argv[1],"--post-exec")) {
+              mach_port_t endpoint=MACH_PORT_NULL, reply=MACH_PORT_NULL;
+              if (task_get_special_port(mach_task_self(),TASK_BOOTSTRAP_PORT,&endpoint)!=KERN_SUCCESS || endpoint==MACH_PORT_NULL ||
+                  mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&reply)!=KERN_SUCCESS) return 128;
+              struct sentinel note={0}; note.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND_ONCE);
+              note.h.msgh_size=sizeof(note); note.h.msgh_remote_port=endpoint; note.h.msgh_local_port=reply;
+              note.h.msgh_id=sentinel_id; note.global_matches_task=bootstrap_port==endpoint;
+              if(mach_msg(&note.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(note),0,MACH_PORT_NULL,500,MACH_PORT_NULL)!=KERN_SUCCESS) return 129;
+              struct { mig_reply_error_t response; mach_msg_max_trailer_t trailer; } answer={0};
+              if(mach_msg(&answer.response.Head,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(answer),reply,1000,MACH_PORT_NULL)!=KERN_SUCCESS || answer.response.Head.msgh_id!=sentinel_id+100 || answer.response.RetCode!=MIG_BAD_ID) return 130;
+              if(!note.global_matches_task) return 131;
+              if (!strcmp(argv[2],"id")) execl("/usr/bin/id","id","-F",(char*)NULL);
+              else execl("/usr/bin/ssh","ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",(char*)NULL);
+              return 132;
+            }
             for(int mode=0;mode<3;mode++) { witness("id",mode); witness("ssh",mode); }
             return 0;
           }
