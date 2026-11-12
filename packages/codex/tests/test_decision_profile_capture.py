@@ -418,7 +418,8 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
         def _check_open(self):
             return None
 
-        async def _start(self, input, output, *, budget, run_usage):
+        async def _start(self, input, output, *, budget, run_usage, model_override=None):
+            assert model_override is None
             assert run_usage is state.run_usage
             correction_inputs.append(json.loads(input[0]["text"]))
             return Attempt()

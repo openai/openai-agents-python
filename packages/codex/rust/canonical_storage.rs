@@ -80,6 +80,7 @@ fn invocation_identity(item: &ResponseItem) -> Option<&str> {
         ResponseItem::ApplyPatchCall { call_id, .. }
         | ResponseItem::FunctionCall { call_id, .. }
         | ResponseItem::ComputerCall { call_id, .. } => Some(call_id),
+        ResponseItem::McpApprovalRequest { id: Some(id), .. } => Some(id.as_str()),
         ResponseItem::ShellCall {
             provider_fields, ..
         } => crate::local_reconciliation::shell_call_id(provider_fields).map(String::as_str),
@@ -636,14 +637,16 @@ impl ThreadStore for CanonicalStore {
         Box::pin(async move {
             let mut writers = self.writers.lock().await;
             self.load(params.thread_id, &mut writers).await?;
-            Ok(Arc::new(
+            let mut history = Arc::new(
                 writers[&params.thread_id]
                     .snapshot
                     .as_ref()
                     .unwrap()
                     .items
                     .clone(),
-            ))
+            );
+            crate::checkpoint::remove_replayed_mcp_approvals(&mut history);
+            Ok(history)
         })
     }
 

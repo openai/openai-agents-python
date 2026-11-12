@@ -70,10 +70,11 @@ from .compaction import ResponsesCompaction, _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
+from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
 from .model_context import HostedPromptSource, _ContextTransform
-from .models import ModelProvider, NativeModel
+from .models import ModelProvider, NativeModel, _capture_model_override
 from .retry import ModelRetrySettings as ModelRetrySettings
 from .tools import ToolRef
 from .usage import RunBudget
@@ -1302,6 +1303,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1337,6 +1339,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: object = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1372,6 +1375,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: ContextT,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1407,6 +1411,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1492,6 +1497,10 @@ class Agent(Generic[ContextT, OutputT]):
         `model=None` inherits the Agent model. Present model_settings keys
         override Agent defaults; only a present `service_tier=None` clears a
         value. Other omitted keys keep the Agent or native defaults.
+        To restore a pending turn with a saved model override, authorize that
+        exact model with `model`. The saved default must match the active Agent
+        or provider default. When there is no pending override, `model` can
+        authorize a different saved default.
 
         Omitted ``tools`` or ``tools=None`` uses this Agent's tools.
         A sequence replaces the finite opening definitions and defaults for
@@ -1500,7 +1509,9 @@ class Agent(Generic[ContextT, OutputT]):
         Sessions acquire external MCP resources when an operation selecting
         them starts. Startup errors are reported on that Turn. Restoring an
         already-admitted pending manual turn readies its selected resources
-        before exposing its replies.
+        before exposing its replies. For a pending turn that selects hosted MCP,
+        pass the current HostedMCP declarations in restored_hosted_mcp to authorize
+        those servers for that turn.
 
         trace_options captures native tracing defaults before opening. Every
         submission inherits its disabled/content restrictions, including when
@@ -1520,11 +1531,10 @@ class Agent(Generic[ContextT, OutputT]):
         checkpoints contain no credentials.
 
         With ``state``, restore an idle or settled manual native checkpoint
-        using the effective provider, current tools, and application context. Tool declarations and
-        instructions must match the saved conversation. Saved model settings
-        take precedence over this Agent's model settings. Non-None model or
-        model_settings overrides, including an empty mapping, are rejected with
-        state. Use update(model=...) on the restored Session after it becomes idle.
+        using the effective provider, current tools, and application context.
+        Tool declarations and instructions must match the saved conversation.
+        Saved model settings take precedence over this Agent's model settings.
+        Use update(model=...) to change the default after the Session becomes idle.
         Live submission handles
         and workspace files do not transfer to the restored Session. Each restore
         owns isolated native storage; applications coordinate shared state files.
@@ -1581,6 +1591,7 @@ class Agent(Generic[ContextT, OutputT]):
                 context=context,
                 state=state,
                 verify_remembered_approvals=verify_remembered_approvals,
+                restored_hosted_mcp=restored_hosted_mcp,
                 restored_output_type=restored_output_type,
                 resume_budget=resume_budget,
                 initial_messages=initial_messages,
@@ -1623,6 +1634,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
@@ -1672,6 +1684,7 @@ class Agent(Generic[ContextT, OutputT]):
                 context=context,
                 state=state,
                 verify_remembered_approvals=verify_remembered_approvals,
+                restored_hosted_mcp=restored_hosted_mcp,
                 restored_output_type=restored_output_type,
                 resume_budget=resume_budget,
                 initial_messages_json=_initial_messages_json(initial_messages),
@@ -1747,6 +1760,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -1754,6 +1768,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1780,6 +1795,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -1787,6 +1803,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1813,6 +1830,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -1820,6 +1838,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1845,6 +1864,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -1857,6 +1877,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1916,6 +1937,10 @@ class Agent(Generic[ContextT, OutputT]):
         manual checkpoint, input=None resumes the existing turn. Idle state
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
+        For a saved pending model override, pass its authorized name as `model`.
+        The saved default must match the active Agent or provider default.
+        Pass the current HostedMCP declarations in restored_hosted_mcp to
+        authorize selected hosted servers for the pending turn.
         return_history=True captures conversation records before close for replay
         through another Session's transact_history. That Session supplies its own instructions.
         History above 4,096 original records or 8 MiB raises NativeError after completion.
@@ -1952,7 +1977,6 @@ class Agent(Generic[ContextT, OutputT]):
         raw_usage_token = None
         produced_items_token = None
         try:
-            from ._function_tools import FunctionTool
             from .manual import _CapturedApproval
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
@@ -1969,6 +1993,7 @@ class Agent(Generic[ContextT, OutputT]):
             from .state import SessionState
             from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
 
+            model_override = _capture_model_override(model_override)
             if budget is not None and not isinstance(budget, RunBudget):
                 raise TypeError("budget must be a RunBudget or None")
             if prepare_request is not None:
@@ -2000,6 +2025,8 @@ class Agent(Generic[ContextT, OutputT]):
                 raise TypeError("state must be a SessionState")
             resume_manual = state is not None and state.native_continuation is not None
             if resume_manual and state is not None:
+                if model_override is not None:
+                    raise ValueError("Cannot replace a restored turn's model override")
                 if budget is not None and state.run_budget is None:
                     raise CapabilityError("Cannot set a budget when restoring an active checkpoint")
                 if input is not None:
@@ -2029,7 +2056,12 @@ class Agent(Generic[ContextT, OutputT]):
                 and before_step is None
                 and prepare_request is None
                 and (tool._bind is None or tool.needs_approval is not False)
-                and (tools is None or tool in tools or tool.ref in tools)
+                and (
+                    tools is None
+                    or tool in tools
+                    or tool.ref in tools
+                    or any(isinstance(item, HostedMCP) and item._binding is tool for item in tools)
+                )
             )
             if (
                 state is None
@@ -2088,6 +2120,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["resume_budget"] = budget
             if verify_remembered_approvals is not None:
                 options["verify_remembered_approvals"] = verify_remembered_approvals
+            if restored_hosted_mcp is not None:
+                options["restored_hosted_mcp"] = restored_hosted_mcp
             if provider is not None:
                 options["provider"] = provider
             if model is not None:
@@ -2124,16 +2158,24 @@ class Agent(Generic[ContextT, OutputT]):
                 # instruction receipt to the first ordinary submission.
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
-                if not (
-                    return_history or return_raw_usage or return_items or capture_error_details
-                ) and _private_text_run_eligible(
-                    self, input, context, return_state, parent_trace, trace_options
+                if (
+                    not (
+                        return_history or return_raw_usage or return_items or capture_error_details
+                    )
+                    and model_override is None
+                    and _private_text_run_eligible(
+                        self, input, context, return_state, parent_trace, trace_options
+                    )
                 ):
                     options["_private_text_run"] = True
-                if not (
-                    return_history or return_raw_usage or return_items or capture_error_details
-                ) and _completed_run_eligible(
-                    self, input, context, return_state, parent_trace, trace_options
+                if (
+                    not (
+                        return_history or return_raw_usage or return_items or capture_error_details
+                    )
+                    and model_override is None
+                    and _completed_run_eligible(
+                        self, input, context, return_state, parent_trace, trace_options
+                    )
                 ):
                     options["_completed_input"] = input
             if return_raw_usage and resume_manual:
@@ -2219,11 +2261,14 @@ class Agent(Generic[ContextT, OutputT]):
                                 continue
                             visited.add(target)
                             profile = session._profiles[target].profile
+                            profile_tools, _, _ = _split_tools(
+                                profile.declaration.tools,
+                                profile.declaration.programmatic_tool_calling,
+                            )
                             target_manual = tuple(
                                 tool
-                                for tool in profile.declaration.tools
-                                if isinstance(tool, FunctionTool)
-                                and (tool._bind is None or tool.needs_approval is not False)
+                                for tool in profile_tools
+                                if (tool._bind is None or tool.needs_approval is not False)
                                 and not tool._requires_live_manual_session
                             )
                             has_reachable_manual |= bool(target_manual)
@@ -2296,6 +2341,8 @@ class Agent(Generic[ContextT, OutputT]):
                 else:
                     assert input is not None
                     submit_options: dict[str, Any] = {}
+                    if model_override is not None:
+                        submit_options["model_override"] = model_override
                     if prepare_request is not None:
                         submit_options["prepare_request"] = prepare_request
                     if budget is not None:
@@ -2356,6 +2403,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -2363,6 +2411,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2389,6 +2438,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -2396,6 +2446,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2422,6 +2473,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -2429,6 +2481,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2454,6 +2507,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -2466,6 +2520,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2494,6 +2549,7 @@ class Agent(Generic[ContextT, OutputT]):
         are not attached to the error.
         """
         initial_messages = _capture_initial_messages(initial_messages, state=state)
+        model_override = _capture_model_override(model_override)
         if budget is not None and not isinstance(budget, RunBudget):
             raise TypeError("budget must be a RunBudget or None")
         options: dict[str, Any] = {}
@@ -2509,6 +2565,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["state"] = state
                 if verify_remembered_approvals is not None:
                     options["verify_remembered_approvals"] = verify_remembered_approvals
+                if restored_hosted_mcp is not None:
+                    options["restored_hosted_mcp"] = restored_hosted_mcp
                 if initial_messages is not None:
                     options["initial_messages"] = initial_messages
                 if return_items:
@@ -2545,6 +2603,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["prepare_request"] = prepare_request
                 if budget is not None:
                     options["budget"] = budget
+                if model_override is not None:
+                    options["model_override"] = model_override
                 return _SyncRun().run(
                     self.run(
                         input,

@@ -21,6 +21,12 @@ from ._compat import cancellation_requested
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
+def _capture_model_override(value: str | None) -> str | None:
+    if value is not None and not value.strip():
+        raise ValueError("model_override must be a nonempty model name")
+    return value
+
+
 @dataclass(frozen=True)
 class ModelRequest:
     """Detached provider request. The current application context is never persisted."""

@@ -16,6 +16,7 @@ from agents import (
     Agent,
     Environment,
     FunctionTool,
+    ManagedAgentToolOrigin,
     NativeAgents,
     NativeError,
     NativeRole,
@@ -657,3 +658,74 @@ async def test_native_child_updates_reject_without_changing_the_live_session(
             encoded = json.dumps(responses.requests[1])
             assert initial_instructions in encoded
             assert rejected_instructions not in encoded
+
+
+@pytest.mark.parametrize("scenario", ["success", "empty-input", "child-failure"])
+async def test_produced_items_attribute_managed_role_tool(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Literal["success", "empty-input", "child-failure"],
+) -> None:
+    managed = NativeRoleTool(
+        name="research_topic", role="research", description="Research a topic."
+    )
+
+    @function_tool(name=managed.name)
+    def ordinary() -> str:
+        return "ordinary tool output"
+
+    responses.respond(function_call(managed.name, {}, "ordinary"))
+    managed_input = "" if scenario == "empty-input" else "Read the record."
+    responses.respond(collaboration(managed.name, {"input": managed_input}, "managed"))
+    if scenario == "success":
+        responses.respond(assistant_output("child result"))
+    if scenario == "child-failure":
+        responses.respond(
+            {
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_prompt",
+                        "message": "Synthetic child model failure",
+                    }
+                },
+            }
+        )
+    responses.respond(assistant_output("parent result"))
+    agent = Agent(
+        instructions="Use the research tool.",
+        model=NATIVE_ROLE_FIXTURE_MODEL,
+        provider=provider(responses),
+        tools=[
+            ordinary,
+            NativeAgents(
+                additional_roles=[_role()],
+                managed_tools=[managed],
+                approval=lambda _context, _call: True,
+            ),
+        ],
+    )
+
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        completed = await agent.run(
+            "Research the record.", environment=declaration(executor), return_items=True
+        )
+
+    assert completed.final_output == "parent result"
+    assert completed.items is not None
+    origin = ManagedAgentToolOrigin(name=managed.name, role=managed.role)
+    for call_id, expected in [("ordinary", None), ("managed", origin)]:
+        entries = [entry for entry in completed.items if entry.item.get("call_id") == call_id]
+        assert [entry.item["type"] for entry in entries] == [
+            "function_call",
+            "function_call_output",
+        ]
+        assert [entry.tool_origin for entry in entries] == [expected, expected]
+    assert len(responses.requests) == (3 if scenario == "empty-input" else 4)
+    if scenario == "child-failure":
+        assert "Managed agent did not complete its turn" in json.dumps(
+            responses.requests[-1]["input"]
+        )
