@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::SystemTime;
 
+use anyhow::Context;
 use codex_agent_graph_store::{
     AgentGraphStore, AgentGraphStoreFuture, AgentGraphStoreResult, LocalAgentGraphStore,
     ThreadSpawnEdgeStatus,
@@ -1227,16 +1228,21 @@ impl LossSuspension {
             let mut calls = 0;
             for item in &items[start..] {
                 if let RolloutItem::ResponseItem(envelope) = item {
-                    // Approval and manual keys bind functions only. A custom
-                    // call sharing this ID makes cancellation attribution unsafe.
+                    // Only exact function or application Shell calls can own
+                    // manual keys. Another call kind makes attribution unsafe.
                     if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } | ResponseItem::ApplyPatchCall { call_id, .. }
                         if *call_id == key.call)
                     {
                         return None;
                     }
-                    if matches!(&envelope.item, ResponseItem::FunctionCall { call_id, .. }
-                        if *call_id == key.call)
-                    {
+                    let call_id = match &envelope.item {
+                        ResponseItem::FunctionCall { call_id, .. } => Some(call_id),
+                        ResponseItem::ShellCall {
+                            provider_fields, ..
+                        } => crate::local_reconciliation::shell_call_id(provider_fields),
+                        _ => None,
+                    };
+                    if call_id == Some(&key.call) {
                         calls += 1;
                     }
                 }
@@ -1263,6 +1269,10 @@ impl LossSuspension {
         let mut excluded = HashSet::new();
         if preserve {
             for key in &self.pending {
+                let shell = self.prefix.iter().any(|row| matches!(row,
+                    RolloutItem::ResponseItem(envelope)
+                    if matches!(&envelope.item, ResponseItem::ShellCall { provider_fields, .. }
+                        if crate::local_reconciliation::shell_call_id(provider_fields) == Some(&key.call))));
                 let mut matches = Vec::new();
                 // None until this binding's call, and again after its attempt
                 // ends. A completion from another turn cannot arm this key.
@@ -1292,6 +1302,9 @@ impl LossSuspension {
                             ResponseItem::FunctionCall { call_id, .. } => {
                                 tool_calls += 1;
                                 if *call_id == key.call {
+                                    if shell {
+                                        preserve = false;
+                                    }
                                     sampled = Some(tool_calls <= self.completed_tool_calls);
                                     if ordinal >= self.prefix.len() {
                                         // Another attempt makes attribution ambiguous.
@@ -1299,9 +1312,39 @@ impl LossSuspension {
                                     }
                                 }
                             }
+                            ResponseItem::ShellCall {
+                                provider_fields, ..
+                            } => {
+                                tool_calls += 1;
+                                if crate::local_reconciliation::shell_call_id(provider_fields)
+                                    == Some(&key.call)
+                                {
+                                    if !shell || ordinal >= self.prefix.len() {
+                                        preserve = false;
+                                    }
+                                    sampled = Some(tool_calls <= self.completed_tool_calls);
+                                }
+                            }
+                            ResponseItem::ShellCallOutput {
+                                provider_fields, ..
+                            } => {
+                                if crate::local_reconciliation::shell_call_id(provider_fields)
+                                    == Some(&key.call)
+                                {
+                                    if !shell {
+                                        preserve = false;
+                                    }
+                                    if sampled == Some(true) && ordinal >= self.prefix.len() {
+                                        matches.push(ordinal - self.prefix.len());
+                                        if envelope.item.turn_id() != Some(key.turn.as_str()) {
+                                            preserve = false;
+                                        }
+                                    }
+                                }
+                            }
                             ResponseItem::CustomToolCall { call_id, .. }
                             | ResponseItem::ComputerCall { call_id, .. }
-            | ResponseItem::ApplyPatchCall { call_id, .. } => {
+                            | ResponseItem::ApplyPatchCall { call_id, .. } => {
                                 tool_calls += 1;
                                 if *call_id == key.call {
                                     // A later custom call must not turn a real
@@ -1325,6 +1368,9 @@ impl LossSuspension {
                                 && sampled == Some(true)
                                 && ordinal >= self.prefix.len() =>
                             {
+                                if shell {
+                                    preserve = false;
+                                }
                                 // Core stamps IDs on its own drain results too.
                                 // Only after native sampling completed, for an
                                 // executor still unreturned on this lost writer,
@@ -1445,14 +1491,14 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
                 }
                 match &envelope.item {
                     ResponseItem::ComputerCall { call_id, .. }
-            | ResponseItem::ApplyPatchCall { call_id, .. } => {
+                    | ResponseItem::ApplyPatchCall { call_id, .. } => {
                         if !seen.insert(call_id.as_str()) {
                             return false;
                         }
                         computers.insert(call_id.as_str());
                     }
                     ResponseItem::ComputerCallOutput { call_id, .. }
-            | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
+                    | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
                         computers.remove(call_id.as_str());
                     }
                     _ => {}
@@ -1708,10 +1754,12 @@ impl LocalChecklistStore {
             ));
         }
         let identity = (key.turn.clone(), key.call.clone());
-        if matches!(&item, ResponseItem::ApplyPatchCallOutput { .. } | ResponseItem::ComputerCallOutput { .. })
-            && (key.reply.thread != id.to_string()
-                || crate::local_reconciliation::output_identity(&item)
-                    != Some((key.call.as_str(), Some(key.turn.as_str()))))
+        if matches!(
+            &item,
+            ResponseItem::ApplyPatchCallOutput { .. } | ResponseItem::ComputerCallOutput { .. }
+        ) && (key.reply.thread != id.to_string()
+            || crate::local_reconciliation::output_identity(&item)
+                != Some((key.call.as_str(), Some(key.turn.as_str()))))
         {
             return Err(checklist_error("SDK computer receipt identity mismatch"));
         }

@@ -713,7 +713,19 @@ fn validate_frame(
                 && fields.get("effective_arguments").is_none_or(|value| {
                     value.is_null()
                         || value.as_str().is_some_and(|text| {
-                            serde_json::from_str::<Value>(text).is_ok_and(|value| value == *saved)
+                            serde_json::from_str::<Value>(text).is_ok_and(|value| {
+                                let mut original = saved.clone();
+                                if value
+                                    .get("internal_chat_message_metadata_passthrough")
+                                    .is_none()
+                                {
+                                    original
+                                        .as_object_mut()
+                                        .expect("canonical Shell call")
+                                        .remove("internal_chat_message_metadata_passthrough");
+                                }
+                                value == original
+                            })
                         })
                 })
         } else {

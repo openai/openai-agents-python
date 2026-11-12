@@ -94,7 +94,8 @@ async def test_pending_shell_approval_rebinds_current_callback_after_portable_re
         assert receipts[0]["max_output_length"] == 3
         assert receipts[0]["output"][0]["stdout"] == "abc"
     else:
-        assert receipts[0]["output"][0]["stderr"] == "Application denied execution"
+        assert receipts[0]["output"][0]["stderr"] == "Appli"
+        assert receipts[0]["max_output_length"] == 5
 
 
 @pytest.mark.parametrize("changed", ["declaration", "action", "effective_action"])
