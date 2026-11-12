@@ -643,6 +643,15 @@ class SandboxSession(BaseSandboxSession):
     async def _validate_path_access(self, path: Path | str, *, for_write: bool = False) -> Path:
         return await self._inner._validate_path_access(path, for_write=for_write)
 
+    async def _ls_bounded(
+        self,
+        path: Path | str,
+        *,
+        max_entries: int,
+        user: str | User | None = None,
+    ) -> list[FileEntry]:
+        return await self._inner._ls_bounded(path, max_entries=max_entries, user=user)
+
     async def ls(
         self,
         path: Path | str,

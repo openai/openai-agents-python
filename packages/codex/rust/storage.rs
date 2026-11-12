@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::SystemTime;
 
+use anyhow::Context;
 use codex_agent_graph_store::{
     AgentGraphStore, AgentGraphStoreFuture, AgentGraphStoreResult, LocalAgentGraphStore,
     ThreadSpawnEdgeStatus,
@@ -524,9 +525,8 @@ impl MemoryThreadStore {
         anyhow::ensure!(
             !prefix.iter().any(|item| matches!(item,
                 RolloutItem::ResponseItem(envelope)
-                if matches!(&envelope.item, ResponseItem::FunctionCallOutput {
-                    call_id: Some(call_id), ..
-                } if pending_ids.contains(call_id.as_str()))
+                if crate::local_reconciliation::output_identity(&envelope.item)
+                    .is_some_and(|(call_id, _)| pending_ids.contains(call_id))
             )),
             UnsupportedManualState::NativeWork
         );
@@ -543,20 +543,25 @@ impl MemoryThreadStore {
             Custom,
             Computer,
             ApplyPatch,
+            Shell,
         }
         let mut calls = HashMap::new();
+        let mut application_patches = HashSet::new();
         for item in prefix {
             match item {
                 RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
                     unfinished.clear();
                     calls.clear();
+                    application_patches.clear();
                 }
                 RolloutItem::ResponseItem(item) => match &item.item {
                     ResponseItem::FunctionCall { call_id, .. }
                     | ResponseItem::CustomToolCall { call_id, .. }
                     | ResponseItem::ApplyPatchCall { call_id, .. }
-                    | ResponseItem::ComputerCall { call_id, .. }
-            | ResponseItem::ApplyPatchCall { call_id, .. } => {
+                    | ResponseItem::ComputerCall { call_id, .. } => {
+                        if crate::local_reconciliation::owns_application_patch(item) {
+                            application_patches.insert(call_id.as_str());
+                        }
                         let kind = match &item.item {
                             ResponseItem::FunctionCall { .. } => CallKind::Function,
                             ResponseItem::CustomToolCall { .. } => CallKind::Custom,
@@ -568,6 +573,28 @@ impl MemoryThreadStore {
                             UnsupportedManualState::NativeWork
                         );
                         unfinished.insert(call_id.as_str());
+                    }
+                    ResponseItem::ShellCall {
+                        provider_fields, ..
+                    } => {
+                        let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
+                            .context("Shell call lacks identity")?;
+                        anyhow::ensure!(
+                            calls.insert(call_id.as_str(), CallKind::Shell).is_none(),
+                            UnsupportedManualState::NativeWork
+                        );
+                        unfinished.insert(call_id.as_str());
+                    }
+                    ResponseItem::ShellCallOutput {
+                        provider_fields, ..
+                    } => {
+                        let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
+                            .context("Shell output lacks identity")?;
+                        anyhow::ensure!(
+                            calls.get(call_id.as_str()) == Some(&CallKind::Shell)
+                                && unfinished.remove(call_id.as_str()),
+                            UnsupportedManualState::NativeWork
+                        );
                     }
                     ResponseItem::FunctionCallOutput {
                         call_id: Some(call_id),
@@ -603,10 +630,11 @@ impl MemoryThreadStore {
             }
         }
         anyhow::ensure!(
-            pending.iter().all(|key| !matches!(
-                calls.get(key.call.as_str()),
-                Some(CallKind::Custom | CallKind::Computer | CallKind::ApplyPatch)
-            )),
+            pending.iter().all(|key| match calls.get(key.call.as_str()) {
+                Some(CallKind::ApplyPatch) => application_patches.contains(key.call.as_str()),
+                Some(CallKind::Custom | CallKind::Computer) => false,
+                _ => true,
+            }),
             UnsupportedManualState::NativeWork
         );
         if unfinished
@@ -616,7 +644,7 @@ impl MemoryThreadStore {
             return Ok(None);
         }
         let Some(suspension) =
-            LossSuspension::bind(&writer.sampling, pending.to_vec(), history.items)
+            LossSuspension::bind_pending(&writer.sampling, pending.to_vec(), history.items, true)
         else {
             return Ok(None);
         };
@@ -1151,6 +1179,7 @@ impl SamplingState {
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::ComputerCall { .. }
                         | ResponseItem::ApplyPatchCall { .. }
+                        | ResponseItem::ShellCall { .. }
                 ) =>
             {
                 self.tool_calls += 1;
@@ -1184,6 +1213,15 @@ impl LossSuspension {
         pending: Vec<crate::python_tools::PendingKey>,
         items: Vec<RolloutItem>,
     ) -> Option<Self> {
+        Self::bind_pending(sampling, pending, items, false)
+    }
+
+    fn bind_pending(
+        sampling: &SamplingState,
+        pending: Vec<crate::python_tools::PendingKey>,
+        items: Vec<RolloutItem>,
+        application_patches: bool,
+    ) -> Option<Self> {
         let turn_id = sampling.turn_id.clone()?;
         let Some(start) = items.iter().rposition(|item| {
             matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(turn))
@@ -1204,16 +1242,16 @@ impl LossSuspension {
             let mut calls = 0;
             for item in &items[start..] {
                 if let RolloutItem::ResponseItem(envelope) = item {
-                    // Approval and manual keys bind functions only. A custom
-                    // call sharing this ID makes cancellation attribution unsafe.
-                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } | ResponseItem::ApplyPatchCall { call_id, .. }
-                        if *call_id == key.call)
-                    {
+                    if matches!(&envelope.item, ResponseItem::ApplyPatchCall { call_id, .. } if *call_id == key.call) {
+                        if !application_patches || !crate::local_reconciliation::owns_application_patch(envelope) { return None; }
+                        calls += 1;
+                    } else if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } if *call_id == key.call) {
                         return None;
-                    }
-                    if matches!(&envelope.item, ResponseItem::FunctionCall { call_id, .. }
-                        if *call_id == key.call)
-                    {
+                    } else if match &envelope.item {
+                        ResponseItem::FunctionCall { call_id, .. } => call_id == &key.call,
+                        ResponseItem::ShellCall { provider_fields, .. } => crate::local_reconciliation::shell_call_id(provider_fields) == Some(&key.call),
+                        _ => false,
+                    } {
                         calls += 1;
                     }
                 }
@@ -1240,6 +1278,13 @@ impl LossSuspension {
         let mut excluded = HashSet::new();
         if preserve {
             for key in &self.pending {
+                let shell = self.prefix.iter().any(|row| matches!(row,
+                    RolloutItem::ResponseItem(envelope)
+                    if matches!(&envelope.item, ResponseItem::ShellCall { provider_fields, .. }
+                        if crate::local_reconciliation::shell_call_id(provider_fields) == Some(&key.call))));
+                let patch = self.prefix.iter().any(|row| matches!(row,
+                    RolloutItem::ResponseItem(envelope) if crate::local_reconciliation::owns_application_patch(envelope)
+                        && matches!(&envelope.item, ResponseItem::ApplyPatchCall { call_id, .. } if *call_id == key.call)));
                 let mut matches = Vec::new();
                 // None until this binding's call, and again after its attempt
                 // ends. A completion from another turn cannot arm this key.
@@ -1266,9 +1311,12 @@ impl LossSuspension {
                             tool_calls = 0;
                         }
                         RolloutItem::ResponseItem(envelope) => match &envelope.item {
-                            ResponseItem::FunctionCall { call_id, .. } => {
+                            ResponseItem::FunctionCall { call_id, .. }
+                            | ResponseItem::ApplyPatchCall { call_id, .. } if matches!(&envelope.item, ResponseItem::FunctionCall { .. })
+                                || crate::local_reconciliation::owns_application_patch(envelope) => {
                                 tool_calls += 1;
                                 if *call_id == key.call {
+                                    if shell || matches!(&envelope.item, ResponseItem::ApplyPatchCall { .. }) != patch { preserve = false; }
                                     sampled = Some(tool_calls <= self.completed_tool_calls);
                                     if ordinal >= self.prefix.len() {
                                         // Another attempt makes attribution ambiguous.
@@ -1276,9 +1324,39 @@ impl LossSuspension {
                                     }
                                 }
                             }
+                            ResponseItem::ShellCall {
+                                provider_fields, ..
+                            } => {
+                                tool_calls += 1;
+                                if crate::local_reconciliation::shell_call_id(provider_fields)
+                                    == Some(&key.call)
+                                {
+                                    if !shell || ordinal >= self.prefix.len() {
+                                        preserve = false;
+                                    }
+                                    sampled = Some(tool_calls <= self.completed_tool_calls);
+                                }
+                            }
+                            ResponseItem::ShellCallOutput {
+                                provider_fields, ..
+                            } => {
+                                if crate::local_reconciliation::shell_call_id(provider_fields)
+                                    == Some(&key.call)
+                                {
+                                    if !shell {
+                                        preserve = false;
+                                    }
+                                    if sampled == Some(true) && ordinal >= self.prefix.len() {
+                                        matches.push(ordinal - self.prefix.len());
+                                        if envelope.item.turn_id() != Some(key.turn.as_str()) {
+                                            preserve = false;
+                                        }
+                                    }
+                                }
+                            }
                             ResponseItem::CustomToolCall { call_id, .. }
                             | ResponseItem::ComputerCall { call_id, .. }
-            | ResponseItem::ApplyPatchCall { call_id, .. } => {
+                            | ResponseItem::ApplyPatchCall { call_id, .. } => {
                                 tool_calls += 1;
                                 if *call_id == key.call {
                                     // A later custom call must not turn a real
@@ -1286,12 +1364,20 @@ impl LossSuspension {
                                     preserve = false;
                                 }
                             }
-                            ResponseItem::ComputerCallOutput { call_id, .. }
-                            | ResponseItem::ApplyPatchCallOutput { call_id, .. }
-                                if *call_id == key.call =>
-                            {
+                            ResponseItem::ApplyPatchCallOutput {
+                                call_id, status, internal_chat_message_metadata_passthrough: meta, ..
+                            } if *call_id == key.call => {
+                                if patch && sampled == Some(true) && ordinal >= self.prefix.len()
+                                    && *status == codex_protocol::models::ApplyPatchStatus::Failed
+                                    && meta.as_ref().and_then(|m| m.turn_id.as_deref()) == Some(key.turn.as_str()) {
+                                    matches.push(ordinal - self.prefix.len());
+                                } else { preserve = false; }
+                            }
+                            ResponseItem::ComputerCallOutput { call_id, .. } if *call_id == key.call => {
                                 preserve = false;
                             }
+                            ResponseItem::FunctionCallOutput { call_id: Some(call_id), .. }
+                                if *call_id == key.call && patch => { preserve = false; }
                             ResponseItem::FunctionCallOutput {
                                 call_id: Some(call_id),
                                 name,
@@ -1299,9 +1385,13 @@ impl LossSuspension {
                                 internal_chat_message_metadata_passthrough: meta,
                                 ..
                             } if *call_id == key.call
+                                && !patch
                                 && sampled == Some(true)
                                 && ordinal >= self.prefix.len() =>
                             {
+                                if shell {
+                                    preserve = false;
+                                }
                                 // Core stamps IDs on its own drain results too.
                                 // Only after native sampling completed, for an
                                 // executor still unreturned on this lost writer,
@@ -1422,14 +1512,14 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
                 }
                 match &envelope.item {
                     ResponseItem::ComputerCall { call_id, .. }
-            | ResponseItem::ApplyPatchCall { call_id, .. } => {
+                    | ResponseItem::ApplyPatchCall { call_id, .. } => {
                         if !seen.insert(call_id.as_str()) {
                             return false;
                         }
                         computers.insert(call_id.as_str());
                     }
                     ResponseItem::ComputerCallOutput { call_id, .. }
-            | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
+                    | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
                         computers.remove(call_id.as_str());
                     }
                     _ => {}
@@ -1685,10 +1775,12 @@ impl LocalChecklistStore {
             ));
         }
         let identity = (key.turn.clone(), key.call.clone());
-        if matches!(&item, ResponseItem::ApplyPatchCallOutput { .. } | ResponseItem::ComputerCallOutput { .. })
-            && (key.reply.thread != id.to_string()
-                || crate::local_reconciliation::output_identity(&item)
-                    != Some((key.call.as_str(), Some(key.turn.as_str()))))
+        if matches!(
+            &item,
+            ResponseItem::ApplyPatchCallOutput { .. } | ResponseItem::ComputerCallOutput { .. }
+        ) && (key.reply.thread != id.to_string()
+            || crate::local_reconciliation::output_identity(&item)
+                != Some((key.call.as_str(), Some(key.turn.as_str()))))
         {
             return Err(checklist_error("SDK computer receipt identity mismatch"));
         }

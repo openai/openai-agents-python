@@ -304,8 +304,9 @@ class Peer:
         self.websocket_connections += 1
         self.websocket_open_connections += 1
         self.websockets_retired.clear()
-        warmup_id, warmup_input = None, []
-        generated = False
+        connection_id = self.websocket_connections
+        previous_id, history, operation = None, [], None
+        completed = False
         try:
             async for message in socket:
                 if message.type != WSMsgType.TEXT:
@@ -317,14 +318,18 @@ class Peer:
                 if not isinstance(items, list):
                     raise ValueError("Expected an input list")
                 previous = body.get("previous_response_id")
-                if previous is not None and previous != warmup_id:
+                if previous is not None and previous != previous_id:
                     raise ValueError("Fresh conversation references another response")
-                items = (warmup_input if previous is not None else []) + items
+                if completed:
+                    raise ValueError("One fresh conversation per WebSocket connection")
+                items = (history if previous is not None else []) + items
                 if body.get("generate") is False:
+                    if previous_id is not None:
+                        raise ValueError("Only one initial WebSocket warmup is supported")
                     self.websocket_warmups += 1
-                    warmup_id = f"resp_warmup_{self.websocket_warmups}"
-                    warmup_input = items
-                    response = self.response(warmup_id, [], "completed", body["model"])
+                    previous_id = f"resp_warmup_{self.websocket_warmups}"
+                    history = items
+                    response = self.response(previous_id, [], "completed", body["model"])
                     for name, value in response["usage"].items():
                         if isinstance(value, dict):
                             for detail in value:
@@ -334,12 +339,22 @@ class Peer:
                     for event in self.events(response, []):
                         await socket.send_json(event)
                     continue
-                if generated or self.args.tool_rounds:
-                    raise ValueError("WebSocket benchmark supports one no-tool turn per socket")
-                generated = True
-                await self.handle(
-                    request, websocket=socket, raw_body=message.data.encode(), resolved_input=items
+                markers = user_markers(items)
+                if len(markers) != 1 or (operation is not None and markers != [operation]):
+                    raise ValueError("WebSocket history must belong to one fresh operation")
+                operation = markers[0]
+                response = await self.handle(
+                    request,
+                    websocket=socket,
+                    raw_body=message.data.encode(),
+                    resolved_input=items,
+                    websocket_connection_id=connection_id,
                 )
+                if response is None:
+                    break  # handle has already recorded and sent its protocol failure.
+                previous_id = response["id"]
+                history = items + response["output"]
+                completed = self.operations[operation].status == "completed"
         except Exception as error:
             self.errors += 1
             await socket.send_json(
@@ -355,7 +370,15 @@ class Peer:
                 self.websockets_retired.set()
         return socket
 
-    async def handle(self, request, *, websocket=None, raw_body=None, resolved_input=None):
+    async def handle(
+        self,
+        request,
+        *,
+        websocket=None,
+        raw_body=None,
+        resolved_input=None,
+        websocket_connection_id=None,
+    ):
         from aiohttp import web
 
         self.requests += 1
@@ -385,6 +408,9 @@ class Peer:
             receipt["body_parse_ns"] = time.monotonic_ns() - parse_start
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
+            receipt["request_previous_response_id"] = body.get("previous_response_id")
+            if websocket is not None:
+                receipt["websocket_connection_id"] = websocket_connection_id
             items = body.get("input") if resolved_input is None else resolved_input
             if isinstance(items, str):
                 items = [{"role": "user", "content": items}]
@@ -536,19 +562,17 @@ class Peer:
             )
             receipt["stream"] = streaming
             receipt["text_chunks"] = len(chunks) if streaming else 0
-            return result
+            return response if websocket is not None else result
         except Exception as error:
             self.errors += 1
             if op is not None:
                 op.status = "error"
             receipt["error"] = f"{type(error).__name__}: {error}"
+            error_body = {
+                "error": {"message": receipt["error"], "type": "benchmark_protocol_error"}
+            }
             payload = encode(
-                {
-                    "error": {
-                        "message": receipt["error"],
-                        "type": "benchmark_protocol_error",
-                    }
-                }
+                {"type": "error", **error_body} if websocket is not None else error_body
             )
             self.response_bytes += len(payload)
             if websocket is not None:
