@@ -601,7 +601,7 @@ async def native_deadline_case():
                     await writer.drain()
             writer.write(b"Content-Length: 0\r\n\r\n")
             await writer.drain()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             if not trickling:
                 raise
             first_closed.set()
@@ -612,7 +612,7 @@ async def native_deadline_case():
             writer.close()
             try:
                 await writer.wait_closed()
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 if not trickling:
                     raise
                 first_closed.set()
