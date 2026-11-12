@@ -165,6 +165,13 @@ impl Policy {
             .is_some_and(|policy| policy.allowed_tools.is_some() && policy.allows(name))
     }
 
+    fn managed_tool_admission(&self, depth: usize, name: &str) -> Option<bool> {
+        self.managed_tools
+            .iter()
+            .any(|tool| tool == name)
+            .then_some(depth < self.max_depth)
+    }
+
     pub fn admits(&self, depth: usize, item: &codex_protocol::models::ResponseItem) -> bool {
         use codex_protocol::models::ResponseItem;
         match item {
@@ -184,8 +191,8 @@ impl Policy {
                     // ToolPolicy grant, just like each nested dispatch.
                     return true;
                 }
-                if self.managed_tools.iter().any(|tool| tool == name) {
-                    return depth < self.max_depth;
+                if let Some(admitted) = self.managed_tool_admission(depth, name) {
+                    return admitted;
                 }
                 if (depth != 0 && self.max_depth == 1)
                     || (name == "spawn_agent" && depth >= self.max_depth)
@@ -246,6 +253,9 @@ impl Policy {
             codex_code_mode::CodeModeToolKind::Function => {
                 if name.namespace.as_deref() != Some("collaboration") {
                     return true;
+                }
+                if let Some(admitted) = self.managed_tool_admission(depth, &name.name) {
+                    return admitted;
                 }
                 if (depth != 0 && self.max_depth == 1)
                     || (name.name == "spawn_agent" && depth >= self.max_depth)
