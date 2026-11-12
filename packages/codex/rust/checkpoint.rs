@@ -21,6 +21,7 @@ use codex_thread_store::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::tool_callers::ToolDeclarations;
 use crate::{
     NativeThread,
     engine::{EngineState, ThreadState},
@@ -63,8 +64,8 @@ pub struct Checkpoint {
 pub(crate) fn restore_specs(
     payload: &Value,
     options: &mut options::ThreadOptions,
-    specs: Option<Vec<DynamicToolSpec>>,
-) -> anyhow::Result<Option<Vec<DynamicToolSpec>>> {
+    specs: Option<ToolDeclarations>,
+) -> anyhow::Result<Option<ToolDeclarations>> {
     let Some(opening) = &options.agent_profiles else {
         return Ok(specs);
     };
@@ -843,7 +844,7 @@ pub async fn restore(
     engine: &Arc<EngineState>,
     mut checkpoint: Checkpoint,
     mut options: options::ThreadOptions,
-    python_specs: Option<Vec<DynamicToolSpec>>,
+    python_specs: Option<ToolDeclarations>,
     source: Option<&crate::context::Change>,
 ) -> anyhow::Result<NativeThread> {
     let _lifecycle = engine.lifecycle.lock().await;
