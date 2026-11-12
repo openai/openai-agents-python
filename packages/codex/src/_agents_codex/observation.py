@@ -632,6 +632,7 @@ class EventStream(AsyncIterator[Observation]):
         self._reading = False
         self._turn = _turn
         self._include_execution_details = _include_execution_details is True
+        self._respect_admission_floor = False
 
     def __aiter__(self) -> EventStream:
         return self
@@ -649,7 +650,9 @@ class EventStream(AsyncIterator[Observation]):
         try:
             while not self._closed:
                 signal = self._buffer.changed
-                if self._buffer.retention == "all" and self._turn is not None:
+                if (
+                    self._buffer.retention == "all" or self._respect_admission_floor
+                ) and self._turn is not None:
                     # Queued roots have no observation window until dispatch. Read
                     # the live floor after every wake, including pre-opened readers.
                     floor = getattr(self._turn, "_observation_after", 0)

@@ -179,6 +179,10 @@ async def test_steering_successor_uses_final_turn_and_original_submission(respon
         assert report is not None
         assert report.availability == "complete"
         assert sum(row.count for row in report.counts) == 1
+        logical = turn.submission_request_attempts
+        assert logical is not None
+        assert logical.availability == "complete"
+        assert sum(row.count for row in logical.counts) == 2
 
 
 async def test_invalid_typed_output_has_no_acceptance(responses):
