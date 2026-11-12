@@ -587,6 +587,10 @@ class ChatCompletionsModel:
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
             choice = value["choices"][0]
             message = choice["message"]
+            if isinstance(self, LitellmModel) and message.get("refusal") is None:
+                provider_data = (message.get("provider_specific_fields") or {}).get("refusal")
+                if provider_data is not None:
+                    message = {**message, "refusal": provider_data}
             if (
                 choice.get("finish_reason") == "content_filter"
                 and not message.get("content")
@@ -755,9 +759,6 @@ class LitellmModel(ChatCompletionsModel):
     """
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
-        choice: Any = None
-        message: Any = None
-        refusal: Any = None
         response: Any = None
         value: Any = None
         try:
@@ -770,15 +771,10 @@ class LitellmModel(ChatCompletionsModel):
                 }
             response = await self.client.acompletion(**options)
             value = response.model_dump()
-            for choice in value["choices"]:
-                message = choice["message"]
-                refusal = (message.get("provider_specific_fields") or {}).get("refusal")
-                if message.get("refusal") is None and refusal is not None:
-                    message["refusal"] = refusal
             return value
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
-            del request, options, choice, message, refusal, response, value
+            del request, options, response, value
 
 
 @dataclass(frozen=True)

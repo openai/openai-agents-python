@@ -8,7 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from agents import Agent, ChatCompletionsModel, NativeProvider, RunDiagnosticError, function_tool
+from agents import (
+    Agent,
+    ChatCompletionsModel,
+    LitellmModel,
+    ModelRequest,
+    NativeError,
+    NativeProvider,
+    RunDiagnosticError,
+    function_tool,
+)
 from agents.observation import RawProviderEvent
 from tests._asyncio import timeout
 
@@ -113,9 +122,12 @@ async def test_chat_provider_json_native_opt_in_detachment_and_turn_isolation(en
             )
 
 
-async def test_chat_json_in_native_failure_details():
+@pytest.mark.parametrize("object_field", [False, True])
+async def test_chat_json_in_native_failure_details(object_field):
     cause = ValueError("synthetic tool failure")
     response = chat_reply(True)
+    if not object_field:
+        response.pop("object")
 
     @function_tool(error_function=None)
     def fail() -> str:
@@ -181,3 +193,57 @@ async def test_cancelled_chat_client_cleanup_without_late_raw_json():
                 async for event in turn.events(include_execution_details=True)
                 if isinstance(event, RawProviderEvent)
             ]
+
+
+async def test_litellm_refusal_retains_original_client_json():
+    response = chat_reply()
+    response["choices"][0]["message"] = {
+        "role": "assistant",
+        "content": None,
+        "provider_specific_fields": {"refusal": "synthetic refusal"},
+    }
+    original = deepcopy(response)
+
+    class Client:
+        async def acompletion(self, **_body):
+            return SimpleNamespace(model_dump=lambda: deepcopy(response))
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url="https://example.invalid/v1", model_backend=LitellmModel(Client())
+        ) as provider,
+    ):
+        async with Agent(instructions="Reply briefly.", model="fixture", provider=provider).session(
+            include_raw_provider_events=True, observation_retention="all"
+        ) as session:
+            turn = await session.submit("Reply.")
+            with pytest.raises(NativeError) as refused:
+                await turn.get_result()
+            assert refused.value.response_integrity_reason == "provider_refusal"
+            frames = [
+                event.payload
+                async for event in turn.events(include_execution_details=True)
+                if isinstance(event, RawProviderEvent)
+            ]
+    assert frames == [original]
+    assert response == original
+
+
+async def test_litellm_refusal_adapter_keeps_client_projection_separate():
+    response = chat_reply()
+    response["choices"][0]["message"] = {
+        "role": "assistant",
+        "content": None,
+        "provider_specific_fields": {"refusal": "synthetic refusal"},
+    }
+
+    class Client:
+        async def acompletion(self, **_body):
+            return SimpleNamespace(model_dump=lambda: deepcopy(response))
+
+    request = ModelRequest({"model": "fixture", "input": []}, None, "fixture-session", "fixture-turn")
+    object.__setattr__(request, "_observe_raw_provider_events", True)
+    result = await LitellmModel(Client()).complete(request)
+    assert result.output[0]["content"] == [{"type": "refusal", "refusal": "synthetic refusal"}]
+    assert result._raw_chat_completion == response

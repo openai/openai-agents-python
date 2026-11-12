@@ -8205,7 +8205,10 @@ class Session(Generic[ContextT, OutputT]):
                                 "response.failed",
                             }:
                                 response = payload.get("response")
-                            elif payload.get("object") in ("response", "chat.completion"):
+                            elif event.source == "chat_completions" or payload.get("object") in (
+                                "response",
+                                "chat.completion",
+                            ):
                                 response = payload
                             else:
                                 continue
