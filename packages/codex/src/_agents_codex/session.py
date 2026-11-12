@@ -99,6 +99,7 @@ from ._mcp_errors import _protect_mcp_methods
 from ._media import _audio_json, _check_audio_json
 from ._model_retry import _is_model_abort, _ModelFailure, _normalized_error, _resolve_retry
 from ._native_async import _NativeCompletionError as _NativeCompletionError
+from ._opening import _capture_opening_agent as _capture_opening_agent
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
@@ -3641,60 +3642,6 @@ def _configure_child_roles(
             "description": role.description,
             "config_file": str(role_path),
         }
-
-
-def _capture_opening_agent(
-    agent: Agent[ContextT, OutputT],
-    *,
-    provider: NativeProvider | None,
-    model: str | None,
-    model_settings: ModelSettings | None,
-    tool_selection: Sequence[Tool[ContextT]] | None,
-) -> Agent[ContextT, OutputT]:
-    """Detach declaration defaults before native opening can suspend."""
-    captured_settings = _copy_model_settings(agent.model_settings)
-    overrides = _copy_model_settings(model_settings)
-    original_retry = captured_settings.get("retry")
-    override_retry = overrides.get("retry")
-    if original_retry is not None and override_retry is not None:
-        overrides["retry"] = replace(
-            original_retry,
-            max_retries=override_retry.max_retries
-            if override_retry.max_retries is not None
-            else original_retry.max_retries,
-            backoff=override_retry.backoff
-            if override_retry.backoff is not None
-            else original_retry.backoff,
-            policy=override_retry.policy
-            if override_retry.policy is not None
-            else original_retry.policy,
-        )
-    captured_settings.update(overrides)
-    return Agent[ContextT, OutputT](
-        instructions=cast(
-            str,
-            agent.instructions if getattr(agent, "_hosted_instructions_provided", True) else None,
-        ),
-        hosted_prompt=agent.hosted_prompt,
-        realtime=agent.realtime,
-        name=agent.name,
-        tools=(agent.tools if getattr(agent, "_hosted_tools_provided", True) else None)
-        if tool_selection is None
-        else tool_selection,
-        handoffs=agent.handoffs,
-        model=agent.model if model is None else model,
-        model_settings=captured_settings,
-        provider=agent.provider if provider is None else provider,
-        decisions=agent.decisions,
-        output_type=cast(OutputSpec[OutputT], agent.output_type),
-        programmatic_tool_calling=agent.programmatic_tool_calling,
-        transform_context=agent.transform_context,
-        before_compact=agent.before_compact,
-        before_complete=agent.before_complete,
-        tool_batch_completion=agent.tool_batch_completion,
-        input_guardrails=agent.input_guardrails,
-        output_guardrails=agent.output_guardrails,
-    )
 
 
 def _private_default_opening_candidates(
