@@ -5463,6 +5463,7 @@ pub(crate) mod tests {
                 entered.send(()).unwrap();
                 boundary
                     .on_tool_start(ToolStartInput {
+                        builtin_sandbox_operation: None,
                         session_store: &session,
                         thread_store: &thread,
                         step_store: None,

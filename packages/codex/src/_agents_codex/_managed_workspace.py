@@ -176,3 +176,5 @@ class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
 
 
 ManagedWorkspaceCheckpoint.__module__ = "agents.sandbox"
+
+_SANDBOX_EVENTS_ATTRIBUTE = "_sdk_sandbox_operation_observer"

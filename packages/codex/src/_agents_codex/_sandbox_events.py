@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Sequence
 from copy import copy
 from uuid import UUID
-from weakref import WeakValueDictionary
+from weakref import WeakValueDictionary, ref
 
 from agents.classic.sandbox.errors import OpName
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -16,6 +17,7 @@ from agents.classic.sandbox.session.events import (
     SandboxSessionFinishEvent,
 )
 from agents.classic.sandbox.session.manager import Instrumentation as _Instrumentation
+from agents.classic.sandbox.session.sandbox_session import SandboxSession
 from agents.classic.sandbox.session.sinks import (
     ChainedSink,
     EventSink,
@@ -176,7 +178,10 @@ class Instrumentation(_Instrumentation):
         return False
 
     async def emit(self, event: SandboxSessionEvent) -> None:
-        if event.op not in ("start", "stop", "shutdown") or not self.sinks:
+        if (
+            event.op not in ("start", "stop", "shutdown", "exec", "write_stdin", "view_image")
+            or not self.sinks
+        ):
             return
         safe = event.model_copy(update={"data": {}})
         if isinstance(safe, SandboxSessionFinishEvent):
@@ -195,3 +200,50 @@ class Instrumentation(_Instrumentation):
                 task.cancel()
         for sink in self._sinks:
             _retire_binding(sink, session_id)
+
+
+class _OperationObserver:
+    """One weak provider lease supplies resource identity for native-only facts."""
+
+    def __init__(self, session: SandboxSession) -> None:
+        self._session = ref(session)
+        self.active = True
+
+    async def emit(self, message: dict[str, object]) -> None:
+        session = self._session()
+        if not self.active or session is None:
+            return
+        op = message.get("operation")
+        if op not in ("exec", "write_stdin", "view_image"):
+            return
+        identifiers = tuple(message.get(key) for key in ("thread", "turn_id", "call_id"))
+        if any(
+            not isinstance(value, str) or not value or len(value) > 256 for value in identifiers
+        ):
+            return
+        span = "native:" + ":".join(str(value) for value in identifiers)
+        if message.get("phase") == "start":
+            await session._emit_start_event(op=op, span_id=span, parent_span_id=None, trace_id=None)
+        elif message.get("phase") == "finish":
+            duration = message.get("duration_ms")
+            ok = message.get("ok")
+            if (
+                type(ok) is not bool
+                or not isinstance(duration, (float, int))
+                or isinstance(duration, bool)
+                or not math.isfinite(duration)
+                or duration < 0
+            ):
+                return
+            await session._emit_finish_event(
+                op=op,
+                span_id=span,
+                parent_span_id=None,
+                trace_id=None,
+                duration_ms=float(duration),
+                ok=ok,
+                exc=None,
+                data=None,
+                stdout=None,
+                stderr=None,
+            )

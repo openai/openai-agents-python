@@ -739,7 +739,11 @@
     {
       "path": "sdk-application-model-raw-events.patch",
       "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
+    },
+    {
+      "path": "sdk-native-sandbox-operation-events.patch",
+      "sha256": "a7b909514a885fbd7a292e1f8f62e8904528d1b2a7b3afdfbe512427cee8aa70"
     }
   ],
-  "result_tree": "eb3c756f20d7f0bc0822378f58894872a2acf1bb"
+  "result_tree": "c3fcd0a1807a690cc8ed00f6895f3fb190cff8a5"
 }

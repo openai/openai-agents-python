@@ -29,6 +29,7 @@ from agents.sandbox import (
 )
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
+from tests.native_fixtures import responses as responses
 
 if sys.platform != "win32":
     from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
@@ -380,3 +381,56 @@ async def test_native_lifecycle_excludes_payloads_even_with_output_opt_in():
     assert safe.stdout is safe.stderr is safe.stdout_bytes is safe.stderr_bytes is None
     assert safe.error_message is None
     assert original.stdout == "private-output" and original.data == {"private": "provider-payload"}
+
+
+@unix
+@pytest.mark.parametrize("valid", [True, False])
+async def test_native_builtin_dispatch_retains_resource_identity_and_measured_finish(
+    valid: bool, responses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from tests.native_fixtures import assistant_output, function_call
+    from tests.test_native_agent import provider
+    from tests.test_native_executor_tools import declaration, trust
+
+    observed = []
+    resources = []
+    instrumentation = Instrumentation(
+        sinks=[CallbackSink(lambda event, session: observed.append(event))]
+    )
+    client = UnixLocalSandboxClient(instrumentation=instrumentation, inherit_host_environment=False)
+    responses.respond(
+        function_call(
+            "exec_command",
+            {"cmd": "echo native-private-command" if valid else 7},
+            "builtin-operation",
+        )
+    )
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(30),
+        ExecutorPeer(
+            tmp_path / "executor", synthetic_process_output="native-private-output"
+        ).serve() as peer,
+    ):
+        trust(peer, tmp_path, monkeypatch)
+
+        @asynccontextmanager
+        async def connect(session):
+            resources.append(session)
+            yield declaration(peer)
+
+        environment = sandbox_environment(
+            client, manifest=Manifest(), options=None, connect=connect
+        )
+        async with Agent(
+            instructions="Use the requested sandbox operation.", provider=provider(responses)
+        ).session(environment=environment) as session:
+            assert (await (await session.submit("once")).get_result()).final_output == "done"
+    operations = [event for event in observed if event.op == "exec"]
+    assert [event.phase for event in operations] == ["start", "finish"]
+    assert all(event.session_id == resources[0].state.session_id for event in operations)
+    assert operations[0].span_id == operations[1].span_id
+    assert operations[1].ok is valid and operations[1].duration_ms >= 0
+    assert all(event.data == {} for event in operations)
+    assert "native-private" not in "".join(event.model_dump_json() for event in operations)
+    assert bool(peer.synthetic_process_starts) is valid

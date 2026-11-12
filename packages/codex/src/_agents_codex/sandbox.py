@@ -89,12 +89,13 @@ from agents.classic.sandbox.session.sinks import (
 )
 
 from ._managed_workspace import (
+    _SANDBOX_EVENTS_ATTRIBUTE,
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
     ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint,
     _ManagedWorkspaceSource,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
-from ._sandbox_events import Instrumentation as Instrumentation
+from ._sandbox_events import Instrumentation as Instrumentation, _OperationObserver
 from .executor import Environment
 
 _OptionsT = TypeVar("_OptionsT")
@@ -352,7 +353,20 @@ def sandbox_environment(
                 _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
                 _render_workspace_instructions(selected.state.manifest, environment),
             )
-            yield environment
+            observer = (
+                _OperationObserver(selected)
+                if isinstance(selected._instrumentation, Instrumentation)
+                else None
+            )
+            if observer is not None:
+                setattr(source_manager, _SANDBOX_EVENTS_ATTRIBUTE, observer)
+                if managed_source is not None:
+                    setattr(managed_source, _SANDBOX_EVENTS_ATTRIBUTE, observer)
+            try:
+                yield environment
+            finally:
+                if observer is not None:
+                    observer.active = False
 
     source_manager = source()
     if managed_workspace:

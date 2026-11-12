@@ -1,3 +1,6 @@
+#[path = "sandbox_events.rs"]
+mod sandbox_events;
+
 #[path = "model_producer.rs"]
 mod model_producer;
 pub(crate) use model_producer::Contributor as ModelProducerContributor;
@@ -19,8 +22,8 @@ use codex_extension_api::{
     ContextContributor, ExtensionData, ExtensionFuture, ThreadIdleInput,
     ThreadLifecycleContributor, ThreadStartInput, ThreadStopInput, ToolCallOutcome,
     ToolContributor, ToolFinishInput, ToolLifecycleContributor, ToolLifecycleFuture, ToolPolicy,
-    TurnErrorInput, TurnLifecycleContributor, TurnSamplingStop, TurnStartInput, TurnStartPhase,
-    WorldStateContributionInput, WorldStateSectionContribution,
+    ToolStartInput, TurnErrorInput, TurnLifecycleContributor, TurnSamplingStop, TurnStartInput,
+    TurnStartPhase, WorldStateContributionInput, WorldStateSectionContribution,
 };
 use codex_protocol::dynamic_tools::{
     DynamicToolFunctionSpec, DynamicToolNamespaceSpec, DynamicToolNamespaceTool,
@@ -319,6 +322,7 @@ impl Drop for PendingPreparation {
 }
 
 enum QueuedRequest {
+    SandboxOperation(sandbox_events::Notice),
     Callback(Value),
     Prepared(Value),
     Step(Value),
@@ -341,6 +345,7 @@ enum QueuedRequest {
 // This inbox carries requests, never turn admission or response senders.
 // Those remain scoped to the individual thread's PythonTools.
 struct PythonFamily {
+    sandbox_operations: OnceLock<Arc<tokio::sync::Semaphore>>,
     members: RwLock<HashMap<String, Weak<PythonTools>>>,
     // This lock also serializes the turn-receipt installation against an
     // all-scope interrupt. No native await is allowed while holding it.
@@ -377,6 +382,7 @@ impl Default for PythonFamily {
     fn default() -> Self {
         let (requests, receiver) = mpsc::unbounded_channel();
         Self {
+            sandbox_operations: OnceLock::new(),
             members: RwLock::new(HashMap::new()),
             graph: Mutex::new(GraphInterruption::default()),
             graph_changed: watch::channel(()).0,
@@ -3618,6 +3624,7 @@ impl PythonTools {
         let mut receiver = self.family.receiver.lock().await;
         loop {
             match receiver.recv().await {
+                Some(QueuedRequest::SandboxOperation(notice)) => return notice.payload,
                 Some(QueuedRequest::Callback(notice)) => return notice,
                 Some(QueuedRequest::Prepared(request)) => return request,
                 Some(QueuedRequest::Step(request)) => return request,
@@ -4281,8 +4288,13 @@ struct StepCatalog {
 }
 
 impl ToolLifecycleContributor for PythonContributor {
+    fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move { sandbox_events::on_start(&input) })
+    }
+
     fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
+            sandbox_events::on_finish(&input);
             if let Some(tools) = input.thread_store.get::<PythonTools>() {
                 // A rejected duplicate shares a call ID, not the original invocation.
                 // PendingReply already retires and cancels its exact owner on drop.
@@ -6489,6 +6501,8 @@ pub(crate) mod managed_tests {
         ] {
             PythonContributor::default()
                 .on_tool_finish(ToolFinishInput {
+                    builtin_sandbox_operation: None,
+                    builtin_sandbox_duration: None,
                     session_store: &session,
                     thread_store: &thread,
                     turn_store: &turn,
