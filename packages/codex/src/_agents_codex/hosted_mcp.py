@@ -83,8 +83,6 @@ class HostedMCP(Generic[ContextT_contra]):
     _binding: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.on_approval_request is not None and not callable(self.on_approval_request):
-            raise TypeError("Hosted MCP approval callback must be callable or None")
         config = _capture_config(
             self.tool_config, has_approval_callback=self.on_approval_request is not None
         )
