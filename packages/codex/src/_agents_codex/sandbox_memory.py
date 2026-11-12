@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Annotated, Any
 from pydantic import BaseModel, Field
 
 from _agents_shared.sandbox_memory_artifacts import (
+    _EXCLUDED_MEMORY_ITEM_TYPES,
+    _INCLUDED_MEMORY_ITEM_TYPES,
     MemoryLayoutConfig as MemoryLayoutConfig,
     RolloutExtractionArtifacts,
     format_raw_memory,
@@ -20,6 +22,7 @@ from _agents_shared.sandbox_memory_artifacts import (
     validate_rollout_id,
 )
 
+from ._hosted_projection import _HOSTED_RESPONSE_ITEM_FIELDS
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
@@ -83,6 +86,22 @@ def _bounded_json(value: object) -> str:
     return encoded
 
 
+def _memory_content_parts(parts: list[Any], *, tool_output: bool = False) -> list[dict[str, str]]:
+    content: list[dict[str, str]] = []
+    for part in parts:
+        if isinstance(part, dict):
+            kind = part.get("type")
+            if kind in ("input_text", "output_text") and isinstance(part.get("text"), str):
+                content.append({"type": kind, "text": part["text"]})
+                continue
+            if tool_output and kind in ("input_image", "input_file"):
+                # Memory records only the presence and kind of tool output media.
+                content.append({"type": kind})
+                continue
+        raise ValueError("Native sandbox memory requires text message history")
+    return content
+
+
 def _memory_transcript(
     thread_id: str, snapshot: CanonicalHistorySnapshot, sandbox_id: str
 ) -> dict[str, Any]:
@@ -91,11 +110,49 @@ def _memory_transcript(
     messages: list[dict[str, Any]] = []
     for item in snapshot.items:
         kind = item.get("type")
+        role = item.get("role")
         if kind == "reasoning":
             continue
+        if kind == "function_call":
+            call = {key: item.get(key) for key in ("name", "call_id", "arguments")}
+            if not all(isinstance(value, str) for value in call.values()):
+                raise ValueError("Invalid native memory function call")
+            if isinstance(namespace := item.get("namespace"), str):
+                call["namespace"] = namespace
+            messages.append({"type": kind, **call})
+            continue
+        if kind == "function_call_output":
+            call_id, output = item.get("call_id"), item.get("output")
+            if not isinstance(call_id, str):
+                raise ValueError("Invalid native memory function output")
+            result: dict[str, Any] = {"type": kind, "call_id": call_id}
+            if item.get("status") == "failed":
+                result["status"] = "failed"
+            if isinstance(output, (str, list)):
+                result["output"] = (
+                    _memory_content_parts(output, tool_output=True)
+                    if isinstance(output, list)
+                    else output
+                )
+            elif output is None and result.get("status") == "failed":
+                error = item.get("error")
+                if error is not None and not isinstance(error, str):
+                    raise ValueError("Invalid native memory function output")
+                result["error"] = error or ""
+            else:
+                raise ValueError("Invalid native memory function output")
+            messages.append(result)
+            continue
         if kind != "message":
-            raise ValueError("Native sandbox memory requires text message history")
-        role = item.get("role")
+            if isinstance(kind, str) and (
+                kind in _INCLUDED_MEMORY_ITEM_TYPES
+                or kind in _EXCLUDED_MEMORY_ITEM_TYPES
+                or kind in _HOSTED_RESPONSE_ITEM_FIELDS
+            ):
+                raise ValueError(
+                    "Native sandbox memory requires text messages and function tool history"
+                )
+            continue
         if role not in ("user", "assistant"):
             continue
         parts = item.get("content")
@@ -114,16 +171,7 @@ def _memory_transcript(
             ]
             if not parts:
                 continue
-        content: list[dict[str, str]] = []
-        for part in parts:
-            if (
-                not isinstance(part, dict)
-                or part.get("type") not in ("input_text", "output_text")
-                or not isinstance(part.get("text"), str)
-            ):
-                raise ValueError("Native sandbox memory requires text message history")
-            content.append({"type": part["type"], "text": part["text"]})
-        messages.append({"role": role, "content": content})
+        messages.append({"role": role, "content": _memory_content_parts(parts)})
     return {
         "rollout_id": thread_id,
         "native_thread_id": thread_id,

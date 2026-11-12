@@ -160,7 +160,10 @@ async def test_managed_result_waits_for_stream_registration(responses, tmp_path,
 
     async def delayed_registration(self, state, message):
         turn_id = message["child_turn_id"]
-        stream = self._managed_tool_streams.pop(turn_id)
+        stream = self._managed_tool_streams.pop(turn_id, None)
+        if stream is None:
+            await original(self, state, message)
+            return
 
         def register():
             self._managed_tool_streams[turn_id] = stream
