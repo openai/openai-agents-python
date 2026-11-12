@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -9,11 +10,15 @@ from agents import (
     ActionReply,
     Agent,
     FunctionTool,
+    GuardrailResult,
+    InputGuardrail,
     Interaction,
     InteractionRequired,
     NativeError,
     NativeProvider,
     ProducedItem,
+    RunDiagnosticError,
+    Session,
     ToolOutput,
     function_tool,
 )
@@ -203,3 +208,122 @@ async def test_one_shot_items_bound_original_tool_output_after_the_turn(response
 
     assert effects == ["executed"]
     assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("manual", [False, True])
+async def test_failed_native_run_details_outlive_its_session(responses, capture, manual):
+    error = ValueError("synthetic callback failure")
+
+    @function_tool
+    def lookup() -> str:
+        return "accepted data"
+
+    @function_tool
+    def fail() -> str:
+        raise error
+
+    def policy(turn, context, source, value):
+        return GuardrailResult(False)
+
+    manual_tools = (
+        [
+            FunctionTool(
+                name="manual_lookup",
+                description="Look up a record manually.",
+                input_type=LookupArgs,
+                output_type=str,
+            )
+        ]
+        if manual
+        else []
+    )
+    responses.respond(function_call("lookup", {}, "accepted-call"))
+    responses.respond(function_call("fail", {}, "failing-call"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-error-diagnostics"
+    ) as provider:
+        agent = Agent(
+            instructions="Call both tools.",
+            tools=[lookup, fail, *manual_tools],
+            provider=provider,
+            input_guardrails=[InputGuardrail("allow-lookup", policy, run_in_parallel=False)],
+        )
+        with pytest.raises(RunDiagnosticError if capture else ValueError) as caught:
+            await agent.run("original request", capture_error_details=capture)
+
+    assert not isinstance(caught.value.__context__, AttributeError)
+    assert not isinstance(error.__context__, AttributeError)
+    if not capture:
+        assert caught.value is error
+        return
+    assert isinstance(caught.value, RunDiagnosticError)
+    assert caught.value.__cause__ is error
+    details = caught.value.details
+    assert details.input == "original request"
+    assert details.last_agent is agent
+    accepted = [
+        entry.item for entry in details.items if entry.item.get("call_id") == "accepted-call"
+    ]
+    assert [item["type"] for item in accepted] == ["function_call", "function_call_output"]
+    assert "accepted data" in str(accepted[1]["output"])
+    assert "accepted data" not in repr(details)
+    assert "resp_1" in {response["id"] for response in details.raw_responses}
+    assert len(details.guardrail_results) == 1
+    assert not details.incomplete
+
+
+async def test_cancelled_error_capture_preserves_the_original_failure(responses, monkeypatch):
+    error = ValueError("synthetic callback failure")
+    capture_started = asyncio.Event()
+
+    @function_tool
+    def fail() -> str:
+        raise error
+
+    async def block_capture(self):
+        capture_started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(Session, "get_active_agent", block_capture)
+    responses.respond(function_call("fail", {}, "failing-call"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-error-diagnostics"
+    ) as provider:
+        agent = Agent(instructions="Call fail.", tools=[fail], provider=provider)
+        run = asyncio.create_task(agent.run("original request", capture_error_details=True))
+        try:
+            await asyncio.wait_for(capture_started.wait(), timeout=5)
+        finally:
+            run.cancel()
+            with pytest.raises(ValueError) as caught:
+                await run
+
+    assert caught.value is error
+
+
+async def test_native_failure_details_are_scoped_when_runs_share_an_exception(responses):
+    shared = ValueError("synthetic shared callback failure")
+
+    @function_tool
+    def fail() -> str:
+        raise shared
+
+    responses.respond(function_call("fail", {}, "first-failing-call"))
+    responses.respond(function_call("fail", {}, "second-failing-call"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-shared-error-diagnostics"
+    ) as provider:
+        agent = Agent(instructions="Call fail.", tools=[fail], provider=provider)
+        first, second = await asyncio.gather(
+            agent.run("first request", capture_error_details=True),
+            agent.run("second request", capture_error_details=True),
+            return_exceptions=True,
+        )
+
+    assert isinstance(first, RunDiagnosticError)
+    assert isinstance(second, RunDiagnosticError)
+    assert first is not second
+    assert first.__cause__ is second.__cause__ is shared
+    assert first.details.input == "first request"
+    assert second.details.input == "second request"
