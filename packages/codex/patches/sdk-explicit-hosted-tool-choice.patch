@@ -1,0 +1,474 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index d91f201adc9672d0554cc6e686e5e20269055531..d321208851f5681c94faa9a7fc5b039b1fc3f8e2 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -285,6 +285,9 @@ impl Serialize for ResponsesApiTools {
+ /// Effective wire values. Cleared and omitted SDK settings emit no member here.
+ #[derive(Debug, Default, Serialize, Clone, PartialEq)]
+ pub struct ResponsesRequestControls {
++    // Core suppresses the outer scalar when this captured selector is present.
++    #[serde(rename = "tool_choice", skip_serializing_if = "Option::is_none")]
++    pub hosted_tool_choice: Option<codex_protocol::model_request_controls::HostedToolChoice>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub prompt: Option<codex_protocol::model_request_controls::HostedPromptReference>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+diff --git a/codex-rs/codex-api/tests/hosted_tool_choice.rs b/codex-rs/codex-api/tests/hosted_tool_choice.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..26dc1b06ed4b0a884195d03408f7d14a8c0931d5
+--- /dev/null
++++ b/codex-rs/codex-api/tests/hosted_tool_choice.rs
+@@ -0,0 +1,38 @@
++use codex_api::*;
++use codex_protocol::model_request_controls::HostedToolChoice;
++use serde_json::json;
++
++#[test]
++fn hosted_tool_choice_uses_one_structured_member_for_http_and_websocket() {
++    let request = ResponsesApiRequest {
++        model: Some("fixture-model".into()),
++        stream: true,
++        service_tier: None,
++        input: Vec::new(),
++        tools: None,
++        tool_choice: None,
++        request_controls: ResponsesRequestControls {
++            hosted_tool_choice: Some(HostedToolChoice::WebSearch {}),
++            ..Default::default()
++        },
++        parallel_tool_calls: None,
++        reasoning: None,
++        store: false,
++        stream_options: None,
++        include: Vec::new(),
++        prompt_cache_key: None,
++        text: None,
++        client_metadata: None,
++        access_programs: None,
++    };
++    for encoded in [
++        serde_json::to_string(&request).unwrap(),
++        serde_json::to_string(&ResponseCreateWsRequest::from(&request)).unwrap(),
++    ] {
++        assert_eq!(encoded.matches("\"tool_choice\"").count(), 1);
++        assert_eq!(
++            serde_json::from_str::<serde_json::Value>(&encoded).unwrap()["tool_choice"],
++            json!({"type":"web_search"})
++        );
++    }
++}
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..c1a4cce0cb5577febf1374315fc2419cb02ed0a9 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1161,6 +1161,28 @@ impl ModelClient {
+                 return Err(CodexErr::InvalidRequest("named tool choice is absent, deferred or conflicts with the final offered catalog".into()));
+             }
+         }
++        let hosted_tool_choice = controls
++            .hosted_tool_choice
++            .as_ref()
++            .and_then(Option::as_ref)
++            .map(|choice| {
++                let mut matches = prompt
++                    .tools
++                    .iter()
++                    .filter_map(|spec| spec.captured_hosted_choice(choice));
++                let selected = matches.next().ok_or_else(|| {
++                    CodexErr::InvalidRequest(
++                        "hosted tool choice is outside the final offered catalog".into(),
++                    )
++                })?;
++                if matches.next().is_some() {
++                    return Err(CodexErr::InvalidRequest(
++                        "hosted tool choice is ambiguous in the final offered catalog".into(),
++                    ));
++                }
++                Ok(selected)
++            })
++            .transpose()?;
+         let mut input = prompt.get_formatted_input_for_request(model_info);
+         if !self.reasoning_effort_override_enabled(model_info) {
+             // Unsupported models and disabled overrides must also accept saved history.
+@@ -1302,20 +1324,21 @@ impl ModelClient {
+             tools: tools.filter(|_| {
+                 !hosted_prompt.is_some_and(|hosted| hosted.omit_tools && prompt.tools.is_empty())
+             }),
+-            tool_choice: (!(hosted_prompt.is_some() && controls.named_tool_choice.is_none())).then(
+-                || {
+-                    if controls
+-                        .named_tool_choice
+-                        .as_ref()
+-                        .is_some_and(Option::is_some)
+-                    {
+-                        "required".to_string()
+-                    } else {
+-                        prompt.tool_choice.to_string()
+-                    }
+-                },
+-            ),
++            tool_choice: (hosted_tool_choice.is_none()
++                && !(hosted_prompt.is_some() && controls.named_tool_choice.is_none()))
++            .then(|| {
++                if controls
++                    .named_tool_choice
++                    .as_ref()
++                    .is_some_and(Option::is_some)
++                {
++                    "required".to_string()
++                } else {
++                    prompt.tool_choice.to_string()
++                }
++            }),
+             request_controls: codex_api::ResponsesRequestControls {
++                hosted_tool_choice,
+                 prompt: prompt_reference,
+                 instructions: hosted_prompt
+                     .filter(|prompt| !prompt.omit_instructions)
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index 827f9718afa6791f31951a94f4e28fb964a3eb00..76476dc3fb474d386a5b97f8d6981ace90ed088d 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -125,6 +125,7 @@ impl ResolvedStepSettings {
+             let selected = Arc::make_mut(&mut self.selected);
+             selected.tool_choice = Some(ToolChoice::Auto);
+             selected.request_controls.named_tool_choice = Some(None);
++            selected.request_controls.hosted_tool_choice = Some(None);
+         }
+     }
+ 
+@@ -141,6 +142,9 @@ impl ResolvedStepSettings {
+         Arc::make_mut(&mut self.selected)
+             .request_controls
+             .named_tool_choice = Some(Some(choice));
++        Arc::make_mut(&mut self.selected)
++            .request_controls
++            .hosted_tool_choice = Some(None);
+     }
+ 
+     pub(crate) fn request_model(&self) -> &str {
+@@ -445,6 +449,7 @@ impl StepSettings {
+         // patch below supplies its own target while selecting Required mode.
+         if update.tool_choice.is_some() {
+             next.request_controls.named_tool_choice = Some(None);
++            next.request_controls.hosted_tool_choice = Some(None);
+         }
+         next.request_controls.apply_patch(&update.request_controls);
+         if update.model.is_some() && update.request_controls.hosted_prompt.is_none() {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index c85b747beb4ac45b52b06a5f5d60e71e90306e64..36e9a93c39b6dd18e480bdb899dd49d63fb8ed57 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2161,6 +2161,7 @@ async fn run_sampling_request(
+             {
+                 prompt.tool_choice = codex_protocol::config_types::ToolChoice::Auto;
+                 prompt.request_controls.named_tool_choice = Some(None);
++                prompt.request_controls.hosted_tool_choice = Some(None);
+             }
+             prompt.prefer_buffered_response = sess
+                 .services
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 17c8b4ca3ee64c913916a681700cb65fae25811e..68c06eb388e2d69be268576c48890201a656bc37 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -23,6 +23,40 @@ pub enum PromptCacheTtl {
+     Hours12,
+ }
+ 
++/// Explicit provider-tool selection; it never grants a function identity.
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
++pub enum HostedToolChoice {
++    WebSearch {},
++    FileSearch {},
++    CodeInterpreter {},
++    ImageGeneration {},
++    Computer {},
++    ComputerUsePreview {},
++    Shell {},
++    ApplyPatch {},
++    ToolSearch {},
++    Mcp {
++        server_label: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        name: Option<String>,
++    },
++}
++
++impl HostedToolChoice {
++    pub fn validate(&self) -> Result<(), String> {
++        if let Self::Mcp { server_label, name } = self
++            && (server_label.trim().is_empty()
++                || name.as_ref().is_some_and(|name| name.trim().is_empty()))
++        {
++            return Err(
++                "hosted MCP choice needs a nonempty captured server and tool identity".into(),
++            );
++        }
++        Ok(())
++    }
++}
++
+ const MAX_PROVIDER_COMPACTION_THRESHOLD: u64 = 9_007_199_254_740_991;
+ 
+ /// SDK policy for the in-band Responses compaction threshold.
+@@ -256,6 +290,14 @@ pub struct ModelRequestControls {
+     #[ts(optional = nullable, as = "Option<ToolName>")]
+     #[schemars(with = "Option<ToolName>")]
+     pub named_tool_choice: Option<Option<ToolName>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<HostedToolChoice>")]
++    #[schemars(with = "Option<HostedToolChoice>")]
++    pub hosted_tool_choice: Option<Option<HostedToolChoice>>,
+     /// Local opt-in: release forced choice after an accepted tool use on this profile.
+     #[serde(
+         default,
+@@ -289,6 +331,7 @@ impl ModelRequestControls {
+             && self.prompt_cache_retention.is_none()
+             && self.prompt_cache_ttl.is_none()
+             && self.named_tool_choice.is_none()
++            && self.hosted_tool_choice.is_none()
+             && self.reset_tool_choice.is_none()
+     }
+ 
+@@ -353,6 +396,9 @@ impl ModelRequestControls {
+         if patch.prompt_cache_ttl.is_some() {
+             self.prompt_cache_ttl = patch.prompt_cache_ttl;
+         }
++        if patch.hosted_tool_choice.is_some() {
++            self.hosted_tool_choice = patch.hosted_tool_choice.clone();
++        }
+         if patch.named_tool_choice.is_some() {
+             self.named_tool_choice = patch.named_tool_choice.clone();
+         }
+@@ -467,6 +513,12 @@ impl ModelRequestControls {
+                 );
+             }
+         }
++        if let Some(Some(choice)) = &self.hosted_tool_choice {
++            choice.validate()?;
++            if self.named_tool_choice.as_ref().is_some_and(Option::is_some) {
++                return Err("hosted and named tool choices cannot be active together".into());
++            }
++        }
+         if let Some(Some(target)) = &self.named_tool_choice {
+             if target.name.trim().is_empty()
+                 || target
+@@ -555,6 +607,10 @@ impl ModelRequestControls {
+                 .is_some_and(Option::is_some)
+             || self.prompt_cache_ttl.as_ref().is_some_and(Option::is_some)
+             || self.named_tool_choice.as_ref().is_some_and(Option::is_some)
++            || self
++                .hosted_tool_choice
++                .as_ref()
++                .is_some_and(Option::is_some)
+     }
+ }
+ 
+diff --git a/codex-rs/protocol/tests/hosted_tool_choice.rs b/codex-rs/protocol/tests/hosted_tool_choice.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2855f374ac788feb6846eb9b46953bd3fd8727d
+--- /dev/null
++++ b/codex-rs/protocol/tests/hosted_tool_choice.rs
+@@ -0,0 +1,46 @@
++use codex_protocol::model_request_controls::*;
++use serde_json::json;
++
++#[test]
++fn hosted_tool_choice_preserves_omit_clear_and_captured_selector() {
++    let mut controls = ModelRequestControls::default();
++    assert!(controls.is_empty());
++    assert!(
++        serde_json::to_value(&controls)
++            .unwrap()
++            .get("hosted_tool_choice")
++            .is_none()
++    );
++    let choice: ModelRequestControls = serde_json::from_value(json!({
++        "hosted_tool_choice": {"type":"web_search"}
++    }))
++    .unwrap();
++    controls.apply_patch(&choice);
++    assert_eq!(
++        controls.hosted_tool_choice,
++        Some(Some(HostedToolChoice::WebSearch {}))
++    );
++    assert!(controls.has_wire_values());
++    let clear: ModelRequestControls =
++        serde_json::from_value(json!({"hosted_tool_choice":null})).unwrap();
++    controls.apply_patch(&clear);
++    assert_eq!(controls.hosted_tool_choice, Some(None));
++    assert!(!controls.has_wire_values());
++}
++
++#[test]
++fn hosted_tool_choice_rejects_function_shape_and_extra_authority() {
++    assert!(
++        serde_json::from_value::<HostedToolChoice>(json!({"type":"function","name":"web_search"}))
++            .is_err()
++    );
++    assert!(
++        serde_json::from_value::<HostedToolChoice>(json!({"type":"web_search","name":"injected"}))
++            .is_err()
++    );
++    let choice = HostedToolChoice::Mcp {
++        server_label: " ".into(),
++        name: None,
++    };
++    assert!(choice.validate().is_err());
++}
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index f2848e73f316ea8dfd372b750d94e1709e81f7d1..3ab3b324fb968420c6072d160e195ca87bbba00b 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -132,6 +132,54 @@ impl ToolSpec {
+         }
+     }
+ 
++    /// Match only provider-tool declarations already present in the final catalog.
++    /// Same-name functions and deferred functions never satisfy this selection.
++    pub fn captured_hosted_choice(
++        &self,
++        choice: &codex_protocol::model_request_controls::HostedToolChoice,
++    ) -> Option<codex_protocol::model_request_controls::HostedToolChoice> {
++        use codex_protocol::model_request_controls::HostedToolChoice as Choice;
++        let matches = match (self, choice) {
++            (Self::WebSearch { .. }, Choice::WebSearch {})
++            | (Self::FileSearch(_), Choice::FileSearch {})
++            | (Self::CodeInterpreter(_), Choice::CodeInterpreter {})
++            | (Self::ImageGeneration(_), Choice::ImageGeneration {})
++            | (Self::Computer { .. }, Choice::Computer {})
++            | (Self::ComputerUsePreview { .. }, Choice::ComputerUsePreview {})
++            | (Self::Shell(_) | Self::ApplicationShell { .. }, Choice::Shell {})
++            | (Self::ApplyPatch { .. }, Choice::ApplyPatch {})
++            | (Self::ToolSearch { .. } | Self::ProviderToolSearch(_), Choice::ToolSearch {}) => {
++                true
++            }
++            (Self::ComputerUsePreview { .. }, Choice::Computer {}) => {
++                return Some(Choice::ComputerUsePreview {});
++            }
++            (Self::Mcp(tool), Choice::Mcp { server_label, name }) => {
++                tool.server_label == *server_label
++                    && name.as_ref().is_none_or(|name| {
++                        match tool.provider_data.get("allowed_tools") {
++                            None | Some(Value::Null) => true,
++                            Some(Value::Array(names)) => names
++                                .iter()
++                                .any(|value| value.as_str() == Some(name.as_str())),
++                            Some(Value::Object(filter)) => filter
++                                .get("tool_names")
++                                .is_none_or(|names| {
++                                    names.as_array().is_some_and(|names| {
++                                        names
++                                            .iter()
++                                            .any(|value| value.as_str() == Some(name.as_str()))
++                                    })
++                                }),
++                            _ => false,
++                        }
++                    })
++            }
++            _ => false,
++        };
++        matches.then(|| choice.clone())
++    }
++
+     /// Advertise a deferred schema while retaining its provider options.
+     pub fn deferred_for_provider_search(mut self) -> Option<Self> {
+         match &mut self {
+diff --git a/codex-rs/tools/tests/hosted_tool_choice.rs b/codex-rs/tools/tests/hosted_tool_choice.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..19220b1520f093b07ef5f3f2440a669a261f4290
+--- /dev/null
++++ b/codex-rs/tools/tests/hosted_tool_choice.rs
+@@ -0,0 +1,87 @@
++use codex_protocol::model_request_controls::HostedToolChoice as Choice;
++use codex_tools::*;
++use serde_json::json;
++
++#[test]
++fn hosted_tool_choice_never_promotes_same_name_or_deferred_functions() {
++    for deferred in [false, true] {
++        let function = ToolSpec::Function(ResponsesApiTool {
++            name: "web_search".into(),
++            description: "application callback".into(),
++            strict: false,
++            defer_loading: Some(deferred),
++            parameters: JsonSchema::default(),
++            output_schema: None,
++        });
++        assert_eq!(function.captured_hosted_choice(&Choice::WebSearch {}), None);
++        assert_eq!(
++            function.has_eager_callable(&codex_protocol::ToolName::plain("web_search")),
++            !deferred
++        );
++    }
++    assert_eq!(
++        ToolSpec::Computer {}.captured_hosted_choice(&Choice::Computer {}),
++        Some(Choice::Computer {})
++    );
++    assert_eq!(
++        ToolSpec::ComputerUsePreview {
++            display_width: 800,
++            display_height: 600,
++            environment: "browser".into()
++        }
++        .captured_hosted_choice(&Choice::Computer {}),
++        Some(Choice::ComputerUsePreview {})
++    );
++}
++
++#[test]
++fn hosted_tool_choice_mcp_respects_the_captured_server_and_allowed_names() {
++    let spec = ToolSpec::Mcp(crate::HostedMcpTool {
++        server_label: "search".into(),
++        provider_data:
++            json!({"server_url":"https://fixture.invalid/mcp","allowed_tools":["lookup"]})
++                .as_object()
++                .unwrap()
++                .clone(),
++    });
++    let select = |server: &str, name: &str| Choice::Mcp {
++        server_label: server.into(),
++        name: Some(name.into()),
++    };
++    assert!(
++        spec.captured_hosted_choice(&select("search", "lookup"))
++            .is_some()
++    );
++    assert!(
++        spec.captured_hosted_choice(&select("other", "lookup"))
++            .is_none()
++    );
++    assert!(
++        spec.captured_hosted_choice(&select("search", "delete"))
++            .is_none()
++    );
++}
++
++#[test]
++fn hosted_mcp_filter_omission_does_not_create_an_empty_name_list() {
++    let choice = Choice::Mcp {
++        server_label: "docs".into(),
++        name: Some("lookup".into()),
++    };
++    for (filter, allowed) in [
++        (json!({"read_only": true}), true),
++        (json!({}), true),
++        (json!({"read_only": true, "tool_names": ["lookup"]}), true),
++        (json!({"read_only": true, "tool_names": []}), false),
++        (json!({"tool_names": ["other"]}), false),
++    ] {
++        let spec = ToolSpec::Mcp(HostedMcpTool {
++            server_label: "docs".into(),
++            provider_data: json!({"server_url":"https://docs.invalid/mcp", "allowed_tools":filter})
++                .as_object()
++                .unwrap()
++                .clone(),
++        });
++        assert_eq!(spec.captured_hosted_choice(&choice).is_some(), allowed);
++    }
++}
