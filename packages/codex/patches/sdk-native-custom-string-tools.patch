@@ -1,0 +1,319 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 924ee5ce..c8f688dc 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -391,6 +391,9 @@ fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
+             DynamicToolSpec::ToolSearch(_) => {
+                 return Err("client tool search requires an extension-owned executor".to_string());
+             }
++            DynamicToolSpec::Custom(_) => {
++                return Err("custom string tools require an SDK executor".into());
++            }
+             DynamicToolSpec::ApplyPatch => {
+                 if !seen_tools.insert("apply_patch") {
+                     return Err("duplicate dynamic application patch tool".into());
+@@ -1477,7 +1480,7 @@ impl ThreadRequestProcessor {
+         let dynamic_tool_count: usize = dynamic_tools
+             .iter()
+             .map(|tool| match tool {
+-                DynamicToolSpec::HostedMcp(_) => 0,
++                DynamicToolSpec::HostedMcp(_) | DynamicToolSpec::Custom(_) => 0,
+                 DynamicToolSpec::ApplyPatch
+                 | DynamicToolSpec::Computer(_)
+                 | DynamicToolSpec::Function(_)
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index c85b747b..a8d97071 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3037,13 +3037,18 @@ fn recovered_tools_from_history(
+         }
+     }
+     for (envelope, succeeded) in &candidates.held_outputs {
+-        let ResponseItem::FunctionCallOutput {
+-            call_id: Some(id),
+-            output,
+-            ..
+-        } = &envelope.item
+-        else {
+-            return Err(invalid());
++        let (id, output) = match &envelope.item {
++            ResponseItem::FunctionCallOutput {
++                call_id: Some(id),
++                output,
++                ..
++            }
++            | ResponseItem::CustomToolCallOutput {
++                call_id: id,
++                output,
++                ..
++            } => (id, output),
++            _ => return Err(invalid()),
+         };
+         if !unique.contains(id)
+             || outputs.insert(id.clone(), envelope.item.clone()).is_some()
+@@ -3108,7 +3113,9 @@ async fn release_held_tool_results(sess: &Session, step: &StepContext, withheld:
+         std::mem::take(&mut *held.outputs.lock().expect("held terminal outputs poisoned"));
+     for (mut envelope, mut succeeded) in outputs {
+         if withheld {
+-            if let ResponseItem::FunctionCallOutput { output, .. } = &mut envelope.item {
++            if let ResponseItem::FunctionCallOutput { output, .. }
++            | ResponseItem::CustomToolCallOutput { output, .. } = &mut envelope.item
++            {
+                 *output = codex_protocol::models::FunctionCallOutputPayload::from_text(
+                     "Native terminal tool output withheld by completion policy".into(),
+                 );
+@@ -3220,6 +3227,25 @@ async fn try_complete_tool_turn(
+ }
+ 
+ /// Ask captured host policy about settled direct calls in original model order.
++fn matches_terminal_tool_receipt(call: &ResponseItem, output: &ResponseItem) -> bool {
++    match (call, output) {
++        (
++            ResponseItem::FunctionCall { call_id, .. },
++            ResponseItem::FunctionCallOutput {
++                call_id: Some(output_id),
++                ..
++            },
++        )
++        | (
++            ResponseItem::CustomToolCall { call_id, .. },
++            ResponseItem::CustomToolCallOutput {
++                call_id: output_id, ..
++            },
++        ) => call_id == output_id,
++        _ => false,
++    }
++}
++
+ async fn propose_tool_completion(
+     sess: &Session,
+     step: &StepContext,
+@@ -3236,21 +3262,24 @@ async fn propose_tool_completion(
+         ));
+     }
+     for (call, output) in tools.calls.iter().zip(&tools.outputs) {
+-        let ResponseItem::FunctionCall {
+-            call_id,
+-            name,
+-            namespace,
+-            ..
+-        } = call
+-        else {
+-            continue;
++        let (call_id, name, namespace) = match call {
++            ResponseItem::FunctionCall {
++                call_id,
++                name,
++                namespace,
++                ..
++            } => {
++                if !matches_terminal_tool_receipt(call, output) {
++                    return Err(CodexErr::Fatal(
++                        "Settled tool receipt identity mismatch".into(),
++                    ));
++                }
++                (call_id, name, namespace.as_ref())
++            }
++            ResponseItem::CustomToolCall { call_id, name, .. }
++                if matches_terminal_tool_receipt(call, output) => (call_id, name, None),
++            _ => continue,
+         };
+-        if !matches!(output, ResponseItem::FunctionCallOutput { call_id: Some(output_id), .. } if output_id == call_id)
+-        {
+-            return Err(CodexErr::Fatal(
+-                "Settled tool receipt identity mismatch".into(),
+-            ));
+-        }
+         for contributor in sess.services.extensions.turn_lifecycle_contributors() {
+             let decision = contributor
+                 .propose_tool_completion(codex_extension_api::ToolCompletionInput {
+@@ -3284,7 +3313,7 @@ async fn propose_tool_completion(
+                     return Ok(Some(codex_protocol::protocol::ToolTurnCompletion {
+                         call_id: call_id.clone(),
+                         name: name.clone(),
+-                        namespace: namespace.clone(),
++                        namespace: namespace.cloned(),
+                         final_output,
+                         batch_call_ids: None,
+                     }));
+@@ -4043,11 +4072,10 @@ async fn drain_in_flight(
+                     &result.envelope.item,
+                 )
+                 .await;
+-                let call = settled_tools.calls.iter().find(|call| matches!(
+-                    (call, &result.envelope.item),
+-                    (ResponseItem::FunctionCall { call_id, .. },
+-                     ResponseItem::FunctionCallOutput { call_id: Some(output_id), .. }) if call_id == output_id
+-                ));
++                let call = settled_tools
++                    .calls
++                    .iter()
++                    .find(|call| matches_terminal_tool_receipt(call, &result.envelope.item));
+                 let held = result.pending_exec.is_none()
+                     && call.is_some_and(|call| {
+                         sess.services
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index a2a20e15..5e1fde5e 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -383,6 +383,54 @@ fn tool_terminal_recovery_resolves_written_prefix_across_same_id_start() {
+     }
+ }
+ 
++#[test]
++fn tool_terminal_recovery_held_results_keep_kind_and_outcome_authority() {
++    use codex_history::ResponseItemEnvelope;
++    for custom in [false, true] {
++        let (thread, mut candidates, mut history) = recovered_batch_fixture();
++        let mut output = match history.remove(10) {
++            RolloutItem::ResponseItem(envelope) => envelope,
++            _ => unreachable!(),
++        };
++        if custom {
++            history[5] = RolloutItem::ResponseItem(ResponseItemEnvelope::new(
++                serde_json::from_value(serde_json::json!({
++                    "type":"custom_tool_call", "call_id":"fresh", "name":"answer", "input":"raw",
++                }))
++                .unwrap(),
++            ));
++            output.item = serde_json::from_value(serde_json::json!({
++                "type":"custom_tool_call_output", "call_id":"fresh", "output":"held body",
++            }))
++            .unwrap();
++        }
++        candidates.held_outputs = vec![(output.clone(), true)];
++        let tools =
++            recovered_tools_from_history(&candidates, thread, "recovered", &history).unwrap();
++        assert!(tools.all_succeeded);
++        assert_eq!(tools.outputs[1], output.item);
++
++        // The held channel cannot change the retained call's provider kind.
++        candidates.held_outputs[0].0.item = serde_json::from_value(serde_json::json!({
++            "type": if custom { "function_call_output" } else { "custom_tool_call_output" },
++            "call_id":"fresh", "output":"wrong kind",
++        }))
++        .unwrap();
++        assert!(recovered_tools_from_history(&candidates, thread, "recovered", &history).is_err());
++
++        // An ordinary history record cannot become a held tool receipt.
++        candidates.held_outputs[0].0.item = serde_json::from_value(serde_json::json!({
++            "type":"message", "role":"assistant", "content":[],
++        }))
++        .unwrap();
++        assert!(recovered_tools_from_history(&candidates, thread, "recovered", &history).is_err());
++        candidates.held_outputs = vec![(output.clone(), false)];
++        assert!(recovered_tools_from_history(&candidates, thread, "recovered", &history).is_err());
++        candidates.held_outputs = vec![(output.clone(), true), (output, true)];
++        assert!(recovered_tools_from_history(&candidates, thread, "recovered", &history).is_err());
++    }
++}
++
+ #[test]
+ fn tool_terminal_recovery_preserves_failed_and_unknown_siblings() {
+     let (thread, mut candidates, mut history) = recovered_batch_fixture();
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index c7c84623..fa36bceb 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -1776,7 +1776,9 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
+                 registry.register_external(Arc::new(super::handlers::application_apply_patch::ApplicationApplyPatchHandler::new()));
+             }
+             // The SDK attaches scoped executors through ToolContributor.
+-            DynamicToolSpec::ToolSearch(_) | DynamicToolSpec::HostedMcp(_) => {}
++            DynamicToolSpec::ToolSearch(_)
++            | DynamicToolSpec::HostedMcp(_)
++            | DynamicToolSpec::Custom(_) => {}
+             DynamicToolSpec::Computer(tool) => {
+                 if let Ok(handler) = super::handlers::computer::ComputerToolHandler::new(tool) {
+                     registry.register_external(Arc::new(handler));
+diff --git a/codex-rs/protocol/src/dynamic_tools.rs b/codex-rs/protocol/src/dynamic_tools.rs
+index 8bf201d7..a0a32c5f 100644
+--- a/codex-rs/protocol/src/dynamic_tools.rs
++++ b/codex-rs/protocol/src/dynamic_tools.rs
+@@ -15,11 +15,47 @@ pub enum DynamicToolSpec {
+     Computer(DynamicComputerToolSpec),
+     ToolSearch(DynamicToolSearchSpec),
+     Function(DynamicToolFunctionSpec),
++    Custom(DynamicCustomToolSpec),
+     Namespace(DynamicToolNamespaceSpec),
+     Shell(DynamicShellToolSpec),
+     HostedMcp(DynamicHostedMcpSpec),
+ }
+ 
++/// A Responses custom tool bound to the SDK's current application callback.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++#[ts(export_to = "v2/")]
++pub struct DynamicCustomToolSpec {
++    pub name: String,
++    pub description: String,
++    pub format: DynamicCustomToolFormat,
++    pub input_field: String,
++    pub input_schema: JsonValue,
++    #[serde(default)]
++    pub defer_loading: bool,
++}
++
++impl DynamicCustomToolSpec {
++    pub fn callback_spec(&self) -> DynamicToolFunctionSpec {
++        DynamicToolFunctionSpec {
++            name: self.name.clone(),
++            description: self.description.clone(),
++            input_schema: self.input_schema.clone(),
++            strict: false,
++            defer_loading: self.defer_loading,
++            output_schema: None,
++        }
++    }
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
++#[ts(export_to = "v2/")]
++pub enum DynamicCustomToolFormat {
++    Text,
++    Grammar { syntax: String, definition: String },
++}
++
+ /// Shell execution is supplied by the SDK host. Skills describe its local environment.
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+diff --git a/codex-rs/tools/src/responses_api.rs b/codex-rs/tools/src/responses_api.rs
+index 2853b665..0e1f7772 100644
+--- a/codex-rs/tools/src/responses_api.rs
++++ b/codex-rs/tools/src/responses_api.rs
+@@ -26,7 +26,9 @@ pub struct FreeformTool {
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct FreeformToolFormat {
+     pub r#type: String,
++    #[serde(default, skip_serializing_if = "String::is_empty")]
+     pub syntax: String,
++    #[serde(default, skip_serializing_if = "String::is_empty")]
+     pub definition: String,
+ }
+ 
+diff --git a/codex-rs/tui/src/dynamic_tools.rs b/codex-rs/tui/src/dynamic_tools.rs
+index a915fba6..7b6a5619 100644
+--- a/codex-rs/tui/src/dynamic_tools.rs
++++ b/codex-rs/tui/src/dynamic_tools.rs
+@@ -265,7 +265,7 @@ pub(crate) fn non_delegation_tool_specs() -> Vec<DynamicToolSpec> {
+         .into_iter()
+         .filter_map(|spec| match spec {
+             DynamicToolSpec::ApplyPatch => Some(DynamicToolSpec::ApplyPatch),
+-            DynamicToolSpec::HostedMcp(_) => None,
++            DynamicToolSpec::HostedMcp(_) | DynamicToolSpec::Custom(_) => None,
+             spec @ (DynamicToolSpec::Computer(_) | DynamicToolSpec::Shell(_)) => Some(spec),
+             DynamicToolSpec::ToolSearch(_) => None,
+             DynamicToolSpec::Function(function) => (!DELEGATION_TOOLS
+diff --git a/codex-rs/tui/src/dynamic_tools_mcp.rs b/codex-rs/tui/src/dynamic_tools_mcp.rs
+index ad3cd762..ba2429b2 100644
+--- a/codex-rs/tui/src/dynamic_tools_mcp.rs
++++ b/codex-rs/tui/src/dynamic_tools_mcp.rs
+@@ -266,6 +266,7 @@ impl ServerHandler for DynamicToolMcpHandler {
+                 | DynamicToolSpec::Computer(_)
+                 | DynamicToolSpec::Shell(_)
+                 | DynamicToolSpec::HostedMcp(_)
++                | DynamicToolSpec::Custom(_)
+                 | DynamicToolSpec::ToolSearch(_) => continue,
+                 DynamicToolSpec::Function(function) => vec![function],
+                 DynamicToolSpec::Namespace(namespace) => namespace
