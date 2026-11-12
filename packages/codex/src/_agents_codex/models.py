@@ -278,9 +278,8 @@ def _chat_apply_patch_input(arguments: Any) -> str:
         return arguments
     if isinstance(envelope, str):
         return envelope
-    if isinstance(envelope, dict) and isinstance(envelope.get("patch"), str):
-        return envelope["patch"]
-    return ""
+    patch = envelope.get("patch") if isinstance(envelope, dict) else None
+    return patch if isinstance(patch, str) else ""
 
 
 @dataclass(frozen=True)
