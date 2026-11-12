@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -566,7 +567,7 @@ async def test_editor_batch_failure_releases_unexecuted_payloads(fail_at, invali
     inspected = False
     while trace is not None:
         frame = trace.tb_frame
-        if frame.f_code.co_filename.endswith("/_agents_codex/apply_patch.py"):
+        if Path(frame.f_code.co_filename).parts[-2:] == ("_agents_codex", "apply_patch.py"):
             if frame.f_code.co_name == "apply":
                 inspected = True
                 assert not {
