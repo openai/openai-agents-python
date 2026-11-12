@@ -1745,8 +1745,12 @@ async def test_manual_restore_keeps_saved_model_settings_and_uses_current_creden
             tools=[lookup],
             provider=NativeProvider(base_url=responses.url, api_key="synthetic-current-restore"),
         )
+        with pytest.raises(ValueError, match="Authorize the saved manual checkpoint default model"):
+            async with current.session(state=saved_state):
+                pytest.fail("A changed Agent model cannot authorize the saved model")
+        assert len(responses.requests) == 1
         responses.respond(assistant_output("restored"))
-        async with current.session(state=saved_state) as restored:
+        async with current.session(state=saved_state, model=original.model) as restored:
             request = await next_request(restored.interactions(), lookup)
             assert request.call.model == original_request.call.model
             assert request.call.model != current.model
