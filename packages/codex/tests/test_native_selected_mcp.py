@@ -21,6 +21,7 @@ from agents import (
     InteractionRequired,
     NativeError,
     ToolContext,
+    ToolErrorContext,
     ToolOutput,
     ToolRef,
     ToolTimeoutBehavior,
@@ -612,6 +613,106 @@ async def test_cancelled_selected_call_keeps_the_borrowed_connection_open(
             assert (await next_turn.get_result()).final_output == "after cancellation"
         assert len(peer.calls) == 1
         assert await client.list_tools()
+
+
+@pytest.mark.parametrize("policy", ["custom", "inherit", "explicit-none", "throws", "cancel"])
+async def test_selected_mcp_retains_body_error_policy(
+    responses: ResponsesFixture, policy: str
+) -> None:
+    peer_detail = "synthetic-private-peer-detail"
+    peer = Peer(call_result={"content": [{"type": "text", "text": {"detail": peer_detail}}]})
+    context = object()
+    formatted: list[str] = []
+    entered = asyncio.Event()
+    exited = asyncio.Event()
+
+    def check_error(error: Exception) -> None:
+        assert type(error) is RuntimeError
+        assert str(error) == "Selected MCP tool invocation failed"
+        assert error.__cause__ is None and error.__context__ is None
+
+    def custom(call: ToolContext[object], error: Exception) -> str:
+        check_error(error)
+        assert call.context is context
+        assert call.call.tool == ToolRef("search", "catalog")
+        assert call.call_id == "selected-failure"
+        assert call.original_arguments == {"key": "43"}
+        formatted.append("custom")
+        return "selected custom recovery"
+
+    async def inherited(failure: ToolErrorContext[object]) -> str:
+        check_error(failure.error)
+        assert failure.context is context
+        assert failure.call.tool == ToolRef("search", "catalog")
+        assert failure.phase == "execution"
+        formatted.append("inherited")
+        if policy == "throws":
+            raise RuntimeError("synthetic-private-formatter-detail")
+        if policy == "cancel":
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                exited.set()
+        return "selected inherited recovery"
+
+    responses.respond(mcp_call("search", "catalog", "selected-failure"))
+    if policy in {"custom", "inherit", "throws"}:
+        responses.respond(assistant_output("recovered"))
+    async with (
+        timeout(30),
+        peer.serve() as url,
+        MCPServerStreamableHttp(params={"url": url}) as client,
+    ):
+        [selected] = await select_mcp_tools(
+            MCPNamespace("catalog", client), context=context, tool_names=["search"]
+        )
+        selected = replace(selected, description="Read a synthetic record.")
+        if policy in {"custom", "explicit-none"}:
+            selected = replace(selected, error_function=custom)
+        if policy == "explicit-none":
+            selected = replace(selected, error_function=None)
+        agent = Agent(instructions="Read.", provider=provider(responses), tools=[selected])
+        async with agent.session(context=context, tool_error_formatter=inherited) as session:
+            turn = await session.submit("Read")
+            if policy == "explicit-none":
+                with pytest.raises(RuntimeError, match="^Selected MCP tool invocation failed$"):
+                    await turn.get_result()
+            elif policy == "cancel":
+                outcome = asyncio.create_task(turn.get_result())
+                ready = asyncio.create_task(entered.wait())
+                try:
+                    await asyncio.wait((outcome, ready), return_when=asyncio.FIRST_COMPLETED)
+                    if not entered.is_set():
+                        await outcome
+                        pytest.fail("The Session formatter was never entered")
+                    await turn.cancel()
+                    with pytest.raises(TurnStoppedError):
+                        await outcome
+                    assert exited.is_set()
+                finally:
+                    ready.cancel()
+                    await asyncio.gather(ready, outcome, return_exceptions=True)
+            else:
+                assert (await turn.get_result()).final_output == "recovered"
+                text = tool_output(responses.requests[1], "selected-failure")
+                assert (
+                    text
+                    == {
+                        "custom": "selected custom recovery",
+                        "inherit": "selected inherited recovery",
+                        "throws": "Function 'search' failed.",
+                    }[policy]
+                )
+                assert peer_detail not in text and "synthetic-private-formatter-detail" not in text
+        assert await client.list_tools()
+
+    assert peer.calls == [{"name": "search", "arguments": {"key": "43"}}]
+    assert formatted == (
+        [] if policy == "explicit-none" else ["custom" if policy == "custom" else "inherited"]
+    )
+    assert len(responses.requests) == (1 if policy in {"explicit-none", "cancel"} else 2)
+    assert not responses.replies
 
 
 @pytest.mark.parametrize(

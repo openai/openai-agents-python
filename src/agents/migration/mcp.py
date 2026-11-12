@@ -76,10 +76,18 @@ class _CapturedMCPTool(_CapturedFunction):
         return True
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, init=False)
 class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
     _schema_json: str = field(repr=False)
     _selected_context: ContextT = field(repr=False)
+
+    def __init__(
+        self, *, _schema_json: str, _selected_context: ContextT, **declaration: Any
+    ) -> None:
+        object.__setattr__(self, "_schema_json", _schema_json)
+        object.__setattr__(self, "_selected_context", _selected_context)
+        # Use FunctionTool's formatter defaults for selection and dataclass copies.
+        super().__init__(**declaration)
 
     @property
     def _requires_live_manual_session(self) -> bool:
@@ -303,6 +311,8 @@ def _capture_tool(
             callback_timeout=declaration.callback_timeout,
             timeout_behavior=declaration.timeout_behavior,
             timeout_error_function=declaration.timeout_error_function,
+            error_function=declaration.error_function,
+            _allow_run_error_formatter=bool(declaration._allow_run_error_formatter),
             before=declaration.before,
             after=declaration.after,
             context=session_context,
