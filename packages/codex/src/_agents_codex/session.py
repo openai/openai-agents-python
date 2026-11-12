@@ -3726,17 +3726,17 @@ def _prepare_opening_model_settings(
         settings.setdefault("request_controls", {})["hosted_prompt"] = prompt_controls
     if codex_login is not None and settings.get("request_controls", {}).get("store") is True:
         raise ValueError("store=True requires API-key Responses authentication")
+    current_controls = settings.get("request_controls", {})
+    profile_model = (
+        next(row["model"] for row in profile_roster if row["id"] == restored_profile.profile.id)
+        if restored_profile is not None
+        else None
+    )
+    profile_controls = profile_model["request_controls"] if profile_model is not None else {}
+    current_store = (profile_controls if profile_model is not None else current_controls).get(
+        "store"
+    )
     if restored_model_settings is not None:
-        current_controls = settings.get("request_controls", {})
-        profile_model = (
-            next(row["model"] for row in profile_roster if row["id"] == restored_profile.profile.id)
-            if restored_profile is not None
-            else None
-        )
-        profile_controls = profile_model["request_controls"] if profile_model is not None else {}
-        current_store = (profile_controls if profile_model is not None else current_controls).get(
-            "store"
-        )
         attempt_controls = _current_attempt_controls(current_controls, profile_controls)
         invocation_timeout = (
             profile_model.get("invocation_timeout_ms")
@@ -3746,8 +3746,6 @@ def _prepare_opening_model_settings(
         model, settings = restored_model_settings
         settings.setdefault("request_controls", {}).update(attempt_controls)
         settings["invocation_timeout_ms"] = invocation_timeout
-    else:
-        current_store = settings.get("request_controls", {}).get("store")
     if provider_history is not None:
         if provider_history["type"] == "previous_response" and current_store is not True:
             raise ValueError("Previous-response HTTP history requires current store=True")
@@ -4826,6 +4824,7 @@ class Session(Generic[ContextT, OutputT]):
                     settings=settings,
                     fresh=checkpoint is None and not _atomic_first_turn,
                     restored=checkpoint is not None or resume is not None,
+                    provider_history=provider_history,
                     manual_restore=manual_restore,
                     validate_provider_model=(
                         uses_siwc or (web_search is not None and web_search.route == "hosted")
@@ -5476,6 +5475,7 @@ class Session(Generic[ContextT, OutputT]):
         settings: dict[str, Any],
         fresh: bool,
         restored: bool = False,
+        provider_history: ProviderHistory | None = None,
         manual_restore: bool = False,
         validate_provider_model: bool,
         instructions: str,
@@ -5498,6 +5498,10 @@ class Session(Generic[ContextT, OutputT]):
                     "retry": None,
                 },
             }
+            if provider_history is not None:
+                # Restored startup contains saved controls. Rebind storage to the
+                # current declaration, including an explicit clear for omission.
+                reset["request_controls"]["store"] = controls.get("store")
             if manual_restore:
                 reset["invocation_timeout_ms"] = settings.get("invocation_timeout_ms")
             if (
@@ -5562,6 +5566,8 @@ class Session(Generic[ContextT, OutputT]):
                 controls = _current_attempt_controls(
                     settings.get("request_controls", {}), model["request_controls"]
                 )
+                if provider_history is not None:
+                    controls["store"] = model["request_controls"].get("store")
                 await publish_attempt_controls(controls)
                 await self._refresh_profile_bindings(preserve_current=True)
 

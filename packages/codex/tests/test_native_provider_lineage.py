@@ -188,3 +188,60 @@ async def test_native_lineage_refuses_websocket_before_any_request():
                     provider_history={"type": "previous_response", "id": "resp_current"},
                 )
         assert wire == []
+
+
+@pytest.mark.parametrize("current_store", [False, None])
+async def test_native_conversation_restore_rebinds_current_storage(current_store):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        source = Agent(
+            instructions="Continue.",
+            model="gpt-5.2",
+            provider=provider,
+            model_settings={"store": True},
+        )
+        mode = {"type": "conversation", "id": "conv_current"}
+        async with source.session(provider_history=mode) as session:
+            await (await session.submit("Before.")).get_result()
+            state = await session.save_state()
+        current = Agent(
+            instructions="Continue.",
+            model="gpt-5.2",
+            provider=provider,
+            model_settings={} if current_store is None else {"store": current_store},
+        )
+        async with current.session(state=state, provider_history=mode) as session:
+            await (await session.submit("After.")).get_result()
+        assert [request["store"] for request in model.requests] == [True, False]
+        assert [request["conversation"] for request in model.requests] == ["conv_current"] * 2
+
+
+async def test_native_response_chain_profile_restore_retains_current_storage():
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        child = Agent(
+            name="Other",
+            instructions="Continue.",
+            model="gpt-5.2",
+            provider=provider,
+            model_settings={"store": True},
+        )
+        agent = Agent(
+            name="Root",
+            instructions="Continue.",
+            model="gpt-5.2",
+            provider=provider,
+            model_settings={"store": True},
+            handoffs=[child],
+        )
+        async with agent.session(provider_history={"type": "previous_response"}) as session:
+            await (await session.submit("Before.")).get_result()
+            state = await session.save_state()
+        async with agent.session(
+            state=state, provider_history={"type": "previous_response", "id": "resp_1"}
+        ) as session:
+            await (await session.submit("After.")).get_result()
+        assert [request["store"] for request in model.requests] == [True, True]
+        assert model.requests[1]["previous_response_id"] == "resp_1"
