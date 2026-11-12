@@ -136,7 +136,7 @@ def _capture_agent_graph(
         python_slots = sum(_python_tool_slot(tool) is not None for tool in declaration.tools)
         for reference in declaration.handoffs:
             if isinstance(reference, DecisionHandoff):
-                if declaration.realtime is not None:
+                if opening.realtime is not None or declaration.realtime is not None:
                     raise ValueError("DecisionHandoff does not support Realtime")
                 name = reference.name
                 if name in targets or name in decision_handoffs:

@@ -9084,6 +9084,11 @@ class Session(Generic[ContextT, OutputT]):
                     slots = tuple(indices)
             state = _Submission(
                 output,
+                submission_request_attempts=(
+                    _SubmissionRequestAttempts()
+                    if self._include_request_attempts and realtime_tool is None
+                    else None
+                ),
                 guardrail_input=guardrail_input,
                 run_usage=run_usage or _UsageCollector(),
                 observation_after=self._observations.sequence,
@@ -9110,7 +9115,13 @@ class Session(Generic[ContextT, OutputT]):
             if input is not None:
                 # A queued root has no observation window until its own dispatch.
                 issued = _root_turn(
-                    self, None, uuid4().hex, state.completion, -1, state.guardrail_results
+                    self,
+                    None,
+                    uuid4().hex,
+                    state.completion,
+                    -1,
+                    state.guardrail_results,
+                    submission_request_attempts=state.submission_request_attempts,
                 )
                 state.issued = issued
                 self._queued_roots.register(state, input)
@@ -10762,7 +10773,12 @@ class Session(Generic[ContextT, OutputT]):
                             request["trace"] = state.parent_trace.to_headers()
                         if state.issued is None:
                             state.issued = _root_turn(
-                                self, None, uuid4().hex, state.completion, state.observation_after
+                                self,
+                                None,
+                                uuid4().hex,
+                                state.completion,
+                                state.observation_after,
+                                submission_request_attempts=state.submission_request_attempts,
                             )
                         route_id = self._register_request_observation(state, state.issued)
                         request["observation_submission_id"] = route_id
@@ -11045,7 +11061,13 @@ class Session(Generic[ContextT, OutputT]):
         if state.submission_request_attempts is not None and state.issued is not None:
             # This producer has been owning this native capture exactly once.
             if state.issued._request_attempts is not None:
-                state.submission_request_attempts.add(state.issued.request_attempts)
+                snapshot = state.issued.request_attempts
+                if (
+                    snapshot is not None
+                    or state.handle is not None
+                    or getattr(error, "_effects", None) != "not_started"
+                ):
+                    state.submission_request_attempts.add(snapshot)
         continuation: _Submission | None = None
         if state.cleanup_error is not None:
             if error is None:

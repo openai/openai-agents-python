@@ -9,6 +9,63 @@ from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, responses as responses, text_response
 
 
+@pytest.mark.parametrize("cancel_successor", [False, True])
+async def test_late_reader_skips_retired_step_before_live_automatic_successor(
+    responses, monkeypatch, cancel_successor
+):
+    from agents import TurnStoppedError
+    from agents.observation import OutputTextDelta
+    from tests.test_review_ii_steering_tail import ProjectContinuation
+
+    successor_entered = asyncio.Event()
+    release = asyncio.Event()
+    responses.respond(*text_response("earlier", "Retired private text."))
+    responses.respond(*text_response("successor", "Live prefix."))
+
+    async def hold(event):
+        if len(responses.requests) == 2 and event["type"] == "response.completed":
+            successor_entered.set()
+            await release.wait()
+
+    responses.before_event = hold
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=responses.url, api_key="synthetic", supports_websockets=False
+        ) as provider,
+    ):
+        async with Agent(instructions="Answer.", provider=provider).session() as session:
+            # Project only the existing controlled unsampled receipt; both native turns run.
+            monkeypatch.setattr(session, "_native", ProjectContinuation(session._native))
+            turn = await session.submit("Answer.")
+            calls = []
+            reader = turn.accepted_text(lambda text: calls.append(text) or text)
+            try:
+                await successor_entered.wait()
+                async for event in turn.events():
+                    if isinstance(event, OutputTextDelta) and event.item_id == "successor":
+                        successor_id = event.turn_id
+                        break
+                else:
+                    pytest.fail("The native successor has not been streaming")
+                assert successor_id != turn.turn_id
+                if cancel_successor:
+                    await turn.cancel()
+                    assert [chunk async for chunk in reader] == []
+                    assert calls == []
+                    with pytest.raises(TurnStoppedError):
+                        await turn.get_result()
+                else:
+                    chunk = await anext(reader)
+                    assert (chunk.text, chunk.turn_id) == ("Live prefix.", successor_id)
+                    assert calls == ["Live prefix."]
+            finally:
+                release.set()
+                await reader.aclose()
+            if not cancel_successor:
+                assert (await turn.get_result()).final_output == "Live prefix."
+
+
 async def test_approved_prefix_arrives_before_provider_finishes_and_rejected_tail_stays_private(
     responses,
 ):

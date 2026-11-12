@@ -10,6 +10,56 @@ from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 
+@pytest.mark.parametrize("realtime", [False, True])
+async def test_nested_decision_graph_rejects_realtime_before_provider_acquisition(
+    responses, monkeypatch, realtime
+):
+    from agents.realtime import RealtimeAgentConfig
+
+    target = Agent(name="target", instructions="Target.")
+    child = Agent(
+        name="child",
+        instructions="Child.",
+        handoffs=[
+            DecisionHandoff(
+                name="delegate",
+                description="Transfer.",
+                question="Choose.",
+                targets={"target": target},
+            )
+        ],
+    )
+    acquisitions = []
+    acquire = NativeProvider._acquire_lease
+
+    def observe(provider):
+        acquisitions.append(provider)
+        return acquire(provider)
+
+    monkeypatch.setattr(NativeProvider, "_acquire_lease", observe)
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=responses.url, api_key="synthetic", supports_websockets=False
+        ) as provider,
+    ):
+        opening = Agent(
+            instructions="Source.",
+            provider=provider,
+            handoffs=[child],
+            realtime=RealtimeAgentConfig() if realtime else None,
+        )
+        if realtime:
+            with pytest.raises(ValueError, match="Realtime"):
+                async with opening.session():
+                    pytest.fail("A Realtime Decisions graph has been opening")
+            assert acquisitions == []
+        else:
+            async with opening.session():
+                assert acquisitions == [provider]
+        assert responses.requests == []
+
+
 class Decisions:
     def __init__(self, value="billing", *, hold=False):
         self.value = value

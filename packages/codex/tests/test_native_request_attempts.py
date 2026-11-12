@@ -30,6 +30,54 @@ from tests.test_native_agent import provider as fixture_provider
 from tests.test_native_provider_websockets import peer as websocket_peer
 
 
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("failure", ["validation", "rejected", "uncertain"])
+async def test_issued_admission_failure_retains_opted_in_logical_report(
+    responses, monkeypatch, capture, failure
+):
+    import _agents_codex.session as session_module
+
+    async with timeout(30), fixture_provider(responses) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session(
+            include_request_attempts=capture
+        ) as session:
+            native = session._native
+
+            class Admission:
+                def __getattr__(self, name):
+                    return getattr(native, name)
+
+                async def _submit(self, encoded, **kwargs):
+                    if failure == "rejected":
+                        return json.dumps(
+                            {"status": "not_submitted", "reason": {"type": "no_active_turn"}}
+                        )
+                    raise NativeError("Synthetic uncertain admission")
+
+            if failure == "validation":
+
+                def reject(request):
+                    raise ValueError("Synthetic pre-admission validation")
+
+                monkeypatch.setattr(session_module, "_check_audio_json", reject)
+            else:
+                monkeypatch.setattr(session, "_native", Admission())
+            turn = await session.submit("Answer.")
+            with pytest.raises(ValueError if failure == "validation" else NativeError):
+                await turn.get_result()
+            assert turn.turn_id is None
+            assert responses.requests == []
+            assert turn.request_attempts is None
+            report = turn.submission_request_attempts
+            if capture:
+                assert report is not None
+                assert report.counts == ()
+                assert report.availability == ("partial" if failure == "uncertain" else "complete")
+                assert not report.borrowed_requests_unavailable
+            else:
+                assert report is None
+
+
 @asynccontextmanager
 async def attempt_peer(*, mode="streaming", failures=0, hold=None, borrowed=False):
     requests = []
@@ -79,6 +127,42 @@ async def attempt_peer(*, mode="streaming", failures=0, hold=None, borrowed=Fals
                 model_backend=ResponsesModel(client) if borrowed else None,
             ) as provider:
                 yield provider, requests, entered
+
+
+@pytest.mark.parametrize("capture", [False, True])
+async def test_withdrawn_queued_turn_retains_zero_logical_sends(responses, capture):
+    entered, release = asyncio.Event(), asyncio.Event()
+    responses.respond(assistant_output("First answer."))
+
+    async def hold(event):
+        entered.set()
+        await release.wait()
+
+    responses.before_event = hold
+    async with timeout(30), fixture_provider(responses) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session(
+            include_request_attempts=capture
+        ) as session:
+            first = await session.submit("First.")
+            try:
+                await entered.wait()
+                queued = await session.submit("Withdraw.", if_busy="queue")
+                await queued.cancel()
+                with pytest.raises(TurnStoppedError):
+                    await queued.get_result()
+                assert queued.turn_id is None and queued.request_attempts is None
+                report = queued.submission_request_attempts
+                if capture:
+                    assert report is not None
+                    assert report.availability == "complete" and report.counts == ()
+                else:
+                    assert report is None
+            finally:
+                release.set()
+            assert (await first.get_result()).final_output == "First answer."
+            assert len(responses.requests) == 1
+            if capture:
+                assert counts(first, submission=True) == {("root", "generation", "http_sse"): 1}
 
 
 def counts(turn, *, submission=False):

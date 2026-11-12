@@ -477,23 +477,16 @@ class Turn(Generic[OutputT]):
             owners = {step.submission_id for step in self._steps()}
             if event.submission_id not in owners:
                 continue
-            current = (event.turn_id, event.item_id)
-            if current != identity:
-                pending = ""
-                identity = current
-            pending += event.delta
-            if len(pending.encode("utf-8")) > 65536:
-                raise RuntimeError("Accepted text pending limit exceeded")
 
             def live(
-                native_turn_id: str = event.turn_id, owning_submissions: set[str] = owners
+                native_turn_id: str | None = None, owning_submissions: set[str] = owners
             ) -> bool:
                 active = getattr(self._session, "_active", None)
                 handle = getattr(active, "handle", None)
                 return (
                     active is not None
                     and handle is not None
-                    and handle.turn_id == native_turn_id
+                    and (native_turn_id is None or handle.turn_id == native_turn_id)
                     and handle.submission_id in owning_submissions
                     and not active.stopping
                     and not active.terminal.done()
@@ -502,13 +495,24 @@ class Turn(Generic[OutputT]):
 
             if not live():
                 return
+            if not live(event.turn_id):
+                pending = ""
+                identity = None
+                continue
+            current = (event.turn_id, event.item_id)
+            if current != identity:
+                pending = ""
+                identity = current
+            pending += event.delta
+            if len(pending.encode("utf-8")) > 65536:
+                raise RuntimeError("Accepted text pending limit exceeded")
             approved = accept(pending)
             if inspect.isawaitable(approved):
                 approved = await approved
             task = asyncio.current_task()
             if task is not None and cancellation_requested(task):
                 raise asyncio.CancelledError
-            if not live():
+            if not live(event.turn_id):
                 return
             if approved is None or approved == "":
                 continue
@@ -613,6 +617,8 @@ def _root_turn(
     completion: asyncio.Future[Any],
     observation_after: int = 0,
     guardrail_results: list[Any] | None = None,
+    *,
+    submission_request_attempts: _SubmissionRequestAttempts | None = None,
 ) -> Turn[Any]:
     result = object.__new__(Turn)
     for name, value in {
@@ -625,7 +631,7 @@ def _root_turn(
         "_owner": session._owner,
         "_run_usage": _UsageCollector(),
         "_request_attempts": None,
-        "_submission_request_attempts": None,
+        "_submission_request_attempts": submission_request_attempts,
         "_completion": completion,
         "_continuation": None,
         "_result": None,
