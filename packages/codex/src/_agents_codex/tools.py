@@ -589,6 +589,15 @@ def _capture_application_data(
         raise ValueError("Tool application data must be JSON-compatible") from error
 
 
+def _rebuild_tool_output_adapter(adapter: TypeAdapter[Any], output_type: Any) -> TypeAdapter[Any]:
+    # Public module identities can leave these deferred SDK annotations unresolved.
+    if not adapter.pydantic_complete and (
+        output_type is ToolOutput or output_type == str | ToolOutput
+    ):
+        adapter.rebuild(_types_namespace=globals())
+    return adapter
+
+
 @dataclass(frozen=True)
 class _CapturedFunction:
     """One immutable snapshot for schema publication and callback execution."""
