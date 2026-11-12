@@ -172,7 +172,12 @@ impl Policy {
             .then_some(depth < self.max_depth)
     }
 
-    pub fn admits(&self, depth: usize, item: &codex_protocol::models::ResponseItem) -> bool {
+    pub fn admits(
+        &self,
+        depth: usize,
+        item: &codex_protocol::models::ResponseItem,
+        admission: Option<&dyn codex_extension_api::ModelToolAdmission>,
+    ) -> bool {
         use codex_protocol::models::ResponseItem;
         match item {
             ResponseItem::FunctionCall {
@@ -230,7 +235,10 @@ impl Policy {
                 namespace
                     .as_deref()
                     .is_none_or(|ns| matches!(ns, "functions" | ""))
-                    && matches!(name.as_str(), "apply_patch" | "exec")
+                    && (matches!(name.as_str(), "apply_patch" | "exec")
+                        || admission.is_some_and(|admission| {
+                            crate::python_tools::admits_custom_call(admission, item)
+                        }))
                     && self.explicitly_allows(&ToolName::new(namespace.clone(), name.clone()))
             }
             _ => false,

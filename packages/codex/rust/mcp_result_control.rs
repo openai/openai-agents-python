@@ -185,6 +185,8 @@ pub(crate) struct Selection {
     servers: HashMap<String, HashMap<String, f64>>,
     #[serde(default)]
     metadata_servers: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    discovery_servers: HashMap<String, Vec<String>>,
 }
 
 impl Selection {
@@ -211,23 +213,55 @@ impl Selection {
                 "Native MCP result timeout must be in (0, 3600] seconds"
             );
         }
-        for (name, tools) in &self.metadata_servers {
-            ensure!(
-                requested.get(name).is_some_and(|server| {
-                    !crate::mcp_roster::enterprise(server)
-                        && server.enabled
-                        && tools.iter().all(|tool| {
-                            server
-                                .enabled_tools
-                                .as_ref()
-                                .is_some_and(|names| names.contains(tool))
-                        })
-                }),
-                "MCP metadata policy must select admitted ordinary raw tool names"
-            );
+        for (selected, message) in [
+            (
+                &self.metadata_servers,
+                "MCP metadata policy must select admitted ordinary raw tool names",
+            ),
+            (
+                &self.discovery_servers,
+                "MCP discovery policy must select admitted ordinary raw tool names",
+            ),
+        ] {
+            for (name, tools) in selected {
+                ensure!(
+                    requested.get(name).is_some_and(|server| {
+                        !crate::mcp_roster::enterprise(server)
+                            && server.enabled
+                            && tools.iter().all(|tool| {
+                                server
+                                    .enabled_tools
+                                    .as_ref()
+                                    .is_some_and(|names| names.contains(tool))
+                            })
+                    }),
+                    "{message}"
+                );
+            }
         }
         Ok(())
     }
+
+    pub(crate) fn filters_discovery(&self, server: &str, tool: &str) -> bool {
+        self.discovery_servers
+            .get(server)
+            .is_some_and(|names| names.iter().any(|name| name == tool))
+    }
+
+    pub(crate) fn filters_server_discovery(&self, server: &str) -> bool {
+        self.discovery_servers.contains_key(server)
+    }
+}
+
+pub(crate) fn discovery_selection(
+    thread: &ExtensionData,
+    turn: &ExtensionData,
+    step: &ExtensionData,
+) -> Result<Option<Arc<Selection>>> {
+    if thread.get::<McpResultControl>().is_none() {
+        return Ok(None);
+    }
+    source_selection(thread, turn, Some(step))
 }
 
 // Keep explicit unselected turns unselected after later thread reconfiguration.
@@ -1479,6 +1513,7 @@ pub(crate) mod tests {
     fn selected(generation: u64, enabled: bool) -> Selection {
         Selection {
             metadata_servers: HashMap::new(),
+            discovery_servers: HashMap::new(),
             generation,
             servers: if enabled {
                 HashMap::from([("vault".into(), HashMap::from([("record".into(), 0.25)]))])

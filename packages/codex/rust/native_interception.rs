@@ -3026,7 +3026,11 @@ impl DirectRequest {
                 if state.revoked
                     || self.control.stopped.is_cancelled()
                     || self.owner.cancelled.is_cancelled()
-                    || !policy.admits(self.control.native_depth, &item)
+                    || !policy.admits(
+                        self.control.native_depth,
+                        &item,
+                        self.tool_admission.as_deref(),
+                    )
                 {
                     return Err(rejected());
                 }
@@ -3197,7 +3201,11 @@ impl DirectRequest {
             admission.check(&item)?;
         }
         if let Some(policy) = self.control.native_agents.get()
-            && !policy.admits(self.control.native_depth, &item)
+            && !policy.admits(
+                self.control.native_depth,
+                &item,
+                self.tool_admission.as_deref(),
+            )
         {
             return Err(rejected());
         }

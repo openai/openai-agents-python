@@ -18,6 +18,7 @@ class Workload:
     tool_rounds: int = 0
     sync_tool: bool = False
     delay_ms: float = 0
+    identity_family: str | None = None
 
     def dictionary(self):
         return asdict(self)
@@ -49,6 +50,30 @@ WORKLOADS = {
             iterations=20,
             tools_per_round=1,
             tool_rounds=1,
+        ),
+        *[
+            Workload(
+                f"oneshot_tool_output_16k_{chunks}",
+                mode="oneshot",
+                iterations=20,
+                output_chars=16384,
+                chunks=chunks,
+                tools_per_round=1,
+                tool_rounds=1,
+                identity_family="oneshot_tool_output_16k",
+            )
+            for chunks in (1, 16, 128)
+        ],
+        Workload(
+            "oneshot_tool_output_16k_128_active",
+            mode="oneshot",
+            iterations=20,
+            output_chars=16384,
+            chunks=128,
+            stream=True,
+            tools_per_round=1,
+            tool_rounds=1,
+            identity_family="oneshot_tool_output_16k",
         ),
         Workload("conversation_tool", tools_per_round=1, tool_rounds=1),
         Workload("tool_chain_5", iterations=20, tools_per_round=1, tool_rounds=5),
@@ -85,3 +110,12 @@ WORKLOADS = {
 def get_workload(name, *, iterations=None):
     value = WORKLOADS[name]
     return replace(value, iterations=iterations) if iterations is not None else value
+
+
+def fresh_native_supported(workload):
+    return (
+        workload.mode == "oneshot"
+        and not workload.sync_tool
+        and (workload.tools_per_round, workload.tool_rounds) in ((0, 0), (1, 1))
+        and (not workload.stream or workload.tools_per_round == 1)
+    )

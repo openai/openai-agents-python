@@ -80,7 +80,7 @@ The output directory must be new. Expect validator PASS, six successful worker r
 
 ### Requests and framing
 
-The adapters fix the model identifier to `gpt-5.1-codex`, instructions and tool schema; there is no model/effort override. For final-only calls, stable uses JSON while native uses SSE. The peer performs that framing work, so large-output wall time does not isolate client cost. Streamed cases also validate chunks, and history/tool cases verify retained request contents and callbacks.
+The adapters have been fixing the model identifier to `gpt-5.1-codex`, instructions and tool schema, without a model/effort override. For caller-owned loopback final-only calls, stable has been using JSON while native has been using SSE by default. The peer has been performing that framing work, so large-output wall time has not been isolating client cost. Streamed cases have been validating chunks, and history/tool cases have been verifying retained request contents and callbacks. The optional default-host profile below has been checking the selected native wheel's actual HTTP/SSE or WSS route.
 
 ### Version and source identity
 
@@ -112,7 +112,7 @@ Compared with the JS benchmark, this harness keeps a fresh peer per worker rathe
 
 ## Focused checks and diagnostic profiling
 
-The statistics/qualification tests use only the standard library and do not import either SDK or spawn benchmark workers:
+The focused tests have been using the peer environment's existing aiohttp dependency. They have been checking statistics, adapter ownership and WSS tool continuation without importing either SDK or launching benchmark workers:
 
 ```sh
 "$PEER_PY" -m unittest discover -s "$BENCH/tests" -v
@@ -153,7 +153,21 @@ Select only final-result workloads for a buffered comparison, for example:
           oneshot_output_64k_256_plain oneshot_output_64k_4096_plain
 ```
 
-Omit `--v1-response-mode buffered` and use a fresh output directory for the default SSE control. Keep the same source, wheel, dependencies, interpreter, CA and host conditions. The three 64 KiB cases are final-only `Agent.run` calls in independent fresh conversations, with one prefill and 20 measured calls by default. Their chunk setting controls the SSE reference workload; a JSON response has zero SSE chunks. This removes peer framing work too, so wall-time differences do not isolate client processing. Client process CPU and peer CPU remain separate.
+Omit `--v1-response-mode buffered` and use a fresh output directory for the default caller-owned loopback SSE control. Keep the same source, wheel, dependencies, interpreter, CA and host conditions. The three 64 KiB cases are final-only `Agent.run` calls in independent fresh conversations, with one prefill and 20 measured calls by default. Their chunk setting controls the SSE reference workload; a JSON response has zero SSE chunks. This removes peer framing work too, so wall-time differences do not isolate client processing. Client process CPU and peer CPU remain separate.
+
+For a paired comparison of two native modes, `--reference-engine v1 --reference-response-mode streaming --v1-response-mode buffered` has been selecting SSE for the reference and JSON for the target. Without `--reference-response-mode`, both native arms have been inheriting `--v1-response-mode`. The following command has been using the same installed native wheel on both sides, with one caller-owned Provider per Adapter and fresh conversations per call:
+
+```sh
+"$PEER_PY" "$BENCH/compare.py" \
+  --reference-engine v1 --reference-response-mode streaming --v1-response-mode buffered \
+  --native-provider-mode caller-owned --native-transport http \
+  --v0-python "$NATIVE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version "$NATIVE_VERSION" --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/native-response-modes-new" \
+  --samples 5 --iterations 20 --cases oneshot_tool_output_16k_128
+```
+
+This loopback comparison has been excluding default-host TLS and implicit-provider cache behavior. The controller has been recording each arm's response mode in metadata and summaries, and checking it against that arm's worker and peer receipts. Buffered mode has been remaining restricted to final-result workloads outside the default-host profile.
 
 Rows record the native response mode and expected wire transport, checked against all actual request receipts, per-response chunk counts and total emitted chunks. Both modes retain the same final output, input/history and tool-result checks. Buffered comparisons reject live-observation workloads. They report no first-delta metric or token-live claim; buffered progress arrives after the complete body. Existing live streaming cursor, gap and exact chunk checks remain unchanged.
 
@@ -163,9 +177,9 @@ Rows record the native response mode and expected wire transport, checked agains
 
 ## Focused native WebSocket reproduction
 
-The `--reference-engine v1` option has been selecting a native adapter for the reference slot named `--v0-python`. The target slot has been continuing to use the native adapter. Both adapters have been retaining one Provider while each `Agent.run` has been opening a fresh conversation. HTTP has been remaining the default transport.
+The `--reference-engine v1` option has been selecting a native adapter for the reference slot named `--v0-python`. The target slot has been continuing to use the native adapter. In the caller-owned loopback examples below, both adapters have been retaining one Provider while each `Agent.run` has been opening a fresh conversation. HTTP has been remaining that configuration's default transport.
 
-This WebSocket mode has been accepting only `--cases oneshot_text` with streaming response mode. The peer has been checking one generating request per socket, reconstructing only that socket's own optional warmup input, and rejecting continuation from another response. Worker validation has been requiring WebSocket receipts and joined socket retirement. Warmup frames have been appearing separately as `websocket_warmups`, outside the generating-request count.
+The loopback WebSocket example below has been selecting `--cases oneshot_text` with streaming response mode. The peer has been keeping warmup and generating history local to each socket, and rejecting continuation from another response. The default-host fresh-tool cases below have been exercising bounded tool continuation on that same peer. Worker validation has been requiring WebSocket receipts and joined socket retirement. Warmup frames have been appearing separately as `websocket_warmups`, outside the generating-request count.
 
 Prerequisites: the same interpreter, dependency and bytecode conditions described above; two native-wheel environments with recorded source commits and wheel hashes. `REFERENCE_NATIVE_PY` has been naming the reference environment's Python, and `NATIVE_PY` has been naming the candidate environment's Python. The peer has been continuing to run in its separate process. Existing override-clearing instructions have been applying to both commands.
 
@@ -204,12 +218,56 @@ A separate context command has been comparing stable v0 over HTTP with the nativ
 
 ## Optional default-host container smoke
 
-The [default-host container guide](container-default-host/README.md) has been supplying an offline functional check against a local TLS peer at the normal API hostname. Its image setup has been provisioning matching Python environments and explicit certifi prerequisites. Scope: fresh, final-only, no-tool native HTTP/SSE calls or omitted-Provider WSS calls; one-worker correctness evidence, without a performance claim.
+The [default-host container guide](container-default-host/README.md) has been supplying an offline functional check against a local TLS peer at the normal API hostname. Its image setup has been provisioning matching Python environments and explicit certifi prerequisites. Scope: fresh native HTTP/SSE calls or omitted-Provider WSS calls, with no tools or one asynchronous function tool. The optional smoke has been supplying correctness checks, without a performance claim.
 
 `--native-provider-mode omitted` has been selecting the public `Agent.run` entrypoint without constructing a caller-owned `NativeProvider` or passing the Agent's `provider` argument. The default `caller-owned` mode has been retaining one Provider per worker. Both modes have been opening a fresh conversation for every oneshot call; neither has been reusing conversation history. The single flag has been applying to every v1 arm, including `--reference-engine v1`, while leaving the v0 adapter unchanged. Worker rows and comparison summaries have been recording `native_provider_mode`.
 
-Omitted mode has been accepting only the default-host profile's final-only, no-tool oneshot cases, including cold, large-input and oneshot concurrent cases. The worker has been discarding inherited credentials and setting only `OPENAI_API_KEY=synthetic-benchmark-key` before importing the SDK. The [complete container example](container-default-host/README.md#run-one-offline-functional-smoke) has been selecting this mode without a custom endpoint or trust override.
+Omitted mode has been accepting the default-host profile's fresh no-tool cases and one asynchronous function tool per call. No-tool cases have been including cold, large-input and oneshot concurrent calls. The tool profile has been excluding retained conversations, synchronous tools, fanout and multiple tool rounds. Live observation has been using the one-tool active-reader case. The worker has been discarding inherited credentials and setting only `OPENAI_API_KEY=synthetic-benchmark-key` before importing the SDK. The [complete container example](container-default-host/README.md#run-one-offline-functional-smoke) has been selecting this mode without a custom endpoint or trust override.
 
 In default-host omitted mode, `--native-transport` has been declaring the target wheel's expected default route, without changing the SDK transport. `--reference-transport` has been declaring that route for a v1 reference arm. A WSS reference and an HTTP/SSE target have been remaining comparable with the same omitted-Provider entrypoint. Standalone summaries have been recording both effective transports. Caller-owned default-host mode has been continuing to accept only HTTP/SSE.
 
 In omitted mode, `Agent.run` has been owning each call's Provider creation and close inside the call measurement. Process-owned caches have been remaining outside the Adapter's final-close ownership. The existing all-thread process CPU clocks have been retaining their measurement windows; `full_owner_*` has not been claiming process-exit CPU or final cached-resource retirement. Comparisons have been describing the selected Provider lifetime and its transport ownership, without isolating Engine construction cost.
+
+### Fresh implicit tools and dense output
+
+`oneshot_tool` has been supplying the short fresh-tool case. The following cases have been sharing the same 16 KiB logical output, operation IDs and one-tool history:
+
+- `oneshot_tool_output_16k_1`
+- `oneshot_tool_output_16k_16`
+- `oneshot_tool_output_16k_128`
+- `oneshot_tool_output_16k_128_active`
+
+Their `identity_family` has been keeping inputs and outputs identical while chunk count or public observation has been changing. Each worker has been using one prefill and 20 measured calls by default. The peer has been checking every tool result and keeping continuation history on the same fresh WSS connection. Connection counts have been counting conversations; generating-request counts have been including the tool round and final response. Warmups have been receiving separate counters.
+
+In omitted-provider tool mode, the native adapter has been requiring a real `ToolContext[None]`, its actual call ID and `context.submission is result.turn`. Worker rows have been recording distinct native Session IDs and those checks. The active case has been creating its reader outside the callback, then attaching it to the callback's real Turn. Readiness has been following the first public non-text event. The reader has been draining an unread suffix only after a first stream without its terminal event. Every cursor drain, reader join and release of callback references has been remaining inside `Adapter.run`. Native wheels without these public APIs have been failing explicitly. Existing caller-owned cases have been retaining their original callbacks.
+
+The v0 adapter has been remaining unchanged: final-only cases have been using `Runner.run` with JSON, while active cases have been using `Runner.run_streamed` with SSE. Native transport declarations have been checking the wheel's actual HTTP/SSE or WSS route. These have been comparing public application paths; JSON, SSE and WSS costs have not been receiving separate causal attribution.
+
+For an unscored functional check, the [container tool example](container-default-host/README.md#fresh-tool-and-active-reader-smoke) has been reusing the existing offline setup. For a paired native comparison, the [second-wheel image steps](container-default-host/README.md#provision-a-reference-native-wheel) have been provisioning `/opt/reference` alongside `/opt/sdk` and `/opt/peer`. The shell below has been replacing the setup and worker body inside that guide's `docker run`, with all three environments trusting the same synthetic CA. Outer container deadline for this 240-worker comparison: `7200s` instead of the single-smoke `180s`; the same output mount, logs, trap and container/image cleanup.
+
+```sh
+BENCH=/bench
+LAB=/out
+PEER_PY=/opt/peer/bin/python
+REFERENCE_NATIVE_PY=/opt/reference/bin/python
+NATIVE_PY=/opt/sdk/bin/python
+REFERENCE_NATIVE_VERSION="$("$REFERENCE_NATIVE_PY" -B -c "from importlib.metadata import version; print(version(\"openai-agents\"))")"
+NATIVE_VERSION="$("$NATIVE_PY" -B -c "from importlib.metadata import version; print(version(\"openai-agents\"))")"
+"$PEER_PY" -B "$BENCH/container-default-host/setup.py" \
+  --directory /run/sdk-benchmark \
+  --python "$REFERENCE_NATIVE_PY" --python "$NATIVE_PY" --python "$PEER_PY"
+cp /input/sdk-packages.txt /input/peer-packages.txt /reference/packages.txt /out/
+exec env OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 PYTHONHASHSEED=0 \
+  "$PEER_PY" -B "$BENCH/compare.py" \
+  --reference-engine v1 --default-host-setup /run/sdk-benchmark/setup.json \
+  --native-provider-mode omitted \
+  --reference-transport websocket --native-transport websocket \
+  --v0-python "$REFERENCE_NATIVE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version "$REFERENCE_NATIVE_VERSION" --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/fresh-tools" \
+  --samples 24 --iterations 20 --timeout 60 \
+  --cases oneshot_tool oneshot_tool_output_16k_1 oneshot_tool_output_16k_16 \
+          oneshot_tool_output_16k_128 oneshot_tool_output_16k_128_active
+```
+
+The existing estimator has been retaining matched block order, raw metric vectors and paired bootstrap intervals. This command has not been carrying a source-specific optimization gate or a speedup claim. All-client CPU has been covering the existing warm interval; full-owner CPU has been covering Adapter construction through exit. Process-owned cache retirement and process-exit CPU have been remaining outside those owner clocks.

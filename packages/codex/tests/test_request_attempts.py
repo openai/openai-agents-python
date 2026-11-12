@@ -86,3 +86,20 @@ def test_invalid_wire_count_never_becomes_a_public_number(count):
     )
     with pytest.raises(ValueError, match="request-attempt"):
         _request_attempts_snapshot(capture)
+
+
+def test_logical_aggregation_keeps_borrowed_coverage_explicit_and_rows_bounded():
+    from _agents_codex.turn import _SubmissionRequestAttempts
+
+    report = _SubmissionRequestAttempts()
+    report.add(RequestAttempts("unavailable", (), True))
+    assert report.snapshot() == RequestAttempts("unavailable", (), True)
+    for _ in range(100):
+        report.add(
+            RequestAttempts(
+                "complete", (RequestAttemptCount("root", "generation", "http_sse", 1),), False
+            )
+        )
+    assert report.snapshot() == RequestAttempts(
+        "partial", (RequestAttemptCount("root", "generation", "http_sse", 100),), True
+    )

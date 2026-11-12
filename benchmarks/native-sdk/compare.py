@@ -18,8 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from owned_process import _note, defer_cleanup_signals, terminate_group
-from worker import reject_inherited_overrides, validate_transport
-from workloads import WORKLOADS, get_workload
+from worker import reject_inherited_overrides, validate_fresh_tool_rows, validate_transport
+from workloads import WORKLOADS, fresh_native_supported, get_workload
 
 
 def interval(values):
@@ -118,9 +118,10 @@ def validate_sample(
     ):
         raise ValueError("Native Provider mode mismatch with its schedule")
     if native_transport == "websocket" and (
-        (case != "oneshot_text" and not default_host) or v1_response_mode != "streaming"
+        (case == "startup_import" or not fresh_native_supported(get_workload(case)))
+        or v1_response_mode != "streaming"
     ):
-        raise ValueError("WebSocket reproduction requires native final-only oneshot_text")
+        raise ValueError("WebSocket reproduction requires supported fresh native calls")
     if engine == "v1" and row.get("native_transport", "http") != native_transport:
         raise ValueError("Native transport metadata differs from its schedule")
     if row.get("engine") != engine or row.get("case") != case:
@@ -239,6 +240,8 @@ def validate_sample(
             for name, expected in counts.items()
         ):
             raise ValueError("Worker operation/tool counts differ from the scheduled work")
+        if engine == "v1" and native_provider_mode == "omitted" and workload.tools_per_round:
+            validate_fresh_tool_rows(workload, row.get("operations"))
     identity = {
         "versions": {name: versions[name] for name in required},
         "python": row["python"],
@@ -265,12 +268,15 @@ def summarize(
     expected_versions,
     iterations=None,
     v1_response_mode="streaming",
+    reference_response_mode=None,
     reference_engine="v0",
     native_transport="http",
     reference_transport=None,
     default_host=False,
     native_provider_mode="caller-owned",
 ):
+    if reference_response_mode is not None and reference_engine != "v1":
+        raise ValueError("Reference response mode requires a v1 reference")
     summary, identities = {}, {}
     for case, sides in records.items():
         if set(sides) != {"v0", "v1"}:
@@ -297,7 +303,9 @@ def summarize(
                     expected_versions=expected_versions,
                     identities=identities,
                     iterations=iterations,
-                    v1_response_mode=v1_response_mode,
+                    v1_response_mode=(reference_response_mode or v1_response_mode)
+                    if side == "v0"
+                    else v1_response_mode,
                     reference_engine=reference_engine,
                     native_transport=reference_transport
                     if side == "v0" and reference_transport
@@ -351,6 +359,10 @@ def summarize(
             else (reference_transport or native_transport),
             "native_transport": native_transport,
             "native_provider_mode": native_provider_mode,
+            "reference_response_mode": (reference_response_mode or v1_response_mode)
+            if reference_engine == "v1" and case != "startup_import"
+            else None,
+            "v1_response_mode": v1_response_mode if case != "startup_import" else None,
             "full_owner_scope": None if case == "startup_import" else "adapter-lifetime",
             "primary_metric": primary,
             "primary": metrics[primary],
@@ -381,7 +393,7 @@ def main():
         default="caller-owned",
         help=(
             "Provider mode for every v1 arm "
-            "(omitted: default-host, final-only, no-tool oneshot cases)"
+            "(omitted: default-host fresh no-tool or one-async-tool calls)"
         ),
     )
     parser.add_argument("--v0-python", type=Path, required=True)
@@ -390,6 +402,11 @@ def main():
     parser.add_argument("--v1-version", required=True)
     parser.add_argument(
         "--v1-response-mode", choices=["streaming", "buffered"], default="streaming"
+    )
+    parser.add_argument(
+        "--reference-response-mode",
+        choices=["streaming", "buffered"],
+        help="Response mode for a v1 reference; omission inherits --v1-response-mode",
     )
     parser.add_argument("--server-python", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -417,6 +434,12 @@ def main():
         parser.error("Use positive counts/timeout, distinct cases and explicit expected versions")
     if args.native_provider_mode == "omitted" and not args.default_host_setup:
         parser.error("Omitted Provider mode: default-host workloads only")
+    if args.reference_response_mode is not None and args.reference_engine != "v1":
+        parser.error("Reference response mode requires --reference-engine v1")
+    reference_response_mode = args.reference_response_mode or args.v1_response_mode
+    native_response_modes = [args.v1_response_mode]
+    if args.reference_engine == "v1":
+        native_response_modes.append(reference_response_mode)
     if args.reference_transport and (not args.default_host_setup or args.reference_engine != "v1"):
         parser.error("Reference transport requires default-host mode with a v1 reference")
     if args.default_host_setup:
@@ -425,23 +448,28 @@ def main():
         ):
             parser.error("Default-host HTTP/SSE mode: --native-transport http only")
         args.default_host_setup = args.default_host_setup.resolve()
-        if args.v1_response_mode != "streaming" or any(
-            case == "startup_import"
-            or WORKLOADS[case].mode != "oneshot"
-            or WORKLOADS[case].stream
-            or WORKLOADS[case].tool_rounds
+        if "buffered" in native_response_modes or any(
+            case == "startup_import" or not fresh_native_supported(WORKLOADS[case])
             for case in args.cases
         ):
-            parser.error("Default-host mode requires explicit fresh final-only no-tool cases")
+            parser.error(
+                "Default-host mode requires explicit fresh no-tool or one-async-tool cases"
+            )
         if args.reference_engine == "v1" and not args.reference_transport:
             parser.error("Declare the v1 reference arm's expected transport")
     if (
         args.native_transport == "websocket"
         and not args.default_host_setup
-        and (args.cases != ["oneshot_text"] or args.v1_response_mode != "streaming")
+        and (
+            any(
+                case == "startup_import" or not fresh_native_supported(WORKLOADS[case])
+                for case in args.cases
+            )
+            or "buffered" in native_response_modes
+        )
     ):
-        parser.error("WebSocket reproduction requires --cases oneshot_text and streaming mode")
-    if args.v1_response_mode == "buffered" and any(
+        parser.error("WebSocket reproduction requires fresh cases and streaming mode")
+    if "buffered" in native_response_modes and any(
         case != "startup_import" and WORKLOADS[case].stream for case in args.cases
     ):
         parser.error(
@@ -494,6 +522,9 @@ def main():
         "reference_transport": args.reference_transport,
         "default_host_setup": str(args.default_host_setup) if args.default_host_setup else None,
         "v1_response_mode": args.v1_response_mode,
+        "reference_response_mode": reference_response_mode
+        if args.reference_engine == "v1"
+        else None,
         "completed": False,
         "rss_scope": "Unqualified raw process ru_maxrss only; no RSS comparison or verdict",
         "statistics": (
@@ -549,6 +580,9 @@ def main():
                         str(sample),
                     ]
                     engine = args.reference_engine if side == "v0" else "v1"
+                    response_mode = (
+                        reference_response_mode if side == "v0" else args.v1_response_mode
+                    )
                     scheduled_transport = (
                         args.reference_transport
                         if side == "v0" and args.reference_transport
@@ -560,7 +594,7 @@ def main():
                         command += ["--native-provider-mode", args.native_provider_mode]
                     if args.default_host_setup:
                         command += ["--default-host-setup", str(args.default_host_setup)]
-                    if engine == "v1" and args.v1_response_mode == "buffered":
+                    if engine == "v1" and response_mode == "buffered":
                         command += ["--response-mode", "buffered"]
                     if case == "startup_import":
                         command.append("--import-only")
@@ -642,7 +676,7 @@ def main():
                         expected_versions=expected_versions,
                         identities=identities,
                         iterations=args.iterations,
-                        v1_response_mode=args.v1_response_mode,
+                        v1_response_mode=response_mode,
                         reference_engine=args.reference_engine,
                         native_transport=scheduled_transport,
                         default_host=bool(args.default_host_setup),
@@ -660,6 +694,7 @@ def main():
                 expected_versions=expected_versions,
                 iterations=args.iterations,
                 v1_response_mode=args.v1_response_mode,
+                reference_response_mode=args.reference_response_mode,
                 reference_engine=args.reference_engine,
                 native_transport=args.native_transport,
                 reference_transport=args.reference_transport,

@@ -26,6 +26,7 @@ class _EnvironmentLease:
         loop = asyncio.get_running_loop()
         self._ready: asyncio.Future[Environment[Any]] = loop.create_future()
         self._retired: asyncio.Future[None] = loop.create_future()
+        self.source = source
         self._borrower = asyncio.current_task()
         self._sync_run: _SyncRun | None = None
         self._woke_borrower = False
