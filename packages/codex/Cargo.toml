@@ -97,6 +97,7 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "=0.2.186"
+openssl-probe = "=0.2.1"
 
 [patch.crates-io]
 crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
