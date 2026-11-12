@@ -721,6 +721,10 @@
       "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
     },
     {
+      "path": "sdk-application-apply-patch.patch",
+      "sha256": "353cefc34587a72a8a9a243e117e118f50e639a6cd0a5a96491ff0ec6bf69677"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
       "sha256": "487a2e788517874133ef1d0aef8366cbcbd885fdb57783c1d569d374aed14220"
     },
@@ -767,7 +771,11 @@
     {
       "path": "sdk-hosted-shell-replay-fence.patch",
       "sha256": "a6732ddaadb5a8caab18e88c6c46fa3c4efebada534e32a7c0ed91b7bcf8b279"
+    },
+    {
+      "path": "sdk-native-model-stream-completion-usage.patch",
+      "sha256": "d89d2ed9176b3a4a163a890d2d9cf2be51cf6029d13d25aa895f876eb2770609"
     }
   ],
-  "result_tree": "5d804da0214a2d8b070130c39160253f1b15f8ef"
+  "result_tree": "430769e2541c03d38b7cb4dc533b7f4ced0e6ce0"
 }
