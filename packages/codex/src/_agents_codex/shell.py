@@ -74,6 +74,9 @@ class ShellOutput(BaseModel):
     provider_data: dict[str, JsonValue] | None = Field(default=None, exclude=True, repr=False)
 
 
+_SHELL_WIRE_OUTPUT = TypeAdapter(ShellOutput)
+
+
 def _shell_output(value: Any) -> ToolOutput:
     result = ShellOutput.model_validate(value)
     metadata: dict[str, JsonValue] = {}
@@ -89,7 +92,7 @@ def _shell_output(value: Any) -> ToolOutput:
         entries.append(data)
     if any(entries):
         metadata["shell_output"] = entries
-    output = ToolOutput.text(result.model_dump_json(warnings="error"))
+    output = ToolOutput.text(_SHELL_WIRE_OUTPUT.dump_json(result, warnings="error").decode())
     output.application_data = _capture_application_data(metadata)
     return output
 

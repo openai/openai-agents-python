@@ -6,7 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, NativeProvider, SessionState, ShellOutput, shell_tool
+from _agents_codex.shell import _shell_output
+from agents import (
+    Agent,
+    NativeProvider,
+    SessionState,
+    ShellCommandOutput,
+    ShellExit,
+    ShellOutput,
+    ToolOutputText,
+    shell_tool,
+)
 from agents.observation import ToolFinished
 from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_native_application_shell import shell_call
@@ -23,6 +33,40 @@ def selected_model():
         and not row.get("use_responses_lite")
         and row.get("tool_mode") != "code_mode_only"
     )
+
+
+def test_shell_output_uses_the_declared_wire_schema():
+    class ApplicationShellCommand(ShellCommandOutput):
+        private_command_data: str = "command-only"
+
+    class ApplicationShellResult(ShellOutput):
+        private_result_data: str = "result-only"
+
+    result = _shell_output(
+        ApplicationShellResult(
+            output=[
+                ApplicationShellCommand(
+                    stdout="public result",
+                    stderr="",
+                    outcome=ShellExit(exit_code=0),
+                    provider_data={"scope": "command"},
+                )
+            ],
+            provider_data={"scope": "result"},
+        )
+    )
+    (content,) = result.content_items
+    assert isinstance(content, ToolOutputText)
+    assert json.loads(content.text) == {
+        "output": [
+            {"stdout": "public result", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+        ],
+        "max_output_length": None,
+    }
+    assert result.application_data == {
+        "provider_data": {"scope": "result"},
+        "shell_output": [{"provider_data": {"scope": "command"}}],
+    }
 
 
 @pytest.mark.parametrize("as_model", [False, True])
