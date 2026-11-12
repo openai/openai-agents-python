@@ -18,8 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from owned_process import _note, defer_cleanup_signals, terminate_group
-from worker import reject_inherited_overrides, validate_transport
-from workloads import WORKLOADS, get_workload
+from worker import reject_inherited_overrides, validate_fresh_tool_rows, validate_transport
+from workloads import WORKLOADS, fresh_native_supported, get_workload
 
 
 def interval(values):
@@ -118,9 +118,10 @@ def validate_sample(
     ):
         raise ValueError("Native Provider mode mismatch with its schedule")
     if native_transport == "websocket" and (
-        (case != "oneshot_text" and not default_host) or v1_response_mode != "streaming"
+        (case == "startup_import" or not fresh_native_supported(get_workload(case)))
+        or v1_response_mode != "streaming"
     ):
-        raise ValueError("WebSocket reproduction requires native final-only oneshot_text")
+        raise ValueError("WebSocket reproduction requires supported fresh native calls")
     if engine == "v1" and row.get("native_transport", "http") != native_transport:
         raise ValueError("Native transport metadata differs from its schedule")
     if row.get("engine") != engine or row.get("case") != case:
@@ -239,6 +240,8 @@ def validate_sample(
             for name, expected in counts.items()
         ):
             raise ValueError("Worker operation/tool counts differ from the scheduled work")
+        if engine == "v1" and native_provider_mode == "omitted" and workload.tools_per_round:
+            validate_fresh_tool_rows(workload, row.get("operations"))
     identity = {
         "versions": {name: versions[name] for name in required},
         "python": row["python"],
@@ -381,7 +384,7 @@ def main():
         default="caller-owned",
         help=(
             "Provider mode for every v1 arm "
-            "(omitted: default-host, final-only, no-tool oneshot cases)"
+            "(omitted: default-host fresh no-tool or one-async-tool calls)"
         ),
     )
     parser.add_argument("--v0-python", type=Path, required=True)
@@ -426,21 +429,26 @@ def main():
             parser.error("Default-host HTTP/SSE mode: --native-transport http only")
         args.default_host_setup = args.default_host_setup.resolve()
         if args.v1_response_mode != "streaming" or any(
-            case == "startup_import"
-            or WORKLOADS[case].mode != "oneshot"
-            or WORKLOADS[case].stream
-            or WORKLOADS[case].tool_rounds
+            case == "startup_import" or not fresh_native_supported(WORKLOADS[case])
             for case in args.cases
         ):
-            parser.error("Default-host mode requires explicit fresh final-only no-tool cases")
+            parser.error(
+                "Default-host mode requires explicit fresh no-tool or one-async-tool cases"
+            )
         if args.reference_engine == "v1" and not args.reference_transport:
             parser.error("Declare the v1 reference arm's expected transport")
     if (
         args.native_transport == "websocket"
         and not args.default_host_setup
-        and (args.cases != ["oneshot_text"] or args.v1_response_mode != "streaming")
+        and (
+            any(
+                case == "startup_import" or not fresh_native_supported(WORKLOADS[case])
+                for case in args.cases
+            )
+            or args.v1_response_mode != "streaming"
+        )
     ):
-        parser.error("WebSocket reproduction requires --cases oneshot_text and streaming mode")
+        parser.error("WebSocket reproduction requires fresh cases and streaming mode")
     if args.v1_response_mode == "buffered" and any(
         case != "startup_import" and WORKLOADS[case].stream for case in args.cases
     ):
