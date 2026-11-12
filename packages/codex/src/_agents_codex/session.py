@@ -227,6 +227,7 @@ from .observation import (
     ExecutionItemCompleted as ExecutionItemCompleted,
     HostedToolCallProgress,
     ModelOutputItemCompleted,
+    OutputAccepted as OutputAccepted,
     OutputTextDelta as OutputTextDelta,
     RawProviderEvent as RawProviderEvent,
     ResponseFactReceived as ResponseFactReceived,
@@ -275,6 +276,7 @@ from .state import (
     LocalStorage as LocalStorage,
     NativeGoal as NativeGoal,
     SessionState as SessionState,
+    _RequestRunBudgetCheckpoint,
 )
 from .subagents import Subagent as Subagent, _subagent as _subagent
 from .telemetry import (
@@ -798,6 +800,36 @@ class _RunBudget:
     cost_micros: int = 0
     usage_missing: bool = False
     pending_estimates: list[TokenUsage] = field(default_factory=list)
+
+    def checkpoint(self) -> _RequestRunBudgetCheckpoint:
+        limits = self.limits
+        if (
+            limits.max_requests is None
+            or limits.max_tokens is not None
+            or limits.max_estimated_cost_micros is not None
+        ):
+            raise CapabilityError("Only request-only run budgets support portable checkpoints")
+        return _RequestRunBudgetCheckpoint(
+            version=1, max_requests=limits.max_requests, admitted_requests=self.requests
+        )
+
+    @classmethod
+    def restore_checkpoint(
+        cls, saved: _RequestRunBudgetCheckpoint | None, current: RunBudget | None
+    ) -> _RunBudget | None:
+        if saved is None:
+            return None
+        if not isinstance(current, RunBudget):
+            raise CapabilityError(
+                "Restoring a request budget requires the original request-only ceiling"
+            )
+        tracker = cls(current)
+        if tracker.checkpoint().max_requests != saved.max_requests:
+            raise CapabilityError(
+                "Restoring a request budget requires the original request-only ceiling"
+            )
+        tracker.requests = saved.admitted_requests
+        return tracker
 
     def observe(self, usage: dict[str, Any] | None) -> None:
         if self.limits.max_tokens is None and self.limits.max_estimated_cost_micros is None:
@@ -2978,6 +3010,30 @@ def _check_checkpoint(state: SessionState, instructions: str, *, graph: bool = F
         native._check_session_instructions(json.dumps(state.history), instructions)
 
 
+def _prepare_open_state(
+    state: SessionState | ManagedWorkspaceCheckpoint | None,
+    environment: object,
+    *,
+    include_raw_provider_events: bool,
+    include_request_attempts: bool,
+    resume_budget: RunBudget | None,
+) -> tuple[SessionState | None, _ManagedWorkspaceSource | None]:
+    if not isinstance(include_raw_provider_events, bool):
+        raise TypeError("include_raw_provider_events must be a bool")
+    if not isinstance(include_request_attempts, bool):
+        raise TypeError("include_request_attempts must be a bool")
+    managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
+    if isinstance(state, ManagedWorkspaceCheckpoint):
+        if managed_source is None:
+            raise ValueError("Managed checkpoint requires a current managed sandbox source")
+        state = managed_source.validate_resume(state).conversation
+    if resume_budget is not None and (
+        not isinstance(state, SessionState) or state.run_budget is None
+    ):
+        raise CapabilityError("Cannot add a budget when restoring an unbudgeted checkpoint")
+    return state, managed_source
+
+
 def _prepare_native_checkpoint(
     saved: SessionState, *, has_output_override: bool
 ) -> tuple[str, bool, tuple[ToolRef, ...] | None, tuple[str, ...]]:
@@ -2997,8 +3053,11 @@ def _prepare_native_checkpoint(
         payload["agent_options"].pop("_sdk_output_override")
     payload.pop("codex_login_binding", None)
     payload.pop("executor_read_only", None)
-    if saved.format_version in (4, 5, 6, 7):
+    if saved.format_version in (8, 9):
+        payload["format_version"] = 3 if saved.format_version == 8 else 5
+    elif saved.format_version in (4, 5, 6, 7):
         payload["format_version"] = saved.format_version - 2
+    payload.pop("run_budget", None)
     payload.pop("operation_tools", None)
     payload.pop("repair_turns", None)
     payload.pop("repair_items", None)
@@ -3518,6 +3577,7 @@ class Session(Generic[ContextT, OutputT]):
         context: ContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
+        resume_budget: RunBudget | None = None,
         initial_messages_json: str | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
@@ -3532,6 +3592,8 @@ class Session(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_output_accepted: bool = False,
+        include_request_attempts: bool = False,
         include_raw_provider_events: bool = False,
         discover_agents_md: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
@@ -3546,14 +3608,13 @@ class Session(Generic[ContextT, OutputT]):
         _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
-        if not isinstance(include_raw_provider_events, bool):
-            raise TypeError("include_raw_provider_events must be a bool")
-        managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
-        if isinstance(state, ManagedWorkspaceCheckpoint):
-            if managed_source is None:
-                raise ValueError("Managed checkpoint requires a current managed sandbox source")
-            captured_pair = managed_source.validate_resume(state)
-            state = captured_pair.conversation
+        state, managed_source = _prepare_open_state(
+            state,
+            environment,
+            include_raw_provider_events=include_raw_provider_events,
+            include_request_attempts=include_request_attempts,
+            resume_budget=resume_budget,
+        )
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -3645,6 +3706,7 @@ class Session(Generic[ContextT, OutputT]):
             checkpoint = None
             manual_restore = False
             continuation = None
+            restored_budget = None
             operation_slots = None
             restored_operation_refs = None
             restored_operation_declarations = None
@@ -3659,6 +3721,7 @@ class Session(Generic[ContextT, OutputT]):
                 # Capture caller-owned data before the first await. The native
                 # importer validates identities, revision, and current tool specs.
                 saved = SessionState.from_json(state.to_json())
+                restored_budget = _RunBudget.restore_checkpoint(saved.run_budget, resume_budget)
                 saved_plan_provider = _checkpoint_plan_provider(saved, auth)
                 if not uses_siwc:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
@@ -4440,6 +4503,8 @@ class Session(Generic[ContextT, OutputT]):
                     tool_error_formatter=tool_error_formatter,
                     observation_retention=observation_retention,
                     include_model_output_items=include_model_output_items,
+                    include_output_accepted=include_output_accepted,
+                    include_request_attempts=include_request_attempts,
                     include_raw_provider_events=include_raw_provider_events,
                 )
                 session._input_guardrails = input_guardrails
@@ -4587,6 +4652,7 @@ class Session(Generic[ContextT, OutputT]):
                         restored_output,
                         run_usage=_UsageCollector(saved.run_usage),
                         restored_pending=True,
+                        budget=restored_budget,
                         observation_after=session._observations.sequence,
                         parent_trace=parent_trace,
                         operation_slots=operation_slots,
@@ -4617,6 +4683,7 @@ class Session(Generic[ContextT, OutputT]):
                     session._active = active
                     thread._select_steps(
                         bool(session._profiles)
+                        or active.budget is not None
                         or bool(session._mcp_tools)
                         or restored_operation_refs is not None
                         or any(
@@ -4647,6 +4714,7 @@ class Session(Generic[ContextT, OutputT]):
                             submission_id=handle.submission_id,
                         )
                     )
+                    session._start_output_acceptance(handle)
                     active.task = _create_task(session._execute(active, [], admitted=True))
                 if handoff is not None:
                     await session._finish_run_opening(
@@ -4846,6 +4914,8 @@ class Session(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
         include_raw_provider_events: bool = False,
+        include_output_accepted: bool = False,
+        include_request_attempts: bool = False,
     ) -> None:
         if tool_error_formatter is not None and not callable(tool_error_formatter):
             raise TypeError("tool_error_formatter must be callable or None")
@@ -4882,6 +4952,7 @@ class Session(Generic[ContextT, OutputT]):
         self._native_options: str | None = None
         self._websockets_enabled = False
         self._include_raw_provider_events = include_raw_provider_events
+        self._include_request_attempts = include_request_attempts
         if include_raw_provider_events:
             thread._enable_raw_provider_events()
         self._engine = engine
@@ -4977,6 +5048,7 @@ class Session(Generic[ContextT, OutputT]):
         self._interaction_error: BaseException | None = None
         self._sync_cleanup_owner = _sync_run.get()
         self._sync_cleanup_deferred = False
+        self._include_output_accepted = include_output_accepted
         self._observations = _ObservationBuffer(
             self.id,
             retention=observation_retention,
@@ -6222,7 +6294,8 @@ class Session(Generic[ContextT, OutputT]):
 
         budget limits this logical run's next root sampling admission. A
         queued submission has its own budget. Steering and live replies
-        keep the active run's budget. A budgeted active turn cannot suspend.
+        keep the active run's budget. Only request-only limits have been
+        supporting manual suspension.
         See RunBudget for the counted usage, errors, and overshoot behavior.
 
         trace_options overrides linkage and adds native tracing restrictions.
@@ -9075,7 +9148,9 @@ class Session(Generic[ContextT, OutputT]):
                     return state
         return None
 
-    async def _wait_continuations(self, handle: Turn[_TurnT]) -> Completed[_TurnT]:
+    async def _wait_continuations(
+        self, handle: Turn[_TurnT], *, publish_acceptance: bool = False
+    ) -> Completed[_TurnT]:
         root = handle
         while True:
             assert handle._completion is not None
@@ -9084,6 +9159,15 @@ class Session(Generic[ContextT, OutputT]):
             if successor is None:
                 # Native usage is a cumulative thread snapshot, including
                 # previous native continuations. Never add snapshots together.
+                if publish_acceptance:
+                    assert result.turn.turn_id is not None
+                    self._observations.append(
+                        OutputAccepted(
+                            session_id=self.id,
+                            submission_id=root.submission_id,
+                            turn_id=result.turn.turn_id,
+                        )
+                    )
                 return result if handle is root else replace(result, turn=root)
             handle = await asyncio.shield(successor)
 
@@ -9870,8 +9954,25 @@ class Session(Generic[ContextT, OutputT]):
                 submission_id=handle.submission_id,
             )
         )
+        if state.continued_from is None and state.realtime_tool is None:
+            self._start_output_acceptance(handle)
         state.accepted.set_result(handle)
         return handle
+
+    def _start_output_acceptance(self, handle: Turn[Any]) -> None:
+        if not self._include_output_accepted:
+            return
+        # Share one producer-owned result between passive readers and result waiters.
+        result = _create_task(self._wait_continuations(handle, publish_acceptance=True))
+        object.__setattr__(handle, "_result", result)
+        object.__setattr__(handle, "_observe_output_acceptance", True)
+
+        def settled(task: asyncio.Task[Any]) -> None:
+            if not task.cancelled():
+                task.exception()
+            self._observations.notify()
+
+        result.add_done_callback(settled)
 
     async def _execute(
         self,
@@ -10071,7 +10172,17 @@ class Session(Generic[ContextT, OutputT]):
                                 # No input reached native admission. Retain the live Session.
                                 confirmed_rejection = True
                                 raise
-                            receipt = json.loads(await self._native._submit(json.dumps(request)))
+                            encoded = json.dumps(request)
+                            if self._include_request_attempts and state.continued_from is None:
+                                native = importlib.import_module("agents._native")
+                                capture = native.NativeModelAttemptCapture()
+                                object.__setattr__(state.issued, "_request_attempts", capture)
+                                submitted = await self._native._submit(
+                                    encoded, model_attempts=capture
+                                )
+                            else:
+                                submitted = await self._native._submit(encoded)
+                            receipt = json.loads(submitted)
                 confirmed_rejection = receipt["status"] == "not_submitted"
                 handle = self._accept_submission(state, receipt, input)
             await asyncio.wait((state.terminal, state.failure), return_when=asyncio.FIRST_COMPLETED)
@@ -14816,9 +14927,7 @@ class Session(Generic[ContextT, OutputT]):
         if self._realtime is not None:
             raise CapabilityError("Close the Realtime connection before capturing a checkpoint")
         if self._active is not None and self._active.budget is not None:
-            raise CapabilityError(
-                "Cannot checkpoint an active run with a budget. Reply in the live Session."
-            )
+            self._active.budget.checkpoint()
         if self._active is not None and self._active.prepare_request is not None:
             raise CapabilityError(
                 "Cannot checkpoint an operation with prepare_request: "
@@ -15113,6 +15222,9 @@ class Session(Generic[ContextT, OutputT]):
             output = self._default_output if active is None else active.output
             # Native formats 2/3 become SDK formats 4/5 when fingerprinted.
             payload["format_version"] += 2
+            if active is not None and active.budget is not None:
+                payload["format_version"] = 8 if payload["format_version"] == 5 else 9
+                payload["run_budget"] = active.budget.checkpoint().model_dump(mode="json")
             payload["output_version"] = 1
             payload["output_fingerprint"] = output.fingerprint
             payload["repair_turns"] = [
@@ -15144,7 +15256,7 @@ class Session(Generic[ContextT, OutputT]):
             _check_checkpoint(state, self._instructions, graph=bool(self._profiles))
             raw = state.to_json()
             if active is not None:
-                if state.format_version not in (5, 7):
+                if state.format_version not in (5, 7, 8, 9):
                     raise NativeError("Native manual settlement omitted its continuation")
                 self._sealed_checkpoint = raw
                 # The native writer has already stopped. Do not send Interrupt.

@@ -151,8 +151,10 @@ class RunBudget:
     or returns an invalid value stops with "run_budget_invalid_estimate".
 
     The budget follows live replies, same-run steering, and output repair.
-    Active runs with a budget cannot be captured or resumed from portable
-    checkpoints. An idle checkpoint can start a new run with a fresh budget.
+    Request-only limits have been retaining prior admissions across supported
+    manual checkpoints, with the original ceiling supplied again on restore.
+    Token and cost limits have been rejecting active portable capture.
+    Idle checkpoints have been starting new runs with fresh budgets.
     """
 
     max_requests: int | None = None
