@@ -202,6 +202,7 @@ from .manual import (
     _is_json_value as _is_json_value,
     _NativeQuestion as _NativeQuestion,
     _PreparedManualResult as _PreparedManualResult,
+    _publish_question as _publish_question,
     _question as _question,
 )
 from .mcp import (
@@ -11808,9 +11809,7 @@ class Session(Generic[ContextT, OutputT]):
                         "Native interaction needs on_interaction or Agent.session()"
                     )
                 question = _question(self, message, state.handle)
-                state.questions[id(question)] = question
-                self._dispatch_interaction(question, state)
-                self._observations.notify()
+                _publish_question(self, state, question)
                 state.add_callback(
                     asyncio.create_task(self._expire_child_question(state, question))
                 )
@@ -14182,9 +14181,7 @@ class Session(Generic[ContextT, OutputT]):
                     except InteractionRequired as error:
                         state.failure.set_result(error)
                     else:
-                        state.questions[id(question)] = question
-                        self._dispatch_interaction(question, state)
-                        self._observations.notify()
+                        _publish_question(self, state, question)
                 elif (
                     kind
                     in {
