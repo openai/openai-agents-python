@@ -7210,6 +7210,12 @@ class Session(Generic[ContextT, OutputT]):
                     object.__setattr__(
                         context, "_usage_reporter", self._tool_usage_reporter(state, admit)
                     )
+                    object.__setattr__(context, "_environment", self._executor)
+                    object.__setattr__(
+                        context,
+                        "_sandbox_source",
+                        self._environment_lease.source if self._environment_lease else None,
+                    )
                     object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
                 elif not isinstance(decision, Allow):
                     raise TypeError("Function before must return Allow, Deny or ReplaceArguments")
@@ -14330,6 +14336,13 @@ class Session(Generic[ContextT, OutputT]):
                     context = replace(
                         context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
                     )
+            if context is not None:
+                object.__setattr__(context, "_environment", self._executor)
+                object.__setattr__(
+                    context,
+                    "_sandbox_source",
+                    self._environment_lease.source if self._environment_lease else None,
+                )
             if context is not None and context._usage_reporter is None:
                 object.__setattr__(
                     context,

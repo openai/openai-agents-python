@@ -65,7 +65,10 @@ class SandboxEnvironmentSource(Protocol[_ContextT_contra]):
 
 def _remote_path(path: str) -> tuple[str, PurePosixPath]:
     uri = urlsplit(_path_uri(path))
-    return uri.netloc.lower(), PurePosixPath(posixpath.normpath(unquote(uri.path)))
+    authority = uri.netloc.lower()
+    if uri.scheme == "file" and authority == "localhost":
+        authority = ""
+    return authority, PurePosixPath(posixpath.normpath(unquote(uri.path)))
 
 
 def _grant_stamp(manifest: Manifest) -> tuple[Any, ...]:

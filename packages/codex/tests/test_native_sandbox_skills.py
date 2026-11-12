@@ -2,6 +2,7 @@
 
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -99,8 +100,9 @@ class Source(LazySkillSource):
 @pytest.mark.skipif(
     sys.platform not in ("linux", "darwin"), reason="POSIX sandbox resource fixture"
 )
+@pytest.mark.parametrize("localhost", [False, True])
 async def test_inline_descriptor_reaches_native_wire_without_changing_content(
-    tmp_path, monkeypatch, responses
+    tmp_path, monkeypatch, responses, localhost
 ):
     async with ExecutorPeer(tmp_path / "executor").serve() as peer:
         trust(peer, tmp_path, monkeypatch)
@@ -117,7 +119,11 @@ async def test_inline_descriptor_reaches_native_wire_without_changing_content(
                 headers={"Authorization": "Bearer " + peer.token},
                 cwd=str(peer.root),
                 tools=(),
-                capability_directories=[str(peer.root / ".agents")],
+                capability_directories=[
+                    (peer.root / ".agents").as_uri().replace("file://", "file://localhost")
+                    if localhost
+                    else str(peer.root / ".agents")
+                ],
             )
 
         source = sandbox_environment(
@@ -148,7 +154,8 @@ async def test_inline_descriptor_reaches_native_wire_without_changing_content(
 @pytest.mark.skipif(
     sys.platform not in ("linux", "darwin"), reason="POSIX sandbox resource fixture"
 )
-async def test_lazy_native_callback_uses_current_source(tmp_path, monkeypatch, responses):
+@pytest.mark.parametrize("approval", ["none", "manual", "automatic"])
+async def test_lazy_native_callback_uses_current_source(tmp_path, monkeypatch, responses, approval):
     async with ExecutorPeer(tmp_path / "executor").serve() as peer:
         trust(peer, tmp_path, monkeypatch)
         resource = Source(effects=[])
@@ -178,9 +185,20 @@ async def test_lazy_native_callback_uses_current_source(tmp_path, monkeypatch, r
             instructions="Inspect.",
             model="gpt-5.5",
             provider=provider(responses),
-            tools=source.skill_tools,
+            tools=(
+                replace(
+                    source.skill_tools[0],
+                    needs_approval=(lambda _: False) if approval == "automatic" else True,
+                ),
+            )
+            if approval != "none"
+            else source.skill_tools,
         ).session(environment=source) as session:
-            assert (await (await session.submit("Load report")).get_result()).final_output == "done"
+            turn = await session.submit("Load report")
+            if approval == "manual":
+                request = await anext(session.interactions())
+                await request.approve()
+            assert (await turn.get_result()).final_output == "done"
         assert effects == ["report"]
         assert "LAZY_REPORT_INDEX" in str(responses.requests[0])
         assert (peer.root / ".agents/report/SKILL.md").read_bytes() == b"lazy body"

@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "ab3cc92034600cf786e9de675767bf7243381878",
+  "baseline_commit": "33677e32e3ba71b4f097f52c02ca50e53442d416",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -2463,7 +2463,7 @@
       "_agents_codex.sandbox_skills": {
         "declarations": [
           "_ContextT_contra = TypeVar('_ContextT_contra', contravariant=True)",
-          "class Skills(SkillSet):\n    pass",
+          "class Skills(SkillSet):\n    _bounded_metadata = True",
           "class SandboxEnvironmentSource(Protocol[_ContextT_contra]):\n\n    @property\n    def skill_tools(self) -> tuple[FunctionTool[Any, Any, Any], ...]:\n        pass\n\n    async def __aenter__(self) -> Environment[_ContextT_contra]:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> bool | None:\n        pass"
         ],
         "exports": {},
@@ -2760,14 +2760,14 @@
           "@dataclass(frozen=True)\nclass SkillMetadata:\n    name: str\n    description: str\n    path: Path",
           "class LazySkillSource(BaseModel, abc.ABC):\n\n    @abc.abstractmethod\n    def list_skill_metadata(self, *, skills_path: str, source_grants: tuple[SandboxPathGrant, ...]=()) -> list[SkillMetadata]:\n        pass\n\n    @abc.abstractmethod\n    async def load_skill(self, *, skill_name: str, session: BaseSandboxSession, skills_path: str, user: str | User | None=None) -> dict[str, str]:\n        pass",
           "class Skill(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True)\n    name: str\n    description: str\n    content: str | bytes | BaseEntry\n    compatibility: str | None = Field(default=None)\n    scripts: dict[str | Path, BaseEntry] = Field(default_factory=dict)\n    references: dict[str | Path, BaseEntry] = Field(default_factory=dict)\n    assets: dict[str | Path, BaseEntry] = Field(default_factory=dict)\n    deferred: bool = Field(default=False)\n\n    def model_post_init(self, context: Any, /) -> None:\n        pass\n\n    def content_artifact(self) -> BaseEntry:\n        pass\n\n    def as_dir_entry(self) -> Dir:\n        pass",
-          "class SkillSet(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True)\n    session: BaseSandboxSession | None = Field(default=None, exclude=True)\n    run_as: User | None = Field(default=None, exclude=True)\n    workspace_scope: SandboxWorkspaceScope = Field(default_factory=SandboxWorkspaceScope, exclude=True, repr=False)\n    type: Literal['skills'] = 'skills'\n    skills: list[Skill] = Field(default_factory=list)\n    from_: BaseEntry | None = Field(default=None)\n    lazy_from: LazySkillSource | None = Field(default=None)\n    skills_path: str = Field(default='.agents')\n    _skills_metadata: list[SkillMetadata] | None = PrivateAttr(default=None)\n    _skills_metadata_cache_key: tuple[tuple[str, bool, str | None], ...] | None = PrivateAttr(default=None)\n\n    def model_post_init(self, context: Any, /) -> None:\n        pass\n\n    def process_manifest(self, manifest: Manifest) -> Manifest:\n        pass\n\n    def bind(self, session: BaseSandboxSession) -> None:\n        pass\n\n    async def load_skill(self, skill_name: str) -> dict[str, str]:\n        pass\n\n    async def instructions(self, manifest: Manifest) -> str | None:\n        pass"
+          "class SkillSet(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True)\n    session: BaseSandboxSession | None = Field(default=None, exclude=True)\n    run_as: User | None = Field(default=None, exclude=True)\n    workspace_scope: SandboxWorkspaceScope = Field(default_factory=SandboxWorkspaceScope, exclude=True, repr=False)\n    type: Literal['skills'] = 'skills'\n    skills: list[Skill] = Field(default_factory=list)\n    from_: BaseEntry | None = Field(default=None)\n    lazy_from: LazySkillSource | None = Field(default=None)\n    skills_path: str = Field(default='.agents')\n    _skills_metadata: list[SkillMetadata] | None = PrivateAttr(default=None)\n    _bounded_metadata: ClassVar[bool] = False\n    _skills_metadata_cache_key: tuple[tuple[str, bool, str | None], ...] | None = PrivateAttr(default=None)\n\n    def model_post_init(self, context: Any, /) -> None:\n        pass\n\n    def process_manifest(self, manifest: Manifest) -> Manifest:\n        pass\n\n    def bind(self, session: BaseSandboxSession) -> None:\n        pass\n\n    async def load_skill(self, skill_name: str) -> dict[str, str]:\n        pass\n\n    async def instructions(self, manifest: Manifest) -> str | None:\n        pass"
         ],
         "exports": {},
         "imports": [
           "import abc",
           "from dataclasses import dataclass",
           "from pathlib import Path",
-          "from typing import Any, Literal",
+          "from typing import Any, ClassVar, Literal",
           "from pydantic import BaseModel, ConfigDict, Field, PrivateAttr",
           "from agents.classic.sandbox.entries import BaseEntry, Dir",
           "from agents.classic.sandbox.manifest import Manifest",
