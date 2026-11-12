@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "3b0aeb89440c2030b9bf638321eb4bd08f3c02d5",
+  "baseline_commit": "6830ea20b4a56f7ee1cebcf6d0571443efb68383",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -15,7 +15,7 @@
           "TypedAgentT = TypeVar('TypedAgentT', bound='Agent[Any, Any]')",
           "_MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()",
           "_OBSERVATION_RETENTION_UNSET: Any = object()",
-          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    attempt_timeout_ms: int | None\n    retry: ModelRetrySettings | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
+          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    attempt_timeout_ms: int | None\n    retry: ModelRetrySettings | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    provider_compaction: ProviderCompactionPolicy | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)\n    credential_directory: str | Path | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
           "@dataclass(frozen=True, kw_only=True, slots=True, repr=False)\nclass SignInWithChatGPTCredentials:\n    issuer: str\n    client_id: str\n    subject: str\n    access_token: str",
@@ -46,6 +46,7 @@
           "from types import TracebackType as TracebackType",
           "from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Generic as Generic, Literal, overload as overload",
           "from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar",
+          "from ._model_settings import ProviderCompactionPolicy as ProviderCompactionPolicy",
           "from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter",
           "from ._trace_context import TraceContext as TraceContext",
           "from .compaction import ResponsesCompaction, _BeforeCompact",
@@ -92,6 +93,7 @@
           "NativeModel": "agents.models.NativeModel",
           "OutputGuardrail": "agents.guardrails.OutputGuardrail",
           "OutputSpec": "agents.schema.OutputSpec",
+          "ProviderCompactionPolicy": "_agents_codex._model_settings.ProviderCompactionPolicy",
           "RealtimeAgentConfig": "_agents_codex.realtime_agents.RealtimeAgentConfig",
           "RealtimeHandoff": "_agents_codex.realtime_agents.RealtimeHandoff",
           "ReconciledCall": "agents.recovery.ReconciledCall",
@@ -1893,15 +1895,25 @@
           "class ScriptedResponses(AbstractAsyncContextManager['ScriptedResponses']):\n\n    def __init__(self, *responses: Script, default_usage: Mapping[str, JsonValue] | None=None) -> None:\n        pass\n\n    @property\n    def remaining_steps(self) -> int:\n        pass\n\n    def set_default_usage(self, usage: Mapping[str, JsonValue] | None) -> None:\n        pass\n\n    def append(self, *responses: Script) -> None:\n        pass\n\n    def clear(self) -> None:\n        pass\n\n    async def __aenter__(self) -> ScriptedResponses:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass\n\n    @property\n    def provider(self) -> NativeProvider:\n        pass\n\n    @property\n    def requests(self) -> tuple[Mapping[str, JsonValue], ...]:\n        pass\n\n    def tool_output(self, call_id: str) -> str | None:\n        pass\n\n    def assert_exhausted(self) -> None:\n        pass"
         ],
         "exports": {
+          "ExecResult": "agents.classic.sandbox.types.ExecResult",
+          "InvalidSandboxStep": "agents.classic.testing.sandbox.InvalidSandboxStep",
           "ModelError": "agents.testing.ModelError",
           "RealtimeConnectCall": "agents.testing.RealtimeConnectCall",
           "RealtimeStep": "agents.testing.RealtimeStep",
+          "SandboxCall": "agents.classic.testing.sandbox.SandboxCall",
+          "SandboxCallMatcherError": "agents.classic.testing.sandbox.SandboxCallMatcherError",
+          "SandboxScriptError": "agents.classic.testing.sandbox.SandboxScriptError",
+          "SandboxStepSpec": "agents.classic.testing.sandbox.SandboxStepSpec",
           "ScriptedModel": "agents.testing.ScriptedModel",
           "ScriptedRealtimeAdapter": "agents.testing.ScriptedRealtimeAdapter",
           "ScriptedResponse": "agents.testing.ScriptedResponse",
           "ScriptedResponses": "agents.testing.ScriptedResponses",
+          "ScriptedSandboxSession": "agents.testing.ScriptedSandboxSession",
+          "UnconsumedSandboxSteps": "agents.classic.testing.sandbox.UnconsumedSandboxSteps",
+          "UnexpectedSandboxCall": "agents.classic.testing.sandbox.UnexpectedSandboxCall",
           "computer_call": "agents.testing.computer_call",
           "event": "agents.testing.event",
+          "scripted_sandbox_session": "agents.testing.scripted_sandbox_session",
           "text": "agents.testing.text",
           "tool_call": "agents.testing.tool_call"
         },
@@ -1913,16 +1925,27 @@
           "from .agent import NativeProvider as NativeProvider",
           "from .config import JsonValue as JsonValue",
           "from .testing_model import ModelError as ModelError, ScriptedModel as ScriptedModel",
-          "from .testing_realtime import RealtimeConnectCall as RealtimeConnectCall, RealtimeStep as RealtimeStep, ScriptedRealtimeAdapter as ScriptedRealtimeAdapter"
+          "from .testing_realtime import RealtimeConnectCall as RealtimeConnectCall, RealtimeStep as RealtimeStep, ScriptedRealtimeAdapter as ScriptedRealtimeAdapter",
+          "from .testing_sandbox import ExecResult as ExecResult, InvalidSandboxStep as InvalidSandboxStep, SandboxCall as SandboxCall, SandboxCallMatcherError as SandboxCallMatcherError, SandboxScriptError as SandboxScriptError, SandboxStepSpec as SandboxStepSpec, ScriptedSandboxSession as ScriptedSandboxSession, UnconsumedSandboxSteps as UnconsumedSandboxSteps, UnexpectedSandboxCall as UnexpectedSandboxCall, scripted_sandbox_session as scripted_sandbox_session"
         ],
         "references": {
+          "ExecResult": "_agents_codex.testing_sandbox.ExecResult",
+          "InvalidSandboxStep": "_agents_codex.testing_sandbox.InvalidSandboxStep",
           "JsonValue": "agents.config.JsonValue",
           "ModelError": "_agents_codex.testing_model.ModelError",
           "NativeProvider": "agents.agent.NativeProvider",
           "RealtimeConnectCall": "_agents_codex.testing_realtime.RealtimeConnectCall",
           "RealtimeStep": "_agents_codex.testing_realtime.RealtimeStep",
+          "SandboxCall": "_agents_codex.testing_sandbox.SandboxCall",
+          "SandboxCallMatcherError": "_agents_codex.testing_sandbox.SandboxCallMatcherError",
+          "SandboxScriptError": "_agents_codex.testing_sandbox.SandboxScriptError",
+          "SandboxStepSpec": "_agents_codex.testing_sandbox.SandboxStepSpec",
           "ScriptedModel": "_agents_codex.testing_model.ScriptedModel",
-          "ScriptedRealtimeAdapter": "_agents_codex.testing_realtime.ScriptedRealtimeAdapter"
+          "ScriptedRealtimeAdapter": "_agents_codex.testing_realtime.ScriptedRealtimeAdapter",
+          "ScriptedSandboxSession": "_agents_codex.testing_sandbox.ScriptedSandboxSession",
+          "UnconsumedSandboxSteps": "_agents_codex.testing_sandbox.UnconsumedSandboxSteps",
+          "UnexpectedSandboxCall": "_agents_codex.testing_sandbox.UnexpectedSandboxCall",
+          "scripted_sandbox_session": "_agents_codex.testing_sandbox.scripted_sandbox_session"
         }
       },
       "agents.tools": {
@@ -2290,6 +2313,7 @@
       "PreparedToolPresentation": "agents.prepared_request.PreparedToolPresentation",
       "ProducedItem": "agents.session.ProducedItem",
       "PromptedOutput": "agents.schema.PromptedOutput",
+      "ProviderCompactionPolicy": "agents.agent.ProviderCompactionPolicy",
       "RawProviderUsage": "agents.usage.RawProviderUsage",
       "ReconciledCall": "agents.recovery.ReconciledCall",
       "RedisSessionStore": "agents.canonical_storage.RedisSessionStore",
@@ -2407,6 +2431,19 @@
         "references": {
           "SessionState": "agents.state.SessionState"
         }
+      },
+      "_agents_codex._model_settings": {
+        "declarations": [
+          "class _StaticProviderCompaction(TypedDict, closed=True):\n    type: Literal['static']\n    threshold: int",
+          "class _DynamicProviderCompaction(TypedDict, total=False, closed=True):\n    type: Required[Literal['dynamic']]\n    threshold_ratio: float\n    fallback_threshold: int",
+          "ProviderCompactionPolicy: TypeAlias = _StaticProviderCompaction | _DynamicProviderCompaction"
+        ],
+        "exports": {},
+        "imports": [
+          "from typing import Literal, TypeAlias",
+          "from typing_extensions import Required, TypedDict"
+        ],
+        "references": {}
       },
       "_agents_codex._sandbox_events": {
         "declarations": [
@@ -2680,6 +2717,33 @@
         ],
         "references": {
           "RealtimeAdapterContext": "_agents_codex.realtime_adapter.RealtimeAdapterContext"
+        }
+      },
+      "_agents_codex.testing_sandbox": {
+        "declarations": [
+          "class ScriptedSandboxSession(SandboxSession):\n\n    def __init__(self, steps: Iterable[SandboxStepSpec | Mapping[str, Any]]=(), *, manifest: Manifest | None=None) -> None:\n        pass\n\n    @property\n    def calls(self) -> tuple[SandboxCall, ...]:\n        pass\n\n    @property\n    def remaining_steps(self) -> int:\n        pass\n\n    async def apply_patch(self, operations: ApplyPatchOperation | dict[str, object] | list[ApplyPatchOperation | dict[str, object]], *, patch_format: PatchFormat | Literal['v4a']='v4a') -> str:\n        pass\n\n    def assert_complete(self) -> None:\n        pass",
+          "def scripted_sandbox_session(steps: Iterable[SandboxStepSpec | Mapping[str, Any]]=(), *, manifest: Manifest | None=None) -> ScriptedSandboxSession:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Iterable, Mapping",
+          "from typing import Any, Literal",
+          "from .sandbox import Manifest, SandboxSession",
+          "from _agents_shared.testing_sandbox import ApplyPatchOperation, ExecResult as ExecResult, InvalidSandboxStep as InvalidSandboxStep, PatchFormat, SandboxCall as SandboxCall, SandboxCallMatcherError as SandboxCallMatcherError, SandboxScriptError as SandboxScriptError, SandboxStepSpec as SandboxStepSpec, UnconsumedSandboxSteps as UnconsumedSandboxSteps, UnexpectedSandboxCall as UnexpectedSandboxCall"
+        ],
+        "references": {
+          "ApplyPatchOperation": "_agents_shared.testing_sandbox.ApplyPatchOperation",
+          "ExecResult": "_agents_shared.testing_sandbox.ExecResult",
+          "InvalidSandboxStep": "_agents_shared.testing_sandbox.InvalidSandboxStep",
+          "Manifest": "agents.sandbox.Manifest",
+          "PatchFormat": "_agents_shared.testing_sandbox.PatchFormat",
+          "SandboxCall": "_agents_shared.testing_sandbox.SandboxCall",
+          "SandboxCallMatcherError": "_agents_shared.testing_sandbox.SandboxCallMatcherError",
+          "SandboxScriptError": "_agents_shared.testing_sandbox.SandboxScriptError",
+          "SandboxSession": "agents.sandbox.SandboxSession",
+          "SandboxStepSpec": "_agents_shared.testing_sandbox.SandboxStepSpec",
+          "UnconsumedSandboxSteps": "_agents_shared.testing_sandbox.UnconsumedSandboxSteps",
+          "UnexpectedSandboxCall": "_agents_shared.testing_sandbox.UnexpectedSandboxCall"
         }
       },
       "_agents_shared.apply_diff": {
@@ -2991,6 +3055,36 @@
         ],
         "references": {
           "LocalSnapshotSpec": "_agents_shared.snapshot.LocalSnapshotSpec"
+        }
+      },
+      "_agents_shared.testing_sandbox": {
+        "declarations": [
+          "SandboxMethod = Literal['apply_patch', 'exec', 'ls', 'mkdir', 'mv', 'pty_exec_start', 'pty_write_stdin', 'read', 'rm', 'same_file', 'write']",
+          "SandboxStepReason = Literal['invalid_input', 'unknown_method', 'invalid_matcher', 'invalid_outcome']",
+          "class SandboxScriptError(Exception):\n    pass",
+          "class InvalidSandboxStep(SandboxScriptError):\n\n    def __init__(self, message: str, *, reason: SandboxStepReason, input_index: int, method: str | None) -> None:\n        pass",
+          "class UnexpectedSandboxCall(SandboxScriptError):\n\n    def __init__(self, message: str, *, call: SandboxCall, call_index: int, expected_method: str | None, remaining_steps: int) -> None:\n        pass",
+          "class SandboxCallMatcherError(SandboxScriptError):\n\n    def __init__(self, message: str, *, call: SandboxCall, call_index: int) -> None:\n        pass",
+          "class UnconsumedSandboxSteps(SandboxScriptError):\n\n    def __init__(self, message: str, *, remaining_steps: int, pending_methods: tuple[str, ...]) -> None:\n        pass",
+          "@dataclass(frozen=True)\nclass SandboxCall:\n    call_index: int\n    method: str\n    args: tuple[Any, ...]\n    kwargs: Mapping[str, Any]",
+          "SandboxMatcher: TypeAlias = Callable[[SandboxCall], bool | None]",
+          "SandboxResponder: TypeAlias = Callable[[SandboxCall], Any | Awaitable[Any]]",
+          "class SandboxStepSpec(TypedDict, total=False):\n    method: SandboxMethod\n    match: SandboxMatcher\n    result: Any\n    responder: SandboxResponder\n    error: Exception"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Awaitable, Callable, Mapping",
+          "from dataclasses import dataclass",
+          "from typing import Any, Literal, TypeAlias",
+          "from typing_extensions import TypedDict",
+          "from agents.classic.editor import ApplyPatchOperation as ApplyPatchOperation",
+          "from agents.classic.sandbox.apply_patch import PatchFormat as PatchFormat",
+          "from agents.classic.sandbox.types import ExecResult as ExecResult"
+        ],
+        "references": {
+          "ApplyPatchOperation": "agents.classic.editor.ApplyPatchOperation",
+          "ExecResult": "agents.classic.sandbox.types.ExecResult",
+          "PatchFormat": "agents.classic.sandbox.apply_patch.PatchFormat"
         }
       },
       "_agents_shared.token_truncation": {
@@ -5237,6 +5331,7 @@
       "PreparedToolPresentation",
       "ProducedItem",
       "PromptedOutput",
+      "ProviderCompactionPolicy",
       "RawProviderUsage",
       "ReconciledCall",
       "RedisSessionStore",
@@ -5319,7 +5414,7 @@
       "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, ToolInputErrorContext as ToolInputErrorContext, ToolTimeoutBehavior as ToolTimeoutBehavior, ToolTimeoutError as ToolTimeoutError, function_tool as function_tool",
       "from ._tool_errors import ToolErrorContext as ToolErrorContext, ToolErrorFormatter as ToolErrorFormatter",
       "from ._trace_context import TraceContext as TraceContext",
-      "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
+      "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, ProviderCompactionPolicy as ProviderCompactionPolicy, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
       "from .apply_patch import ApplyPatchEditor as ApplyPatchEditor, ApplyPatchOperation as ApplyPatchOperation, ApplyPatchResult as ApplyPatchResult, apply_patch_batch_tool as apply_patch_batch_tool, apply_patch_tool as apply_patch_tool",
       "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext, ResponsesCompaction as ResponsesCompaction, ResponsesCompactionContext as ResponsesCompactionContext",

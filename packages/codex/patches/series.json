@@ -831,7 +831,15 @@
     {
       "path": "sdk-native-sandbox-operation-events.patch",
       "sha256": "1d7c7fec2d0faf1956b48dfd7e48b135f3847748d88efb1835b233e39df2f765"
+    },
+    {
+      "path": "sdk-plan-backed-model-retry.patch",
+      "sha256": "ba85296276d0e050a473196e8a4c51872656ada5931dad60cfc9abbc2872b33d"
+    },
+    {
+      "path": "sdk-provider-compaction-threshold.patch",
+      "sha256": "bf3cc2302fb84ae70b68546b5bd0994f3a9d0c0023a59fa25688501d2e062157"
     }
   ],
-  "result_tree": "c9e8230bb2c4d0fe02925f8ba7071903834df92b"
+  "result_tree": "a5010ba099e17ef825770dd85e9082b6920d6b02"
 }
