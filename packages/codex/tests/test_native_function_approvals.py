@@ -428,6 +428,90 @@ async def test_deferred_start_keeps_only_internal_remembered_policy(responses, a
     assert effects == (["first", "later"] if approve else [])
 
 
+@pytest.mark.parametrize("kind", ["mcp", "profile", "replacement"])
+@pytest.mark.parametrize("approve", [True, False])
+async def test_remembered_policy_follows_confirmed_catalog(responses, kind, approve):
+    from contextlib import AsyncExitStack
+
+    from agents import HttpMCP
+    from tests.test_native_mcp_tools import Peer
+
+    effects = []
+
+    def binding(key):
+        @function_tool(needs_approval=True, approval_key=key)
+        def risky(value: str) -> str:
+            effects.append(value)
+            return value
+
+        return risky
+
+    async with timeout(30), AsyncExitStack() as stack:
+        extra = []
+        if kind == "mcp":
+            url = await stack.enter_async_context(Peer().serve())
+            extra.append(HttpMCP(name="docs", url=url, tools=["search"]))
+        native_provider = provider(responses)
+
+        def declaration(tool):
+            return Agent(
+                name="A",
+                instructions="Use the tool.",
+                tools=[tool, *extra],
+                handoffs=[Agent(name="B", instructions="Delegate.")] if kind == "profile" else (),
+                provider=native_provider,
+            )
+
+        original = binding("fixture.risky.v1")
+        current = binding("fixture.risky.updated") if kind == "profile" else original
+        agent = declaration(original)
+        async with agent.session() as source:
+            if kind == "profile":
+                await source.update(tools=[current])
+            responses.respond(function_call("risky", {"value": "first"}, "catalog-first"))
+            responses.respond(assistant_output("done"))
+            turn = await source.submit("begin")
+            request = await next_request(source.interactions(), current)
+            if approve:
+                await request.approve(always=True)
+            else:
+                await request.reject(always=True)
+            await turn.get_result()
+            saved = await source.save_state()
+            assert len(saved.remembered_approvals) == 1, "Effective catalog lost remembered policy"
+            assert saved.remembered_approvals[0].key == current.approval_key
+        responses.respond(function_call("risky", {"value": "later"}, "catalog-later"))
+        responses.respond(assistant_output("restored"))
+        async with declaration(current).session(
+            state=saved, verify_remembered_approvals=lambda _: True
+        ) as restored:
+            if kind == "replacement":
+                current = binding("fixture.risky.v1")
+                await restored.update(tools=[current])
+            turn = await restored.submit("continue")
+            result = asyncio.create_task(turn.get_result())
+            approval = asyncio.create_task(next_request(restored.interactions(), current))
+            try:
+                completed, _ = await asyncio.wait(
+                    {result, approval}, return_when=asyncio.FIRST_COMPLETED, timeout=10
+                )
+                if kind == "replacement":
+                    assert approval in completed, "A replacement inherited the imported slot"
+                    await approval.result().reject()
+                    await result
+                else:
+                    assert result in completed, "Confirmed catalog lost remembered policy"
+                    assert result.result().final_output == "restored"
+            finally:
+                for task in (approval, result):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(approval, result, return_exceptions=True)
+    assert effects == (
+        (["first"] if kind == "replacement" else ["first", "later"]) if approve else []
+    )
+
+
 @pytest.mark.parametrize("approve", [True, False])
 async def test_portable_state_keeps_remembered_future_decision(responses, approve):
     effects = []

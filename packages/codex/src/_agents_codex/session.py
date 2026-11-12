@@ -7232,10 +7232,17 @@ class Session(Generic[ContextT, OutputT]):
             ).encode()
         ).hexdigest()
 
+    def _approval_catalog(self, profile_id: str | None) -> _ToolCatalog:
+        if profile_id is None or (
+            self._profile_current is not None and profile_id == self._profile_current[0]
+        ):
+            return self._catalog
+        return self._profiles[profile_id].catalog
+
     def _current_remembered_approvals(self) -> list[_RememberedApproval]:
         records = []
         catalogs = (
-            [(key, value.catalog) for key, value in self._profiles.items()]
+            [(key, self._approval_catalog(key)) for key in self._profiles]
             if self._profiles
             else [(None, self._catalog)]
         )
@@ -7259,9 +7266,7 @@ class Session(Generic[ContextT, OutputT]):
                 continue
             if record.profile != self._approval_profile(profile_id):
                 continue
-            catalog = (
-                self._profiles[profile_id].catalog if profile_id is not None else self._catalog
-            )
+            catalog = self._approval_catalog(profile_id)
             for slot, entry in enumerate(catalog.tools):
                 if (
                     isinstance(entry, _CapturedApproval)
@@ -9260,11 +9265,23 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native tool replacement acknowledgement did not match")
             # The binding publishes only after validation and its native idle check.
             # Keep Python definitions unchanged until that exact generation is accepted.
+            previous = self._catalog
+            profile_id = self._profile_current[0] if self._profile_current is not None else None
+            if len(previous.tools) == len(candidate.tools) and all(
+                old is current for old, current in zip(previous.tools, candidate.tools, strict=True)
+            ):
+                for slot in range(len(previous.tools)):
+                    record = self._restored_approval_slots.pop(
+                        (profile_id, previous.generation, slot), None
+                    )
+                    if record is not None:
+                        self._restored_approval_slots[(profile_id, candidate.generation, slot)] = (
+                            record
+                        )
             self._catalog = candidate
             self._profile_generation_high_water = max(
                 self._profile_generation_high_water, candidate.generation
             )
-            profile_id = self._profile_current[0] if self._profile_current is not None else None
             self._profile_catalogs[(profile_id, candidate.generation)] = candidate
             # An admitted opening leaf can be absent from a narrowed current descriptor.
             # Capture the effective MCP roster published for this generation.
