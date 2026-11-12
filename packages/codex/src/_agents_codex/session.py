@@ -301,6 +301,7 @@ from .schema import (
     _prepare_spec as _prepare_spec,
     _PreparedOutput as _PreparedOutput,
 )
+from .shell import _CapturedShell
 from .state import (
     ApplicationToolOutput as ApplicationToolOutput,
     ChecklistState as ChecklistState,
@@ -15807,7 +15808,9 @@ class Session(Generic[ContextT, OutputT]):
                         namespace=started.namespace,
                         application_data=application_data,
                     )
-                    if code_origin is None and not isinstance(entry, _CapturedComputer):
+                    if code_origin is None and not isinstance(
+                        entry, (_CapturedComputer, _CapturedShell)
+                    ):
                         application_call_id = started.call_id
                         state.pending_application_outputs[application_call_id] = application_output
                     else:

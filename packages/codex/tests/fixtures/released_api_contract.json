@@ -1726,8 +1726,8 @@
           "class ShellCall(BaseModel):\n    model_config = ConfigDict(extra='allow')\n    type: Literal['shell_call']\n    call_id: str\n    action: ShellAction\n    id: str | None = None\n    status: str | None = None",
           "class ShellExit(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    type: Literal['exit'] = 'exit'\n    exit_code: int",
           "class ShellTimeout(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    type: Literal['timeout'] = 'timeout'",
-          "class ShellCommandOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    stdout: str\n    stderr: str\n    outcome: ShellExit | ShellTimeout = Field(discriminator='type')",
-          "class ShellOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    output: list[ShellCommandOutput]\n    max_output_length: int | None = Field(default=None, ge=0)",
+          "class ShellCommandOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    stdout: str\n    stderr: str\n    outcome: ShellExit | ShellTimeout = Field(discriminator='type')\n    command: str | None = Field(default=None, exclude=True, repr=False)\n    provider_data: dict[str, JsonValue] | None = Field(default=None, exclude=True, repr=False)",
+          "class ShellOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    output: list[ShellCommandOutput]\n    max_output_length: int | None = Field(default=None, ge=0)\n    provider_data: dict[str, JsonValue] | None = Field(default=None, exclude=True, repr=False)",
           "_ShellBinder: TypeAlias = Callable[[_ContextT, object, FunctionTool[Any, Any, Any]], _CapturedFunction]",
           "def shell_tool(executor: Callable[[ToolContext[_ContextT], ShellCall], ShellOutput | Awaitable[ShellOutput]], *, skills: Sequence[ShellSkill]=(), needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False, before: Callable[[ToolContext[_ContextT]], Allow | Deny | Awaitable[Allow | Deny]] | None=None, callback_timeout: float | None=None, error_function: _BodyErrorFormatter[_ContextT] | None=None) -> FunctionTool[ShellCall, ShellOutput, _ShellBinder[_ContextT]]:\n    pass"
         ],
@@ -1744,7 +1744,7 @@
         "imports": [
           "from collections.abc import Awaitable, Callable, Sequence",
           "from typing import Any, Literal, TypeAlias, TypeVar",
-          "from pydantic import BaseModel, ConfigDict, Field",
+          "from pydantic import BaseModel, ConfigDict, Field, JsonValue",
           "from typing_extensions import TypedDict",
           "from ._function_tools import FunctionTool, ToolContext, _BodyErrorFormatter",
           "from .native_interception import Allow, Deny",
