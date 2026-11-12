@@ -9369,7 +9369,10 @@ class Session(Generic[ContextT, OutputT]):
                     for tool in profile.declaration.tools
                     if isinstance(tool, FunctionTool)
                     and tool.namespace in (None, "functions")
-                    and tool.name in profile.handoff_callbacks
+                    and (
+                        tool.name in profile.handoff_callbacks
+                        or tool.name in profile.decision_handoffs
+                    )
                 }
                 for tool in python:
                     expected = callbacks.get(tool.ref)

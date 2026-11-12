@@ -467,7 +467,9 @@ class Turn(Generic[OutputT]):
             raise TypeError("accept must be callable")
         pending = ""
         identity: tuple[str, str] | None = None
-        async for event in self.events():
+        events = self.events()
+        events._respect_admission_floor = True
+        async for event in events:
             if isinstance(event, EventGap):
                 raise RuntimeError("Accepted text observation gap")
             if not isinstance(event, OutputTextDelta) or event.parent_submission_id is not None:

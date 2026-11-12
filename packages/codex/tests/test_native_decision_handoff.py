@@ -139,3 +139,31 @@ async def test_completed_handoff_checkpoint_uses_fresh_captured_targets(response
             turn = await restored.submit("Continue.")
             assert (await turn.get_result()).final_output == "Billing continues."
             assert responses.requests[-1]["model"] == "gpt-5.5"
+
+
+@pytest.mark.parametrize("namespace", [None, "functions"])
+async def test_tool_update_cannot_replace_captured_decision_callback(responses, namespace):
+    from agents import ToolRef, function_tool
+
+    effects = []
+
+    @function_tool(name="delegate", namespace=namespace)
+    def replacement(input: str) -> str:
+        effects.append(input)
+        return "replacement"
+
+    responses.respond(function_call("delegate", {"input": "Billing."}, "route-after-update"))
+    responses.respond(assistant_output("Billing answer."))
+    decisions = Decisions()
+    async with timeout(30), provider(responses) as backend:
+        source, billing = graph(backend, decisions)
+        async with source.session() as session:
+            with pytest.raises(ValueError):
+                await session.update(tools=[replacement])
+            await session.update(tools=[ToolRef("delegate")])
+            assert (
+                await (await session.submit("Route.")).get_result()
+            ).final_output == "Billing answer."
+            assert await session.get_active_agent() is billing
+            assert len(decisions.requests) == 1
+            assert not effects

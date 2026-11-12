@@ -29,11 +29,12 @@ async def reader(monkeypatch, events, accept):
         handle=turn, stopping=False, terminal=asyncio.Future(), failure=asyncio.Future()
     )
 
-    async def stream(self):
-        for event in events:
-            yield event
+    class Stream:
+        async def __aiter__(self):
+            for event in events:
+                yield event
 
-    monkeypatch.setattr(Turn, "events", stream)
+    monkeypatch.setattr(Turn, "events", lambda _: Stream())
     return [chunk async for chunk in turn.accepted_text(accept)]
 
 

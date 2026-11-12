@@ -185,3 +185,90 @@ async def test_native_terminal_during_approval_withholds_original_text_while_rep
                 await stream.aclose()
             assert (await turn.get_result()).final_output == 7
             assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("queued", [False, True])
+async def test_reader_skips_only_eviction_before_its_own_admission(responses, queued):
+    responses.respond(*text_response("prior", *(["x"] * 300)))
+    approved = asyncio.Event()
+    blocker_entered = asyncio.Event()
+    blocker_release = asyncio.Event()
+
+    async def hold_completion(event):
+        if event["type"] != "response.completed":
+            return
+        if queued and len(responses.requests) == 2:
+            blocker_entered.set()
+            await blocker_release.wait()
+        else:
+            await approved.wait()
+
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=responses.url, api_key="synthetic", supports_websockets=False
+        ) as provider,
+    ):
+        async with Agent(
+            instructions="Answer.", model="fixture", provider=provider
+        ).session() as session:
+            await (await session.submit("Earlier.")).get_result()
+            responses.before_event = hold_completion
+            if queued:
+                responses.respond(*text_response("blocker", "Blocking."))
+                blocker = await session.submit("Block dispatch.")
+                await blocker_entered.wait()
+            responses.respond(*text_response("current", "Approved."))
+            turn = await session.submit("Current.", if_busy="queue" if queued else "reject")
+            read = asyncio.create_task(anext(turn.accepted_text(lambda text: text)))
+            try:
+                if queued:
+                    await asyncio.sleep(0)
+                    blocker_release.set()
+                chunk = await read
+                assert chunk.text == "Approved."
+                assert chunk.submission_id == turn.submission_id
+                assert not approved.is_set()
+            finally:
+                blocker_release.set()
+                approved.set()
+            assert (await turn.get_result()).final_output == "Approved."
+            if queued:
+                assert (await blocker.get_result()).final_output == "Blocking."
+
+
+async def test_reader_still_fails_closed_when_current_turn_observations_are_evicted(responses):
+    ready = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_completion(event):
+        if event["type"] == "response.completed":
+            ready.set()
+            await release.wait()
+
+    responses.before_event = hold_completion
+    responses.respond(*text_response("current", *(["x"] * 300), "last"))
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=responses.url, api_key="synthetic", supports_websockets=False
+        ) as provider,
+    ):
+        async with Agent(
+            instructions="Answer.", model="fixture", provider=provider
+        ).session() as session:
+            turn = await session.submit("Current.")
+            await ready.wait()
+            from agents.observation import OutputTextDelta
+
+            async for event in session.events():
+                if isinstance(event, OutputTextDelta) and event.delta.endswith("last"):
+                    break
+            calls = []
+            try:
+                with pytest.raises(RuntimeError, match="observation gap"):
+                    await anext(turn.accepted_text(lambda text: calls.append(text) or text))
+                assert not calls
+            finally:
+                release.set()
+            assert (await turn.get_result()).final_output == "x" * 300 + "last"
