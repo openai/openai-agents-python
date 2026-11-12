@@ -1,0 +1,146 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 437c3cf8..36ca302b 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -17,6 +17,7 @@ use serde_json::{Value, json};
+ use tracing_opentelemetry::OpenTelemetrySpanExt;
+ 
+ pub(crate) const MAX_COMPLETION_DATA_BYTES: usize = 32 * 1024;
++const MAX_TRACING_DATA_DEPTH: usize = 64;
+ 
+ #[derive(Debug, Default)]
+ pub struct ScopePolicy {
+@@ -423,26 +424,22 @@ fn parse_span_id(value: &str) -> Result<SpanId, String> {
+     Ok(id)
+ }
+ fn bounded_value(value: &Value, depth: usize) -> Result<(), String> {
+-    if depth > 8 {
+-        return Err("Tracing metadata exceeds maximum depth of 8".into());
++    if depth > MAX_TRACING_DATA_DEPTH {
++        return Err(format!(
++            "Tracing metadata exceeds maximum depth of {MAX_TRACING_DATA_DEPTH}"
++        ));
+     }
+     match value {
+         Value::String(s) if s.len() > MAX_COMPLETION_DATA_BYTES => {
+             Err("Tracing outcome string exceeds 32 KiB".into())
+         }
+         Value::Array(values) => {
+-            if values.len() > 64 {
+-                return Err("Tracing arrays may contain at most 64 entries".into());
+-            }
+             for value in values {
+                 bounded_value(value, depth + 1)?;
+             }
+             Ok(())
+         }
+         Value::Object(values) => {
+-            if values.len() > 64 {
+-                return Err("Tracing objects may contain at most 64 fields".into());
+-            }
+             for (key, value) in values {
+                 if key.len() > 256 {
+                     return Err("Tracing key exceeds 256 UTF-8 bytes".into());
+@@ -455,28 +452,23 @@ fn bounded_value(value: &Value, depth: usize) -> Result<(), String> {
+     }
+ }
+ // Validate opaque metadata with typed serde containers, without Value's private-map visitor.
+-// Return canonical JSON so escaped strings keep the existing encoded-attribute byte limit.
+ fn bounded_metadata_json(
+     encoded: &str,
+     depth: usize,
+ ) -> Result<Box<serde_json::value::RawValue>, String> {
+-    if depth > 8 {
+-        return Err("Tracing metadata exceeds maximum depth of 8".into());
++    if depth > MAX_TRACING_DATA_DEPTH {
++        return Err(format!(
++            "Tracing metadata exceeds maximum depth of {MAX_TRACING_DATA_DEPTH}"
++        ));
+     }
+     let encoded = encoded.trim_start();
+     let serialized = if encoded.starts_with('"') {
+         let value: String =
+             serde_json::from_str(encoded).map_err(|_| "Invalid tracing metadata")?;
+-        if value.len() > 4096 {
+-            return Err("Tracing string exceeds 4096 UTF-8 bytes".into());
+-        }
+         serde_json::value::to_raw_value(&value)
+     } else if encoded.starts_with('[') {
+         let values: Vec<&serde_json::value::RawValue> =
+             serde_json::from_str(encoded).map_err(|_| "Invalid tracing metadata")?;
+-        if values.len() > 64 {
+-            return Err("Tracing arrays may contain at most 64 entries".into());
+-        }
+         let values = values
+             .iter()
+             .map(|value| bounded_metadata_json(value.get(), depth + 1))
+@@ -485,9 +477,6 @@ fn bounded_metadata_json(
+     } else if encoded.starts_with('{') {
+         let values: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
+             serde_json::from_str(encoded).map_err(|_| "Invalid tracing metadata")?;
+-        if values.len() > 64 {
+-            return Err("Tracing objects may contain at most 64 fields".into());
+-        }
+         let mut bounded = std::collections::BTreeMap::new();
+         for (key, value) in values {
+             if key.len() > 256 {
+@@ -508,9 +497,6 @@ fn metadata_attribute_value(value: &serde_json::value::RawValue) -> Result<Strin
+     } else {
+         value.get().to_owned()
+     };
+-    if encoded.len() > 4096 {
+-        return Err("Encoded tracing metadata value exceeds 4096 UTF-8 bytes".into());
+-    }
+     Ok(encoded)
+ }
+ 
+@@ -863,9 +849,19 @@ mod tests {
+         assert!(bounded_value(&at_limit, 0).is_ok());
+         assert!(bounded_value(&over_limit, 0).is_err());
+         assert!(bounded_value(&json!({"x":[1,2,3]}), 0).is_ok());
++        assert!(bounded_value(&json!({"x": vec![0; 65]}), 0).is_ok());
++        let object = (0..65)
++            .map(|key| (key.to_string(), json!(0)))
++            .collect::<serde_json::Map<_, _>>();
++        assert!(bounded_value(&Value::Object(object), 0).is_ok());
++        for (depth, allowed) in [(9, true), (64, true), (65, false)] {
++            let encoded = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
++            let value: Value = serde_json::from_str(&encoded).unwrap();
++            assert_eq!(bounded_value(&value, 0).is_ok(), allowed);
++        }
+     }
+     #[test]
+-    fn preserves_opaque_metadata_and_existing_bounds() {
++    fn preserves_opaque_metadata_with_aggregate_payload_bounds() {
+         for marker in ["Number", "RawValue"] {
+             let encoded =
+                 format!(r#"{{"nested":{{"$serde_json::private::{marker}":"ordinary text"}}}}"#);
+@@ -877,8 +873,8 @@ mod tests {
+         let string = serde_json::to_string(&"x".repeat(4096)).unwrap();
+         assert!(bounded_metadata_json(&string, 0).is_ok());
+         let string = serde_json::to_string(&"x".repeat(4097)).unwrap();
+-        assert!(bounded_metadata_json(&string, 0).is_err());
+-        for (count, allowed) in [(64, true), (65, false)] {
++        assert!(bounded_metadata_json(&string, 0).is_ok());
++        for (count, allowed) in [(64, true), (65, true), (1024, true)] {
+             let array = serde_json::to_string(&vec![0; count]).unwrap();
+             assert_eq!(bounded_metadata_json(&array, 0).is_ok(), allowed);
+             let object = (0..count)
+@@ -896,7 +892,7 @@ mod tests {
+                 allowed
+             );
+         }
+-        for (depth, allowed) in [(8, true), (9, false)] {
++        for (depth, allowed) in [(8, true), (9, true), (64, true), (65, false)] {
+             let value = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+             assert_eq!(bounded_metadata_json(&value, 0).is_ok(), allowed);
+         }
+@@ -919,7 +915,7 @@ mod tests {
+                 &serde_json::value::to_raw_value(&json!(["x".repeat(3000), "y".repeat(3000)]))
+                     .unwrap()
+             )
+-            .is_err()
++            .is_ok()
+         );
+         assert!(
+             metadata_attribute_value(

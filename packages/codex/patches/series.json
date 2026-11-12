@@ -835,7 +835,11 @@
     {
       "path": "sdk-plan-backed-model-retry.patch",
       "sha256": "ba85296276d0e050a473196e8a4c51872656ada5931dad60cfc9abbc2872b33d"
+    },
+    {
+      "path": "sdk-tracing-annotation-shapes.patch",
+      "sha256": "d87a93c52e3223e004a7f568df6ec29afcac2bd9d71a61ae2ebeb7fcb054ba4c"
     }
   ],
-  "result_tree": "9ef03848cf14c7ff62e47d577c23a0bdaf19db38"
+  "result_tree": "f8fce05628d971ed8c10528732cc334dfdbaac34"
 }
