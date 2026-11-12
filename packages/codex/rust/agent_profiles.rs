@@ -12,6 +12,7 @@ use codex_extension_api::{
 };
 use codex_history::{ResponseItemEnvelope, RolloutItem};
 use codex_protocol::dynamic_tools::{DynamicToolFunctionSpec, DynamicToolSpec};
+use codex_protocol::model_request_transport::RequestTransportOverrides;
 use codex_thread_store::PersistContext;
 use codex_tools::{
     FunctionCallError, ToolCall, ToolExecutor, ToolExecutorFuture, ToolName, ToolOutput, ToolSpec,
@@ -373,6 +374,7 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
         .iter()
         .map(|profile| {
             let mut descriptor = serde_json::to_value(profile)?;
+            descriptor["model"] = serde_json::to_value(profile.model.for_persistence())?;
             // Refreshed Session formatter policy; declared input callbacks remain pinned.
             descriptor
                 .as_object_mut()
@@ -452,7 +454,7 @@ struct PersistedProfile {
     model: AgentProfileModelSettings,
 }
 
-fn rebind_attempt_controls(
+fn rebind_runtime_controls(
     mut saved: AgentProfileModelSettings,
     current: &AgentProfileModelSettings,
 ) -> AgentProfileModelSettings {
@@ -461,6 +463,10 @@ fn rebind_attempt_controls(
         .retry
         .clone_from(&current.request_controls.retry);
     saved.request_controls.attempt_timeout_ms = current.request_controls.attempt_timeout_ms;
+    saved
+        .request_controls
+        .request_transport
+        .clone_from(&current.request_controls.request_transport);
     saved.invocation_timeout_ms = current.invocation_timeout_ms;
     saved
 }
@@ -478,20 +484,17 @@ fn restored_envelope<'a>(
     opening: &OpeningProfiles,
     history: &'a [RolloutItem],
 ) -> Result<Option<(&'a ResponseItemEnvelope, PersistedProfile)>> {
-    let latest = history
-        .iter()
-        .filter_map(|item| match item {
-            RolloutItem::ResponseItem(envelope)
-                if envelope
-                    .metadata
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.sdk_agent_profile.is_some()) =>
-            {
-                Some(envelope)
-            }
-            _ => None,
-        })
-        .last();
+    let latest = history.iter().rev().find_map(|item| match item {
+        RolloutItem::ResponseItem(envelope)
+            if envelope
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.sdk_agent_profile.is_some()) =>
+        {
+            Some(envelope)
+        }
+        _ => None,
+    });
     let Some(envelope) = latest else {
         return Ok(None);
     };
@@ -626,6 +629,20 @@ pub(crate) fn validate_restored(
         "Latest accepted instructions have no matching Agent profile receipt"
     );
     Ok(accepted)
+}
+
+pub(crate) fn restored_request_transport(
+    opening: &OpeningProfiles,
+    history: &[RolloutItem],
+) -> Result<Option<Option<RequestTransportOverrides>>> {
+    let (_, source) = restored_envelope(opening, history)?
+        .context("Managed Agent checkpoint has no source receipt")?;
+    let profile = opening
+        .roster
+        .iter()
+        .find(|profile| profile.id == source.profile_id)
+        .context("Restored Agent is outside the captured graph")?;
+    Ok(profile.model.request_controls.request_transport.clone())
 }
 
 #[derive(Clone)]
@@ -1173,7 +1190,7 @@ pub(crate) async fn configure(
     for descriptor in &opening.roster {
         let model = if descriptor.id == opening.root_id {
             if restored {
-                rebind_attempt_controls(opening_model.clone(), &descriptor.model)
+                rebind_runtime_controls(opening_model.clone(), &descriptor.model)
             } else {
                 opening_model.clone()
             }
@@ -1254,9 +1271,14 @@ pub(crate) async fn configure(
                 })
                 .collect(),
         });
+        let mut model = receipt.model;
+        model
+            .request_controls
+            .request_transport
+            .clone_from(&prepared.model.request_controls.request_transport);
         let mut target = AgentProfile {
             profile_id: receipt.profile_id,
-            model: receipt.model,
+            model,
             application_instructions: envelope.clone(),
             data,
             mcp: prepared.mcp.clone(),

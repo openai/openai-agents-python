@@ -9,7 +9,7 @@ import httpx
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from openai import APITimeoutError, AsyncOpenAI
+from openai import APITimeoutError, AsyncOpenAI, omit
 
 from agents import Agent, ChatCompletionsModel, ModelRequest, NativeProvider, ResponsesModel
 
@@ -375,8 +375,11 @@ async def test_scoped_transport_overlays_borrowed_client_options(adapter, route)
                     async with agent.session() as session:
                         first = await session.submit(
                             "Scoped.",
-                            model_settings={
-                                "extra_headers": scoped["headers"],
+                            model_settings_override={
+                                "extra_headers": {
+                                    key: omit if value is None else value
+                                    for key, value in scoped["headers"].items()
+                                },
                                 "extra_query": scoped["query"],
                             },
                         )

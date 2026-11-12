@@ -926,6 +926,12 @@ pub async fn restore(
             })
             .transpose()?,
     };
+    let profile_transport = agent_profiles
+        .as_ref()
+        .map(|profiles| {
+            crate::agent_profiles::restored_request_transport(profiles, &checkpoint.history)
+        })
+        .transpose()?;
     let mut current_files = options.sdk_instruction_files.clone();
     let manual_slots = std::mem::take(&mut options.manual_tool_slots);
     let transform_context = options.transform_context;
@@ -934,6 +940,9 @@ pub async fn restore(
     let before_complete = options.before_complete;
     let tool_batch_completion = options.tool_batch_completion;
     let (mut startup, instructions) = engine.build_startup(options, None).await?;
+    if let Some(transport) = profile_transport {
+        startup.config.sdk_request_controls.request_transport = transport;
+    }
     // Snapshot data is not authority to enable model-facing goal tools. The
     // validated record still requires goal storage above, but never the feature.
     if let Some(specs) = python_specs {

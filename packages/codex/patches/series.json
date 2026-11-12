@@ -903,7 +903,11 @@
     {
       "path": "sdk-request-transport-startup-warmup.patch",
       "sha256": "a7409b913c6d9fc3a8e9aae391dede4d31c273b11f6492ceb03c21817444c2ab"
+    },
+    {
+      "path": "sdk-agent-profile-request-transport.patch",
+      "sha256": "88239361fd2891f6e4234209d90482848034ecc836e5fc30742e18379c4333f1"
     }
   ],
-  "result_tree": "401fb2fa49feb2eca86fa0b088b084842569f255"
+  "result_tree": "ae08e162e94d04d0bb6849baf300dc5cf5d2e318"
 }

@@ -8,12 +8,14 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 from agents import (
     Agent,
     ChatCompletionsModel,
     FunctionTool,
     NativeProvider,
+    PromptedOutput,
     ResponsesModel,
     function_tool,
 )
@@ -352,3 +354,105 @@ async def test_manual_resume_retains_sampling_but_rebinds_transport(monkeypatch)
                 await (await restored.submit("Independent operation.")).get_result()
             ).final_output == ("independent result")
             assert server.requests[-1]["temperature"] == 0.6
+
+
+class RepairTransportReport(BaseModel):
+    label: str
+
+
+@pytest.mark.parametrize(
+    ("handoff", "override", "updated", "root_updated"),
+    [
+        (False, False, False, False),
+        (False, True, False, False),
+        (False, False, True, False),
+        (False, True, True, False),
+        (True, False, False, False),
+        (True, True, False, False),
+        (True, False, True, False),
+        (True, True, True, False),
+        (True, False, False, True),
+    ],
+)
+async def test_prompted_repair_preserves_active_transport(
+    monkeypatch, handoff, override, updated, root_updated
+):
+    observed = []
+    original = WebSocketPeer.handle
+
+    async def record(self, request):
+        observed.append(
+            ({name.lower(): value for name, value in request.headers.items()}, dict(request.query))
+        )
+        return await original(self, request)
+
+    monkeypatch.setattr(WebSocketPeer, "handle", record)
+
+    def settings(value):
+        return {
+            "extra_headers": {"x-agent-route": value},
+            "extra_query": {"agent_route": value},
+        }
+
+    async with timeout(30), peer() as server:
+        provider = server.provider(websocket=False)
+        worker = Agent(
+            name="Worker",
+            instructions="Produce the report.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings=settings("SYNTHETIC_WORKER"),
+        )
+        root = Agent(
+            instructions="Produce the report, handing off if requested.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings=settings("SYNTHETIC_ROOT"),
+            handoffs=[worker] if handoff else [],
+        )
+        async with root.session() as session:
+            if root_updated:
+                await session.update(model_settings=settings("SYNTHETIC_ROOT_UPDATED"))
+            if handoff:
+                server.respond(function_call("transfer_to_worker", {}, "repair-handoff"))
+                server.respond(assistant_output("Worker ready."))
+                assert (await (await session.submit("Use Worker.")).get_result()).final_output
+            if updated:
+                latest = settings("SYNTHETIC_UPDATED")
+                await session.update(model_settings={"extra_headers": latest["extra_headers"]})
+                await session.update(model_settings={"extra_query": latest["extra_query"]})
+            first_report = len(observed)
+            server.respond(assistant_output("invalid JSON"))
+            server.respond(assistant_output('{"label":"corrected"}'))
+            operation = (
+                {
+                    "extra_headers": {"x-operation": "SYNTHETIC_OPERATION"},
+                    "extra_query": {"operation": "SYNTHETIC_OPERATION"},
+                }
+                if override
+                else None
+            )
+            turn = await session.submit(
+                "Produce the report.",
+                output_type=PromptedOutput(RepairTransportReport, 1),
+                model_settings_override=operation,
+            )
+            result = await turn.get_result()
+            assert result.final_output == RepairTransportReport(label="corrected")
+            assert len(result.repair_attempts) == 1
+        assert len(observed) - first_report == 2
+        for headers, query in observed[first_report:]:
+            if override:
+                assert headers["x-operation"] == "SYNTHETIC_OPERATION"
+                assert "x-agent-route" not in headers
+                assert query == {"operation": "SYNTHETIC_OPERATION"}
+            else:
+                expected = (
+                    "SYNTHETIC_UPDATED"
+                    if updated
+                    else "SYNTHETIC_WORKER"
+                    if handoff
+                    else "SYNTHETIC_ROOT"
+                )
+                assert headers["x-agent-route"] == expected
+                assert query == {"agent_route": expected}

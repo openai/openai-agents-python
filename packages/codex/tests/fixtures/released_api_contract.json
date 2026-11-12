@@ -16,7 +16,7 @@
           "_MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()",
           "_OBSERVATION_RETENTION_UNSET: Any = object()",
           "class HostedToolChoice(TypedDict, total=False, closed=True):\n    type: _Required[Literal['web_search', 'file_search', 'code_interpreter', 'image_generation', 'computer', 'computer_use_preview', 'shell', 'apply_patch', 'tool_search', 'mcp']]\n    server_label: str\n    name: str",
-          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | HostedToolChoice | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    extra_headers: Mapping[str, str | Omit] | None\n    extra_query: Mapping[str, Any] | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    attempt_timeout_ms: int | None\n    retry: ModelRetrySettings | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    provider_compaction: ProviderCompactionPolicy | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
+          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | HostedToolChoice | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    extra_headers: Mapping[str, str | Omit | None] | None\n    extra_query: Mapping[str, Any] | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    attempt_timeout_ms: int | None\n    retry: ModelRetrySettings | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    provider_compaction: ProviderCompactionPolicy | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)\n    credential_directory: str | Path | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
           "@dataclass(frozen=True, kw_only=True, slots=True, repr=False)\nclass SignInWithChatGPTCredentials:\n    issuer: str\n    client_id: str\n    subject: str\n    access_token: str",
@@ -47,9 +47,8 @@
           "from pathlib import Path as Path",
           "from types import TracebackType as TracebackType",
           "from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Generic as Generic, Literal, overload as overload",
-          "from openai import Omit",
           "from typing_extensions import Required as _Required, TypedDict as TypedDict, TypeVar as TypeVar",
-          "from ._model_settings import ProviderCompactionPolicy as ProviderCompactionPolicy",
+          "from ._model_settings import Omit, ProviderCompactionPolicy as ProviderCompactionPolicy",
           "from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter",
           "from ._trace_context import TraceContext as TraceContext",
           "from .compaction import ResponsesCompaction, _BeforeCompact",
@@ -98,6 +97,7 @@
           "ModelRetrySettings": "agents.retry.ModelRetrySettings",
           "NativeAgents": "agents.native_agents.NativeAgents",
           "NativeModel": "agents.models.NativeModel",
+          "Omit": "_agents_codex._model_settings.Omit",
           "OutputGuardrail": "agents.guardrails.OutputGuardrail",
           "OutputSpec": "agents.schema.OutputSpec",
           "ProviderCompactionPolicy": "_agents_codex._model_settings.ProviderCompactionPolicy",
@@ -2547,7 +2547,8 @@
         "exports": {},
         "imports": [
           "from typing import Literal, TypeAlias",
-          "from typing_extensions import Required, TypedDict"
+          "from typing_extensions import Required, TypedDict",
+          "from openai import Omit"
         ],
         "references": {}
       },

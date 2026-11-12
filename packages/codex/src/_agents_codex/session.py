@@ -444,13 +444,11 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     transport: dict[str, Any] = {}
     if "extra_headers" in copied:
         headers = copied["extra_headers"]
-        from openai import Omit
-
         transport["headers"] = (
             None
             if headers is None
             else {
-                name: None if isinstance(value, Omit) else value for name, value in headers.items()
+                name: value if isinstance(value, str) else None for name, value in headers.items()
             }
         )
     if "extra_query" in copied:
@@ -5084,6 +5082,8 @@ class Session(Generic[ContextT, OutputT]):
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
+        # Acknowledged transport defaults for this profile's correction requests.
+        self._repair_transport_settings: tuple[tuple[str, int] | None, dict[str, Any]] | None = None
         self._raw_usage_started = False
         self._produced_items_started = False
         self._agent: Agent[ContextT, OutputT] | None = None
@@ -9404,8 +9404,25 @@ class Session(Generic[ContextT, OutputT]):
                     raise NativeError("Native Agent activation acknowledgement did not match")
                 await self._refresh_profile_bindings()
             else:
+                previous_profile = self._profile_current
+                previous_transport = self._repair_transport_settings
                 await self._update_category(settings, instructions, captured_tools)
                 await self._refresh_profile_bindings(preserve_current=True)
+                transport = (
+                    previous_transport[1]
+                    if previous_transport is not None and previous_transport[0] == previous_profile
+                    else {}
+                )
+                transport = {
+                    **transport,
+                    **{
+                        key: value
+                        for key, value in captured_update_settings.items()
+                        if key in ("extra_headers", "extra_query")
+                    },
+                }
+                if transport:
+                    self._repair_transport_settings = (self._profile_current, transport)
             if self._realtime is not None and (
                 target is not None
                 or settings
@@ -11385,6 +11402,22 @@ class Session(Generic[ContextT, OutputT]):
                 if captured.get(key) is not None
             },
         )
+        transport_settings = {
+            key: value
+            for key, value in source_agent.model_settings.items()
+            if key in ("extra_headers", "extra_query")
+        }
+        source_profile = (
+            (source_message["profile_id"], source_message["profile_epoch"])
+            if source_message is not None and self._profiles
+            else self._profile_current
+        )
+        if (
+            self._repair_transport_settings is not None
+            and self._repair_transport_settings[0] == source_profile
+        ):
+            transport_settings.update(self._repair_transport_settings[1])
+        settings.update(cast(ModelSettings, transport_settings))
         declaration = Agent[ContextT, str](
             instructions="Correct the supplied JSON to match its schema. Return only JSON.",
             provider=provider,
