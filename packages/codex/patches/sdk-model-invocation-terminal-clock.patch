@@ -1,0 +1,44 @@
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2224,6 +2224,7 @@
+                     &sampling_prompt,
+                     attempt.cancellation(),
+                     Some(attempt_deadline.clone()),
++                    invocation_deadline.as_deref(),
+                 )
+                 .await
+             };
+@@ -3779,6 +3780,7 @@
+     prompt: &Prompt,
+     cancellation_token: CancellationToken,
+     logical_deadline: Option<Arc<super::model_invocation_deadline::ModelInvocationDeadline>>,
++    invocation_deadline: Option<&super::model_invocation_deadline::ModelInvocationDeadline>,
+ ) -> CodexResult<SamplingRequestResult> {
+     let turn_context = Arc::clone(&step_context.turn);
+     feedback_tags!(
+@@ -3992,7 +3994,10 @@
+                 }
+             };
+ 
+-            if matches!(&event, ResponseEvent::Completed { .. }) && !deadline.accept_terminal() {
++            if matches!(&event, ResponseEvent::Completed { .. })
++                && (!deadline.accept_terminal()
++                    || invocation_deadline.is_some_and(|owner| !owner.accept_terminal()))
++            {
+                 break Err(CodexErr::TurnAborted);
+             }
+             sess.services
+@@ -4591,6 +4596,13 @@
+     } else {
+         deadline.run(Box::pin(sampling)).await
+     };
++    // A successful preemption can settle without a provider Completed event.
++    if outcome.is_ok()
++        && let Some(owner) = invocation_deadline
++        && deadline.accept_terminal()
++    {
++        owner.accept_outcome();
++    }
+     // A final success (including preemption) or nonretryable error owns its
+     // outcome before cleanup. Only a retryable failure retains the logical clock.
+     if model_attempt.is_some()

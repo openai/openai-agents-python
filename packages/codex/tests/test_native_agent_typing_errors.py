@@ -306,3 +306,10 @@ if TYPE_CHECKING:
     )
     Agent[Application](instructions="Read.", tools=[mismatched_input_tool])  # pyright: ignore[reportArgumentType]
     Agent[str](instructions="Read.", tools=[mismatched_input_tool])  # pyright: ignore[reportArgumentType]
+
+    @function_tool
+    def wrong_handoff_context(context: ToolContext[str], ticket: int) -> str:
+        return str(ticket)
+
+    handoff_target = Agent[Application, str](instructions="Resolve.")
+    agents.Handoff[Application, str](handoff_target, wrong_handoff_context)  # pyright: ignore[reportArgumentType]

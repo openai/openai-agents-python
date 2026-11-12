@@ -8,7 +8,7 @@ import json
 import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
 
@@ -29,6 +29,69 @@ class ModelRequest:
     context: Any = field(repr=False)
     session_id: str
     turn_id: str
+    attempt_id: str | None = field(default=None, kw_only=True)
+    attempt: int | None = field(default=None, kw_only=True)
+    retry_configured: bool = field(default=False, kw_only=True)
+    disable_provider_retries: bool = field(default=False, kw_only=True)
+    _report_usage: Callable[[dict[str, int]], bool] | None = field(
+        default=None, repr=False, compare=False, kw_only=True
+    )
+
+    def report_usage(self, usage: Mapping[str, int]) -> bool:
+        """Report measured cumulative tokens for this exact native attempt.
+
+        Reporting replaces this attempt's measurement; it never increments request
+        counts. Cleanup can report until the admitted callback physically exits.
+        False means this request has no live native measurement owner.
+        """
+        captured = None
+        try:
+            captured = _capture_model_usage(usage)
+            assert captured is not None
+            return self._report_usage(captured) if self._report_usage is not None else False
+        finally:
+            del self, usage, captured
+
+
+def _capture_model_usage(usage: Mapping[str, int] | None) -> dict[str, int] | None:
+    if usage is None:
+        return None
+    fields = (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+    try:
+        if (
+            not isinstance(usage, Mapping)
+            or usage.keys() - set(fields)
+            or any(
+                type(value) is not int or not 0 <= value <= 2**63 - 1 for value in usage.values()
+            )
+        ):
+            raise ValueError("ModelResponse usage requires nonnegative native token counters")
+        captured = {key: usage.get(key, 0) for key in fields}
+        if "total_tokens" not in usage:
+            captured["total_tokens"] = captured["input_tokens"] + captured["output_tokens"]
+            if captured["total_tokens"] > 2**63 - 1:
+                raise ValueError("ModelResponse total token count exceeds native capacity")
+        return captured
+    finally:
+        del usage
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRetryAdviceRequest:
+    """One failed producer request, with logical policy and physical request indexes."""
+
+    request: ModelRequest = field(repr=False)
+    error: BaseException = field(repr=False)
+    attempt_id: str
+    attempt: int
+    request_attempt: int
 
 
 class ModelRequestOptions(TypedDict, total=False):
@@ -116,12 +179,7 @@ async def _request_options_for(
         if callable(source):
             from .session import _call_callback
 
-            observed = ModelRequest(
-                body=deepcopy(request.body),
-                context=request.context,
-                session_id=request.session_id,
-                turn_id=request.turn_id,
-            )
+            observed = replace(request, body=deepcopy(request.body))
             value = await _call_callback(source, admit, observed)
         if task is not None and cancellation_requested(task):
             raise asyncio.CancelledError
@@ -172,24 +230,7 @@ class ModelResponse:
             if not isinstance(self.response_id, str) or not self.response_id.strip():
                 raise ValueError("ModelResponse needs a nonempty response_id")
             usage = None
-            if self.usage is not None:
-                fields = (
-                    "input_tokens",
-                    "cached_input_tokens",
-                    "cache_write_input_tokens",
-                    "output_tokens",
-                    "reasoning_output_tokens",
-                    "total_tokens",
-                )
-                if self.usage.keys() - set(fields) or any(
-                    type(value) is not int or value < 0 for value in self.usage.values()
-                ):
-                    raise ValueError(
-                        "ModelResponse usage requires nonnegative native token counters"
-                    )
-                usage = {key: self.usage.get(key, 0) for key in fields}
-                if "total_tokens" not in self.usage:
-                    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+            usage = _capture_model_usage(self.usage)
             if capture_raw_provider_events:
                 raw = getattr(self, "_raw_chat_completion", None)
             try:
@@ -748,7 +789,43 @@ class ChatCompletionsModel:
                 **options,
             )
             value = response.model_dump() if hasattr(response, "model_dump") else response
-            if not isinstance(value, dict) or len(value.get("choices", [])) != 1:
+            if not isinstance(value, dict):
+                raise ValueError("ChatCompletionsModel requires exactly one response choice")
+            raw_usage = value.get("usage")
+            usage = (
+                None
+                if raw_usage is None
+                else {
+                    "input_tokens": raw_usage.get("prompt_tokens", 0),
+                    "output_tokens": raw_usage.get("completion_tokens", 0),
+                    "total_tokens": raw_usage.get("total_tokens", 0),
+                    "cached_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
+                        "cached_tokens", 0
+                    ),
+                    "cache_write_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
+                        "cache_write_tokens", 0
+                    ),
+                    "reasoning_output_tokens": (
+                        raw_usage.get("completion_tokens_details") or {}
+                    ).get("reasoning_tokens", 0),
+                }
+            )
+            if usage is not None:
+                usage = {
+                    key: 0
+                    if counter is None
+                    and key
+                    in (
+                        "cached_input_tokens",
+                        "cache_write_input_tokens",
+                        "reasoning_output_tokens",
+                    )
+                    else counter
+                    for key, counter in usage.items()
+                }
+            if usage is not None:
+                request.report_usage(usage)
+            if len(value.get("choices", [])) != 1:
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
             choice = value["choices"][0]
             message = choice["message"]
@@ -831,38 +908,6 @@ class ChatCompletionsModel:
                         "arguments": call["function"]["arguments"],
                     }
                 )
-            raw_usage = value.get("usage")
-            usage = (
-                None
-                if raw_usage is None
-                else {
-                    "input_tokens": raw_usage.get("prompt_tokens", 0),
-                    "output_tokens": raw_usage.get("completion_tokens", 0),
-                    "total_tokens": raw_usage.get("total_tokens", 0),
-                    "cached_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
-                        "cached_tokens", 0
-                    ),
-                    "cache_write_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
-                        "cache_write_tokens", 0
-                    ),
-                    "reasoning_output_tokens": (
-                        raw_usage.get("completion_tokens_details") or {}
-                    ).get("reasoning_tokens", 0),
-                }
-            )
-            if usage is not None:
-                usage = {
-                    key: 0
-                    if counter is None
-                    and key
-                    in (
-                        "cached_input_tokens",
-                        "cache_write_input_tokens",
-                        "reasoning_output_tokens",
-                    )
-                    else counter
-                    for key, counter in usage.items()
-                }
             returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
             if getattr(request, "_observe_raw_provider_events", False):
                 object.__setattr__(returned, "_raw_chat_completion", deepcopy(value))
@@ -914,6 +959,8 @@ class ChatCompletionsModel:
         try:
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
+            if request.disable_provider_retries:
+                selected["max_retries"] = 0
             if "max_retries" in selected:
                 if not callable(getattr(client, "with_options", None)):
                     raise TypeError("Per-request retries require client.with_options")
@@ -948,6 +995,8 @@ class LitellmModel(ChatCompletionsModel):
                     **options.get("extra_body", {}),
                     "prompt_cache_key": options.pop("prompt_cache_key"),
                 }
+            if request.disable_provider_retries:
+                options["num_retries"] = 0
             response = await self.client.acompletion(**options)
             value = response.model_dump()
             return value
@@ -969,6 +1018,8 @@ class AnyLLMModel(ChatCompletionsModel):
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
         try:
+            if request.disable_provider_retries:
+                raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
             if self._request_options_source is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
             if "max_completion_tokens" in options:
@@ -1032,6 +1083,8 @@ class ResponsesModel:
         try:
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
+            if request.disable_provider_retries:
+                selected["max_retries"] = 0
             if "max_retries" in selected:
                 if not callable(getattr(client, "with_options", None)):
                     raise TypeError("Per-request retries require client.with_options")
@@ -1040,7 +1093,8 @@ class ResponsesModel:
             if not inspect.iscoroutinefunction(inspect.unwrap(create)):
                 raise TypeError("ResponsesModel requires an asynchronous client")
             body = dict(request.body)
-            body["model"] = self.model or body["model"]
+            if self.model:
+                body["model"] = self.model
             if self.prompt_cache_key is not None:
                 body["prompt_cache_key"] = self.prompt_cache_key
             body.pop("stream", None)
@@ -1048,19 +1102,6 @@ class ResponsesModel:
                 stream=False, extra_body=body, **_client_request_options(selected)
             )
             value = response.model_dump() if hasattr(response, "model_dump") else response
-            output = value.get("output") or []
-            refusal = False
-            for item in output:
-                if item.get("type") != "message":
-                    continue
-                for part in item.get("content", []):
-                    if part.get("type") == "refusal":
-                        refusal = True
-                        break
-                if refusal:
-                    break
-            if value.get("status") != "completed" and not refusal:
-                raise ValueError("ResponsesModel requires a completed response")
             raw_usage = value.get("usage")
             usage = (
                 None
@@ -1090,6 +1131,21 @@ class ResponsesModel:
                     else counter
                     for key, counter in usage.items()
                 }
+            if usage is not None:
+                request.report_usage(usage)
+            output = value.get("output") or []
+            refusal = False
+            for item in output:
+                if item.get("type") != "message":
+                    continue
+                for part in item.get("content", []):
+                    if part.get("type") == "refusal":
+                        refusal = True
+                        break
+                if refusal:
+                    break
+            if value.get("status") != "completed" and not refusal:
+                raise ValueError("ResponsesModel requires a completed response")
             returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
             if (
                 value.get("status") == "completed"
