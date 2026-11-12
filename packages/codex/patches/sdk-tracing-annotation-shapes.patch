@@ -183,7 +183,7 @@ index 437c3cf8f26fd4a751a7f9a00e07c39167c1bb6c..70f6c41e346d2c88878b4ead61dfce9d
          assert!(
              metadata_attribute_value(
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index 76816513dc961af42bdaa1c1ddd3ce0b03edf988..4574c0637777d99eccbda41a3b37eec7d8e50551 100644
+index 76816513dc961af42bdaa1c1ddd3ce0b03edf988..f9dcfd52e6e49468d5801fadf4e7fade0b0976ac 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -259,12 +259,58 @@ pub fn set_trace_routes(input: &str) -> Result<u64, String> {
@@ -196,8 +196,8 @@ index 76816513dc961af42bdaa1c1ddd3ce0b03edf988..4574c0637777d99eccbda41a3b37eec7
 +        .iter()
 +        .map(|kv| (kv.key.to_string(), kv.value.to_string()))
 +        .collect::<BTreeMap<_, _>>();
-+    let expansion = serde_json::to_vec(&projected).ok()?.len().saturating_sub(encoded.len());
-+    Some((metadata, expansion))
++    let projection_bytes = serde_json::to_vec(&projected).ok()?.len();
++    Some((metadata, projection_bytes))
 +}
 +
 +fn sdk_metadata(span: &SpanData) -> Option<(Vec<opentelemetry::KeyValue>, usize)> {
@@ -264,12 +264,12 @@ index 76816513dc961af42bdaa1c1ddd3ce0b03edf988..4574c0637777d99eccbda41a3b37eec7
      }
 -    owner.snapshot.get().cloned()
 +    owner.snapshot.get().cloned().map(|snapshot| {
-+        let expansion = owner
++        let projection_bytes = owner
 +            .metadata
 +            .get()
 +            .and_then(|encoded| metadata_projection(encoded))
-+            .map_or(0, |(_, expansion)| expansion);
-+        (snapshot, expansion)
++            .map_or(0, |(_, projection_bytes)| projection_bytes);
++        (snapshot, projection_bytes)
 +    })
  }
  fn event(
@@ -281,22 +281,23 @@ index 76816513dc961af42bdaa1c1ddd3ce0b03edf988..4574c0637777d99eccbda41a3b37eec7
      credential: Option<Arc<HostTraceCredential>>,
  ) {
      s.sequence += 1;
-@@ -332,8 +385,12 @@ fn event(
+@@ -332,8 +385,13 @@ fn event(
          Some(value @ Value::String(data)) => value.to_string().len() - data.len() - 2,
          _ => 0,
      };
 -    let max_event_bytes =
 -        65_536 + completion_escape_bytes.min(crate::sdk_trace::MAX_COMPLETION_DATA_BYTES);
-+    // Only encoding added to validated SDK annotations is outside the record budget.
++    // SDK metadata has an independent validated start budget. Keep its projection
++    // separate from the existing record/completion budget.
 +    // Queue admission below still charges every encoded byte.
-+    let metadata_expansion = sdk_metadata(span).map_or(0, |(_, expansion)| expansion);
++    let metadata_projection_bytes = sdk_metadata(span).map_or(0, |(_, projection_bytes)| projection_bytes);
 +    let max_event_bytes = 65_536
 +        + completion_escape_bytes.min(crate::sdk_trace::MAX_COMPLETION_DATA_BYTES)
-+        + metadata_expansion;
++        + metadata_projection_bytes;
      let mut value = json!({"sequence":sequence,"processor_ids":s.processors,"lifecycle":lifecycle,"trace_id":span.span_context.trace_id().to_string(),"span_id":span.span_context.span_id().to_string(),"parent_span_id":if span.parent_span_id==opentelemetry::trace::SpanId::INVALID {None}else{Some(span.parent_span_id.to_string())},"name":truncate(&span.name,4096),"kind":format!("{:?}",span.span_kind).to_ascii_lowercase(),"start_time_unix_nanos":span.start_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string(),"end_time_unix_nanos":if lifecycle=="end" {Some(span.end_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string())}else{None},"attributes":attrs,"dropped_attributes_count":span.dropped_attributes_count,"outcome":match span.status { opentelemetry::trace::Status::Error{..}=>"error",opentelemetry::trace::Status::Ok=>"ok",_=>"unset" }});
      if credential_required {
          value["credential_required"] = json!(true);
-@@ -352,7 +409,7 @@ fn enqueue_event(
+@@ -352,7 +410,7 @@ fn enqueue_event(
      s: &mut Routes,
      sequence: u64,
      mut value: Value,
@@ -305,18 +306,18 @@ index 76816513dc961af42bdaa1c1ddd3ce0b03edf988..4574c0637777d99eccbda41a3b37eec7
      credential: Option<Arc<HostTraceCredential>>,
      max_event_bytes: usize,
  ) -> bool {
-@@ -360,8 +417,8 @@ fn enqueue_event(
+@@ -360,8 +418,8 @@ fn enqueue_event(
          dropped(s, sequence);
          return false;
      }
 -    if let Some(descriptor) = root_descriptor {
 -        if serde_json::to_vec(&descriptor).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 {
-+    if let Some((descriptor, expansion)) = root_descriptor {
-+        if serde_json::to_vec(&descriptor).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 + expansion {
++    if let Some((descriptor, projection_bytes)) = root_descriptor {
++        if serde_json::to_vec(&descriptor).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 + projection_bytes {
              dropped(s, sequence);
              return false;
          }
-@@ -432,7 +489,14 @@ pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
+@@ -432,7 +490,14 @@ pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
          value["sequence"] = json!(sequence);
          value["processor_ids"] = json!(s.processors);
          // Observation IDs never resolve a native scope or credential lease.
@@ -332,7 +333,7 @@ index 76816513dc961af42bdaa1c1ddd3ce0b03edf988..4574c0637777d99eccbda41a3b37eec7
              return Err("Trace event exceeds processor queue capacity".into());
          }
          let (sender, acknowledged) = tokio::sync::oneshot::channel();
-@@ -1176,7 +1240,7 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+@@ -1176,7 +1241,7 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
          }
          let sequence = s.sequence;
          if !self.inner.enqueue(

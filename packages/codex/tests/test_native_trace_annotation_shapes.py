@@ -154,7 +154,9 @@ async def native_boundaries():
         await telemetry.shutdown()
 
 
-@pytest.mark.parametrize("route", ["otlp", "generic", "wide", "wide-queue"])
+@pytest.mark.parametrize(
+    "route", ["otlp", "generic", "wide", "wide-queue", "combined", "combined-escaped"]
+)
 def test_native_annotation_delivery_and_generic_limits(route):
     result = subprocess.run(
         [
@@ -194,6 +196,31 @@ async def native_delivery(route):
             assert delivered["generic.000-long"] == "x" * 4096
             assert len(delivered) <= 128
             assert ended[0]["dropped_attributes_count"] > 0
+        finally:
+            await telemetry.shutdown()
+        return
+
+    if route in {"combined", "combined-escaped"}:
+        events = []
+
+        class Recorder:
+            def on_trace_event(self, event):
+                events.append(event)
+
+        await telemetry.configure(processors=[Recorder()])
+        try:
+            metadata = {"x": "x" * 40000}
+            data = {"x": "y" * 30000 if route == "combined" else "\\" * 16375}
+            with telemetry.trace(
+                "bounds.combined",
+                options={"metadata": metadata, "include_sensitive_data": True},
+            ) as root:
+                root.set_outcome(status="ok", data=data)
+            assert (await telemetry.force_flush(timeout_ms=5000)).status == "success"
+            ended = [event for event in events if event["lifecycle"] == "end"]
+            assert len(ended) == 1
+            assert ended[0]["attributes"]["sdk.metadata.x"] == metadata["x"]
+            assert json.loads(ended[0]["attributes"]["sdk.outcome.data"]) == data
         finally:
             await telemetry.shutdown()
         return
