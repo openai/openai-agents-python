@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "fc21acdbddc52830e73d9a7afaf6b85fa7a37ee5",
+  "baseline_commit": "1811cf56a168165cb3e483dce68fb317705bc0f3",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -844,7 +844,10 @@
           "ContextT = TypeVar('ContextT', contravariant=True, default=object)",
           "_ContextT_co = TypeVar('_ContextT_co', covariant=True, default=object)",
           "@dataclass(frozen=True, kw_only=True)\nclass NativeRole:\n    name: str\n    instructions: str = field(repr=False)\n    description: str\n    model: str | None = None\n    model_settings: Mapping[Literal['reasoning_effort'], str] | None = None",
-          "@dataclass(frozen=True, kw_only=True)\nclass NativeRoleTool:\n    name: str\n    role: str\n    description: str",
+          "class NativeRoleToolInvocation(TypedDict):\n    tool_name: str\n    role: str\n    input: str\n    native_call_id: str\n    parent_thread_id: str\n    parent_turn_id: str\n    child_thread_id: str\n    child_turn_id: str\n    cell_id: str | None\n    runtime_tool_call_id: str | None",
+          "class NativeRoleToolStreamEvent(TypedDict):\n    event: Observation\n    invocation: NativeRoleToolInvocation",
+          "class NativeRoleToolResult(TypedDict):\n    role: str\n    thread_id: str\n    turn_id: str\n    final_output: JsonValue\n    items: tuple[SessionItem, ...]",
+          "@dataclass(frozen=True, kw_only=True)\nclass NativeRoleTool:\n    name: str\n    role: str\n    description: str\n    on_stream: Callable[[NativeRoleToolStreamEvent], None | Awaitable[None]] | None = field(default=None, repr=False)\n    on_stream_max_pending_events: int | None = 1024\n    extract_result: Callable[[NativeRoleToolResult], str | Awaitable[str]] | None = field(default=None, repr=False)",
           "_ChildStepResult: TypeAlias = Sequence['ToolRef | Tool[Any] | Environment[Any] | NativeAgents[Any]'] | None | StopTurn | Awaitable[Sequence['ToolRef | Tool[Any] | Environment[Any] | NativeAgents[Any]'] | None | StopTurn]",
           "_ChildBeforeStep: TypeAlias = Callable[['ChildStepContext[ContextT]'], _ChildStepResult]",
           "@dataclass(frozen=True, kw_only=True)\nclass NativeAgents(Generic[ContextT]):\n    additional_roles: Sequence[NativeRole] = ()\n    max_children: int | None = None\n    approval: Callable[[ToolContext[object], NativeToolCall], bool | Awaitable[bool]] | Callable[[ToolContext[ContextT], NativeToolCall], bool | Awaitable[bool]] | None = field(default=None, repr=False)\n    max_depth: int = 1\n    before_step: Callable[[ChildStepContext[object]], _ChildStepResult] | _ChildBeforeStep[ContextT] | None = field(default=None, repr=False)\n    interactions: bool = False\n    managed_tools: Sequence[NativeRoleTool] = ()",
@@ -857,14 +860,20 @@
           "ContextT": "ContextT",
           "NativeAgents": "agents.native_agents.NativeAgents",
           "NativeRole": "agents.native_agents.NativeRole",
-          "NativeRoleTool": "agents.native_agents.NativeRoleTool"
+          "NativeRoleTool": "agents.native_agents.NativeRoleTool",
+          "NativeRoleToolInvocation": "agents.native_agents.NativeRoleToolInvocation",
+          "NativeRoleToolResult": "agents.native_agents.NativeRoleToolResult",
+          "NativeRoleToolStreamEvent": "agents.native_agents.NativeRoleToolStreamEvent"
         },
         "imports": [
           "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
           "from dataclasses import dataclass as dataclass, field as field",
           "from typing import Any as Any, Generic as Generic, Literal as Literal, TypeAlias as TypeAlias, overload as overload",
-          "from typing_extensions import TypeVar as TypeVar",
+          "from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar",
+          "from ._events import SessionItem as SessionItem",
+          "from .config import JsonValue as JsonValue",
           "from .native_interception import NativeToolCall as NativeToolCall, StopTurn",
+          "from .observation import Observation as Observation",
           "from ._function_tools import Tool, ToolContext",
           "from .decisions import DecisionInput, DecisionProvider",
           "from .executor import Environment",
@@ -874,7 +883,10 @@
           "DecisionInput": "agents.decisions.DecisionInput",
           "DecisionProvider": "agents.decisions.DecisionProvider",
           "Environment": "agents.executor.Environment",
+          "JsonValue": "agents.config.JsonValue",
           "NativeToolCall": "agents.native_interception.NativeToolCall",
+          "Observation": "agents.observation.Observation",
+          "SessionItem": "agents._events.SessionItem",
           "StopTurn": "agents.native_interception.StopTurn",
           "Tool": "agents._function_tools.Tool",
           "ToolContext": "agents._function_tools.ToolContext",
@@ -1392,7 +1404,7 @@
         "declarations": [
           "_OptionsT = TypeVar('_OptionsT')",
           "_ContextT = TypeVar('_ContextT')",
-          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]], snapshot: SnapshotSpec | SnapshotBase | None=None, session: SandboxSession | None=None, authorized_resume_state: SandboxSessionState | None=None, concurrency_limits: SandboxConcurrencyLimits | None=None, archive_limits: SandboxArchiveLimits | None=None, managed_workspace: bool=False, authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None=None) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
+          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]], snapshot: SnapshotSpec | SnapshotBase | None=None, session: SandboxSession | None=None, authorized_resume_state: SandboxSessionState | None=None, concurrency_limits: SandboxConcurrencyLimits | None=None, archive_limits: SandboxArchiveLimits | None=None, managed_workspace: bool=False, authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None=None, memory: SandboxMemoryOptions | None=None) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
           "@redact_mount_error_data_sync\ndef render_storage_layout(manifest: Manifest) -> str:\n    pass"
         ],
         "exports": {
@@ -1418,6 +1430,7 @@
           "LocalSnapshotSpec": "agents.classic.sandbox.snapshot.LocalSnapshotSpec",
           "ManagedWorkspaceCheckpoint": "agents.sandbox.ManagedWorkspaceCheckpoint",
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
+          "MemoryLayoutConfig": "agents.classic.sandbox.config.MemoryLayoutConfig",
           "Mount": "agents.classic.sandbox.entries.mounts.base.Mount",
           "MountpointMountPattern": "agents.classic.sandbox.entries.mounts.patterns.MountpointMountPattern",
           "NoopSnapshot": "agents.classic.sandbox.snapshot.NoopSnapshot",
@@ -1431,6 +1444,7 @@
           "S3Mount": "agents.classic.sandbox.entries.mounts.providers.s3.S3Mount",
           "SandboxArchiveLimits": "agents.classic.run_config.SandboxArchiveLimits",
           "SandboxConcurrencyLimits": "agents.classic.run_config.SandboxConcurrencyLimits",
+          "SandboxMemoryOptions": "agents.sandbox.SandboxMemoryOptions",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
           "SandboxSessionEvent": "typing.Annotated",
           "SandboxSessionFinishEvent": "agents.classic.sandbox.session.events.SandboxSessionFinishEvent",
@@ -1473,7 +1487,8 @@
           "from .classic.sandbox.session.sandbox_client import BaseSandboxClient",
           "from .classic.sandbox.session.sandbox_session import SandboxSession",
           "from .classic.sandbox.session.sinks import CallbackSink as CallbackSink, ChainedSink as ChainedSink, EventSink as EventSink, HttpProxySink as HttpProxySink, JsonlOutboxSink as JsonlOutboxSink, WorkspaceJsonlSink as WorkspaceJsonlSink",
-          "from .executor import Environment"
+          "from .executor import Environment",
+          "from .sandbox_memory import MemoryLayoutConfig as MemoryLayoutConfig, SandboxMemoryOptions as SandboxMemoryOptions"
         ],
         "references": {
           "AzureBlobMount": "agents.classic.sandbox.entries.mounts.AzureBlobMount",
@@ -1499,6 +1514,7 @@
           "LocalSnapshotSpec": "_agents_shared.snapshot.LocalSnapshotSpec",
           "ManagedWorkspaceCheckpoint": "_agents_codex._managed_workspace.ManagedWorkspaceCheckpoint",
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
+          "MemoryLayoutConfig": "_agents_codex.sandbox_memory.MemoryLayoutConfig",
           "Mount": "agents.classic.sandbox.entries.mounts.Mount",
           "MountpointMountPattern": "agents.classic.sandbox.entries.mounts.MountpointMountPattern",
           "NoopSnapshot": "_agents_shared.snapshot.NoopSnapshot",
@@ -1512,6 +1528,7 @@
           "S3Mount": "agents.classic.sandbox.entries.mounts.S3Mount",
           "SandboxArchiveLimits": "_agents_shared.sandbox_limits.SandboxArchiveLimits",
           "SandboxConcurrencyLimits": "_agents_shared.sandbox_limits.SandboxConcurrencyLimits",
+          "SandboxMemoryOptions": "_agents_codex.sandbox_memory.SandboxMemoryOptions",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
           "SandboxSessionEvent": "agents.classic.sandbox.session.events.SandboxSessionEvent",
           "SandboxSessionFinishEvent": "agents.classic.sandbox.session.events.SandboxSessionFinishEvent",
@@ -1582,7 +1599,7 @@
           "@dataclass(frozen=True)\nclass Completed(Generic[OutputT, TurnT]):\n    turn: TurnT\n    final_output: OutputT\n    thread_usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()\n    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)\n    tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)\n    guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)\n    history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)\n    items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)\n    raw_usage: tuple[RawProviderUsage, ...] | None = field(default=None, repr=False, kw_only=True)\n    run_usage: RunUsage = field(init=False)\n\n    @property\n    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:\n        pass",
           "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",
           "class _BeforeStep(Protocol[_SelectionContextT_contra]):\n\n    def __call__(self, turn: Turn[Any], /, *, step_index: int) -> Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents[_SelectionContextT_contra]] | None | StopTurn | Awaitable[Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents[_SelectionContextT_contra]] | None | StopTurn]:\n        pass",
-          "class Session(Generic[ContextT, OutputT]):\n\n    def __init__(self, engine: Any, thread: Any, home: TemporaryDirectory[str] | None, catalog: _ToolCatalog, mcp_tools: tuple[_MCP[Any], ...], context: ContextT | None, output: _PreparedOutput, instructions: str, *, _start_readers: bool=True, _start_event_reader: bool=True, max_function_concurrency: int | None=None, tool_error_formatter: ToolErrorFormatter | None=None, observation_retention: Literal['bounded', 'all']='bounded', include_model_output_items: bool=False, include_raw_provider_events: bool=False, include_output_accepted: bool=False, include_request_attempts: bool=False) -> None:\n        pass\n\n    @property\n    def id(self) -> str:\n        pass\n\n    @property\n    def codex_account(self) -> CodexAccount | None:\n        pass\n\n    @property\n    def realtime_usage(self) -> RealtimeUsage | None:\n        pass\n\n    def realtime(self, *, config: RealtimeConfig | None=None) -> RealtimeSession:\n        pass\n\n    async def build_realtime_sip_config(self, *, config: RealtimeConfig | None=None) -> dict[str, Any]:\n        pass\n\n    async def get_active_agent(self) -> Agent[ContextT, OutputT]:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass\n\n    async def respond(self, reply: ActionReply[Any]) -> None:\n        pass\n\n    async def pending_interactions(self) -> tuple[Interaction, ...]:\n        pass\n\n    def interactions(self) -> AsyncIterator[Interaction]:\n        pass\n\n    @property\n    def capabilities(self) -> Capabilities:\n        pass\n\n    @property\n    def active_turn(self) -> Turn[Any] | None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass\n\n    async def plan_usage(self) -> CodexPlanUsage | None:\n        pass\n\n    @property\n    def restored_turn(self) -> Turn[Any] | None:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, model_override: str | None=None) -> Turn[OutputT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[_TurnT], tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, model_override: str | None=None) -> Turn[_TurnT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, if_busy: Literal['steer'], output_type: None=None, tools: None=None, before_step: None=None, writable_roots: None=None, parent_trace: None=None, trace_options: None=None, prepare_request: None=None, budget: None=None, model_override: None=None) -> Turn[Any]:\n        pass\n\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[Any] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue', 'steer']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, model_override: str | None=None) -> Turn[Any]:\n        pass\n\n    async def list_mcp_prompts(self, server: str) -> list[MCPPrompt]:\n        pass\n\n    async def get_mcp_prompt(self, server: str, name: str, arguments: Mapping[str, str] | None=None) -> MCPGetPromptResult:\n        pass\n\n    async def list_mcp_resources(self, server: str, cursor: str | None=None) -> MCPListResourcesResult:\n        pass\n\n    async def list_mcp_resource_templates(self, server: str, cursor: str | None=None) -> MCPListResourceTemplatesResult:\n        pass\n\n    async def read_mcp_resource(self, server: str, uri: str) -> MCPReadResourceResult:\n        pass\n\n    async def history_snapshot(self, *, limit: int | None=None) -> CanonicalHistorySnapshot:\n        pass\n\n    async def transact_history(self, *, expected_revision: str, keep: int, items: Sequence[Mapping[str, Any]]=()) -> str:\n        pass\n\n    async def model_context(self) -> ModelContextSnapshot:\n        pass\n\n    async def compact(self, *, summary: str | None=None, snapshot: ModelContextSnapshot | None=None, retain: Sequence[int] | None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, agent: Agent[ContextT, OutputT], model: None=None, model_settings: None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, instructions: str | None=None, model: None=None, model_settings: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, model: None=None, model_settings: None=None, instructions: None=None) -> None:\n        pass\n\n    async def update(self, *, agent: Agent[ContextT, OutputT] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, instructions: str | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None) -> None:\n        pass\n\n    async def cancel_all(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    async def fork_stored(self, *, before_turn_id: str | None=None, through_turn_id: str | None=None) -> str:\n        pass\n\n    async def revert_stored(self, *, before_turn_id: str) -> None:\n        pass\n\n    async def delete_stored(self, *, preserve_descendants: bool=False) -> None:\n        pass\n\n    async def set_stored_name(self, name: str | None) -> str | None:\n        pass\n\n    async def stored_sessions(self, *, limit: int=50, cursor: str | None=None, archived: bool=False) -> StoredSessionPage:\n        pass\n\n    async def stored_turns(self, *, limit: int=50, cursor: str | None=None, direction: Literal['asc', 'desc']='asc', include_summary: bool=False) -> StoredTurnPage:\n        pass\n\n    async def stored_items(self, *, turn_id: str | None=None, limit: int=50, cursor: str | None=None, direction: Literal['asc', 'desc']='asc') -> StoredItemPage:\n        pass\n\n    async def search_history(self, text: str, *, limit: int=50, cursor: str | None=None) -> StoredMatchPage:\n        pass\n\n    async def items(self, *, subagent_id: str | None=None) -> AsyncIterator[SessionItem]:\n        pass\n\n    async def subagents(self) -> AsyncIterator[Subagent]:\n        pass\n\n    async def turns(self, *, subagent_id: str | None=None) -> AsyncIterator[RecordedTurn]:\n        pass\n\n    async def checklist(self, *, subagent_id: str | None=None) -> ChecklistState | None:\n        pass\n\n    async def goal(self) -> NativeGoal | None:\n        pass\n\n    async def set_paused_goal(self, objective: str, *, token_budget: int | None=None) -> NativeGoal:\n        pass\n\n    async def suspend_workspace(self) -> ManagedWorkspaceCheckpoint:\n        pass\n\n    async def save_state(self) -> SessionState:\n        pass\n\n    async def fork(self) -> SessionState:\n        pass\n\n    async def checkpoint_status(self, *, kind: Literal['idle', 'manual_wait']) -> CheckpointStatus:\n        pass\n\n    async def suspend(self) -> SessionState:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
+          "class Session(Generic[ContextT, OutputT]):\n\n    def __init__(self, engine: Any, thread: Any, home: TemporaryDirectory[str] | None, catalog: _ToolCatalog, mcp_tools: tuple[_MCP[Any], ...], context: ContextT | None, output: _PreparedOutput, instructions: str, *, _start_readers: bool=True, _start_event_reader: bool=True, max_function_concurrency: int | None=None, tool_error_formatter: ToolErrorFormatter | None=None, observation_retention: Literal['bounded', 'all']='bounded', include_model_output_items: bool=False, include_raw_provider_events: bool=False, include_output_accepted: bool=False, include_request_attempts: bool=False) -> None:\n        pass\n\n    @property\n    def id(self) -> str:\n        pass\n\n    @property\n    def codex_account(self) -> CodexAccount | None:\n        pass\n\n    @property\n    def realtime_usage(self) -> RealtimeUsage | None:\n        pass\n\n    def realtime(self, *, config: RealtimeConfig | None=None) -> RealtimeSession:\n        pass\n\n    async def build_realtime_sip_config(self, *, config: RealtimeConfig | None=None) -> dict[str, Any]:\n        pass\n\n    async def get_active_agent(self) -> Agent[ContextT, OutputT]:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass\n\n    async def respond(self, reply: ActionReply[Any]) -> None:\n        pass\n\n    async def pending_interactions(self) -> tuple[Interaction, ...]:\n        pass\n\n    def interactions(self) -> AsyncIterator[Interaction]:\n        pass\n\n    @property\n    def capabilities(self) -> Capabilities:\n        pass\n\n    @property\n    def active_turn(self) -> Turn[Any] | None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass\n\n    async def plan_usage(self) -> CodexPlanUsage | None:\n        pass\n\n    @property\n    def restored_turn(self) -> Turn[Any] | None:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, model_override: str | None=None) -> Turn[OutputT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[_TurnT], tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, model_override: str | None=None) -> Turn[_TurnT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, if_busy: Literal['steer'], output_type: None=None, tools: None=None, before_step: None=None, writable_roots: None=None, parent_trace: None=None, trace_options: None=None, prepare_request: None=None, budget: None=None, model_override: None=None) -> Turn[Any]:\n        pass\n\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[Any] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue', 'steer']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, model_override: str | None=None) -> Turn[Any]:\n        pass\n\n    async def list_mcp_prompts(self, server: str) -> list[MCPPrompt]:\n        pass\n\n    async def get_mcp_prompt(self, server: str, name: str, arguments: Mapping[str, str] | None=None) -> MCPGetPromptResult:\n        pass\n\n    async def list_mcp_resources(self, server: str, cursor: str | None=None) -> MCPListResourcesResult:\n        pass\n\n    async def list_mcp_resource_templates(self, server: str, cursor: str | None=None) -> MCPListResourceTemplatesResult:\n        pass\n\n    async def read_mcp_resource(self, server: str, uri: str) -> MCPReadResourceResult:\n        pass\n\n    async def flush_memory(self) -> None:\n        pass\n\n    async def history_snapshot(self, *, limit: int | None=None) -> CanonicalHistorySnapshot:\n        pass\n\n    async def transact_history(self, *, expected_revision: str, keep: int, items: Sequence[Mapping[str, Any]]=()) -> str:\n        pass\n\n    async def model_context(self) -> ModelContextSnapshot:\n        pass\n\n    async def compact(self, *, summary: str | None=None, snapshot: ModelContextSnapshot | None=None, retain: Sequence[int] | None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, agent: Agent[ContextT, OutputT], model: None=None, model_settings: None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, instructions: str | None=None, model: None=None, model_settings: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, model: None=None, model_settings: None=None, instructions: None=None) -> None:\n        pass\n\n    async def update(self, *, agent: Agent[ContextT, OutputT] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, instructions: str | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None) -> None:\n        pass\n\n    async def cancel_all(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    async def fork_stored(self, *, before_turn_id: str | None=None, through_turn_id: str | None=None) -> str:\n        pass\n\n    async def revert_stored(self, *, before_turn_id: str) -> None:\n        pass\n\n    async def delete_stored(self, *, preserve_descendants: bool=False) -> None:\n        pass\n\n    async def set_stored_name(self, name: str | None) -> str | None:\n        pass\n\n    async def stored_sessions(self, *, limit: int=50, cursor: str | None=None, archived: bool=False) -> StoredSessionPage:\n        pass\n\n    async def stored_turns(self, *, limit: int=50, cursor: str | None=None, direction: Literal['asc', 'desc']='asc', include_summary: bool=False) -> StoredTurnPage:\n        pass\n\n    async def stored_items(self, *, turn_id: str | None=None, limit: int=50, cursor: str | None=None, direction: Literal['asc', 'desc']='asc') -> StoredItemPage:\n        pass\n\n    async def search_history(self, text: str, *, limit: int=50, cursor: str | None=None) -> StoredMatchPage:\n        pass\n\n    async def items(self, *, subagent_id: str | None=None) -> AsyncIterator[SessionItem]:\n        pass\n\n    async def subagents(self) -> AsyncIterator[Subagent]:\n        pass\n\n    async def turns(self, *, subagent_id: str | None=None) -> AsyncIterator[RecordedTurn]:\n        pass\n\n    async def checklist(self, *, subagent_id: str | None=None) -> ChecklistState | None:\n        pass\n\n    async def goal(self) -> NativeGoal | None:\n        pass\n\n    async def set_paused_goal(self, objective: str, *, token_budget: int | None=None) -> NativeGoal:\n        pass\n\n    async def suspend_workspace(self) -> ManagedWorkspaceCheckpoint:\n        pass\n\n    async def save_state(self) -> SessionState:\n        pass\n\n    async def fork(self) -> SessionState:\n        pass\n\n    async def checkpoint_status(self, *, kind: Literal['idle', 'manual_wait']) -> CheckpointStatus:\n        pass\n\n    async def suspend(self) -> SessionState:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
           "def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | SessionStoreCleanup | None:\n    pass"
         ],
         "exports": {
@@ -2336,6 +2353,9 @@
       "NativeProvider": "agents.agent.NativeProvider",
       "NativeRole": "agents.native_agents.NativeRole",
       "NativeRoleTool": "agents.native_agents.NativeRoleTool",
+      "NativeRoleToolInvocation": "agents.native_agents.NativeRoleToolInvocation",
+      "NativeRoleToolResult": "agents.native_agents.NativeRoleToolResult",
+      "NativeRoleToolStreamEvent": "agents.native_agents.NativeRoleToolStreamEvent",
       "NativeStreamingModel": "agents.models.NativeStreamingModel",
       "NativeToolCall": "agents.native_interception.NativeToolCall",
       "NetworkPolicy": "agents.executor.NetworkPolicy",
@@ -2701,6 +2721,22 @@
         ],
         "references": {}
       },
+      "_agents_codex.sandbox_memory": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass SandboxMemoryOptions:\n    phase_one: Agent[None, Any]\n    phase_two: Agent[None, Any]\n    layout: MemoryLayoutConfig = field(default_factory=MemoryLayoutConfig)\n    max_raw_memories: int = 16"
+        ],
+        "exports": {},
+        "imports": [
+          "from dataclasses import dataclass, field",
+          "from typing import Any",
+          "from _agents_shared.sandbox_memory_artifacts import MemoryLayoutConfig as MemoryLayoutConfig",
+          "from .agent import Agent"
+        ],
+        "references": {
+          "Agent": "agents.agent.Agent",
+          "MemoryLayoutConfig": "_agents_shared.sandbox_memory_artifacts.MemoryLayoutConfig"
+        }
+      },
       "_agents_codex.testing_model": {
         "declarations": [
           "@dataclass(frozen=True)\nclass ModelError:\n    error: Exception\n    retry_advice: RetryAdvice | None = None",
@@ -3001,10 +3037,22 @@
         ],
         "references": {}
       },
+      "_agents_shared.sandbox_memory_artifacts": {
+        "declarations": [
+          "class _MemoryFlushLock(asyncio.Lock):\n    pass",
+          "@dataclass\nclass MemoryLayoutConfig:\n    memories_dir: str = 'memories'\n    sessions_dir: str = 'sessions'"
+        ],
+        "exports": {},
+        "imports": [
+          "import asyncio",
+          "from dataclasses import dataclass"
+        ],
+        "references": {}
+      },
       "_agents_shared.sandbox_session_state": {
         "declarations": [
           "SessionStateClass = type['SandboxSessionState']",
-          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
+          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _native_memory_flush_lock: _MemoryFlushLock = PrivateAttr(default_factory=_MemoryFlushLock)\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -3014,11 +3062,13 @@
           "from typing_extensions import Self",
           "from agents.classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from agents.classic.sandbox.manifest import Manifest",
-          "from agents.classic.sandbox.snapshot import SnapshotBase"
+          "from agents.classic.sandbox.snapshot import SnapshotBase",
+          "from .sandbox_memory_artifacts import _MemoryFlushLock"
         ],
         "references": {
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
+          "_MemoryFlushLock": "_agents_shared.sandbox_memory_artifacts._MemoryFlushLock",
           "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync"
         }
       },
@@ -3158,6 +3208,7 @@
           "class FileSearchCallItem(_HostedCallItem):\n    type: Literal['file_search_call']\n    queries: list[str]\n    results: list[dict[str, JsonValue]] | None",
           "class CodeInterpreterCallItem(_HostedCallItem):\n    type: Literal['code_interpreter_call']\n    container_id: str\n    code: str | None\n    outputs: list[dict[str, JsonValue]] | None",
           "class ShellCallItem(_HostedCallItem):\n    type: Literal['shell_call']\n    call_id: str\n    action: dict[str, JsonValue]",
+          "class LocalShellCallItem(TypedDict):\n    type: Literal['local_shell_call']\n    id: str\n    turn_id: str\n    call_id: str | None\n    action: dict[str, JsonValue]\n    status: str",
           "class ShellCallOutputItem(_HostedCallItem):\n    type: Literal['shell_call_output']\n    call_id: str\n    output: list[dict[str, JsonValue]]",
           "class ImageGenerationCallItem(_HostedCallItem):\n    type: Literal['image_generation_call']\n    result: str | None\n    revised_prompt: str | None",
           "class FunctionCallItem(TypedDict):\n    type: Literal['function_call']\n    id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue\n    status: FunctionCallStatus",
@@ -3176,7 +3227,7 @@
           "class InterruptSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['interrupt_subagent_call']",
           "class CloseSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['close_subagent_call']",
           "class WaitForSubagentsCallItem(_SubagentCallItem):\n    type: Literal['wait_for_subagents_call']\n    sender_agent_id: str",
-          "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | ShellCallOutputItem | ImageGenerationCallItem)",
+          "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | LocalShellCallItem | ShellCallOutputItem | ImageGenerationCallItem)",
           "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile | _InputAudio]",
           "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | ToolSearchCallItem | ToolSearchOutputItem | UserMessageItem)"
         ],
@@ -4826,7 +4877,7 @@
       "agents.classic.sandbox.session.sandbox_session_state": {
         "declarations": [
           "SessionStateClass = type['SandboxSessionState']",
-          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
+          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _native_memory_flush_lock: _MemoryFlushLock = PrivateAttr(default_factory=_MemoryFlushLock)\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -4836,11 +4887,13 @@
           "from typing_extensions import Self",
           "from agents.classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from agents.classic.sandbox.manifest import Manifest",
-          "from agents.classic.sandbox.snapshot import SnapshotBase"
+          "from agents.classic.sandbox.snapshot import SnapshotBase",
+          "from .sandbox_memory_artifacts import _MemoryFlushLock"
         ],
         "references": {
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
+          "_MemoryFlushLock": "_agents_shared.sandbox_memory_artifacts._MemoryFlushLock",
           "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync"
         }
       },
@@ -5331,6 +5384,9 @@
       "NativeProvider",
       "NativeRole",
       "NativeRoleTool",
+      "NativeRoleToolInvocation",
+      "NativeRoleToolResult",
+      "NativeRoleToolStreamEvent",
       "NativeStreamingModel",
       "NativeToolCall",
       "NetworkPolicy",
@@ -5445,7 +5501,7 @@
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",
       "from .model_context import HostedPromptReference as HostedPromptReference, HostedPromptSource as HostedPromptSource, ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",
       "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, ModelRetryAdviceRequest as ModelRetryAdviceRequest, NativeModel as NativeModel, NativeStreamingModel as NativeStreamingModel, ResponsesModel as ResponsesModel",
-      "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole, NativeRoleTool as NativeRoleTool",
+      "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole, NativeRoleTool as NativeRoleTool, NativeRoleToolInvocation as NativeRoleToolInvocation, NativeRoleToolResult as NativeRoleToolResult, NativeRoleToolStreamEvent as NativeRoleToolStreamEvent",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
       "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",
       "from .rate_limits import ApiRateLimits as ApiRateLimits, ApiRateLimitWindow as ApiRateLimitWindow, CodexPlanCredits as CodexPlanCredits, CodexPlanLimit as CodexPlanLimit, CodexPlanSpendLimit as CodexPlanSpendLimit, CodexPlanUsage as CodexPlanUsage, CodexPlanWindow as CodexPlanWindow",

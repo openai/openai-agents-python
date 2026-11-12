@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -86,10 +87,21 @@ def test_release_bot_uses_scoped_app_without_executing_candidate() -> None:
 
 
 @pytest.mark.parametrize(
-    ("tag", "wheel_version"), [("v0.24.0a1", "0.24.0a1"), ("v0.24.0-alpha.2", "0.24.0a2")]
+    ("tag", "wheel_version", "requested_platform", "released_platform"),
+    [
+        ("v0.24.0a1", "0.24.0a1", "win_amd64", "win_amd64"),
+        ("v0.24.0-alpha.2", "0.24.0a2", "win_amd64", "win_amd64"),
+        ("v0.24.0-alpha.2", "0.24.0a2", "manylinux_2_28_x86_64", "manylinux_2_28_x86_64"),
+        ("v0.24.0a1", "0.24.0a1", "manylinux_2_28_x86_64", "manylinux_2_39_x86_64"),
+    ],
 )
 def test_private_alpha_download_uses_tag_and_canonical_wheel_name(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tag: str, wheel_version: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tag: str,
+    wheel_version: str,
+    requested_platform: str,
+    released_platform: str,
 ) -> None:
     workflow = yaml.load(
         (ROOT / ".github/workflows/alpha-install.yml").read_text(), Loader=yaml.BaseLoader
@@ -97,25 +109,23 @@ def test_private_alpha_download_uses_tag_and_canonical_wheel_name(
     script = workflow["jobs"]["install"]["steps"][1]["run"]
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ALPHA_TAG", tag)
-    monkeypatch.setenv("WHEEL_PLATFORM", "win_amd64")
+    monkeypatch.setenv("WHEEL_PLATFORM", requested_platform)
     monkeypatch.setenv("GITHUB_REPOSITORY", "example/preview")
     monkeypatch.setenv("GITHUB_SHA", "example-sha")
     monkeypatch.setenv("GITHUB_ENV", str(tmp_path / "github-env"))
+    wheel = f"openai_agents-{wheel_version}-cp310-abi3-{released_platform}.whl"
+    checksum = sha256(b"fixture wheel").hexdigest()
     commands: list[list[str]] = []
-    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: commands.append(command))
+
+    def download_release(command: list[str], **kwargs: object) -> None:
+        commands.append(command)
+        if command[-1] == "SHA256SUMS":
+            (tmp_path / "SHA256SUMS").write_text(f"{checksum}  {wheel}\n")
+
+    monkeypatch.setattr(subprocess, "run", download_release)
 
     exec(compile(script, "alpha-install.yml", "exec"), {})
 
-    assert commands[0] == [
-        "gh",
-        "release",
-        "download",
-        tag,
-        "--repo",
-        "example/preview",
-        "--pattern",
-        f"openai_agents-{wheel_version}-cp310-abi3-win_amd64.whl",
-        "--pattern",
-        "SHA256SUMS",
-    ]
+    download = ["gh", "release", "download", tag, "--repo", "example/preview", "--pattern"]
+    assert commands[:2] == [[*download, "SHA256SUMS"], [*download, wheel]]
     assert (tmp_path / "github-env").read_text() == f"WHEEL_VERSION={wheel_version}\n"

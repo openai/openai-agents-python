@@ -514,6 +514,7 @@ def native_bundle_identity(project):
         ".github/workflows/codex-python-qualify.yml",
         ".github/actions/setup-native/action.yml",
         ".github/scripts/download-native-snapshot.py",
+        ".github/scripts/install-linux-native-build-tools.sh",
         ".github/scripts/native-dependencies.py",
         ".github/scripts/detect-changes.sh",
         "packages/codex/tests/fixtures/exec_server.rs",

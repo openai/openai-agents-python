@@ -245,6 +245,20 @@ async def test_exporter_caps_exponential_backoff_within_the_delivery_budget():
     assert times[-1] - times[0] >= 0.045
 
 
+async def test_exporter_default_budget_refuses_a_retry_beyond_its_deadline():
+    with collector([503, 200]) as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-key",
+            endpoint=endpoint,
+            max_retries=1,
+            retry_delay_ms=1000,
+            max_retry_delay_ms=1000,
+        )
+        with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
+            await exporter.on_trace_event(completed_event())
+    assert len(received) == 1
+
+
 async def test_exporter_backoff_cannot_extend_the_delivery_deadline():
     with collector([503, 200]) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(

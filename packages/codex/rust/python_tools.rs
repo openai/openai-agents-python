@@ -285,6 +285,7 @@ enum PreparationReply {
         oneshot::Sender<std::result::Result<Option<codex_extension_api::CompactionResult>, ()>>,
     ),
     CompactionPolicy(oneshot::Sender<std::result::Result<Option<bool>, ()>>),
+    ManagedAgentResult(oneshot::Sender<std::result::Result<Option<String>, ()>>),
     Completion {
         reply: oneshot::Sender<std::result::Result<Option<String>, ()>>,
         stop: crate::native_interception::CapturedTurnStop,
@@ -303,6 +304,7 @@ impl PreparationReply {
             Self::Compaction(reply) => reply.is_closed(),
             Self::CompactionPolicy(reply) => reply.is_closed(),
             Self::Completion { reply, .. } => reply.is_closed(),
+            Self::ManagedAgentResult(reply) => reply.is_closed(),
         }
     }
 }
@@ -5683,6 +5685,12 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                     let _ = tools.interception.set(Arc::downgrade(&control));
                     control.bind_context_tools(&tools);
                 }
+                input.thread_store.insert(
+                    codex_core::managed_agent_result::ManagedAgentResultGate(Arc::new(
+                        ManagedResultBridge,
+                    )),
+                );
+
                 let _graph = tools.family.graph.lock().expect("Python graph poisoned");
                 tools
                     .family
@@ -10384,4 +10392,100 @@ pub fn check_raw_operation(operation: &str) -> Result<()> {
         "{operation} is unsupported for replaceable tool sessions; use Session.submit"
     );
     Ok(())
+}
+
+struct ManagedResultBridge;
+impl codex_core::managed_agent_result::ManagedAgentResultCallback for ManagedResultBridge {
+    fn settle<'a>(
+        &'a self,
+        input: codex_core::managed_agent_result::ManagedAgentResultInput<'a>,
+    ) -> futures_util::future::BoxFuture<'a, std::result::Result<Option<String>, ()>> {
+        Box::pin(async move {
+            let tools = input.thread_store.get::<PythonTools>().ok_or(())?;
+            tools.managed_agent_result(input).await.map_err(|_| ())
+        })
+    }
+}
+
+impl PythonTools {
+    async fn managed_agent_result(
+        self: &Arc<Self>,
+        input: codex_core::managed_agent_result::ManagedAgentResultInput<'_>,
+    ) -> Result<Option<String>> {
+        let mut source_metadata = self.source_metadata(Some(input.step_store))?;
+        if !source_metadata.contains_key("generation") {
+            source_metadata.insert(
+                "generation".into(),
+                json!(self.generation_for_step(Some(input.step_store))?.id),
+            );
+        }
+        let owner = self.admission_ready(input.parent_turn_id)?;
+        let mut items = None;
+        let mut items_error = None;
+        let mut capture_root_turn_id = None;
+        if let Some(capture) = &input.result.items {
+            capture_root_turn_id = capture.root_turn_id.clone();
+            match &capture.items {
+                Ok(raw) => match serde_json::from_str::<Value>(raw) {
+                    Ok(value) => items = Some(value),
+                    Err(_) => {
+                        items_error = Some("Managed child items could not be decoded".to_owned())
+                    }
+                },
+                Err(error) => items_error = Some(error.clone()),
+            }
+        }
+        self.exchange_preparation(
+            owner,
+            None,
+            Some(input.cancellation),
+            [
+                "Expired managed result owner",
+                "Managed result callback reader closed",
+                "Managed result callback cancelled",
+            ],
+            PreparationReply::ManagedAgentResult,
+            |id| {
+                let mut request = json!({"id":input.parent_turn_id, "msg":{
+                    "type":"_sdk_managed_agent_result", "turn_id":input.parent_turn_id,
+                    "thread":input.parent_thread_id, "instance":self.instance, "step_id":id,
+                    "call_id":input.call_id, "tool_name":input.tool_name,
+                    "role":input.role, "source":input.source,
+                    "child_thread_id":input.result.thread_id.to_string(),
+                    "child_turn_id":input.result.turn_id, "child_status":input.result.status,
+                    "tool_completion":input.result.output,
+                    "capture_root_turn_id":capture_root_turn_id,
+                    "items":items, "items_error":items_error}});
+                request["msg"]
+                    .as_object_mut()
+                    .expect("managed result request")
+                    .extend(source_metadata);
+                request
+            },
+            |result| result.map_err(|_| anyhow::anyhow!("Managed result callback failed")),
+        )
+        .await
+    }
+
+    pub(crate) fn reply_managed_agent_result(
+        self: &Arc<Self>,
+        id: u64,
+        output: Option<String>,
+        error: bool,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        ensure!(
+            !error || output.is_none(),
+            "Conflicting managed result reply"
+        );
+        let PreparationReply::ManagedAgentResult(reply) =
+            self.step_owner(thread, instance)?.take_preparation(id)?
+        else {
+            anyhow::bail!("Invalid managed result reply");
+        };
+        reply
+            .send(if error { Err(()) } else { Ok(output) })
+            .map_err(|_| anyhow::anyhow!("Expired managed result callback"))
+    }
 }
