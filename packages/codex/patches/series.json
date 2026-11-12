@@ -717,6 +717,10 @@
       "sha256": "36d245c076fdae420316ecd26218c7039307ec4877b385a30e769cda0cfc02f9"
     },
     {
+      "path": "sdk-tracing-id-annotations.patch",
+      "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
+    },
+    {
       "path": "sdk-chat-completions-raw-response.patch",
       "sha256": "5adb96468cc0c98a5516ebec5acb2afdbd33129160b7705497cb83601063713c"
     },
@@ -725,5 +729,5 @@
       "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
     }
   ],
-  "result_tree": "88ed6ea768d83a20ab5c36ae4a7f884ea0bacdfd"
+  "result_tree": "96dae4ba85d0c98d777ed41d18f4d6675c1e79f4"
 }
