@@ -102,6 +102,7 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
+from ._managed_tool_stream import _ManagedToolPrefix, _ManagedToolStream
 from ._managed_workspace import (
     ManagedWorkspaceCheckpoint,
     _capture_retired_workspace,
@@ -230,6 +231,9 @@ from .native_agents import (
     ChildInvocation as ChildInvocation,
     ChildStepContext as ChildStepContext,
     NativeAgents as NativeAgents,
+    NativeRoleToolInvocation,
+    NativeRoleToolResult,
+    _native_agent_options,
 )
 from .native_interception import (
     Allow as Allow,
@@ -249,6 +253,7 @@ from .observation import (
     ExecutionItemCompleted as ExecutionItemCompleted,
     HostedToolCallProgress,
     ModelOutputItemCompleted,
+    Observation,
     OutputAccepted as OutputAccepted,
     OutputTextDelta as OutputTextDelta,
     RawProviderEvent as RawProviderEvent,
@@ -1222,6 +1227,7 @@ class _ChildCallbacks:
     run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     model_run_usage: _UsageCollector = field(default_factory=_UsageCollector, repr=False)
     observation_after: int = 0
+    managed_stream_prefix: _ManagedToolPrefix | None = field(default=None, repr=False)
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
@@ -4266,30 +4272,7 @@ class Session(Generic[ContextT, OutputT]):
                     "_input_error_tool_slots": restored_catalog.input_error_slots(
                         run_formatter=tool_error_formatter is not None
                     ),
-                    **(
-                        {
-                            "_native_agent_roles": [
-                                role.name for role in native_agents.additional_roles
-                            ],
-                            "_native_agent_max_depth": native_agents.max_depth,
-                            **(
-                                {
-                                    "_native_agent_tools": [
-                                        {
-                                            "name": tool.name,
-                                            "role": tool.role,
-                                            "description": tool.description,
-                                        }
-                                        for tool in native_agents.managed_tools
-                                    ],
-                                }
-                                if native_agents.managed_tools
-                                else {}
-                            ),
-                        }
-                        if native_agents is not None
-                        else {}
-                    ),
+                    **_native_agent_options(native_agents),
                     "tool_policy": {
                         "allowed_mcp_tools": [
                             [server.name, raw, ref]
@@ -4575,7 +4558,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._project_guidance = project_guidance
                 if executor is not None and executor.writable_roots is not None:
                     session._writable_roots = _writable_roots(executor.writable_roots)
-                session._native_agents = native_agents
+                session._bind_native_agents(native_agents)
                 session._storage = storage
                 if checkpoint is not None:
                     await session._restore_opening_checkpoint(
@@ -4998,6 +4981,7 @@ class Session(Generic[ContextT, OutputT]):
         self._writable_roots: tuple[str, ...] | None = None
         self._executor_termination_attempted = False
         self._native_agents: NativeAgents[Any] | None = None
+        self._managed_tool_streams: dict[str, _ManagedToolStream] = {}
         self._interception: _NativeInterception | None = None
         self._input_guardrails: tuple[InputGuardrail[Any], ...] = ()
         self._output_guardrails: tuple[OutputGuardrail[Any], ...] = ()
@@ -9959,6 +9943,7 @@ class Session(Generic[ContextT, OutputT]):
             state.stopping = True
             for callback in state.callbacks:
                 cancel_once(callback)
+            await self._join_managed_child_stream(state)
             await asyncio.shield(state.completion)
             if state.cleanup_error is None and confirmed is True:
                 return True
@@ -11438,6 +11423,18 @@ class Session(Generic[ContextT, OutputT]):
                 ChildInvocation(self.id, child_id, instance, turn_id),
                 observation_after=self._observations.sequence,
             )
+            if turn_id not in self._managed_tool_streams:
+                limits = [
+                    tool.on_stream_max_pending_events
+                    for tool in self._native_agents.managed_tools
+                    if tool.on_stream is not None
+                ]
+                if limits:
+                    state.managed_stream_prefix = _ManagedToolPrefix(
+                        None
+                        if None in limits
+                        else max(limit for limit in limits if limit is not None)
+                    )
             self._child_callbacks[key] = state
             self._observations.append(
                 TurnStarted(
@@ -11458,6 +11455,13 @@ class Session(Generic[ContextT, OutputT]):
             )
             state.request_keys.append(json.dumps({name: request[name] for name in fields}))
         return state
+
+    async def _join_managed_child_stream(self, state: _ChildCallbacks) -> None:
+        state.managed_stream_prefix = None
+        stream = self._managed_tool_streams.get(state.handle.turn_id)
+        if stream is not None and stream.submission_id == state.handle.submission_id:
+            stream.abort()
+            await asyncio.gather(stream.task, return_exceptions=True)
 
     async def _stop_child_callback_owner(self, state: _ChildCallbacks) -> None:
         state.stopping = True
@@ -11490,6 +11494,7 @@ class Session(Generic[ContextT, OutputT]):
                 if await self._native._cancel_child_turn(native) is None:
                     raise NativeError("Child cancellation cleanup failed")
         finally:
+            await self._join_managed_child_stream(state)
             if state.policy_stop and not self._closing:
                 if state.native_instance is None:
                     raise NativeError("Stopped child has no native incarnation receipt")
@@ -11636,6 +11641,270 @@ class Session(Generic[ContextT, OutputT]):
                 else None,
             )
         )
+
+    def _bind_native_agents(self, declaration: NativeAgents[Any] | None) -> None:
+        self._native_agents = declaration
+        if declaration is not None and any(
+            tool.on_stream is not None for tool in declaration.managed_tools
+        ):
+            self._observations.on_record = weakref.WeakMethod(self._observe_managed_tool)
+
+    def _observe_managed_tool(self, event: Observation) -> None:
+        stream = self._managed_tool_streams.get(getattr(event, "turn_id", ""))
+        if stream is None:
+            for child in self._child_callbacks.values():
+                if (
+                    child.handle.turn_id == getattr(event, "turn_id", None)
+                    and child.handle.submission_id == getattr(event, "submission_id", None)
+                    and child.managed_stream_prefix is not None
+                ):
+                    if isinstance(event, TurnFinished):
+                        child.managed_stream_prefix = None
+                    else:
+                        child.managed_stream_prefix.append(event)
+                    break
+            return
+        if getattr(event, "submission_id", None) != stream.submission_id:
+            return
+        stream.append(event)
+        if isinstance(event, TurnFinished):
+            stream.finish()
+
+    def _register_managed_tool_stream(self, event: dict[str, Any]) -> None:
+        message = event["msg"]
+        if self._closing or self._native_agents is None:
+            return
+        child_id, instance = event.get("subagent_id"), event.get("subagent_incarnation")
+        child_turn = message["child_turn_id"]
+        if (
+            not child_id
+            or not instance
+            or child_id != message["child_thread_id"]
+            or child_turn != event["id"]
+            or child_turn in self._managed_tool_streams
+        ):
+            return
+        tool = next(
+            (
+                tool
+                for tool in self._native_agents.managed_tools
+                if tool.name == message["tool_name"] and tool.role == message["role"]
+            ),
+            None,
+        )
+        if tool is None or tool.on_stream is None:
+            return
+        parent_thread, parent_turn = message["parent_thread_id"], message["parent_turn_id"]
+        parent = (
+            self._active
+            if parent_thread == self.id
+            else next(
+                (
+                    owner
+                    for owner in self._child_callbacks.values()
+                    if owner.handle.child_id == parent_thread
+                    and owner.handle.turn_id == parent_turn
+                    and not owner.stopping
+                ),
+                None,
+            )
+        )
+        if (
+            parent is None
+            or parent.handle is None
+            or parent.handle.turn_id != parent_turn
+            or parent.stopping
+            or parent.failure.done()
+        ):
+            return
+        invocation: NativeRoleToolInvocation = {
+            "tool_name": tool.name,
+            "role": tool.role,
+            "input": message["input"],
+            "native_call_id": message["native_call_id"],
+            "parent_thread_id": parent_thread,
+            "parent_turn_id": parent_turn,
+            "child_thread_id": child_id,
+            "child_turn_id": child_turn,
+            "cell_id": message["cell_id"],
+            "runtime_tool_call_id": message["runtime_tool_call_id"],
+        }
+        callback = tool.on_stream
+        tracing_owner = parent if isinstance(parent, _Submission) else self._active
+        if isinstance(parent, _ChildCallbacks) and (
+            tracing_owner is None
+            or parent.root_turn_id is None
+            or self._usage_roots.get(parent.root_turn_id) is not tracing_owner.run_usage
+        ):
+            tracing_owner = None
+        tracing_context = (
+            tracing_owner.tracing.context
+            if tracing_owner is not None and tracing_owner.tracing is not None
+            else None
+        )
+
+        def admitted() -> bool:
+            return not (
+                self._closing
+                or self._closed
+                or parent.stopping
+                or parent.failure.done()
+                or parent.completion.done()
+            )
+
+        async def observe(value: Any) -> None:
+            guard = _Invocation(self)
+            token = _invocation.set(guard)
+            try:
+                if admitted():
+                    with _owned_span("managed stream callback", "callback", tracing_context):
+                        await _call_callback(callback, admitted, value)
+            finally:
+                guard.active = False
+                _invocation.reset(token)
+
+        def overflow() -> None:
+            child = self._child_callbacks.get((child_id, instance, child_turn))
+            if child is not None:
+                parent.add_callback(asyncio.create_task(self._stop_child_callback_owner(child)))
+
+        stream = _ManagedToolStream(
+            invocation,
+            ChildInvocation(self.id, child_id, instance, child_turn).submission_id,
+            observe,
+            tool.on_stream_max_pending_events,
+            overflow,
+            admit=admitted,
+        )
+        self._managed_tool_streams[child_turn] = stream
+        parent.add_callback(stream.task)
+
+        def retired(task: asyncio.Task[None]) -> None:
+            if (parent.stopping or parent.failure.done()) and self._managed_tool_streams.get(
+                child_turn
+            ) is stream:
+                self._managed_tool_streams.pop(child_turn)
+
+        stream.task.add_done_callback(retired)
+        child = self._child_callbacks.get((child_id, instance, child_turn))
+        if child is not None and child.managed_stream_prefix is not None:
+            prefix, child.managed_stream_prefix = child.managed_stream_prefix, None
+            prefix.replay(stream)
+        self._child_callback_state(child_id, instance, child_turn)
+        self._observations.notify()
+
+    async def _managed_agent_result(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        output = None
+        failed = True
+        stream = None
+        guard = _Invocation(self)
+        token = _invocation.set(guard)
+
+        def admitted() -> bool:
+            return not (
+                self._closing
+                or self._closed
+                or state.stopping
+                or state.failure.done()
+                or state.completion.done()
+                or _native_callback_cancelled(state)
+            )
+
+        try:
+            self._native._check_step(message["step_id"], message["thread"], message["instance"])
+            if not admitted() or self._native_agents is None:
+                return
+            self._catalog_for_message(message, message["generation"])
+            tool = next(
+                (
+                    tool
+                    for tool in self._native_agents.managed_tools
+                    if tool.name == message["tool_name"]["name"] and tool.role == message["role"]
+                ),
+                None,
+            )
+            if tool is None or (tool.on_stream is None and tool.extract_result is None):
+                raise NativeError("Managed role result callback is unavailable")
+            if tool.on_stream is not None:
+                while stream is None:
+                    changed = self._observations.changed
+                    stream = self._managed_tool_streams.get(message["child_turn_id"])
+                    if stream is not None:
+                        break
+                    if not admitted():
+                        raise asyncio.CancelledError()
+                    # The native result and child FIFO use separate delivery channels.
+                    # Keep reading events while this owned callback awaits its marker.
+                    await changed.wait()
+                origin = stream.invocation
+                source = message["source"]
+                if (
+                    origin["parent_thread_id"] != message["thread"]
+                    or origin["parent_turn_id"] != message["turn_id"]
+                    or origin["native_call_id"] != message["call_id"]
+                    or origin["child_thread_id"] != message["child_thread_id"]
+                    or origin["cell_id"] != source.get("cell_id")
+                    or origin["runtime_tool_call_id"] != source.get("runtime_tool_call_id")
+                ):
+                    raise NativeError("Managed child stream does not match its native owner")
+                await stream.drain()
+            if not admitted():
+                raise asyncio.CancelledError()
+            status = message["child_status"]
+            if (
+                tool.extract_result is not None
+                and isinstance(status, dict)
+                and "completed" in status
+            ):
+                if message["items"] is None or message["items_error"] is not None:
+                    raise NativeError("Managed child items are unavailable")
+                _, items = project_history(
+                    [
+                        {"type": "turn_context", "payload": {"turn_id": message["child_turn_id"]}},
+                        *(entry["record"] for entry in message["items"]),
+                    ],
+                    message["child_thread_id"],
+                    tool_success_by_record={
+                        index + 1: entry["tool_success"]
+                        for index, entry in enumerate(message["items"])
+                        if isinstance(entry.get("tool_success"), bool)
+                    },
+                )
+                completion = message["tool_completion"]
+                result: NativeRoleToolResult = {
+                    "role": tool.role,
+                    "thread_id": message["child_thread_id"],
+                    "turn_id": message["child_turn_id"],
+                    "items": tuple(items),
+                    "final_output": completion["final_output"]
+                    if completion is not None
+                    else status["completed"] or "",
+                }
+                with _owned_span(
+                    "managed result callback", "callback", message.get("tracing_context")
+                ):
+                    output = await _call_callback(tool.extract_result, admitted, result)
+                if not isinstance(output, str):
+                    raise TypeError("extract_result must return a string")
+            failed = False
+        except Exception:
+            # Native returns a sanitized tool-local failure and keeps the parent usable.
+            output = None
+        finally:
+            guard.active = False
+            _invocation.reset(token)
+            if (
+                stream is not None
+                and self._managed_tool_streams.get(message["child_turn_id"]) is stream
+            ):
+                self._managed_tool_streams.pop(message["child_turn_id"])
+            try:
+                self._native._reply_managed_agent_result(
+                    message["step_id"], output, message["thread"], message["instance"], error=failed
+                )
+            except RuntimeError:
+                # The original native invocation can retire before its queued reply.
+                pass
 
     async def _read_child_event(self, event: dict[str, Any]) -> None:
         if self._closing:
@@ -13620,6 +13889,7 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_before_complete": self._before_complete,
             "_sdk_tool_completion": self._propose_tool_completion,
             "_sdk_tool_batch_completion": self._propose_tool_completion,
+            "_sdk_managed_agent_result": self._managed_agent_result,
         }
         reader_failure: BaseException | None = None
         manual_shutdown = False
@@ -13733,6 +14003,9 @@ class Session(Generic[ContextT, OutputT]):
                         failed.terminal.set_result(message)
                     self._broken = True
                     self._observations.notify()
+                    continue
+                if message.get("type") == "sdk_managed_tool_started":
+                    self._register_managed_tool_stream(event)
                     continue
                 if message.get("type") == "sdk_subagent_lifecycle":
                     self._observations.append(
@@ -16547,6 +16820,10 @@ class Session(Generic[ContextT, OutputT]):
             self._owned_provider = None
         self._model_api_key = None
         self._native_options = None
+        for stream in self._managed_tool_streams.values():
+            stream.abort()
+        self._managed_tool_streams.clear()
+        self._observations.on_record = None
         self._model_context_snapshots.clear()
         self._profile_catalogs.clear()
         self._catalog_bindings.clear()
