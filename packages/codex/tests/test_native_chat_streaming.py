@@ -417,3 +417,47 @@ async def test_native_chat_usage_stays_out_of_responses_originals(streaming):
     assert result.run_usage.input_tokens == 2
     assert result.run_usage.output_tokens == 1
     assert result.run_usage.total_tokens == 3
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_native_chat_retains_measured_cache_write_usage(streaming):
+    usage = {
+        "prompt_tokens": 11,
+        "completion_tokens": 3,
+        "total_tokens": 14,
+        "prompt_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 5},
+    }
+
+    async def frames():
+        yield chunk({"content": "done"}, "stop")
+        yield chunk(usage=usage)
+
+    async def create(**body):
+        if body.get("stream"):
+            return frames()
+        return {
+            "id": "chat-completed",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": usage,
+        }
+
+    async with (
+        timeout(15),
+        NativeProvider(
+            model_backend=ChatCompletionsModel(client(create), stream=streaming)
+        ) as provider,
+    ):
+        result = await Agent(instructions="Reply.", model="fixture", provider=provider).run(
+            "Reply."
+        )
+    assert result.run_usage.cache_write_input_tokens == 5
+    assert result.run_usage.cached_input_tokens == 2
+    assert result.run_usage.input_tokens == 11
+    assert result.run_usage.total_tokens == 14

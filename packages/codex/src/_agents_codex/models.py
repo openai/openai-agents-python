@@ -1233,7 +1233,10 @@ class ChatCompletionsModel:
                                 "output_tokens": measured["output_tokens"],
                                 "total_tokens": measured["total_tokens"],
                                 "input_tokens_details": {
-                                    "cached_tokens": measured.get("cached_input_tokens", 0)
+                                    "cached_tokens": measured.get("cached_input_tokens", 0),
+                                    "cache_write_tokens": measured.get(
+                                        "cache_write_input_tokens", 0
+                                    ),
                                 },
                                 "output_tokens_details": {
                                     "reasoning_tokens": measured.get("reasoning_output_tokens", 0)
