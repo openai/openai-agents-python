@@ -405,6 +405,29 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="SQLiteSessionStore requires POSIX locking")
+async def test_native_hosted_mcp_custom_storage_matches_null_caller(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    event = approval()
+    event["item"]["caller"] = None
+    responses.respond(event)
+    responses.respond(assistant_output("Decision received."))
+    storage = CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
+    tool = declaration(callback=lambda _: {"approve": True})
+    async with timeout(20), provider(responses) as native:
+        agent = Agent(instructions="Use docs.", provider=native, model="gpt-5.2", tools=[tool])
+        async with agent.session(storage=storage) as session:
+            result = await (await session.submit("Lookup.")).get_result()
+            assert result.final_output == "Decision received."
+
+    [receipt] = replies(responses)
+    assert receipt["approval_request_id"] == "approval_1"
+    assert receipt["approve"] is True
+    assert receipt.get("caller") is None
+
+
+@pytest.mark.asyncio
 async def test_native_hosted_mcp_manual_reply_is_typed_single_use_and_keeps_original_caller(
     responses: ResponsesFixture,
 ) -> None:

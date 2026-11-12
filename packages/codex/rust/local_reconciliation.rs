@@ -40,9 +40,10 @@ pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>
         | ResponseItem::CustomToolCallOutput { call_id: call, .. }
         | ResponseItem::ApplyPatchCallOutput { call_id: call, .. }
         | ResponseItem::ComputerCallOutput { call_id: call, .. } => call,
-        ResponseItem::McpApprovalResponse { approval_request_id, .. } => {
-            approval_request_id.as_str()
-        }
+        ResponseItem::McpApprovalResponse {
+            approval_request_id,
+            ..
+        } => approval_request_id.as_str(),
         ResponseItem::ShellCallOutput {
             provider_fields, ..
         } => shell_call_id(provider_fields)?,
@@ -98,7 +99,11 @@ pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseIt
                 ..
             },
         ) => {
-            expected.as_str() == actual.as_str() && provider_fields.get("caller") == caller.as_ref()
+            expected.as_str() == actual.as_str()
+                && provider_fields
+                    .get("caller")
+                    .filter(|value| !value.is_null())
+                    == caller.as_ref().filter(|value| !value.is_null())
         }
         (
             ResponseItem::ShellCall {
