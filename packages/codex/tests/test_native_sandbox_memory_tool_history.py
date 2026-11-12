@@ -64,6 +64,22 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
             tools=[lookup_preference],
         )
         async with agent.session(environment=environment) as session:
+            history = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=history.revision,
+                keep=history.total,
+                items=[
+                    {
+                        "type": "application_note",
+                        "role": "user",
+                        "value": "PRIVATE_APPLICATION_NOTE",
+                    }
+                ],
+            )
+            assert any(
+                item.get("value") == "PRIVATE_APPLICATION_NOTE"
+                for item in (await session.history_snapshot()).items
+            )
             turn = await session.submit("Check and remember my tone preference.")
             assert (await turn.get_result()).final_output == "Preference checked."
             assert effects == ["tone"]
@@ -85,11 +101,14 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
             assert "SYNTHETIC_TOOL_RESULT" in json.dumps(items[2]["output"])
             assert rollout["terminal_metadata"]["terminal_state"] == "completed"
             assert "PRIVATE_SOURCE_INSTRUCTION" not in lines[0]
+            assert "PRIVATE_APPLICATION_NOTE" not in lines[0]
             assert "Current SDK workspace snapshot" not in lines[0]
             assert (workspace / "memories" / "MEMORY.md").read_text() == consolidation["memory"]
             assert effects == ["tone"]
             assert len(peer.requests) == 4
+            assert "PRIVATE_APPLICATION_NOTE" not in json.dumps(peer.requests[0]["input"])
             phase_one_input = json.dumps(peer.requests[2]["input"])
             assert "source-tool" in phase_one_input
             assert "SYNTHETIC_TOOL_RESULT" in phase_one_input
             assert "PRIVATE_SOURCE_INSTRUCTION" not in phase_one_input
+            assert "PRIVATE_APPLICATION_NOTE" not in phase_one_input

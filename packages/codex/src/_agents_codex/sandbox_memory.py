@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from pydantic import BaseModel, Field
 
 from _agents_shared.sandbox_memory_artifacts import (
+    _INCLUDED_MEMORY_ITEM_TYPES,
     MemoryLayoutConfig as MemoryLayoutConfig,
     RolloutExtractionArtifacts,
     _should_include_memory_item,
@@ -93,7 +94,11 @@ def _memory_transcript(
     for item in snapshot.items:
         kind = item.get("type")
         if kind != "message":
-            if _should_include_memory_item(item):
+            if (
+                isinstance(kind, str)
+                and kind in _INCLUDED_MEMORY_ITEM_TYPES
+                and _should_include_memory_item(item)
+            ):
                 messages.append(dict(item))
             continue
         role = item.get("role")
