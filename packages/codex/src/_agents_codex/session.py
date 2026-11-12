@@ -1334,6 +1334,7 @@ class _RestoreDeclaration:
     resume_budget: RunBudget | None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
+    sealed_checkpoint: str | None = None
     verify_remembered_approvals: Callable[[SessionState], bool] | None = None
 
 
@@ -4113,9 +4114,16 @@ class Session(Generic[ContextT, OutputT]):
                     "Run outside that sandboxed environment or remove unused proxy settings."
                 )
             if manual_restore:
-                _check_restored_hosted_mcp(
-                    saved, operation_declaration.tools, hosted_restore_grants
-                )
+                # DeferredTools.start owns the selection in the exact checkpoint it just sealed.
+                if (
+                    restored_hosted_mcp is not None
+                    or selected is None
+                    or selected.sealed_checkpoint is None
+                    or saved.to_json() != selected.sealed_checkpoint
+                ):
+                    _check_restored_hosted_mcp(
+                        saved, operation_declaration.tools, hosted_restore_grants
+                    )
                 _check_restored_tool_context(
                     restored_tools, restored_mcp, saved.operation_tools, context
                 )
