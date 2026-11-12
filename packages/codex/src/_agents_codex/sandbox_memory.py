@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, Annotated, Any
 from pydantic import BaseModel, Field
 
 from _agents_shared.sandbox_memory_artifacts import (
+    _EXCLUDED_MEMORY_ITEM_TYPES,
     _INCLUDED_MEMORY_ITEM_TYPES,
     MemoryLayoutConfig as MemoryLayoutConfig,
     RolloutExtractionArtifacts,
-    _should_include_memory_item,
     format_raw_memory,
     format_rollout_summary,
     validate_rollout_artifacts,
@@ -85,6 +85,19 @@ def _bounded_json(value: object) -> str:
     return encoded
 
 
+def _memory_text_parts(parts: list[Any]) -> list[dict[str, str]]:
+    content: list[dict[str, str]] = []
+    for part in parts:
+        if (
+            not isinstance(part, dict)
+            or part.get("type") not in ("input_text", "output_text")
+            or not isinstance(part.get("text"), str)
+        ):
+            raise ValueError("Native sandbox memory requires text message history")
+        content.append({"type": part["type"], "text": part["text"]})
+    return content
+
+
 def _memory_transcript(
     thread_id: str, snapshot: CanonicalHistorySnapshot, sandbox_id: str
 ) -> dict[str, Any]:
@@ -93,15 +106,39 @@ def _memory_transcript(
     messages: list[dict[str, Any]] = []
     for item in snapshot.items:
         kind = item.get("type")
-        if kind != "message":
-            if (
-                isinstance(kind, str)
-                and kind in _INCLUDED_MEMORY_ITEM_TYPES
-                and _should_include_memory_item(item)
-            ):
-                messages.append(dict(item))
-            continue
         role = item.get("role")
+        if kind == "reasoning" or role in ("developer", "system"):
+            continue
+        if kind == "function_call":
+            call = {key: item.get(key) for key in ("name", "call_id", "arguments")}
+            if not all(isinstance(value, str) for value in call.values()):
+                raise ValueError("Invalid native memory function call")
+            if isinstance(namespace := item.get("namespace"), str):
+                call["namespace"] = namespace
+            messages.append({"type": kind, **call})
+            continue
+        if kind == "function_call_output":
+            call_id, output = item.get("call_id"), item.get("output")
+            if not isinstance(call_id, str) or not isinstance(output, (str, list)):
+                raise ValueError("Invalid native memory function output")
+            messages.append(
+                {
+                    "type": kind,
+                    "call_id": call_id,
+                    "output": _memory_text_parts(output) if isinstance(output, list) else output,
+                }
+            )
+            continue
+        if kind != "message":
+            if isinstance(kind, str) and (
+                kind in _INCLUDED_MEMORY_ITEM_TYPES
+                or kind in _EXCLUDED_MEMORY_ITEM_TYPES
+                or kind in ("file_search_call", "code_interpreter_call")
+            ):
+                raise ValueError(
+                    "Native sandbox memory requires text messages and function tool history"
+                )
+            continue
         if role not in ("user", "assistant"):
             continue
         parts = item.get("content")
@@ -120,16 +157,7 @@ def _memory_transcript(
             ]
             if not parts:
                 continue
-        content: list[dict[str, str]] = []
-        for part in parts:
-            if (
-                not isinstance(part, dict)
-                or part.get("type") not in ("input_text", "output_text")
-                or not isinstance(part.get("text"), str)
-            ):
-                raise ValueError("Native sandbox memory requires text message history")
-            content.append({"type": part["type"], "text": part["text"]})
-        messages.append({"role": role, "content": content})
+        messages.append({"role": role, "content": _memory_text_parts(parts)})
     return {
         "rollout_id": thread_id,
         "native_thread_id": thread_id,
