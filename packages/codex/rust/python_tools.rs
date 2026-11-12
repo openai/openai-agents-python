@@ -6497,6 +6497,16 @@ impl ToolContributor for PythonContributor {
                     request["msg"]["initial_input"] = json!(records);
                 }
             }
+            if step.get::<codex_extension_api::StagedInputPreparation>()
+                .is_some_and(|preparation| preparation.is_for(turn.level_id()))
+            {
+                request["msg"]["staged_input_preparation"] = json!(true);
+            }
+            if let Some(staged) = turn.get::<codex_extension_api::SelectedStagedInput>()
+                && let Some(items) = staged.0.items_for(turn.level_id())
+            {
+                request["msg"]["staged_input"] = json!(items);
+            }
             if let Some(profile) = profile {
                 request["msg"]["profile_id"] = json!(profile.profile_id);
                 request["msg"]["profile_epoch"] = json!(profile.epoch);
