@@ -12274,6 +12274,10 @@ class Session(Generic[ContextT, OutputT]):
         request_id: int,
         active: Callable[[], bool],
     ) -> bool:
+        from .models import _ChatStreamEvent, _RawChatChunk
+
+        started = False
+        observing_chat = False
         produced: Any = None
         iterator: Any = None
         event: Any = None
@@ -12285,19 +12289,39 @@ class Session(Generic[ContextT, OutputT]):
             if produced is None and not active():
                 return False
             iterator = aiter(produced)
-            if not active() or not native._start_model_producer_stream(request_id):
+            if not active():
                 return False
             while active():
                 try:
                     event = await anext(iterator)
                 except StopAsyncIteration:
+                    if not started:
+                        return bool(active() and native._start_model_producer_stream(request_id))
                     return active()
                 if not active():
                     return False
                 if not isinstance(event, Mapping):
                     raise TypeError("NativeModel.stream must yield Responses event mappings")
+                if not started:
+                    chat_stream = isinstance(event, _ChatStreamEvent)
+                    observing_chat = chat_stream and getattr(
+                        request, "_observe_raw_provider_events", False
+                    )
+                    started = (
+                        native._start_model_producer_stream(request_id, chat_stream=True)
+                        if chat_stream
+                        else native._start_model_producer_stream(request_id)
+                    )
+                    if not started:
+                        return False
                 data = json.dumps(dict(event), allow_nan=False)
-                if not await native._push_model_producer_event(request_id, data):
+
+                accepted = (
+                    await native._push_model_producer_event(request_id, data, raw_chat_chunk=True)
+                    if observing_chat and isinstance(event, _RawChatChunk)
+                    else await native._push_model_producer_event(request_id, data)
+                )
+                if not accepted:
                     return False
             return False
         finally:
@@ -12395,7 +12419,11 @@ class Session(Generic[ContextT, OutputT]):
             stream = getattr(backend, "stream", None)
             if callable(stream):
                 failed = not await self._produce_model_stream(
-                    native, stream, request, request_id, active
+                    native,
+                    stream,
+                    request,
+                    request_id,
+                    active,
                 )
                 return
             if not callable(complete):
