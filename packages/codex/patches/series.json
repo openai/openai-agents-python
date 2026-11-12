@@ -893,9 +893,13 @@
       "sha256": "cb1835cce8e8926674ac438a8b6713ec71053c73db1270dd88ee27d763c3322f"
     },
     {
+      "path": "sdk-independent-websocket-base.patch",
+      "sha256": "b29ef217c5eb88d94fc48bb6d6ef2b06c458e6ab6df5ca5cdbfd9e94bb52385a"
+    },
+    {
       "path": "sdk-function-tool-callers.patch",
       "sha256": "21594792346cd2fa805d34ae09d55737c9b8a7f1d3e55c733c4748edbeeafb7d"
     }
   ],
-  "result_tree": "686ed2c5b792b07f65765ac889c24a7dbb318806"
+  "result_tree": "e6c822951aa4a10d0e58fb40b00605da3dd29538"
 }
