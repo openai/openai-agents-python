@@ -245,3 +245,75 @@ async def test_native_response_chain_profile_restore_retains_current_storage():
             await (await session.submit("After.")).get_result()
         assert [request["store"] for request in model.requests] == [True, True]
         assert model.requests[1]["previous_response_id"] == "resp_1"
+
+
+@pytest.mark.parametrize("restore", [False, True])
+async def test_native_rejected_lineage_compaction_keeps_session_usable(restore):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(instructions="Continue.", model="gpt-5.5", provider=provider)
+        mode = {"type": "conversation", "id": "conv_current"}
+        state = None
+        if restore:
+            async with agent.session(provider_history=mode) as original:
+                await (await original.submit("Before.")).get_result()
+                state = await original.save_state()
+        async with agent.session(state=state, provider_history=mode) as session:
+            if not restore:
+                await (await session.submit("Before.")).get_result()
+            before = await session.model_context()
+            with pytest.raises(
+                RuntimeError, match="Compaction is unavailable for provider-managed history"
+            ):
+                await session.compact(summary="Unpublished summary.")
+            after = await session.model_context()
+            assert after.items == before.items
+            await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
+        assert len(model.requests[1]["input"]) == 1
+        assert model.requests[1]["input"][0]["role"] == "user"
+
+
+async def test_native_rewritten_mcp_arguments_do_not_certify_remote_history():
+    from agents import HttpMCP, ReplaceArguments
+    from tests.test_native_mcp_tools import Peer, mcp_call
+
+    peer = Peer(names=("search",))
+    before_calls = []
+
+    def before(_context, _call):
+        before_calls.append(True)
+        return ReplaceArguments({"key": "effective"})
+
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        call = mcp_call("search", "mcp__records", "rewritten")
+        call["item"]["arguments"] = '{"key":"original"}'
+        model.respond(call)
+        model.respond(assistant_output("Must not continue."))
+        async with peer.serve() as url:
+            agent = Agent(
+                instructions="Search.",
+                model="gpt-5.5",
+                provider=provider,
+                model_settings={"store": True},
+                tools=[
+                    HttpMCP(
+                        name="records",
+                        url=url,
+                        tools=["search"],
+                        approval_mode="preapproved",
+                        before=before,
+                    )
+                ],
+            )
+            async with agent.session(provider_history={"type": "previous_response"}) as session:
+                with pytest.raises(NativeError, match="rewritten tool arguments"):
+                    await (await session.submit("Search.")).get_result()
+                assert before_calls == [True]
+                assert len(peer.calls) <= 1
+                assert all(call["arguments"] == {"key": "effective"} for call in peer.calls)
+                assert len(model.requests) == 1
+                with pytest.raises(NativeError):
+                    await (await session.submit("Do not replay.")).get_result()
+                assert len(model.requests) == 1

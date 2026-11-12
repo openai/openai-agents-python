@@ -4776,6 +4776,7 @@ class Session(Generic[ContextT, OutputT]):
                     include_request_attempts=include_request_attempts,
                     include_raw_provider_events=include_raw_provider_events,
                 )
+                session._provider_history = provider_history
                 session._input_guardrails = input_guardrails
                 session._output_guardrails = output_guardrails
                 session._managed_workspace = managed_source
@@ -5181,6 +5182,7 @@ class Session(Generic[ContextT, OutputT]):
             thread._enable_raw_provider_events()
         self._engine = engine
         self._native = thread
+        self._provider_history: ProviderHistory | None = None
         # Issued snapshots belong to this Session's current native thread.
         self._model_context_snapshots: weakref.WeakKeyDictionary[ModelContextSnapshot, str] = (
             weakref.WeakKeyDictionary()
@@ -8384,6 +8386,8 @@ class Session(Generic[ContextT, OutputT]):
         retained items remain in effect.
         """
         self._check_callback_operation("compact its own Session")
+        if self._provider_history is not None:
+            raise RuntimeError("Compaction is unavailable for provider-managed history")
         if (snapshot is None) != (retain is None) or (snapshot is not None and summary is None):
             raise ValueError("Pass snapshot and retain together with a supplied summary")
         if summary is not None:

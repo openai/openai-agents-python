@@ -383,7 +383,7 @@ index cf39953fcfeefa606263eeaa98b1800b2fc6a755..09202f13f81b1e605af46a7ca072c8bd
                          invocation_timeout_ms: None,
                          tool_choice: None,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc9630c910a72 100644
+index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2d0d086bacb68f3c613d028602ac6a589e1ca39f 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -34,6 +34,7 @@ use std::sync::atomic::Ordering;
@@ -601,7 +601,27 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc963
              let request_transport = if prompt.prefer_buffered_response {
                  codex_extension_api::ModelRequestTransport::HttpJson
              } else {
-@@ -2412,8 +2507,13 @@ impl ModelClientSession {
+@@ -2396,6 +2491,19 @@ impl ModelClientSession {
+ 
+             match stream_result {
+                 Ok((request_id, interrupt, events, producer_task, producer_stop)) => {
++                    // Retain provider call semantics before SDK policy interceptors
++                    // can replace arguments or clear the provider's item ID.
++                    let events: codex_extension_api::ModelResponseStream =
++                        if let Some(cursor) = &self.client.provider_history {
++                            let cursor = Arc::clone(cursor);
++                            Box::pin(events.inspect(move |event| {
++                                if let Ok(ResponseEvent::OutputItemDone(item)) = event {
++                                    cursor.observe_wire_output(item);
++                                }
++                            }))
++                        } else {
++                            events
++                        };
+                     let (mut stream, response) = map_response_events(
+                         request_id,
+                         crate::model_request::intercept_stream(events, interceptors),
+@@ -2412,8 +2520,13 @@ impl ModelClientSession {
                      stream.producer_task = producer_task;
                      stream.producer_stop = producer_stop;
                      stream.request_observation = request_observation;
@@ -617,7 +637,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc963
                      return Ok(stream);
                  }
                  Err(ApiError::Transport(unauthorized_transport))
-@@ -2430,6 +2530,7 @@ impl ModelClientSession {
+@@ -2430,6 +2543,7 @@ impl ModelClientSession {
                          response_debug_context.request_id.as_deref(),
                          /*output_items*/ &[],
                      );
@@ -625,7 +645,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc963
                      auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
                          handle_unauthorized(
                              unauthorized_transport,
-@@ -2488,6 +2589,9 @@ impl ModelClientSession {
+@@ -2488,6 +2602,9 @@ impl ModelClientSession {
          inference_trace: &InferenceTraceContext,
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<WebsocketStreamOutcome> {
@@ -635,7 +655,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc963
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
-@@ -2520,6 +2624,7 @@ impl ModelClientSession {
+@@ -2520,6 +2637,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -643,7 +663,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc963
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2615,7 +2720,11 @@ impl ModelClientSession {
+@@ -2615,7 +2733,11 @@ impl ModelClientSession {
              if let Some(turn_state) = self.turn_state.get() {
                  client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
              }
@@ -656,7 +676,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc963
              let (mode, reason) = if continuation.is_some() {
                  ("incremental", "incremental")
              } else {
-@@ -2875,6 +2984,10 @@ impl ModelClientSession {
+@@ -2875,6 +2997,10 @@ impl ModelClientSession {
          service_tier: Option<String>,
          responses_metadata: &CodexResponsesMetadata,
      ) -> Result<()> {
@@ -669,10 +689,10 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc963
          // ordinary request run the awaited context policy before sending input.
 diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f3984b6af472f5f4add2cd9f39c6b6e8fe42398d
+index 0000000000000000000000000000000000000000..fc47b0987962649c673e705f7b2f8b2e4d55bea7
 --- /dev/null
 +++ b/codex-rs/core/src/client/provider_history.rs
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,418 @@
 +use super::*;
 +use codex_protocol::provider_history::{
 +    ProviderHistoryReference, ProviderHistorySelection, ProviderHistoryWindowReceipt,
@@ -709,6 +729,8 @@ index 0000000000000000000000000000000000000000..f3984b6af472f5f4add2cd9f39c6b6e8
 +    input_len: usize,
 +    input_sha256: String,
 +    output_sha256: Vec<String>,
++    admitted_calls: Vec<Option<String>>,
++    wire_calls: Vec<Option<String>>,
 +    stored: bool,
 +    scope: Scope,
 +}
@@ -762,6 +784,54 @@ index 0000000000000000000000000000000000000000..f3984b6af472f5f4add2cd9f39c6b6e8
 +    let mut value = serde_json::json!({"item": plain, "result_metadata": results});
 +    value.sort_all_objects();
 +    Ok(Sha256::digest(serde_json::to_vec(&value)?).into())
++}
++
++fn provider_call(item: &ResponseItem) -> Option<String> {
++    let (kind, call_id, name, namespace, input) = match item {
++        ResponseItem::FunctionCall {
++            call_id,
++            name,
++            namespace,
++            arguments,
++            ..
++        } => (
++            "function_call",
++            serde_json::json!(call_id),
++            serde_json::json!(name),
++            serde_json::json!(namespace),
++            match serde_json::from_str::<serde_json::Value>(arguments) {
++                Ok(value) => serde_json::json!(["json", value]),
++                Err(_) => serde_json::json!(["raw", arguments]),
++            },
++        ),
++        ResponseItem::CustomToolCall {
++            call_id,
++            name,
++            input,
++            ..
++        } => (
++            "custom_tool_call",
++            serde_json::json!(call_id),
++            serde_json::json!(name),
++            serde_json::Value::Null,
++            serde_json::json!(input),
++        ),
++        ResponseItem::ToolSearchCall {
++            call_id, arguments, ..
++        } => (
++            "tool_search_call",
++            serde_json::json!(call_id),
++            serde_json::Value::Null,
++            serde_json::Value::Null,
++            arguments.clone(),
++        ),
++        _ => return None,
++    };
++    let mut value = serde_json::json!([kind, call_id, name, namespace, input]);
++    value.sort_all_objects();
++    Some(hex(Sha256::digest(
++        serde_json::to_vec(&value).expect("JSON provider call serialization"),
++    )))
 +}
 +
 +fn hex(digest: impl AsRef<[u8]>) -> String {
@@ -902,6 +972,8 @@ index 0000000000000000000000000000000000000000..f3984b6af472f5f4add2cd9f39c6b6e8
 +                input_len: full_len,
 +                input_sha256: full_digest,
 +                output_sha256: Vec::new(),
++                admitted_calls: Vec::new(),
++                wire_calls: Vec::new(),
 +                stored: request.store,
 +                scope,
 +            });
@@ -919,14 +991,23 @@ index 0000000000000000000000000000000000000000..f3984b6af472f5f4add2cd9f39c6b6e8
 +        Ok(logical)
 +    }
 +
++    pub(crate) fn observe_wire_output(&self, item: &ResponseItem) {
++        if let Some(pending) = self.state.lock().unwrap().pending.as_mut() {
++            pending.wire_calls.push(provider_call(item));
++        }
++    }
++
 +    pub(crate) fn observe_output(&self, item: &ResponseItem) -> Result<()> {
 +        let digest = hex(item_digest(item)?);
 +        let mut state = self.state.lock().unwrap();
-+        let pending = state.pending.as_mut()
++        let pending = state
++            .pending
++            .as_mut()
 +            .ok_or_else(|| invalid("Provider history has no admitted dispatch"))?;
 +        // Native output admission assigns missing item IDs. Keep the exact item
 +        // entering history, rather than its earlier unannotated transport copy.
 +        pending.output_sha256.push(digest);
++        pending.admitted_calls.push(provider_call(item));
 +        Ok(())
 +    }
 +
@@ -938,10 +1019,20 @@ index 0000000000000000000000000000000000000000..f3984b6af472f5f4add2cd9f39c6b6e8
 +        }
 +        {
 +            let mut state = self.state.lock().unwrap();
-+            if state.pending.as_ref().is_none_or(|pending| {
-+                pending.output_sha256.len() != response.items_added.len()
-+            }) {
++            if state
++                .pending
++                .as_ref()
++                .is_none_or(|pending| pending.output_sha256.len() != response.items_added.len())
++            {
 +                return Err(invalid("Provider history output admission is incomplete"));
++            }
++            let pending = state.pending.as_ref().expect("checked pending admission");
++            if pending.admitted_calls != pending.wire_calls {
++                // The effect may already have run with corrected input. Keep the
++                // durable pending fence instead of acknowledging a stale remote call.
++                return Err(invalid(
++                    "Provider history cannot acknowledge rewritten tool arguments",
++                ));
 +            }
 +            let pending = state
 +                .pending
@@ -979,6 +1070,102 @@ index 0000000000000000000000000000000000000000..f3984b6af472f5f4add2cd9f39c6b6e8
 +        "Provider history anchor validation failed: {error}"
 +    ))
 +}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn call(kind: &str, input: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({
++            "type": kind, "id": "provider-initial", "name": "effect", "call_id": "call", "arguments": input,
++            "input": input,
++        }))
++        .expect("fixture call")
++    }
++
++    #[test]
++    fn function_arguments_compare_json_values_and_ignore_item_ids() {
++        let first = call("function_call", r#"{"a":1,"b":{"x":2}}"#);
++        let mut same = call("function_call", " { \"b\": {\"x\":2}, \"a\":1 } ");
++        same.set_id(None);
++        assert_eq!(provider_call(&first), provider_call(&same));
++        assert_ne!(
++            provider_call(&first),
++            provider_call(&call("function_call", r#"{"a":2}"#))
++        );
++    }
++
++    #[test]
++    fn malformed_raw_arguments_do_not_equal_a_valid_json_string() {
++        assert_ne!(
++            provider_call(&call("function_call", "text")),
++            provider_call(&call("function_call", r#""text""#))
++        );
++    }
++
++    #[test]
++    fn custom_call_input_keeps_exact_raw_text() {
++        assert_ne!(
++            provider_call(&call("custom_tool_call", "text")),
++            provider_call(&call("custom_tool_call", " text"))
++        );
++    }
++}
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index b2f69aea383b1de63a090dbd502d02331b396ef0..fc33c1b75150e3ebbd1cbe618414bf3662fa3ee7 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -111,6 +111,16 @@ pub(crate) async fn run_inline_auto_compact_task(
+     phase: CompactionPhase,
+     cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_reference()
++        .is_some()
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Compaction is unavailable for provider-managed history".into(),
++        ));
++    }
+     let turn_context = &source_step_context.turn;
+     let prompt = turn_context
+         .config
+@@ -180,6 +190,16 @@ async fn run_compact_task_inner(
+     cancellation_token: &CancellationToken,
+     captured_history: Option<(&ContextManager, &codex_extension_api::CompactionInput<'_>)>,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_reference()
++        .is_some()
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Compaction is unavailable for provider-managed history".into(),
++        ));
++    }
+     let turn_context = Arc::clone(&source_step_context.turn);
+     let trigger = compaction_metadata.trigger();
+     let reason = compaction_metadata.reason();
+@@ -694,6 +714,16 @@ async fn publish_compaction_history(
+     world_state: &WorldState,
+     publication: PreparedCompactionHistory<'_>,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_reference()
++        .is_some()
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Compaction is unavailable for provider-managed history".into(),
++        ));
++    }
+     let PreparedCompactionHistory {
+         items: mut new_history,
+         message: summary_text,
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
 index 74dcc9a2c084b62a1ab066ffdf63c549b8339d39..abd835011afa94e67e8dccfa18c8e5789889eb1f 100644
 --- a/codex-rs/core/src/config/mod.rs
