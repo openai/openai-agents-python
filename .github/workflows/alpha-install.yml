@@ -27,9 +27,9 @@ jobs:
         python: ['3.10', '3.14']
         platform:
           - runner: ubuntu-24.04
-            wheel: manylinux_2_39_x86_64
+            wheel: manylinux_2_28_x86_64
           - runner: ubuntu-24.04-arm
-            wheel: manylinux_2_39_aarch64
+            wheel: manylinux_2_28_aarch64
           - runner: windows-latest
             wheel: win_amd64
           - runner: macos-latest
@@ -37,7 +37,7 @@ jobs:
         # These published releases predate the Linux ARM64 wheel.
         exclude: >-
           ${{ contains(fromJSON('["v0.24.0-alpha.6","v0.24.0a6","v0.24.0-alpha.7","v0.24.0a7"]'), inputs.tag)
-              && fromJSON('[{"platform":{"runner":"ubuntu-24.04-arm","wheel":"manylinux_2_39_aarch64"}}]')
+              && fromJSON('[{"platform":{"runner":"ubuntu-24.04-arm","wheel":"manylinux_2_28_aarch64"}}]')
               || fromJSON('[]') }}
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 15
@@ -63,11 +63,21 @@ jobs:
           assert match, 'Expected an alpha version tag'
           wheel_version = f'{match[1]}a{match[2]}'
           repo = os.environ['GITHUB_REPOSITORY']
-          wheel = f"openai_agents-{wheel_version}-cp310-abi3-{os.environ['WHEEL_PLATFORM']}.whl"
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
               print(f'WHEEL_VERSION={wheel_version}', file=output)
-          subprocess.run(['gh', 'release', 'download', tag, '--repo', repo,
-                          '--pattern', wheel, '--pattern', 'SHA256SUMS'], check=True)
+          download = ['gh', 'release', 'download', tag, '--repo', repo, '--pattern']
+          subprocess.run([*download, 'SHA256SUMS'], check=True)
+          released = {line.split(maxsplit=1)[1] for line in Path('SHA256SUMS').read_text().splitlines()}
+          platform = os.environ['WHEEL_PLATFORM']
+          platforms = {platform}
+          if platform.startswith('manylinux_2_28_'):
+              platforms.add(platform.replace('manylinux_2_28_', 'manylinux_2_39_', 1))
+          supported = {
+              f'openai_agents-{wheel_version}-cp310-abi3-{platform}.whl'
+              for platform in platforms
+          }
+          wheel, = released & supported
+          subprocess.run([*download, wheel], check=True)
           with Path('verify_installed.py').open('wb') as output:
               subprocess.run(['gh', 'api', f'repos/{repo}/contents/packages/codex/scripts/verify_installed.py?ref={os.environ["GITHUB_SHA"]}',
                               '-H', 'Accept: application/vnd.github.raw'], stdout=output, check=True)

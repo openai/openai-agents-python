@@ -694,7 +694,7 @@ def test_refresh_authorization_uses_current_event_sender_permission(
 
 
 @pytest.fixture
-def publication(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def publication(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> dict[str, Any]:
     import copy
     import hashlib
     import io
@@ -702,6 +702,7 @@ def publication(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     import zipfile
 
     head = "b" * 40
+    linux_floor = getattr(request, "param", "2_28")
     run = {
         "id": 42,
         "run_attempt": 1,
@@ -748,10 +749,10 @@ def publication(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     payloads, artifacts = {}, []
     for number, (name, platform) in enumerate(
         [
-            ("native-Linux-X64", "manylinux_2_39_x86_64"),
+            ("native-Linux-X64", f"manylinux_{linux_floor}_x86_64"),
             ("native-Windows-X64", "win_amd64"),
             ("native-macOS-ARM64", "macosx_11_0_arm64"),
-            ("native-Linux-ARM64", "manylinux_2_39_aarch64"),
+            ("native-Linux-ARM64", f"manylinux_{linux_floor}_aarch64"),
         ],
         1,
     ):
@@ -796,6 +797,7 @@ def publication(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "artifacts": artifacts,
         "payloads": payloads,
         "old_version": "0.24.0-alpha.2",
+        "linux_floor": linux_floor,
         "reads": [],
     }
 
@@ -1157,6 +1159,7 @@ def test_release_record_pagination_reads_all_pages(monkeypatch: pytest.MonkeyPat
     assert fetch.call_args_list[-1].args[0].endswith("&per_page=100&page=2")
 
 
+@pytest.mark.parametrize("publication", ["2_28", "2_39"], indirect=True)
 @pytest.mark.parametrize(
     ("branch", "defect"),
     [
@@ -1185,7 +1188,9 @@ def test_release_collection_keeps_only_exact_distributions(
 
     publication["run"]["head_branch"] = branch
     qualified = automation.qualified_distributions("b" * 40, source_branch=branch)
-    platform = "manylinux_2_39_x86_64" if branch == "main" else "manylinux_2_39_aarch64"
+    linux_floor = publication["linux_floor"]
+    arch = "x86_64" if branch == "main" else "aarch64"
+    platform = f"manylinux_{linux_floor}_{arch}"
     artifact = qualified["artifacts"][0 if branch == "main" else -1]
     identifier = artifact["id"]
     if defect == "digest":
@@ -1244,11 +1249,11 @@ def test_release_collection_keeps_only_exact_distributions(
     else:
         automation.collect_distributions(qualified, destination)
         expected = {
-            "openai_agents-0.24.0a3-cp310-abi3-manylinux_2_39_x86_64.whl",
+            f"openai_agents-0.24.0a3-cp310-abi3-manylinux_{linux_floor}_x86_64.whl",
             "openai_agents-0.24.0a3-cp310-abi3-win_amd64.whl",
             "openai_agents-0.24.0a3-cp310-abi3-macosx_11_0_arm64.whl",
             "openai_agents-0.24.0a3.tar.gz",
         }
         if branch == "feat/codex-harness":
-            expected.add("openai_agents-0.24.0a3-cp310-abi3-manylinux_2_39_aarch64.whl")
+            expected.add(f"openai_agents-0.24.0a3-cp310-abi3-manylinux_{linux_floor}_aarch64.whl")
         assert {path.name for path in destination.iterdir()} == expected
