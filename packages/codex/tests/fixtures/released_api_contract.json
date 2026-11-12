@@ -2381,8 +2381,8 @@
         "declarations": [
           "class NativeRealtimeTranscription(TypedDict, total=False):\n    model: str\n    language: str\n    prompt: str\n    keywords: list[str]\n    languages: list[str]\n    delay: Literal['minimal', 'low', 'medium', 'high', 'xhigh']",
           "class NativeRealtimeNoiseReduction(TypedDict):\n    type: Literal['near_field', 'far_field']",
-          "class NativeRealtimeServerVad(TypedDict, total=False):\n    type: Required[Literal['server_vad']]\n    create_response: bool\n    interrupt_response: bool\n    threshold: float\n    prefix_padding_ms: int\n    silence_duration_ms: int\n    idle_timeout_ms: int\n    model_version: str",
-          "class NativeRealtimeSemanticVad(TypedDict, total=False):\n    type: Required[Literal['semantic_vad']]\n    create_response: bool\n    interrupt_response: bool\n    eagerness: Literal['auto', 'low', 'medium', 'high']\n    model_version: str",
+          "class NativeRealtimeServerVad(TypedDict, total=False):\n    type: Required[Literal['server_vad']]\n    create_response: bool\n    interrupt_response: bool\n    threshold: float\n    prefix_padding_ms: int\n    silence_duration_ms: int\n    idle_timeout_ms: int\n    model_version: str\n    provider_data: dict[str, Any] | None",
+          "class NativeRealtimeSemanticVad(TypedDict, total=False):\n    type: Required[Literal['semantic_vad']]\n    create_response: bool\n    interrupt_response: bool\n    eagerness: Literal['auto', 'low', 'medium', 'high']\n    model_version: str\n    provider_data: dict[str, Any] | None",
           "class NativeRealtimeCustomVoice(TypedDict):\n    id: str",
           "class NativeRealtimePromptText(TypedDict):\n    type: Literal['input_text']\n    text: str",
           "class NativeRealtimePromptImage(TypedDict, total=False):\n    type: Required[Literal['input_image']]\n    image_url: str\n    file_id: str\n    detail: Literal['auto', 'low', 'high', 'original']",
