@@ -14,9 +14,11 @@ from agents import (
     Agent,
     ChatCompletionsModel,
     FunctionTool,
+    ModelRetrySettings,
     NativeProvider,
     PromptedOutput,
     ResponsesModel,
+    RetryDecision,
     function_tool,
 )
 from agents.state import SessionState
@@ -456,3 +458,56 @@ async def test_prompted_repair_preserves_active_transport(
                 )
                 assert headers["x-agent-route"] == expected
                 assert query == {"agent_route": expected}
+
+
+async def test_prompted_repair_keeps_the_operation_retry_policy_owner(monkeypatch):
+    request_count = 0
+    retry_calls = []
+    original = WebSocketPeer.handle
+
+    async def fail_first_repair(self, request):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 2:
+            return web.json_response(
+                {"error": {"type": "server_error", "message": "synthetic repair failure"}},
+                status=503,
+            )
+        return await original(self, request)
+
+    def retry(context):
+        retry_calls.append(context)
+        return RetryDecision(True, delay_ms=0)
+
+    monkeypatch.setattr(WebSocketPeer, "handle", fail_first_repair)
+
+    async with timeout(30), peer() as server:
+        server.respond(assistant_output("invalid JSON"))
+        server.respond(assistant_output('{"label":"corrected"}'))
+        provider = NativeProvider(
+            base_url=server.url,
+            api_key="synthetic-repair-retry-owner",
+            supports_websockets=False,
+            request_max_retries=0,
+            stream_max_retries=0,
+        )
+        agent = Agent(
+            instructions="Produce the report.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"retry": ModelRetrySettings(max_retries=0, policy=retry)},
+        )
+        async with provider, agent.session() as session:
+            turn = await session.submit(
+                "Produce the report.",
+                output_type=PromptedOutput(RepairTransportReport, 1),
+                model_settings_override={
+                    "retry": ModelRetrySettings(max_retries=1, policy=retry),
+                },
+            )
+            result = await turn.get_result()
+            assert result.final_output == RepairTransportReport(label="corrected")
+            assert len(result.repair_attempts) == 1
+
+    assert request_count == 3
+    assert len(retry_calls) == 1

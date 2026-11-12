@@ -289,7 +289,7 @@ from .recovery import (
     _application_shell_recovery,
 )
 from .response_facts import _response_fact_record
-from .retry import _CombinedRetryPolicy
+from .retry import ModelRetrySettings, _CombinedRetryPolicy
 from .sandbox_memory import (
     _MAX_RECORDS as _MAX_MEMORY_RECORDS,
     _MEMORY_OWNER_ATTRIBUTE,
@@ -11421,6 +11421,22 @@ class Session(Generic[ContextT, OutputT]):
         ):
             transport_settings.update(self._repair_transport_settings[1])
         settings.update(cast(ModelSettings, transport_settings))
+        repair_model_settings = deepcopy(state.model_settings_override)
+        if repair_model_settings is not None:
+            repair_model_settings.pop("tool_choice", None)
+            controls = repair_model_settings.get("request_controls")
+            if isinstance(controls, dict):
+                for key in ("named_tool_choice", "hosted_tool_choice", "reset_tool_choice"):
+                    controls.pop(key, None)
+                native_retry = controls.get("retry")
+                source_retry = source_agent.model_settings.get("retry")
+                if (
+                    isinstance(native_retry, dict)
+                    and native_retry.get("has_policy") is True
+                    and source_retry is not None
+                    and source_retry.policy is not None
+                ):
+                    settings["retry"] = ModelRetrySettings(policy=source_retry.policy)
         declaration = Agent[ContextT, str](
             instructions="Correct the supplied JSON to match its schema. Return only JSON.",
             provider=provider,
@@ -11473,13 +11489,6 @@ class Session(Generic[ContextT, OutputT]):
                 return None
             if state.failure.done():
                 raise state.failure.result()
-            repair_model_settings = deepcopy(state.model_settings_override)
-            if repair_model_settings is not None:
-                repair_model_settings.pop("tool_choice", None)
-                controls = repair_model_settings.get("request_controls")
-                if isinstance(controls, dict):
-                    for key in ("named_tool_choice", "hosted_tool_choice", "reset_tool_choice"):
-                        controls.pop(key, None)
             # No repair work can have started before this local check.
             # _start reaches its identical check without yielding.
             repair._check_open()
