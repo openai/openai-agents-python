@@ -2344,6 +2344,37 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
+@dataclass(frozen=True)
+class _OpeningTools:
+    """One classified opening declaration, before context binding."""
+
+    available: Sequence[Tool[Any]]
+    python: tuple[FunctionTool[Any, Any, Any], ...]
+    mcp: tuple[_MCP[Any], ...]
+    native_agents: NativeAgents[Any] | None
+
+    @classmethod
+    def capture(
+        cls, available: Sequence[Tool[Any]], programmatic_tool_calling: bool
+    ) -> _OpeningTools:
+        python, mcp, native_agents = _split_tools(available, programmatic_tool_calling)
+        return cls(available, python, mcp, native_agents)
+
+    def validate_collisions(self, *, project_guidance: bool = False) -> list[dict[str, str]]:
+        mcp_names = _tool_names(self.mcp)
+        _check_namespaced_tool_collisions(
+            self.python,
+            mcp_names,
+            self.available,
+            native_agents=self.native_agents,
+            project_guidance=project_guidance,
+        )
+        return mcp_names
+
+    def bind(self, context: Any, *, generation: int = 0) -> _ToolCatalog:
+        return _capture_tools(generation, self.python, context)
+
+
 def _check_native_agents_provider(
     native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
@@ -2611,11 +2642,16 @@ def _capture_profile_runtimes(
     roster: list[dict[str, Any]] = []
     for index, profile in enumerate(profiles):
         declaration = profile.declaration
-        tools, mcp, roles = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
+        opening_tools = _OpeningTools.capture(
+            declaration.tools, declaration.programmatic_tool_calling
+        )
+        mcp = opening_tools.mcp
         catalog = (
             root_catalog
             if index == 0 and not profile.handoff_callbacks
-            else _capture_tools(root_catalog.generation if index == 0 else 0, tools, context)
+            else opening_tools.bind(
+                context, generation=root_catalog.generation if index == 0 else 0
+            )
         )
         _check_handoff_tool_names(
             (
@@ -2625,12 +2661,7 @@ def _capture_profile_runtimes(
             ),
             profile.handoffs,
         )
-        _check_namespaced_tool_collisions(
-            tools,
-            _tool_names(mcp),
-            declaration.tools,
-            native_agents=roles,
-        )
+        opening_tools.validate_collisions()
         output = _prepare_spec(declaration.output_type)
         instructions = root_instructions if index == 0 else (declaration.instructions or "")
         captured[profile.id] = _ProfileRuntime(profile, catalog, output, instructions)
@@ -3882,7 +3913,12 @@ class Session(Generic[ContextT, OutputT]):
                     "LocalStorage does not support code mode: nested tool identities "
                     "do not yet have durable intent and result receipts"
                 )
-            tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
+            opening_tools = _OpeningTools.capture(agent.tools, programmatic_tool_calling)
+            tools, mcp_tools, native_agents = (
+                opening_tools.python,
+                opening_tools.mcp,
+                opening_tools.native_agents,
+            )
             if restored_resource_servers:
                 assert restored_defaults is not None
                 restored_defaults = (
@@ -3936,16 +3972,9 @@ class Session(Generic[ContextT, OutputT]):
                         "NativeAgents requires an Environment with all three execution tools"
                     )
             output = _prepare_spec(agent.output_type)
-            mcp_names = _tool_names(allowed_mcp)
-            _check_namespaced_tool_collisions(
-                allowed_tools,
-                mcp_names,
-                available,
-                native_agents=native_agents,
-                project_guidance=project_guidance,
-            )
+            mcp_names = opening_tools.validate_collisions(project_guidance=project_guidance)
             model = agent.model
-            catalog = _capture_tools(0, tools, context)
+            catalog = opening_tools.bind(context)
             bound_tools = catalog.tools
             native = importlib.import_module("agents._native")
             native._validate_python_tool_declarations(catalog.native_specs())
