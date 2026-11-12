@@ -417,6 +417,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "truncation",
         "include",
         "context_management",
+        "provider_compaction",
         "extra_body",
     }
     for key, value in copied.items():
@@ -511,6 +512,7 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
             "truncation",
             "include",
             "context_management",
+            "provider_compaction",
             "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (

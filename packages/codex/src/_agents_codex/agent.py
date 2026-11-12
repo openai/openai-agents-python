@@ -59,7 +59,10 @@ from ._lifecycle import (
 )
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _MAX_AUDIO_INPUT_BYTES, _check_audio_json, _contains_audio
-from ._model_settings import _capture_model_settings
+from ._model_settings import (
+    ProviderCompactionPolicy as ProviderCompactionPolicy,
+    _capture_model_settings,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
@@ -133,7 +136,10 @@ class ModelSettings(TypedDict, total=False, closed=True):
     compaction or reviewers. Providers own numeric ranges and metadata quotas.
     Request TTL (30m/12h) and retention (in_memory/24h) remain
     independent; omission injects neither default. Providers own model support
-    and cache behavior. Known formatting loss fails locally. ``store=True``
+    and cache behavior. Known formatting loss fails locally. ``provider_compaction``
+    sets the standard Responses compaction threshold from a fixed count or from
+    the current model's context-window ratio. Explicit ``context_management``
+    takes precedence, including ``None``. ``store=True``
     requires API-key authentication.
 
     ``reset_tool_choice=True``: ordinary text sampling only; opt-in release of
@@ -173,6 +179,7 @@ class ModelSettings(TypedDict, total=False, closed=True):
     truncation: Literal["auto", "disabled"] | None
     include: list[str] | None
     context_management: list[dict[str, Any]] | None
+    provider_compaction: ProviderCompactionPolicy | None
     extra_body: Mapping[str, Any] | None
     # Local opt-in; false/None preserve persistent forcing.
     reset_tool_choice: bool | None

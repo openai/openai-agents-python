@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         CodexLogin as CodexLogin,
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
+        ProviderCompactionPolicy as ProviderCompactionPolicy,
         SignInWithChatGPT as SignInWithChatGPT,
         SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     )
@@ -390,6 +391,7 @@ _MODULES = {
     "RetryPolicyContext": ".retry",
     "retry_policies": ".retry",
     "NativeProvider": ".agent",
+    "ProviderCompactionPolicy": ".agent",
     "SignInWithChatGPT": ".agent",
     "SignInWithChatGPTCredentials": ".agent",
     "NativeOutput": ".schema",

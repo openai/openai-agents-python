@@ -7,22 +7,28 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from pydantic import Field
 
 import agents
 from agents import (
     Agent,
     ModelRequestContext,
     NativeError,
+    NativeProvider,
     PromptedOutput,
     StopTurn,
+    ToolOutput,
+    ToolOutputFile,
+    ToolOutputText,
     TurnStoppedError,
     function_tool,
 )
+from agents.extensions import ToolOutputTrimmer
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
@@ -36,6 +42,9 @@ from tests.test_native_agent import provider
 from tests.test_native_child_agents import ChildPeer, agent_for, handles, metadata, trust
 from tests.test_native_executor_tools import declaration
 from tests.test_native_provider_websockets import peer as websocket_peer
+from tests.test_native_schema_discovery import search
+
+_TRIMMER_SCHEMA_PROSE = "Schema prose that should disappear on replay."
 
 
 def reference(text: str) -> dict[str, Any]:
@@ -106,6 +115,92 @@ async def test_fresh_context_each_step_preserves_history_and_tools(
     assert tool_output(responses.requests[1], "refresh-call") == "tool receipt"
     assert requests[0].request_id != requests[1].request_id
     assert "reference-before-tool" not in repr(requests[0])
+
+
+async def test_native_tool_output_trimmer_projects_only_older_selected_outputs(
+    responses: ResponsesFixture,
+) -> None:
+    text = "long search result " * 20
+    structured = "long structured result " * 20
+    ignored = "unselected output " * 20
+    opaque = "file-synthetic-retained-reference"
+
+    @function_tool(
+        defer_loading=True,
+        description="Locate a skylark record from the configured workspace. " * 8,
+    )
+    def find_text(key: Annotated[str, Field(description=_TRIMMER_SCHEMA_PROSE)]) -> str:
+        return text + key
+
+    @function_tool
+    def find_parts() -> ToolOutput:
+        return ToolOutput([ToolOutputText(structured), ToolOutputFile(file_id=opaque)])
+
+    @function_tool
+    def keep() -> str:
+        return ignored
+
+    def item(request: dict[str, Any], call_id: str, kind: str) -> dict[str, Any]:
+        return next(
+            value
+            for value in request["input"]
+            if value.get("call_id") == call_id and value.get("type") == kind
+        )
+
+    catalog = Path(__file__).with_name("fixtures") / "request-control-models.json"
+    model = next(
+        entry["slug"]
+        for entry in json.loads(catalog.read_text())["models"]
+        if not entry.get("use_responses_lite")
+    )
+    native = NativeProvider(base_url=responses.url, api_key="synthetic-trimmer")
+    agent = Agent(
+        instructions="Use the requested tools.",
+        model=model,
+        provider=native,
+        tools=[find_text, find_parts, keep],
+        transform_context=ToolOutputTrimmer(
+            recent_turns=1,
+            max_output_chars=140,
+            preview_chars=18,
+            trimmable_tools={"find_text", "find_parts", "tool_search"},
+        ),
+    )
+    responses.respond(search("skylark", "search-1"))
+    responses.respond(
+        function_call("find_text", {"key": "older"}, "old-text"),
+        function_call("find_parts", {}, "old-parts"),
+        function_call("keep", {}, "old-keep"),
+    )
+    responses.respond(assistant_output("first complete"))
+    responses.respond(function_call("find_text", {"key": "recent"}, "recent-text"))
+    responses.respond(assistant_output("second complete"))
+
+    async with timeout(20), native, agent.session() as session:
+        assert (await (await session.submit("First request.")).get_result()).final_output == (
+            "first complete"
+        )
+        assert (await (await session.submit("Second request.")).get_result()).final_output == (
+            "second complete"
+        )
+        saved = (await session.save_state()).to_json()
+
+    first, replay = responses.requests[2], responses.requests[-1]
+    assert tool_output(first, "old-text") == text + "older"
+    assert opaque in json.dumps(item(first, "old-parts", "function_call_output"))
+    assert _TRIMMER_SCHEMA_PROSE in json.dumps(item(first, "search-1", "tool_search_output"))
+    trimmed_text = tool_output(replay, "old-text")
+    assert trimmed_text.startswith("[Trimmed: find_text")
+    assert text[:18] in trimmed_text and text not in trimmed_text
+    trimmed_parts = tool_output(replay, "old-parts")
+    assert len(trimmed_parts) <= 140 and structured[:18] in trimmed_parts
+    assert opaque not in trimmed_parts
+    search_replay = json.dumps(item(replay, "search-1", "tool_search_output"))
+    assert _TRIMMER_SCHEMA_PROSE not in search_replay
+    assert '"key"' in search_replay and '"find_text"' in search_replay
+    assert tool_output(replay, "old-keep") == ignored
+    assert tool_output(replay, "recent-text") == text + "recent"
+    assert opaque in saved and text + "older" in saved and _TRIMMER_SCHEMA_PROSE in saved
 
 
 async def test_step_stop_prevents_another_context_transform_and_request(responses):

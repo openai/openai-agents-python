@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "6c8ac61ca37ad993fd183f5c617e8f2d2ad437d1",
+  "baseline_commit": "36ffedf48ca674ce48120afd79977e32d4982299",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -15,7 +15,7 @@
           "TypedAgentT = TypeVar('TypedAgentT', bound='Agent[Any, Any]')",
           "_MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()",
           "_OBSERVATION_RETENTION_UNSET: Any = object()",
-          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    attempt_timeout_ms: int | None\n    retry: ModelRetrySettings | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
+          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    attempt_timeout_ms: int | None\n    retry: ModelRetrySettings | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    provider_compaction: ProviderCompactionPolicy | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)\n    credential_directory: str | Path | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
           "@dataclass(frozen=True, kw_only=True, slots=True, repr=False)\nclass SignInWithChatGPTCredentials:\n    issuer: str\n    client_id: str\n    subject: str\n    access_token: str",
@@ -46,6 +46,7 @@
           "from types import TracebackType as TracebackType",
           "from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Generic as Generic, Literal, overload as overload",
           "from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar",
+          "from ._model_settings import ProviderCompactionPolicy as ProviderCompactionPolicy",
           "from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter",
           "from ._trace_context import TraceContext as TraceContext",
           "from .compaction import ResponsesCompaction, _BeforeCompact",
@@ -92,6 +93,7 @@
           "NativeModel": "agents.models.NativeModel",
           "OutputGuardrail": "agents.guardrails.OutputGuardrail",
           "OutputSpec": "agents.schema.OutputSpec",
+          "ProviderCompactionPolicy": "_agents_codex._model_settings.ProviderCompactionPolicy",
           "RealtimeAgentConfig": "_agents_codex.realtime_agents.RealtimeAgentConfig",
           "RealtimeHandoff": "_agents_codex.realtime_agents.RealtimeHandoff",
           "ReconciledCall": "agents.recovery.ReconciledCall",
@@ -2321,6 +2323,7 @@
       "PreparedToolPresentation": "agents.prepared_request.PreparedToolPresentation",
       "ProducedItem": "agents.session.ProducedItem",
       "PromptedOutput": "agents.schema.PromptedOutput",
+      "ProviderCompactionPolicy": "agents.agent.ProviderCompactionPolicy",
       "RawProviderUsage": "agents.usage.RawProviderUsage",
       "ReconciledCall": "agents.recovery.ReconciledCall",
       "RedisSessionStore": "agents.canonical_storage.RedisSessionStore",
@@ -2438,6 +2441,19 @@
         "references": {
           "SessionState": "agents.state.SessionState"
         }
+      },
+      "_agents_codex._model_settings": {
+        "declarations": [
+          "class _StaticProviderCompaction(TypedDict, closed=True):\n    type: Literal['static']\n    threshold: int",
+          "class _DynamicProviderCompaction(TypedDict, total=False, closed=True):\n    type: Required[Literal['dynamic']]\n    threshold_ratio: float\n    fallback_threshold: int",
+          "ProviderCompactionPolicy: TypeAlias = _StaticProviderCompaction | _DynamicProviderCompaction"
+        ],
+        "exports": {},
+        "imports": [
+          "from typing import Literal, TypeAlias",
+          "from typing_extensions import Required, TypedDict"
+        ],
+        "references": {}
       },
       "_agents_codex._sandbox_events": {
         "declarations": [
@@ -5296,6 +5312,7 @@
       "PreparedToolPresentation",
       "ProducedItem",
       "PromptedOutput",
+      "ProviderCompactionPolicy",
       "RawProviderUsage",
       "ReconciledCall",
       "RedisSessionStore",
@@ -5378,7 +5395,7 @@
       "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, ToolInputErrorContext as ToolInputErrorContext, ToolTimeoutBehavior as ToolTimeoutBehavior, ToolTimeoutError as ToolTimeoutError, function_tool as function_tool",
       "from ._tool_errors import ToolErrorContext as ToolErrorContext, ToolErrorFormatter as ToolErrorFormatter",
       "from ._trace_context import TraceContext as TraceContext",
-      "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
+      "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, ProviderCompactionPolicy as ProviderCompactionPolicy, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
       "from .apply_patch import ApplyPatchEditor as ApplyPatchEditor, ApplyPatchOperation as ApplyPatchOperation, ApplyPatchResult as ApplyPatchResult, apply_patch_batch_tool as apply_patch_batch_tool, apply_patch_tool as apply_patch_tool",
       "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext, ResponsesCompaction as ResponsesCompaction, ResponsesCompactionContext as ResponsesCompactionContext",
