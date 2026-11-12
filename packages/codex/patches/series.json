@@ -741,13 +741,21 @@
       "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
     },
     {
+      "path": "sdk-realtime-vad-provider-data.patch",
+      "sha256": "bb38997bdffe09280acb438f7e31ae6e7b0a609f85c2ac072340b8a8dc7cb729"
+    },
+    {
       "path": "sdk-managed-agent-tools.patch",
       "sha256": "ad8d845a6da5485d0010f95d2afa19b10139c9cd05ba3bb5c0b8790491a13fb6"
     },
     {
       "path": "sdk-managed-agent-tool-code-mode.patch",
       "sha256": "163e7309b5262b15b4a63b2c32fc0cc0a13e17103ec7e4b637bd03a2392b9804"
+    },
+    {
+      "path": "sdk-managed-agent-child-catalog.patch",
+      "sha256": "aa9744156b870e194d6dc7e6244e311a290332c7b453747a7440682e69cf674a"
     }
   ],
-  "result_tree": "e1cacab12c59c64b87c243594d283577ec2f85ce"
+  "result_tree": "80f81ddf8c4600788917f1002eb3a9e0a4b1c290"
 }

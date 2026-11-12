@@ -59,6 +59,10 @@ if TYPE_CHECKING:
         ComputerSafetyError as ComputerSafetyError,
         computer_tool as computer_tool,
     )
+    from .conversations import (
+        ConversationsHistory as ConversationsHistory,
+        ConversationsWriteError as ConversationsWriteError,
+    )
     from .decisions import (
         DecisionError as DecisionError,
         DecisionInput as DecisionInput,
@@ -358,6 +362,8 @@ _MODULES = {
     "LocalStorage": ".state",
     "AsyncSQLAlchemySessionStore": ".canonical_storage",
     "CustomStorage": ".canonical_storage",
+    "ConversationsHistory": ".conversations",
+    "ConversationsWriteError": ".conversations",
     "DaprSessionStore": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
     "MongoDBSessionStore": ".canonical_storage",

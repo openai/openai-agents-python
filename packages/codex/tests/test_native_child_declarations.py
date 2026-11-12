@@ -189,6 +189,69 @@ async def test_native_role_tool_returns_its_child_result_after_approval(
     assert _role().instructions in json.dumps(child_request)
 
 
+async def test_native_role_tool_catalog_passes_to_owned_child(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    approved: list[str] = []
+
+    def approve(_context: ToolContext[object], call: NativeToolCall) -> bool:
+        approved.append(call.name)
+        return True
+
+    reviewer = _role()
+    collector = NativeRole(
+        name="collector",
+        description="Collect a fact.",
+        instructions="CATALOG_COLLECTOR_ROLE",
+    )
+    review_tool = NativeRoleTool(
+        name="delegate_review", role=reviewer.name, description="Delegate a review."
+    )
+    collect_tool = NativeRoleTool(
+        name="collect_fact", role=collector.name, description="Collect a fact."
+    )
+    responses.respond(
+        collaboration(review_tool.name, {"input": "Review the record."}, "delegate-review")
+    )
+    responses.respond(
+        collaboration(collect_tool.name, {"input": "Collect the requested fact."}, "collect-fact")
+    )
+    responses.respond(assistant_output("collector result"))
+    responses.respond(assistant_output("reviewer result"))
+    responses.respond(assistant_output("parent final result"))
+    agent = Agent(
+        instructions="Delegate the review.",
+        model=NATIVE_ROLE_FIXTURE_MODEL,
+        provider=provider(responses),
+        tools=[
+            NativeAgents(
+                max_depth=2,
+                additional_roles=[reviewer, collector],
+                managed_tools=[review_tool, collect_tool],
+                approval=approve,
+            )
+        ],
+    )
+
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        async with agent.session(environment=declaration(executor)) as session:
+            result = await (await session.submit("Review the record.")).get_result()
+
+    child = responses.requests[1]
+    assert reviewer.instructions in json.dumps(child)
+    advertised = list(child.get("tools", []))
+    for item in child["input"]:
+        if item.get("type") == "additional_tools":
+            advertised.extend(item["tools"])
+    assert f'"{collect_tool.name}"' in json.dumps(advertised)
+    assert collector.instructions in json.dumps(responses.requests[2])
+    assert "collector result" in json.dumps(responses.requests[3]["input"])
+    assert result.final_output == "parent final result"
+    assert approved == [review_tool.name, collect_tool.name]
+    assert len(responses.requests) == 5
+
+
 @pytest.mark.parametrize("allowed", [True, False])
 async def test_native_role_tool_from_code_mode(
     responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowed: bool
