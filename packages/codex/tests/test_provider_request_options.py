@@ -9,9 +9,9 @@ import httpx
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from openai import APITimeoutError, AsyncOpenAI
+from openai import APITimeoutError, AsyncOpenAI, omit
 
-from agents import ChatCompletionsModel, ModelRequest, ResponsesModel
+from agents import Agent, ChatCompletionsModel, ModelRequest, NativeProvider, ResponsesModel
 
 ADAPTERS = [ChatCompletionsModel, ResponsesModel]
 
@@ -322,3 +322,84 @@ def test_model_request_measurement_is_exact_attempt_local_and_preserves_position
     with pytest.raises(ValueError):
         current.report_usage({"total_tokens": True})
     assert len(measured) == 1
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+@pytest.mark.parametrize("route", ["adapter", "native"])
+async def test_scoped_transport_overlays_borrowed_client_options(adapter, route):
+    seen = []
+
+    async def handle(req):
+        seen.append(
+            (
+                {name.lower(): value for name, value in req.headers.items()},
+                dict(req.query),
+                await req.json(),
+            )
+        )
+        return web.json_response(response(adapter))
+
+    app = web.Application()
+    app.router.add_post("/{tail:.*}", handle)
+    scoped = {
+        "headers": {"x-routing": "operation", "x-drop": None},
+        "query": {"route": "operation", "drop": None, "count": 2},
+    }
+    async with TestServer(app) as server:
+        async with AsyncOpenAI(
+            api_key="synthetic-borrowed",
+            base_url=str(server.make_url("/v1/")),
+            max_retries=0,
+            default_headers={"x-drop": "client"},
+            default_query={"keep": "client", "drop": "client"},
+        ) as client:
+            model = adapter(
+                client,
+                request_options={
+                    "headers": {"X-Routing": "adapter", "x-adapter": "retained"},
+                    "query": {"route": "adapter"},
+                },
+            )
+            if route == "adapter":
+                operation = request()
+                object.__setattr__(operation, "_request_transport", scoped)
+                await model.complete(operation)
+                await model.complete(request())
+            else:
+                async with NativeProvider(
+                    api_key="synthetic-native",
+                    base_url="https://unused.invalid/v1",
+                    model_backend=model,
+                ) as provider:
+                    agent = Agent(model="gpt-4.1", instructions="Answer.", provider=provider)
+                    async with agent.session() as session:
+                        first = await session.submit(
+                            "Scoped.",
+                            model_settings_override={
+                                "extra_headers": {
+                                    key: omit if value is None else value
+                                    for key, value in scoped["headers"].items()
+                                },
+                                "extra_query": scoped["query"],
+                            },
+                        )
+                        assert (await first.get_result()).final_output == "ok"
+                        second = await session.submit("Defaults.")
+                        assert (await second.get_result()).final_output == "ok"
+
+    assert len(seen) == 2
+    first_headers, first_query, first_body = seen[0]
+    second_headers, second_query, second_body = seen[1]
+    assert (
+        first_headers["authorization"]
+        == second_headers["authorization"]
+        == "Bearer synthetic-borrowed"
+    )
+    assert first_headers["x-routing"] == "operation"
+    assert first_headers["x-adapter"] == "retained"
+    assert "x-drop" not in first_headers
+    assert first_query == {"route": "operation", "count": "2", "keep": "client"}
+    assert second_headers["x-routing"] == "adapter"
+    assert second_headers["x-drop"] == "client"
+    assert second_query == {"route": "adapter", "keep": "client", "drop": "client"}
+    assert all("request_transport" not in body for body in (first_body, second_body))

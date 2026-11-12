@@ -293,7 +293,7 @@ from .recovery import (
     _application_shell_recovery,
 )
 from .response_facts import _response_fact_record
-from .retry import _CombinedRetryPolicy
+from .retry import ModelRetrySettings, RetryPolicy, _CombinedRetryPolicy
 from .sandbox_memory import (
     _MAX_RECORDS as _MAX_MEMORY_RECORDS,
     _MEMORY_OWNER_ATTRIBUTE,
@@ -446,7 +446,24 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "provider_compaction",
         "extra_body",
     }
+    transport: dict[str, Any] = {}
+    if "extra_headers" in copied:
+        headers = copied["extra_headers"]
+        transport["headers"] = (
+            None
+            if headers is None
+            else {
+                name: value if isinstance(value, str) else None for name, value in headers.items()
+            }
+        )
+    if "extra_query" in copied:
+        transport["query"] = copied["extra_query"]
+        transport["query_nulls_as_empty"] = False
+    if transport:
+        controls["request_transport"] = transport
     for key, value in copied.items():
+        if key in ("extra_headers", "extra_query"):
+            continue
         if key == "tool_choice":
             if isinstance(value, ToolRef):
                 result["tool_choice"] = "required"
@@ -2896,6 +2913,12 @@ def _restore_profile_sources(
     return profiles[source["profile_id"]], origin, receipt
 
 
+def _has_operation_retry_policy(settings: Mapping[str, Any] | None) -> bool:
+    controls = settings.get("request_controls") if settings is not None else None
+    retry = controls.get("retry") if isinstance(controls, dict) else None
+    return isinstance(retry, dict) and retry.get("has_policy") is True
+
+
 def _restore_operation_origin(
     native: Any,
     profiles: Mapping[str, _ProfileRuntime],
@@ -2903,15 +2926,20 @@ def _restore_operation_origin(
     saved: SessionState,
     context: Any,
 ) -> tuple[_ProfileRuntime | None, dict[str, Any] | None]:
-    if not profiles or not saved.operation_tools:
+    continuation = saved.native_continuation
+    if not profiles or not (
+        saved.operation_tools
+        or continuation is not None
+        and _has_operation_retry_policy(continuation.model_settings_override)
+    ):
         return None, None
-    assert saved.native_continuation is not None
+    assert continuation is not None
     receipt = json.loads(
         native._agent_profiles_operation_source(
             json.dumps(roster),
             roster[0]["id"],
             json.dumps(saved.history),
-            saved.native_continuation.turn_id,
+            continuation.turn_id,
         )
     )
     if (
@@ -2922,10 +2950,11 @@ def _restore_operation_origin(
     ):
         raise NativeError("Checkpoint has no admitted operation declaration source")
     profile = profiles[receipt["profile_id"]]
-    tools, mcp, _ = _split_tools(
-        profile.profile.declaration.tools, profile.profile.declaration.programmatic_tool_calling
-    )
-    _check_restored_tool_context(tools, mcp, saved.operation_tools, context)
+    if saved.operation_tools:
+        tools, mcp, _ = _split_tools(
+            profile.profile.declaration.tools, profile.profile.declaration.programmatic_tool_calling
+        )
+        _check_restored_tool_context(tools, mcp, saved.operation_tools, context)
     return profile, receipt
 
 
@@ -3635,8 +3664,10 @@ def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
 
 
 def _current_attempt_controls(
-    root: Mapping[str, Any], profile: Mapping[str, Any]
+    root: Mapping[str, Any], profile: Mapping[str, Any] | None
 ) -> dict[str, Any]:
+    if profile is None:
+        profile = root
     retry = root.get("retry")
     if "retry" in profile:
         profile_retry = profile["retry"]
@@ -3644,6 +3675,8 @@ def _current_attempt_controls(
     return {
         "retry": retry,
         "attempt_timeout_ms": profile.get("attempt_timeout_ms", root.get("attempt_timeout_ms")),
+        # The active declaration owns routing, including clearing it.
+        "request_transport": profile.get("request_transport"),
     }
 
 
@@ -3679,7 +3712,7 @@ def _prepare_opening_model_settings(
             if restored_profile is not None
             else None
         )
-        profile_controls = profile_model["request_controls"] if profile_model is not None else {}
+        profile_controls = profile_model["request_controls"] if profile_model is not None else None
         attempt_controls = _current_attempt_controls(current_controls, profile_controls)
         invocation_timeout = (
             profile_model.get("invocation_timeout_ms")
@@ -3988,11 +4021,28 @@ class Session(Generic[ContextT, OutputT]):
                 context,
             )
             operation_declaration = (
-                operation_profile.profile.declaration if operation_profile is not None else agent
+                operation_profile.profile.declaration
+                if operation_profile is not None and saved.operation_tools
+                else agent
             )
             operation_handoffs = (
-                operation_profile.profile.handoffs if operation_profile is not None else None
+                operation_profile.profile.handoffs
+                if operation_profile is not None and saved.operation_tools
+                else None
             )
+            restored_retry_policy = None
+            if continuation is not None and _has_operation_retry_policy(
+                continuation.model_settings_override
+            ):
+                retry_owner = (
+                    operation_profile.profile.declaration
+                    if operation_profile is not None
+                    else agent
+                )
+                retry = retry_owner.model_settings.get("retry")
+                if retry is None or retry.policy is None:
+                    raise ValueError("Checkpoint retry policy has no captured application owner")
+                restored_retry_policy = retry.policy
             restored_declaration = (
                 restored_profile.profile.declaration if restored_profile is not None else agent
             )
@@ -4357,8 +4407,14 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if hosted_verification is not None and chatgpt_apps is not None:
                     raise ValueError("Select one explicit Apps registration per Session")
+                startup_transport = settings.get("request_controls", {}).get("request_transport")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **(
+                        {"_sdk_request_transport": startup_transport}
+                        if startup_transport is not None
+                        else {}
+                    ),
                     **({"_sdk_websocket_tls": True} if private_wss_tls else {}),
                     **guidance_options,
                     **(
@@ -4752,6 +4808,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
                 options.pop("_sdk_websocket_tls", None)
+                options.pop("_sdk_request_transport", None)
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
@@ -4775,6 +4832,8 @@ class Session(Generic[ContextT, OutputT]):
                     active = _Submission(
                         restored_output,
                         model_override=continuation.model_override,
+                        model_settings_override=continuation.model_settings_override,
+                        retry_policy_override=restored_retry_policy,
                         guardrail_results=session._restore_guardrail_records(saved),
                         run_usage=_UsageCollector(saved.run_usage),
                         original_input=saved.original_input,
@@ -4787,7 +4846,7 @@ class Session(Generic[ContextT, OutputT]):
                         operation_refs=restored_operation_refs,
                         operation_declarations=restored_operation_declarations,
                         operation_agent=operation_declaration
-                        if operation_source is not None
+                        if saved.operation_tools and operation_source is not None
                         else None,
                         operation_declaration_source=operation_source,
                     )
@@ -5070,6 +5129,8 @@ class Session(Generic[ContextT, OutputT]):
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
+        # Acknowledged transport defaults for this profile's correction requests.
+        self._repair_transport_settings: tuple[tuple[str, int] | None, dict[str, Any]] | None = None
         self._raw_usage_started = False
         self._produced_items_started = False
         self._agent: Agent[ContextT, OutputT] | None = None
@@ -5418,6 +5479,7 @@ class Session(Generic[ContextT, OutputT]):
             reset: dict[str, Any] = {
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
+                    "request_transport": controls.get("request_transport"),
                     "retry": None,
                 },
             }
@@ -5479,7 +5541,8 @@ class Session(Generic[ContextT, OutputT]):
                 )
             )
             receipt = json.loads(encoded)
-            self._accept_profile_catalogs(receipt)
+            publish_catalogs = self._prepare_profile_catalogs(receipt)
+            publish_catalogs()
             if restored and not manual_restore:
                 # Pending continuations already have their current controls before
                 # the graph binds their sealed profile receipt.
@@ -5825,7 +5888,8 @@ class Session(Generic[ContextT, OutputT]):
             raise NativeError("Native request belongs to an expired captured catalog")
         return catalog
 
-    def _accept_profile_catalogs(self, receipt: Mapping[str, Any]) -> None:
+    def _prepare_profile_catalogs(self, receipt: Mapping[str, Any]) -> Callable[[], None]:
+        """Validate a candidate graph before publishing any of its catalogs."""
         catalogs, high_water = receipt.get("catalogs"), receipt.get("generation_high_water")
         if (
             not isinstance(catalogs, dict)
@@ -5843,24 +5907,19 @@ class Session(Generic[ContextT, OutputT]):
         if not isinstance(active, dict):
             raise NativeError("Invalid native active Agent receipt")
         self._agent_for_profile(active)
-        self._profiles = {
+        profiles = {
             key: replace(value, catalog=replace(value.catalog, generation=catalogs[key]))
             for key, value in self._profiles.items()
         }
-        self._profile_generation_high_water = high_water
-        self._profile_catalogs.update(
-            {
-                (key, value.catalog.generation): value.catalog
-                for key, value in self._profiles.items()
-            }
-        )
-        self._catalog_bindings.update(
-            {
-                (key, value.catalog.generation): value.profile.declaration.tools
-                for key, value in self._profiles.items()
-            }
-        )
-        current = self._profiles[active["profile_id"]]
+        profile_catalogs = {
+            (key, value.catalog.generation): value.catalog for key, value in profiles.items()
+        }
+        catalog_bindings = {
+            (key, value.catalog.generation): value.profile.declaration.tools
+            for key, value in profiles.items()
+        }
+        profile_id = active["profile_id"]
+        current = profiles[profile_id]
         active_catalog = receipt.get("active_catalog")
         if not isinstance(active_catalog, dict):
             raise NativeError("Missing native active Agent catalog")
@@ -5878,18 +5937,27 @@ class Session(Generic[ContextT, OutputT]):
         refs = [_saved_python_ref(spec) for spec in specs]
         if refs != [tool._ref for tool in source_catalog.tools]:
             raise NativeError("Active native Agent catalog differs from its captured declarations")
-        known = self._profile_catalogs.get((active["profile_id"], generation))
+        active_key = (profile_id, generation)
+        known = profile_catalogs.get(active_key, self._profile_catalogs.get(active_key))
         if known is not None and known.native_specs() != source_catalog.native_specs():
             raise NativeError("Native Agent reused a catalog generation with different slots")
-        self._profile_catalogs[(active["profile_id"], generation)] = source_catalog
-        self._catalog_bindings[(active["profile_id"], generation)] = (
-            current.profile.declaration.tools
-        )
-        self._catalog = source_catalog
-        self._bound_tools = source_catalog.tools
-        self._bindings = current.profile.declaration.tools
-        self._default_output = current.output
-        self._profile_current = (active["profile_id"], active["epoch"])
+        bindings = current.profile.declaration.tools
+        profile_catalogs[active_key] = source_catalog
+        catalog_bindings[active_key] = bindings
+        active_profile = (profile_id, active["epoch"])
+
+        def publish() -> None:
+            self._profiles = profiles
+            self._profile_generation_high_water = high_water
+            self._profile_catalogs.update(profile_catalogs)
+            self._catalog_bindings.update(catalog_bindings)
+            self._catalog = source_catalog
+            self._bound_tools = source_catalog.tools
+            self._bindings = bindings
+            self._default_output = current.output
+            self._profile_current = active_profile
+
+        return publish
 
     def _effective_agent(self) -> Agent[Any, Any]:
         if self._profile_current is not None:
@@ -6547,6 +6615,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         model_override: str | None = None,
+        model_settings_override: ModelSettings | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -6565,6 +6634,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         model_override: str | None = None,
+        model_settings_override: ModelSettings | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -6582,6 +6652,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: None = None,
         budget: None = None,
         model_override: None = None,
+        model_settings_override: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -6599,6 +6670,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         model_override: str | None = None,
+        model_settings_override: ModelSettings | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -6640,6 +6712,11 @@ class Session(Generic[ContextT, OutputT]):
         supporting manual suspension with matching trusted limits and policy.
         See RunBudget for the counted usage, errors, and overshoot behavior.
 
+        model_settings_override has been selecting sparse settings for this root and
+        its automatic continuations without changing Session defaults. Queueing has
+        been capturing a detached copy before waiting. Steering has been refusing
+        these overrides. Omission and None have been inheriting the current defaults.
+
         trace_options overrides linkage and adds native tracing restrictions.
         Explicit parent takes precedence over ambient context, then Session
         defaults. Disabled/content restrictions from every owner remain sticky.
@@ -6664,6 +6741,30 @@ class Session(Generic[ContextT, OutputT]):
         try:
             self._check_open()
             model_override = _capture_model_override(model_override)
+            captured_settings = (
+                None
+                if model_settings_override is None
+                else _copy_model_settings(model_settings_override)
+            )
+            retry_policy_override = None
+            if captured_settings is not None:
+                requested_retry = captured_settings.get("retry")
+                if requested_retry is not None and requested_retry.policy is not None:
+                    inherited_retry = self._effective_agent().model_settings.get("retry")
+                    if (
+                        inherited_retry is None
+                        or requested_retry.policy is not inherited_retry.policy
+                    ):
+                        raise TypeError(
+                            "model_settings_override cannot install a different "
+                            "retry policy callable"
+                        )
+                    retry_policy_override = requested_retry.policy
+            encoded_settings = (
+                None
+                if captured_settings is None
+                else _native_model_settings(None, captured_settings)
+            )
             parent_trace = _trace_context(parent_trace)
             self._check_callback_operation("start work in its own Session")
             self._check_graph_admission()
@@ -6678,6 +6779,7 @@ class Session(Generic[ContextT, OutputT]):
                 or prepare_request is not None
                 or budget is not None
                 or model_override is not None
+                or model_settings_override is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -6735,6 +6837,8 @@ class Session(Generic[ContextT, OutputT]):
                 prepare_request=prepare_request,
                 budget=_RunBudget(budget) if budget is not None else None,
                 model_override=model_override,
+                model_settings_override=encoded_settings,
+                retry_policy_override=retry_policy_override,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -8439,6 +8543,7 @@ class Session(Generic[ContextT, OutputT]):
         engine = None
         thread = None
         retiring = False
+        publish_profile_catalogs: Callable[[], None] | None = None
         try:
             encoded = change.context()
             # Both native reads serialize the same full snapshot, including revisions.
@@ -8483,6 +8588,23 @@ class Session(Generic[ContextT, OutputT]):
             options["_input_error_tool_slots"] = self._catalog.input_error_slots(
                 run_formatter=self._tool_error_formatter is not None
             )
+            transport_settings = {
+                key: value
+                for key, value in self._effective_agent().model_settings.items()
+                if key in ("extra_headers", "extra_query")
+            }
+            if (
+                self._repair_transport_settings is not None
+                and self._repair_transport_settings[0] == self._profile_current
+            ):
+                transport_settings.update(self._repair_transport_settings[1])
+            transport = (
+                _native_model_settings(None, cast(ModelSettings, transport_settings))
+                .get("request_controls", {})
+                .get("request_transport")
+            )
+            if transport is not None:
+                options["_sdk_request_transport"] = transport
             current_options = json.loads(change.options())
             options["_sdk_instruction_files"] = current_options["instruction_files"]
             applied_roots = current_options["executor_writable_roots"]
@@ -8514,6 +8636,17 @@ class Session(Generic[ContextT, OutputT]):
             if self._model_backend is not None:
                 thread._enable_model_producer(True)
             await change.validate_candidate(thread)
+            if self._profiles:
+                graph = options["_agent_profiles"]
+                profile_receipt = json.loads(
+                    await self._publish_startup(
+                        thread._configure_agent_profiles(
+                            json.dumps(graph["roster"]), graph["root_id"], None, None
+                        ),
+                        candidate=thread,
+                    )
+                )
+                publish_profile_catalogs = self._prepare_profile_catalogs(profile_receipt)
             available = opening
             _, allowed_mcp, _ = _split_tools(available)
             if allowed_mcp:
@@ -8550,6 +8683,8 @@ class Session(Generic[ContextT, OutputT]):
             await self._engine.close()
             self._engine = engine
             self._native = thread
+            if publish_profile_catalogs is not None:
+                publish_profile_catalogs()
             self._model_context_snapshots.clear()
             engine = thread = None
             self._reader = _create_task(self._read_events())
@@ -9010,6 +9145,8 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: _RunBudget | None = None,
         model_override: str | None = None,
+        model_settings_override: dict[str, Any] | None = None,
+        retry_policy_override: RetryPolicy | None = None,
         run_usage: _UsageCollector | None = None,
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
@@ -9139,6 +9276,8 @@ class Session(Generic[ContextT, OutputT]):
                 prepare_request=prepare_request,
                 budget=budget,
                 model_override=model_override,
+                model_settings_override=model_settings_override,
+                retry_policy_override=retry_policy_override,
                 tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
@@ -9151,7 +9290,8 @@ class Session(Generic[ContextT, OutputT]):
                 operation_agent=self._effective_agent() if tools is not None else None,
                 operation_declaration_source=(
                     {"profile_id": self._profile_current[0], "epoch": self._profile_current[1]}
-                    if tools and self._profile_current is not None
+                    if self._profile_current is not None
+                    and (tools or retry_policy_override is not None)
                     else None
                 ),
             )
@@ -9362,8 +9502,25 @@ class Session(Generic[ContextT, OutputT]):
                     raise NativeError("Native Agent activation acknowledgement did not match")
                 await self._refresh_profile_bindings()
             else:
+                previous_profile = self._profile_current
+                previous_transport = self._repair_transport_settings
                 await self._update_category(settings, instructions, captured_tools)
                 await self._refresh_profile_bindings(preserve_current=True)
+                transport = (
+                    previous_transport[1]
+                    if previous_transport is not None and previous_transport[0] == previous_profile
+                    else {}
+                )
+                transport = {
+                    **transport,
+                    **{
+                        key: value
+                        for key, value in captured_update_settings.items()
+                        if key in ("extra_headers", "extra_query")
+                    },
+                }
+                if transport:
+                    self._repair_transport_settings = (self._profile_current, transport)
             if self._realtime is not None and (
                 target is not None
                 or settings
@@ -10834,6 +10991,10 @@ class Session(Generic[ContextT, OutputT]):
                             request["start"] = {"final_output_json_schema": state.output.schema}
                         if state.model_override is not None:
                             request.setdefault("start", {})["model_override"] = state.model_override
+                        if state.model_settings_override is not None:
+                            request.setdefault("start", {})["model_settings_override"] = (
+                                state.model_settings_override
+                            )
                         if state.writable_roots is not None:
                             request["writable_roots"] = state.writable_roots
                         state.observation_after = self._observations.sequence
@@ -11141,6 +11302,8 @@ class Session(Generic[ContextT, OutputT]):
                     step_index=state.step_index,
                     budget=state.budget,
                     model_override=state.model_override,
+                    model_settings_override=state.model_settings_override,
+                    retry_policy_override=state.retry_policy_override,
                     run_usage=state.run_usage,
                     submission_request_attempts=state.submission_request_attempts,
                     original_input=state.original_input,
@@ -11338,6 +11501,34 @@ class Session(Generic[ContextT, OutputT]):
                 if captured.get(key) is not None
             },
         )
+        transport_settings = {
+            key: value
+            for key, value in source_agent.model_settings.items()
+            if key in ("extra_headers", "extra_query")
+        }
+        source_profile = (
+            (source_message["profile_id"], source_message["profile_epoch"])
+            if source_message is not None and self._profiles
+            else self._profile_current
+        )
+        if (
+            self._repair_transport_settings is not None
+            and self._repair_transport_settings[0] == source_profile
+        ):
+            transport_settings.update(self._repair_transport_settings[1])
+        settings.update(cast(ModelSettings, transport_settings))
+        repair_model_settings = deepcopy(state.model_settings_override)
+        if repair_model_settings is not None:
+            repair_model_settings.pop("tool_choice", None)
+            controls = repair_model_settings.get("request_controls")
+            if isinstance(controls, dict):
+                for key in ("named_tool_choice", "hosted_tool_choice", "reset_tool_choice"):
+                    controls.pop(key, None)
+                if (
+                    _has_operation_retry_policy(repair_model_settings)
+                    and state.retry_policy_override is not None
+                ):
+                    settings["retry"] = ModelRetrySettings(policy=state.retry_policy_override)
         declaration = Agent[ContextT, str](
             instructions="Correct the supplied JSON to match its schema. Return only JSON.",
             provider=provider,
@@ -11405,6 +11596,8 @@ class Session(Generic[ContextT, OutputT]):
                         _prepare_spec(str),
                         budget=state.budget,
                         model_override=state.model_override,
+                        model_settings_override=repair_model_settings,
+                        retry_policy_override=state.retry_policy_override,
                         run_usage=state.run_usage,
                     )
                 except NativeError as error:
@@ -12352,7 +12545,10 @@ class Session(Generic[ContextT, OutputT]):
                 return
             declaration = self._agent_for_message(message)
             retry = declaration.model_settings.get("retry")
-            policy = retry.policy if retry is not None else None
+            if isinstance(state, _Submission) and state.retry_policy_override is not None:
+                policy = state.retry_policy_override
+            else:
+                policy = retry.policy if retry is not None else None
 
             async def invoke(callback: Callable[..., Any], argument: Any) -> Any:
                 if not active():
@@ -12534,6 +12730,10 @@ class Session(Generic[ContextT, OutputT]):
                 disable_provider_retries=message.get("disable_provider_retries") is True,
                 _report_usage=report_usage,
             )
+            if "request_transport" in message:
+                object.__setattr__(
+                    request, "_request_transport", deepcopy(message["request_transport"])
+                )
             if self._include_raw_provider_events:
                 object.__setattr__(request, "_observe_raw_provider_events", True)
             backend = self._model_backend
