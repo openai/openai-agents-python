@@ -58,7 +58,11 @@ async def test_unknown_tool_policy_survives_manual_restore(responses: ResponsesF
 
     async with timeout(20):
         with pytest.raises(InteractionRequired) as paused:
-            await agent.run("Find it.", tool_not_found_behavior="raise_error")
+            await agent.run(
+                "Find it.",
+                tool_not_found_behavior="raise_error",
+                model_settings_override={"max_output_tokens": 37},
+            )
         assert paused.value.state is not None
         saved = SessionState.from_json(paused.value.state.to_json())
         assert any(
@@ -77,3 +81,4 @@ async def test_unknown_tool_policy_survives_manual_restore(responses: ResponsesF
                 await turn.get_result()
 
     assert len(responses.requests) == 2
+    assert [request.get("max_output_tokens") for request in responses.requests] == [37, 37]

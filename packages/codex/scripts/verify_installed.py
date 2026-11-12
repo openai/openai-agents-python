@@ -109,6 +109,8 @@ async def exercise(checks: list[dict[str, Any]]) -> None:
         def do_POST(self):
             try:
                 assert self.path == "/v1/responses", f"unexpected provider path: {self.path}"
+                assert self.headers.get("x-sdk-smoke-route") == "installed-wheel"
+                assert self.headers.get("x-sdk-smoke-omit") is None
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 requests.append(body)
                 count = len(requests)
@@ -174,9 +176,13 @@ async def exercise(checks: list[dict[str, Any]]) -> None:
             instructions="Use the lookup tool, then return the typed answer.",
             tools=[lookup],
             output_type=Answer,
+            model_settings={
+                "extra_headers": {"x-sdk-smoke-route": "installed-wheel", "x-sdk-smoke-omit": None},
+            },
             provider=NativeProvider(
                 base_url=f"http://127.0.0.1:{server.server_port}/v1",
                 api_key="synthetic-installed-key",
+                headers={"x-sdk-smoke-omit": "provider-default"},
             ),
         )
         async with agent.session(context=application) as session:

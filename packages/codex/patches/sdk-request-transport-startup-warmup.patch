@@ -1,0 +1,20 @@
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -419,7 +419,7 @@
+             history
+         }
+     };
+-    let startup_prompt = build_prompt(
++    let mut startup_prompt = build_prompt(
+         prompt_input,
+         step_context.as_ref(),
+         BaseInstructions {
+@@ -427,6 +427,8 @@
+             provenance: None,
+         },
+     );
++    startup_prompt.request_controls.request_transport =
++        step_context.settings.request_controls().request_transport.clone();
+     startup_turn_context.session_telemetry.record_startup_phase(
+         "startup_prewarm_build_prompt",
+         build_prompt_started_at.elapsed(),
