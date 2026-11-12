@@ -106,6 +106,39 @@ mod acknowledged_original_tests {
     }
 
     #[test]
+    fn hosted_mcp_receipts_preserve_the_complete_approval_decision() {
+        let make = |approve: bool, request: &str, reason: &str, caller: &str, generated: bool| {
+            let mut value = serde_json::json!({
+                "type": "mcp_approval_response", "approval_request_id": request,
+                "approve": approve, "reason": reason, "caller": {"type": caller},
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn"}
+            });
+            if generated {
+                value["id"] = serde_json::json!("mcp_response_generated");
+                value["internal_chat_message_metadata_passthrough"]["create_time"] =
+                    serde_json::json!(1.25);
+            }
+            serde_json::from_value::<ResponseItem>(value).unwrap()
+        };
+        for approve in [true, false] {
+            let accepted = make(approve, "approval", "decision", "direct", false);
+            assert!(same_acknowledged_output(
+                &accepted,
+                &make(approve, "approval", "decision", "direct", true)
+            ));
+            for changed in [
+                make(!approve, "approval", "decision", "direct", false),
+                make(approve, "other", "decision", "direct", false),
+                make(approve, "approval", "substitute", "direct", false),
+                make(approve, "approval", "decision", "programmatic", false),
+            ] {
+                assert!(!same_output_payload(&accepted, &changed));
+                assert!(!same_acknowledged_output(&accepted, &changed));
+            }
+        }
+    }
+
+    #[test]
     fn completed_and_failed_patch_receipts_require_exact_status_and_output() {
         let make = |status: &str, output: &str| {
             serde_json::from_value::<ResponseItem>(serde_json::json!({
@@ -159,6 +192,27 @@ pub(crate) fn same_output_payload(left: &ResponseItem, right: &ResponseItem) -> 
             .ok()
             .zip(serde_json::to_value(right).ok())
             .is_some_and(|(left, right)| left == right),
+        (
+            ResponseItem::McpApprovalResponse {
+                approval_request_id: left_request,
+                approve: left_approve,
+                reason: left_reason,
+                caller: left_caller,
+                ..
+            },
+            ResponseItem::McpApprovalResponse {
+                approval_request_id: right_request,
+                approve: right_approve,
+                reason: right_reason,
+                caller: right_caller,
+                ..
+            },
+        ) => {
+            left_request == right_request
+                && left_approve == right_approve
+                && left_reason == right_reason
+                && left_caller == right_caller
+        }
         (
             ResponseItem::ApplyPatchCallOutput {
                 status: left_status,

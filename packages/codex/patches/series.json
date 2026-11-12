@@ -847,7 +847,11 @@
     {
       "path": "sdk-trace-provider-restart.patch",
       "sha256": "93e8fc471464e573b070b5a972db1861527e94f86de0b64633893786ded2095f"
+    },
+    {
+      "path": "sdk-hosted-mcp-typed-effect-fence.patch",
+      "sha256": "fabd814cbbf3ad51225dd294bcf7b4ef3fbc447f3799ed09a801f32554732e6f"
     }
   ],
-  "result_tree": "24ce63fae5d905955e557d92346fc97f0d112b60"
+  "result_tree": "30a77d67e63c8278768da5a6f9b065ff6f84e7d8"
 }
