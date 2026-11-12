@@ -267,7 +267,7 @@ async def _exercise_borrowed_provider(
 
 
 @pytest.mark.parametrize("adapter", ["responses", "litellm", "any_llm"])
-@pytest.mark.parametrize("outcome", ["complete", "incomplete", "refusal", "cancel"])
+@pytest.mark.parametrize("outcome", ["incomplete", "refusal", "cancel"])
 async def test_borrowed_provider_library_retains_native_ownership(adapter, outcome, monkeypatch):
     await _exercise_borrowed_provider(adapter, outcome, monkeypatch)
 

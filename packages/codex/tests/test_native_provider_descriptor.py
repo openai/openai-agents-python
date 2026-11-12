@@ -80,8 +80,10 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
 def test_provider_retry_controls_reject_invalid_values(name, value):
     from agents import NativeProvider
 
-    with pytest.raises(ValueError, match="signed 64-bit"):
+    with pytest.raises(ValueError, match="signed 64-bit") as failure:
         NativeProvider(**{name: value})
+    if name in {"request_max_retries", "stream_max_retries"}:
+        assert name in str(failure.value)
 
 
 @pytest.mark.parametrize(
