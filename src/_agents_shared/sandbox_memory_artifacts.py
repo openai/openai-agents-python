@@ -10,6 +10,10 @@ from pydantic import BaseModel
 
 
 class _MemoryFlushLock(asyncio.Lock):
+    def __eq__(self, other: object) -> bool:
+        # Runtime synchronization does not change the persisted workspace value.
+        return type(self) is type(other)
+
     def __deepcopy__(self, _memo: dict[int, object]) -> _MemoryFlushLock:
         # A trusted copy still identifies the same live provider workspace.
         return self

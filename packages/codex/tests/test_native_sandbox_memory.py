@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import tarfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Event
+from typing import Any
 
 import pytest
 
@@ -315,6 +317,32 @@ async def test_native_sandbox_memory_only_consolidates_regular_artifacts(
     from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
 
     if process_backed:
+        from agents.classic.sandbox.session.base_sandbox_session import _READ_MEMORY_FILE_SCRIPT
+
+        original_exec = UnixLocalSandboxSession.exec
+
+        async def reader_exec(
+            self: UnixLocalSandboxSession, command: str, *arguments: str, **kwargs: Any
+        ):
+            if (
+                command == "/bin/sh"
+                and len(arguments) >= 4
+                and arguments[3] == _READ_MEMORY_FILE_SCRIPT
+            ):
+                assert arguments[:3] == (
+                    "-c",
+                    'PATH=/usr/local/bin:/usr/bin:/bin; export PATH; exec python3 -I -S -c "$@"',
+                    "sh",
+                )
+                assert kwargs["shell"] is False
+                # Exercise the remote descriptor script with the known test
+                # interpreter; hosted macOS need not have image Python on PATH.
+                return await original_exec(
+                    self, sys.executable, "-I", "-S", "-c", *arguments[3:], **kwargs
+                )
+            return await original_exec(self, command, *arguments, **kwargs)
+
+        monkeypatch.setattr(UnixLocalSandboxSession, "exec", reader_exec)
         monkeypatch.setattr(
             UnixLocalSandboxSession, "_read_memory_file", BaseSandboxSession._read_memory_file
         )
@@ -374,3 +402,63 @@ async def test_native_sandbox_memory_only_consolidates_regular_artifacts(
         assert "New memory." in request
         assert "private sentinel" not in request
         assert "forged" not in request
+
+
+@pytest.mark.parametrize(
+    ("root", "grant_read_only", "local_interpreter"),
+    [("/usr/local/bin", None, False), ("/workspace", False, False), ("/workspace", True, True)],
+)
+async def test_memory_reader_excludes_writable_interpreter_locations(
+    root: str, grant_read_only: bool | None, local_interpreter: bool
+) -> None:
+    from types import SimpleNamespace
+    from typing import cast
+
+    from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
+    from agents.classic.sandbox.types import ExecResult
+    from agents.classic.sandbox.workspace_paths import SandboxPathGrant, WorkspacePathPolicy
+
+    grants = (
+        (SandboxPathGrant(path="/usr/local/bin", read_only=grant_read_only),)
+        if grant_read_only is not None
+        else ()
+    )
+    manifest = Manifest(root=root, extra_path_grants=grants)
+    policy = WorkspacePathPolicy(root=manifest.root, extra_path_grants=manifest.extra_path_grants)
+    commands = []
+
+    async def execute(*arguments: str, **kwargs: Any) -> ExecResult:
+        commands.append(arguments)
+        assert kwargs["shell"] is False
+        return ExecResult(stdout=b"safe", stderr=b"", exit_code=0)
+
+    owner = cast(
+        BaseSandboxSession,
+        SimpleNamespace(_workspace_path_policy=lambda: policy, exec=execute),
+    )
+    assert (
+        await BaseSandboxSession._read_memory_file(owner, Path("memory.md"), max_bytes=4) == b"safe"
+    )
+    search_path = "/usr/local/bin:/usr/bin:/bin" if local_interpreter else "/usr/bin:/bin"
+    assert commands[0][:3] == (
+        "/bin/sh",
+        "-c",
+        f'PATH={search_path}; export PATH; exec python3 -I -S -c "$@"',
+    )
+
+
+async def test_memory_reader_rejects_workspace_owned_bootstrap() -> None:
+    from types import SimpleNamespace
+    from typing import cast
+
+    from agents.classic.sandbox.errors import WorkspaceArchiveReadError
+    from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
+    from agents.classic.sandbox.workspace_paths import WorkspacePathPolicy
+
+    owner = cast(
+        BaseSandboxSession,
+        SimpleNamespace(_workspace_path_policy=lambda: WorkspacePathPolicy(root="/usr/bin")),
+    )
+    # No exec implementation: rejection must precede provider execution.
+    with pytest.raises(WorkspaceArchiveReadError):
+        await BaseSandboxSession._read_memory_file(owner, Path("memory.md"), max_bytes=4)

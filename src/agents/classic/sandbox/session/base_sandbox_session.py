@@ -3,7 +3,7 @@ import asyncio
 import io
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Literal, NoReturn, TypeVar
 
 from typing_extensions import Self
@@ -1044,13 +1044,31 @@ class BaseSandboxSession(abc.ABC):
             raise ValueError("max_bytes must be positive")
         policy = self._workspace_path_policy()
         relative = policy.relative_path(path)
+        writable_roots = (policy.sandbox_root(),) + tuple(
+            root for root, read_only in policy.extra_path_grant_rules() if not read_only
+        )
+
+        def overlaps_writable(paths: tuple[str, ...]) -> bool:
+            return any(
+                root.is_relative_to(PurePosixPath(candidate))
+                or PurePosixPath(candidate).is_relative_to(root)
+                for root in writable_roots
+                for candidate in paths
+            )
+
+        # The shell and its system libraries must remain image-owned too.
+        if overlaps_writable(("/bin", "/usr/bin", "/lib", "/lib64", "/usr/lib", "/usr/lib64")):
+            raise WorkspaceArchiveReadError(path=path)
+        interpreter_path = "/usr/bin:/bin"
+        if not overlaps_writable(("/usr/local/bin", "/usr/local/lib", "/usr/local/lib64")):
+            interpreter_path = "/usr/local/bin:" + interpreter_path
         result = None
         try:
             # Use image-owned Python and disable workspace and environment import paths.
             result = await self.exec(
                 "/bin/sh",
                 "-c",
-                'PATH=/usr/bin:/bin; export PATH; exec python3 -I -S -c "$@"',
+                f'PATH={interpreter_path}; export PATH; exec python3 -I -S -c "$@"',
                 "sh",
                 _READ_MEMORY_FILE_SCRIPT,
                 policy.sandbox_root().as_posix(),

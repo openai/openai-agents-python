@@ -6314,15 +6314,16 @@ class Session(Generic[ContextT, OutputT]):
             raise RuntimeError("Use Session in the event loop where it opened")
 
     def _check_callback_operation(self, operation: str) -> None:
-        memory = _current_memory_owner()
-        lease = self._environment_lease
-        if memory is not None and lease is not None and lease._sandbox_memory is memory:
-            raise RuntimeError(f"A sandbox memory phase cannot {operation}")
         invocation = _invocation.get()
         while invocation is not None:
             if invocation.active and invocation.session is self:
                 raise RuntimeError(f"A tool callback cannot {operation}")
             invocation = invocation.parent
+        memory = _current_memory_owner()
+        if memory is not None:
+            lease = self._environment_lease
+            if lease is not None and lease._sandbox_memory is memory:
+                raise RuntimeError(f"A sandbox memory phase cannot {operation}")
 
     def _check_graph_admission(self) -> None:
         if self._graph_interrupts:
