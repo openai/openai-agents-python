@@ -523,6 +523,8 @@ async def test_sign_in_with_chatgpt_keeps_external_bearer_and_original_http(
         "proxy",
         "raw_usage",
         "raw_usage_tool",
+        "error_details",
+        "error_details_tool",
         "application-shell",
         "mixed-application-shell",
     ],
@@ -571,7 +573,7 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
     monkeypatch.setattr(native, "create_engine", create_engine)
     agent_options: dict[str, Any] = {}
     run_options: dict[str, Any] = {}
-    if profile in ("tool", "ca", "proxy", "raw_usage_tool"):
+    if profile in ("tool", "ca", "proxy", "raw_usage_tool", "error_details_tool"):
         agent_options["tools"] = [optional_tool]
         if profile == "ca":
             monkeypatch.setenv("SSL_CERT_FILE", "")
@@ -594,6 +596,8 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         )
     if profile in ("raw_usage", "raw_usage_tool"):
         run_options["return_raw_usage"] = True
+    if profile in ("error_details", "error_details_tool"):
+        run_options["capture_error_details"] = True
     agent = Agent(instructions="Answer briefly.", **agent_options)
     assert agent.provider is None
     with pytest.raises(_OpeningCaptured):
