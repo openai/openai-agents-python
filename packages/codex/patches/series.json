@@ -701,9 +701,13 @@
       "sha256": "a6e10d1e8a347c5a8623ffd275b858738b848380460cfbdace7f567fa1905705"
     },
     {
+      "path": "0163-sdk-followup-mailbox-trace.patch",
+      "sha256": "3b4b270ab86c1f76b39d1d49f8e1c17e1896c6e4c6fdecba17a011a0a97ffbaf"
+    },
+    {
       "path": "sdk-chat-completions-raw-response.patch",
       "sha256": "5adb96468cc0c98a5516ebec5acb2afdbd33129160b7705497cb83601063713c"
     }
   ],
-  "result_tree": "2935f26376d5ef8bef4023b9fcb09c75472eea4b"
+  "result_tree": "8df38a602c6b13476d4f2a3a75ecefaf7a7b7891"
 }
