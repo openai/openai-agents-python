@@ -133,6 +133,7 @@ from .agent import (
     SignInWithChatGPT,
     _copy_model_settings as _copy_model_settings,
 )
+from .apply_patch import _ApplyPatchTool
 from .canonical_storage import (
     CustomStorage as CustomStorage,
     SessionStoreCleanup as SessionStoreCleanup,
@@ -3871,7 +3872,11 @@ class Session(Generic[ContextT, OutputT]):
                 raise ValueError("project_guidance requires an Environment")
             if executor is not None:
                 for tool in allowed_tools:
-                    if tool.ref.namespace in (None, "functions") and tool.name in executor.tools:
+                    if (
+                        tool.ref.namespace in (None, "functions")
+                        and tool.name in executor.tools
+                        and not isinstance(tool, _ApplyPatchTool)
+                    ):
                         raise ValueError(
                             f"Python tool collides with enabled environment tool: {tool.name}"
                         )
