@@ -721,6 +721,10 @@
       "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
     },
     {
+      "path": "sdk-application-apply-patch.patch",
+      "sha256": "353cefc34587a72a8a9a243e117e118f50e639a6cd0a5a96491ff0ec6bf69677"
+    },
+    {
       "path": "sdk-chat-completions-raw-response.patch",
       "sha256": "5adb96468cc0c98a5516ebec5acb2afdbd33129160b7705497cb83601063713c"
     },
@@ -729,5 +733,5 @@
       "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
     }
   ],
-  "result_tree": "96dae4ba85d0c98d777ed41d18f4d6675c1e79f4"
+  "result_tree": "6e68ec663ba674cd8d9dcb149b4e2ed85904f87b"
 }
