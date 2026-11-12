@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "24ed471419a8abbe4592741dc5d42f9885de8a07",
+  "baseline_commit": "6fe079aa65e7662eadcc387e262010c011cb2b33",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -172,7 +172,7 @@
           "@runtime_checkable\nclass SessionStore(Protocol):\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
           "class SessionStoreCleanup:\n\n    def __init__(self, owner: Any) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
           "@dataclass(frozen=True)\nclass CustomStorage:\n    backend: SessionStore\n\n    async def reconcile(self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput | ShellOutput) -> None:\n        pass",
-          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    @staticmethod\n    async def read_legacy_history(path: Path, session_id: str, *, messages_table: str='agent_messages', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
+          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    async def store_run_usage(self, session_id: str, turn_id: str, usage: RunUsage, *, branch_id: str='main') -> None:\n        pass\n\n    async def get_turn_usage(self, session_id: str, *, branch_id: str='main', turn_id: str | None=None) -> dict[str, RunUsage]:\n        pass\n\n    async def get_session_usage(self, session_id: str, *, branch_id: str | None=None) -> dict[str, int] | None:\n        pass\n\n    async def clear_run_usage(self, session_id: str, *, branch_id: str | None=None, turn_id: str | None=None) -> None:\n        pass\n\n    @staticmethod\n    async def read_legacy_history(path: Path, session_id: str, *, messages_table: str='agent_messages', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
           "class SQLAlchemySessionStore(SQLiteSessionStore):\n\n    def __init__(self, engine: Any) -> None:\n        pass",
           "async def read_dapr_legacy_history(dapr_client: Any, session_id: str, *, state_store_name: str, consistency: Literal['eventual', 'strong']='eventual', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n    pass"
         ],
@@ -194,7 +194,8 @@
           "from .canonical_storage_redis import RedisSessionStore as RedisSessionStore",
           "from .canonical_storage_sqlalchemy_async import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore",
           "from .shell import ShellOutput as ShellOutput",
-          "from .tools import ToolOutput as ToolOutput"
+          "from .tools import ToolOutput as ToolOutput",
+          "from .usage import RunUsage"
         ],
         "references": {
           "AsyncSQLAlchemySessionStore": "_agents_codex.canonical_storage_sqlalchemy_async.AsyncSQLAlchemySessionStore",
@@ -202,6 +203,7 @@
           "EncryptedSessionStore": "_agents_codex.canonical_storage_encrypt.EncryptedSessionStore",
           "MongoDBSessionStore": "_agents_codex.canonical_storage_mongodb.MongoDBSessionStore",
           "RedisSessionStore": "_agents_codex.canonical_storage_redis.RedisSessionStore",
+          "RunUsage": "agents.usage.RunUsage",
           "ShellOutput": "agents.shell.ShellOutput",
           "ToolOutput": "agents.tools.ToolOutput"
         }
