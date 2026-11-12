@@ -1296,6 +1296,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1331,6 +1332,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: object = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1366,6 +1368,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: ContextT,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1401,6 +1404,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1498,7 +1502,9 @@ class Agent(Generic[ContextT, OutputT]):
         Sessions acquire external MCP resources when an operation selecting
         them starts. Startup errors are reported on that Turn. Restoring an
         already-admitted pending manual turn readies its selected resources
-        before exposing its replies.
+        before exposing its replies. For a pending turn that selects hosted MCP,
+        pass the current HostedMCP declarations in restored_hosted_mcp to authorize
+        those servers for that turn.
 
         trace_options captures native tracing defaults before opening. Every
         submission inherits its disabled/content restrictions, including when
@@ -1518,11 +1524,10 @@ class Agent(Generic[ContextT, OutputT]):
         checkpoints contain no credentials.
 
         With ``state``, restore an idle or settled manual native checkpoint
-        using the effective provider, current tools, and application context. Tool declarations and
-        instructions must match the saved conversation. Saved model settings
-        take precedence over this Agent's model settings. Non-None model or
-        model_settings overrides, including an empty mapping, are rejected with
-        state. Use update(model=...) on the restored Session after it becomes idle.
+        using the effective provider, current tools, and application context.
+        Tool declarations and instructions must match the saved conversation.
+        Saved model settings take precedence over this Agent's model settings.
+        Use update(model=...) to change the default after the Session becomes idle.
         Live submission handles
         and workspace files do not transfer to the restored Session. Each restore
         owns isolated native storage; applications coordinate shared state files.
@@ -1579,6 +1584,7 @@ class Agent(Generic[ContextT, OutputT]):
                 context=context,
                 state=state,
                 verify_remembered_approvals=verify_remembered_approvals,
+                restored_hosted_mcp=restored_hosted_mcp,
                 restored_output_type=restored_output_type,
                 resume_budget=resume_budget,
                 initial_messages=initial_messages,
@@ -1621,6 +1627,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
@@ -1670,6 +1677,7 @@ class Agent(Generic[ContextT, OutputT]):
                 context=context,
                 state=state,
                 verify_remembered_approvals=verify_remembered_approvals,
+                restored_hosted_mcp=restored_hosted_mcp,
                 restored_output_type=restored_output_type,
                 resume_budget=resume_budget,
                 initial_messages_json=_initial_messages_json(initial_messages),
@@ -1753,6 +1761,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1787,6 +1796,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1821,6 +1831,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1859,6 +1870,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1920,6 +1932,8 @@ class Agent(Generic[ContextT, OutputT]):
         state before close; save_state restrictions and failures still apply.
         For a saved pending model override, pass its authorized name as `model`.
         The saved default must match the active Agent or provider default.
+        Pass the current HostedMCP declarations in restored_hosted_mcp to
+        authorize selected hosted servers for the pending turn.
         return_history=True captures conversation records before close for replay
         through another Session's transact_history. That Session supplies its own instructions.
         History above 4,096 original records or 8 MiB raises NativeError after completion.
@@ -2099,6 +2113,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["resume_budget"] = budget
             if verify_remembered_approvals is not None:
                 options["verify_remembered_approvals"] = verify_remembered_approvals
+            if restored_hosted_mcp is not None:
+                options["restored_hosted_mcp"] = restored_hosted_mcp
             if provider is not None:
                 options["provider"] = provider
             if model is not None:
@@ -2388,6 +2404,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2422,6 +2439,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2456,6 +2474,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2494,6 +2513,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2538,6 +2558,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["state"] = state
                 if verify_remembered_approvals is not None:
                     options["verify_remembered_approvals"] = verify_remembered_approvals
+                if restored_hosted_mcp is not None:
+                    options["restored_hosted_mcp"] = restored_hosted_mcp
                 if initial_messages is not None:
                     options["initial_messages"] = initial_messages
                 if return_items:

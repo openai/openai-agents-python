@@ -348,6 +348,7 @@ from .usage import (
 
 if TYPE_CHECKING:
     from ._sandbox_events import _OperationObserver
+    from .hosted_mcp import HostedMCP
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage
     from .turn import ChildTurn
@@ -2819,6 +2820,25 @@ def _install_profile_options(
     )
 
 
+def _check_restored_hosted_mcp(
+    saved: SessionState,
+    available: Sequence[Tool[Any]],
+    authorized: Sequence[HostedMCP[Any]],
+) -> None:
+    from .hosted_mcp import HostedMCP
+
+    if any(not isinstance(tool, HostedMCP) for tool in authorized):
+        raise TypeError("restored_hosted_mcp requires current HostedMCP declarations")
+    selected = None if saved.operation_tools is None else frozenset(saved.operation_tools)
+    for tool in available:
+        if (
+            isinstance(tool, HostedMCP)
+            and (selected is None or tool.ref in selected)
+            and not any(tool is grant for grant in authorized)
+        ):
+            raise ValueError("Restore selected hosted MCP tools with restored_hosted_mcp")
+
+
 def _restore_operation_tools(
     saved: SessionState,
     catalog: _ToolCatalog,
@@ -3738,6 +3758,7 @@ class Session(Generic[ContextT, OutputT]):
         context: ContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages_json: str | None = None,
@@ -3779,6 +3800,9 @@ class Session(Generic[ContextT, OutputT]):
         )
         if state is not None:
             state._check_prompt_references()
+        hosted_restore_grants = () if restored_hosted_mcp is None else tuple(restored_hosted_mcp)
+        if restored_hosted_mcp is not None and (state is None or state.native_continuation is None):
+            raise ValueError("restored_hosted_mcp requires a pending restored turn")
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -4089,6 +4113,9 @@ class Session(Generic[ContextT, OutputT]):
                     "Run outside that sandboxed environment or remove unused proxy settings."
                 )
             if manual_restore:
+                _check_restored_hosted_mcp(
+                    saved, operation_declaration.tools, hosted_restore_grants
+                )
                 _check_restored_tool_context(
                     restored_tools, restored_mcp, saved.operation_tools, context
                 )

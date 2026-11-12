@@ -1266,8 +1266,13 @@ async def test_native_hosted_mcp_update_narrows_provider_advertisement_to_curren
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "restore_case",
+    ["session", "run", "without_hosted", "unattested", "appended", "removed"],
+)
 async def test_native_hosted_mcp_manual_restore_keeps_selected_server_with_handoffs(
     responses: ResponsesFixture,
+    restore_case: str,
 ) -> None:
     from agents.state import SessionState
     from tests.test_native_manual_tools import LookupArgs, next_request
@@ -1293,25 +1298,51 @@ async def test_native_hosted_mcp_manual_restore_keeps_selected_server_with_hando
             tools=[lookup, docs, other],
             handoffs=[target],
         )
+        selected = [lookup.ref] if restore_case == "without_hosted" else [lookup.ref, docs.ref]
         async with agent.session() as source:
-            original = await source.submit("Read A.", tools=[lookup.ref, docs.ref])
+            original = await source.submit("Read A.", tools=selected)
             first = await next_request(source.interactions(), lookup)
             saved = await source.suspend()
-        async with agent.session(state=SessionState.from_json(saved.to_json())) as restored:
-            request = await next_request(restored.interactions(), lookup)
-            assert (request.turn_id, request.call_id) == (original.turn_id, first.call_id)
-            assert len(responses.requests) == 1
-            responses.respond(assistant_output("Restored selected server."))
-            await request.respond("answer-A")
-            assert restored.restored_turn is not None
-            assert (await restored.restored_turn.get_result()).final_output == (
-                "Restored selected server."
+        encoded = json.loads(saved.to_json())
+        if restore_case == "appended":
+            encoded["operation_tools"].append(
+                {"name": other.ref.name, "namespace": other.ref.namespace}
             )
+        elif restore_case == "removed":
+            encoded.pop("operation_tools")
+        checkpoint = SessionState.from_json(json.dumps(encoded))
+        grants = None if restore_case in ("without_hosted", "unattested") else [docs]
+        if restore_case in ("unattested", "appended", "removed"):
+            with pytest.raises(ValueError, match="restored_hosted_mcp"):
+                async with agent.session(state=checkpoint, restored_hosted_mcp=grants):
+                    pytest.fail("Untrusted hosted MCP selection was admitted")
+            assert len(responses.requests) == 1
+            return
+        responses.respond(assistant_output("Restored selected server."))
+        if restore_case == "run":
+
+            async def reply(request):
+                assert (request.turn_id, request.call_id) == (original.turn_id, first.call_id)
+                return request.reply("answer-A")
+
+            result = await agent.run(
+                None, state=checkpoint, restored_hosted_mcp=grants, on_interaction=reply
+            )
+            assert result.final_output == "Restored selected server."
+        else:
+            async with agent.session(state=checkpoint, restored_hosted_mcp=grants) as restored:
+                request = await next_request(restored.interactions(), lookup)
+                assert (request.turn_id, request.call_id) == (original.turn_id, first.call_id)
+                assert len(responses.requests) == 1
+                await request.respond("answer-A")
+                assert restored.restored_turn is not None
+                assert (await restored.restored_turn.get_result()).final_output == (
+                    "Restored selected server."
+                )
         assert len(responses.requests) == 2
+        expected = [] if restore_case == "without_hosted" else [dict(docs.tool_config)]
         for wire in responses.requests:
-            assert [tool for tool in wire.get("tools", []) if tool["type"] == "mcp"] == [
-                dict(docs.tool_config)
-            ]
+            assert [tool for tool in wire.get("tools", []) if tool["type"] == "mcp"] == expected
         outputs = [
             item
             for item in responses.requests[1]["input"]
