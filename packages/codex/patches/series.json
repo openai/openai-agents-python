@@ -855,7 +855,11 @@
     {
       "path": "sdk-hosted-mcp-typed-effect-fence.patch",
       "sha256": "fabd814cbbf3ad51225dd294bcf7b4ef3fbc447f3799ed09a801f32554732e6f"
+    },
+    {
+      "path": "sdk-hosted-mcp-request-risk.patch",
+      "sha256": "97969b9079517f3ec4fc6e3ecfcb158d8d994384de19b646801174d1c9d050bc"
     }
   ],
-  "result_tree": "be2b0be9f25723f8cb2f6b1e9706ed21200718be"
+  "result_tree": "f35a7324848311f8391b5730a6f72d284e042c76"
 }
