@@ -8,7 +8,7 @@ import pytest
 
 from _agents_codex.history import CanonicalHistorySnapshot
 from _agents_codex.sandbox_memory import _memory_transcript
-from agents import Agent, ToolOutput, function_tool
+from agents import Agent, ToolOutput, ToolOutputFile, ToolOutputImage, ToolOutputText, function_tool
 from agents.sandbox import Manifest, SandboxMemoryOptions, sandbox_environment
 from agents.testing import ScriptedResponses, text, tool_call
 from tests._asyncio import timeout
@@ -17,9 +17,9 @@ from tests.test_native_sandbox_memory import _workspace_gateway
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
 
 
-@pytest.mark.parametrize("failed", [False, True], ids=["completed-tool", "failed-tool"])
+@pytest.mark.parametrize("kind", ["completed", "failed", "media"])
 async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_it(
-    tmp_path: Path, monkeypatch, failed: bool
+    tmp_path: Path, monkeypatch, kind: str
 ):
     from agents.classic.sandbox.sandboxes.unix_local import (
         UnixLocalSandboxClient,
@@ -32,8 +32,19 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
     @function_tool
     def lookup_preference(subject: str) -> str | ToolOutput:
         effects.append(subject)
-        if failed:
+        if kind == "failed":
             return ToolOutput.error("SYNTHETIC_TOOL_RESULT: preference unavailable")
+        if kind == "media":
+            return ToolOutput(
+                [
+                    ToolOutputText("SYNTHETIC_TOOL_RESULT: plain language"),
+                    ToolOutputImage(file_id="private-tool-image-id", detail="low"),
+                    ToolOutputFile(
+                        file_data="data:text/plain;base64,cHJpdmF0ZQ==",
+                        filename="private-tool-output.txt",
+                    ),
+                ]
+            )
         return "SYNTHETIC_TOOL_RESULT: plain language"
 
     extraction = {
@@ -66,6 +77,7 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
         agent = Agent(
             instructions="PRIVATE_SOURCE_INSTRUCTION",
             provider=peer.provider,
+            model="gpt-5.5",
             tools=[lookup_preference],
         )
         async with agent.session(environment=environment) as session:
@@ -129,8 +141,14 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
             assert json.loads(items[3]["arguments"]) == {"subject": "tone"}
             assert "role" not in items[0] and "role" not in items[1]
             result = items[4].get("error", items[4].get("output"))
-            expected_result = "preference unavailable" if failed else "plain language"
+            expected_result = "preference unavailable" if kind == "failed" else "plain language"
             assert expected_result in json.dumps(result)
+            if kind == "media":
+                assert result == [
+                    {"type": "input_text", "text": "SYNTHETIC_TOOL_RESULT: plain language"},
+                    {"type": "input_image"},
+                    {"type": "input_file"},
+                ]
             assert rollout["terminal_metadata"]["terminal_state"] == "completed"
             assert "PRIVATE_SOURCE_INSTRUCTION" not in lines[0]
             assert "PRIVATE_APPLICATION_NOTE" not in lines[0]
@@ -146,6 +164,9 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
             assert "PRIVATE_SOURCE_INSTRUCTION" not in phase_one_input
             assert "PRIVATE_APPLICATION_NOTE" not in phase_one_input
             assert "PRIVATE_IMPORTED_TOOL" not in phase_one_input
+            for private in ("private-tool-image-id", "cHJpdmF0ZQ==", "private-tool-output.txt"):
+                assert private not in lines[0]
+                assert private not in phase_one_input
 
 
 def test_memory_preserves_projected_failed_function_output() -> None:

@@ -85,16 +85,19 @@ def _bounded_json(value: object) -> str:
     return encoded
 
 
-def _memory_text_parts(parts: list[Any]) -> list[dict[str, str]]:
+def _memory_content_parts(parts: list[Any], *, tool_output: bool = False) -> list[dict[str, str]]:
     content: list[dict[str, str]] = []
     for part in parts:
-        if (
-            not isinstance(part, dict)
-            or part.get("type") not in ("input_text", "output_text")
-            or not isinstance(part.get("text"), str)
-        ):
-            raise ValueError("Native sandbox memory requires text message history")
-        content.append({"type": part["type"], "text": part["text"]})
+        if isinstance(part, dict):
+            kind = part.get("type")
+            if kind in ("input_text", "output_text") and isinstance(part.get("text"), str):
+                content.append({"type": kind, "text": part["text"]})
+                continue
+            if tool_output and kind in ("input_image", "input_file"):
+                # Memory records only the presence and kind of tool output media.
+                content.append({"type": kind})
+                continue
+        raise ValueError("Native sandbox memory requires text message history")
     return content
 
 
@@ -126,7 +129,9 @@ def _memory_transcript(
                 result["status"] = "failed"
             if isinstance(output, (str, list)):
                 result["output"] = (
-                    _memory_text_parts(output) if isinstance(output, list) else output
+                    _memory_content_parts(output, tool_output=True)
+                    if isinstance(output, list)
+                    else output
                 )
             elif output is None and result.get("status") == "failed":
                 error = item.get("error")
@@ -165,7 +170,7 @@ def _memory_transcript(
             ]
             if not parts:
                 continue
-        messages.append({"role": role, "content": _memory_text_parts(parts)})
+        messages.append({"role": role, "content": _memory_content_parts(parts)})
     return {
         "rollout_id": thread_id,
         "native_thread_id": thread_id,
