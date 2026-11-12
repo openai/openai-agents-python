@@ -145,6 +145,7 @@ def native_trace_child_env() -> dict[str, str]:
     "case_name",
     [
         "native_case",
+        "native_external_parent_case",
         "native_deadline_case",
         "native_deadline_reset_case",
         "native_outcome_privacy_case",
@@ -157,13 +158,21 @@ def native_trace_child_env() -> dict[str, str]:
 def test_real_native_capture_policy_and_openai_export(case_name):
     env = native_trace_child_env()
     env.pop("OPENAI_API_KEY", None)
+    runner = "asyncio.run(case)"
+    if (
+        sys.platform == "win32"
+        and sys.version_info >= (3, 12)
+        and case_name in {"native_deadline_case", "native_deadline_reset_case"}
+    ):
+        # A peer reset can interrupt Proactor transport teardown in this loopback server.
+        runner = "asyncio.run(case, loop_factory=asyncio.SelectorEventLoop)"
     result = subprocess.run(
         [
             sys.executable,
             "-c",
             "import asyncio, sys; "
             "from tests import test_native_trace_exporter as cases; "
-            "asyncio.run(getattr(cases, sys.argv[1])())",
+            "case = getattr(cases, sys.argv[1])(); " + runner,
             case_name,
         ],
         env=env,
@@ -249,6 +258,58 @@ async def native_case():
         await telemetry.shutdown()
 
 
+async def native_external_parent_case():
+    events = []
+
+    class Recorder:
+        def on_trace_event(self, event):
+            events.append(event)
+
+    local_id = "1" * 32
+    remote_id = "2" * 32
+    remote_parent = "3" * 16
+    with collector() as (endpoint, received):
+        await telemetry.configure(
+            processors=[
+                Recorder(),
+                telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint),
+            ]
+        )
+        try:
+            with telemetry.trace("local workflow", options={"trace_id": local_id}):
+                pass
+            assert (await telemetry.force_flush()).status == "success"
+            assert any(
+                record.get("id") == f"trace_{local_id}"
+                for request in received
+                for record in request["payload"]["data"]
+            )
+
+            async with ScriptedResponses([text("synthetic result")]) as peer:
+                result = await Agent(instructions="Respond.", provider=peer.provider).run(
+                    "synthetic request",
+                    parent_trace={"traceparent": f"00-{remote_id}-{remote_parent}-01"},
+                )
+                assert result.final_output == "synthetic result"
+            flush = await telemetry.force_flush()
+            assert flush.status == "partial"
+            assert flush.failed_deliveries > 0
+            assert flush.dropped_records == 0
+            remote_events = [event for event in events if event["trace_id"] == remote_id]
+            assert any(
+                event["parent_span_id"] == remote_parent and event["lifecycle"] == "end"
+                for event in remote_events
+            )
+            records = [record for request in received for record in request["payload"]["data"]]
+            assert all(
+                record.get("id") != f"trace_{remote_id}"
+                and record.get("trace_id") != f"trace_{remote_id}"
+                for record in records
+            )
+        finally:
+            await telemetry.shutdown()
+
+
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_export_deadline_and_cancellation_close_trickling_connection(cancelled):
     import asyncio
@@ -257,8 +318,16 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     peer_closed = asyncio.Event()
     handler_done = asyncio.Event()
     request_started = asyncio.Event()
+    handlers = set()
+
+    async def bounded(awaitable, phase):
+        try:
+            return await asyncio.wait_for(awaitable, 3)
+        except asyncio.TimeoutError:
+            raise AssertionError(f"Trace exporter fixture stalled during {phase}") from None
 
     async def trickle(reader, writer):
+        handlers.add(asyncio.current_task())
         eof = None
         try:
             header = await reader.readuntil(b"\r\n\r\n")
@@ -291,10 +360,16 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             if eof is not None:
                 if not eof.done():
                     eof.cancel()
-                await asyncio.gather(eof, return_exceptions=True)
+                await bounded(asyncio.gather(eof, return_exceptions=True), "reader cleanup")
             writer.close()
             try:
-                await writer.wait_closed()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), 1)
+                except asyncio.TimeoutError:
+                    writer.transport.abort()
+                    raise AssertionError(
+                        "Trace exporter fixture stalled during writer close"
+                    ) from None
             except (BrokenPipeError, ConnectionResetError):
                 if not peer_closed.is_set():
                     raise
@@ -305,7 +380,7 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             warmup = telemetry.OpenAITraceExporter(
                 api_key="synthetic-key", endpoint=warmup_endpoint
             )
-            await warmup.on_trace_event(completed_event())
+            await bounded(warmup.on_trace_event(completed_event()), "warmup delivery")
             assert len(requests) == 1
 
     server = await asyncio.start_server(trickle, "127.0.0.1", 0)
@@ -324,9 +399,11 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     try:
         if cancelled:
             await asyncio.wait_for(request_started.wait(), 1)
+            # Cancellation latency, excluding transport startup.
+            started = time.monotonic()
             delivery.cancel("synthetic caller cancellation")
             with pytest.raises(asyncio.CancelledError) as failure:
-                await delivery
+                await bounded(delivery, "trickling delivery")
             assert delivery.cancelled()
             assert [error.args for error in cancellations] == [("synthetic caller cancellation",)]
             assert_sanitized_failure(cancellations[0], secret)
@@ -338,7 +415,7 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             )
         else:
             with pytest.raises(RuntimeError, match="Native OpenAI trace export failed") as failure:
-                await delivery
+                await bounded(delivery, "trickling delivery")
             assert_sanitized_failure(failure.value, secret)
         # The old per-read timeout could succeed after roughly 600 ms of headers.
         assert time.monotonic() - started < 0.4
@@ -350,15 +427,16 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             recovered = telemetry.OpenAITraceExporter(
                 api_key="synthetic-key", endpoint=healthy_endpoint
             )
-            await recovered.on_trace_event(completed_event())
+            await bounded(recovered.on_trace_event(completed_event()), "recovery delivery")
             assert len(requests) == 1
     finally:
         if not delivery.done():
             delivery.cancel()
-            await asyncio.gather(delivery, return_exceptions=True)
+            await bounded(asyncio.gather(delivery, return_exceptions=True), "delivery cleanup")
         server.close()
-        await server.wait_closed()
-        await asyncio.wait_for(handler_done.wait(), 1)
+        await bounded(server.wait_closed(), "server close")
+        if handlers:
+            await bounded(asyncio.gather(*handlers), "handler cleanup")
 
 
 async def native_deadline_case():
@@ -606,7 +684,7 @@ async def native_outcome_privacy_case():
     scope = telemetry.span("bounded-outcome")
     with pytest.raises(RuntimeError, match="Native trace span end failed") as failure:
         with scope:
-            scope.set_outcome(status="ok", data={"private": secret * 300})
+            scope.set_outcome(status="ok", data={"private": secret * 2000})
     assert_sanitized_failure(failure.value, secret)
     assert scope._outcome is None
     await telemetry.force_flush()

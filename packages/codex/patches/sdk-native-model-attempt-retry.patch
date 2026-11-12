@@ -197,7 +197,7 @@ index 1c89558bb4d9e3ca3a9892336ed330653ef7fab6..eca5abe566c62ef3a3cf647658a2f5ca
          .await;
      child_thread
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index a41c3058abb8599370d60f6e9f429d5d3030f560..a5c919f4d818216f6f7c7340839e659f949a4711 100644
+index 2391b1b46c794bb14a28307f0b6c437833272454..c03e17b0f7f0464764e4bc7b85dcd1a40e51224a 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -2101,10 +2101,32 @@ impl ModelClientSession {
@@ -234,7 +234,7 @@ index a41c3058abb8599370d60f6e9f429d5d3030f560..a5c919f4d818216f6f7c7340839e659f
              if prompt.prefer_buffered_response
                  && !client_setup
                      .auth
-@@ -2377,10 +2399,21 @@ impl ModelClientSession {
+@@ -2385,10 +2407,21 @@ impl ModelClientSession {
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
@@ -257,7 +257,7 @@ index a41c3058abb8599370d60f6e9f429d5d3030f560..a5c919f4d818216f6f7c7340839e659f
              let include_internal = self
                  .client
                  .state
-@@ -2552,6 +2585,21 @@ impl ModelClientSession {
+@@ -2560,6 +2593,21 @@ impl ModelClientSession {
                  ),
                  ..ResponseCreateWsRequest::from(&request)
              };
@@ -304,10 +304,10 @@ index 8801c0e7d67bd6d79044fb3e533cff62a9520818..d7d6cded1991d91e3aef58e1e00e5d16
                  .await;
                  completed_response_id = Some(response_id);
 diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
-index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d6488867e6bd42e 100644
+index 8442e0f29c12abcfbdeabc3f71a64695b66cccce..45466ca435b3fa5aa578d4f1ebc5fdbfc746f5a5 100644
 --- a/codex-rs/core/src/model_request.rs
 +++ b/codex-rs/core/src/model_request.rs
-@@ -89,12 +89,25 @@ struct BoundInterceptor {
+@@ -102,12 +102,25 @@ struct BoundInterceptor {
      admission: Option<Arc<dyn ModelToolAdmission>>,
  }
  impl ModelResponseInterceptor for BoundInterceptor {
@@ -334,7 +334,7 @@ index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d648886
          self.inner.produce_response(request, self.admission.clone())
      }
  
-@@ -108,6 +121,8 @@ impl ModelResponseInterceptor for BoundInterceptor {
+@@ -121,6 +134,8 @@ impl ModelResponseInterceptor for BoundInterceptor {
  }
  
  struct StepToolAdmission {
@@ -343,7 +343,7 @@ index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d648886
      step: Option<Arc<crate::session::step_context::StepContext>>,
      thread_id: String,
      turn_store: Arc<ExtensionData>,
-@@ -122,12 +137,18 @@ impl ModelToolAdmission for StepToolAdmission {
+@@ -135,12 +150,18 @@ impl ModelToolAdmission for StepToolAdmission {
      fn thread_id(&self) -> &str {
          &self.thread_id
      }
@@ -362,7 +362,7 @@ index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d648886
      fn admits(&self, item: &ResponseItem) -> bool {
          self.router
              .as_ref()
-@@ -141,10 +162,12 @@ pub(crate) fn tool_admission(
+@@ -154,10 +175,12 @@ pub(crate) fn tool_admission(
      router: Arc<ToolRouter>,
  ) -> Arc<dyn ModelToolAdmission> {
      Arc::new(StepToolAdmission {
@@ -375,7 +375,7 @@ index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d648886
      })
  }
  
-@@ -153,7 +176,13 @@ pub(crate) fn tool_admission_for_step(
+@@ -166,7 +189,13 @@ pub(crate) fn tool_admission_for_step(
      thread_id: String,
      step: Arc<crate::session::step_context::StepContext>,
  ) -> Arc<dyn ModelToolAdmission> {
@@ -389,7 +389,7 @@ index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d648886
          thread_id,
          turn_store: Arc::clone(&step.turn.extension_data),
          router: Some(Arc::clone(&step.tool_router)),
-@@ -167,6 +196,8 @@ pub(crate) fn compaction_source_admission(
+@@ -180,6 +209,8 @@ pub(crate) fn compaction_source_admission(
      step: Arc<crate::session::step_context::StepContext>,
  ) -> Arc<dyn ModelToolAdmission> {
      Arc::new(StepToolAdmission {
@@ -398,15 +398,14 @@ index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d648886
          thread_id,
          turn_store: Arc::clone(&step.turn.extension_data),
          router: None,
-@@ -203,10 +234,19 @@ pub(crate) async fn produce_response(
-     interceptors: &[Box<dyn ModelResponseInterceptor>],
+@@ -217,13 +248,22 @@ pub(crate) async fn produce_response(
      request: &impl serde::Serialize,
+     model_attempt: Option<&ModelAttemptRoute>,
  ) -> Result<Option<ModelResponseStream>, String> {
 -    let mut producers = interceptors.iter().filter(|interceptor| interceptor.produces_response());
 -    let Some(selected) = producers.next() else { return Ok(None); };
 -    if producers.next().is_some() { return Err("Multiple native model producers selected".into()); }
 -    let request = serde_json::to_value(request).map_err(|_| "Native model request serialization failed")?;
--    let producer = selected.produce_response(request, None).ok_or("Selected native model producer is unavailable")?;
 +    let mut producers = interceptors
 +        .iter()
 +        .filter(|interceptor| interceptor.produces_response());
@@ -418,6 +417,10 @@ index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d648886
 +    }
 +    let request =
 +        serde_json::to_value(request).map_err(|_| "Native model request serialization failed")?;
+     if let Some(attempt) = model_attempt {
+         attempt.0.unavailable();
+     }
+-    let producer = selected.produce_response(request, None).ok_or("Selected native model producer is unavailable")?;
 +    let producer = selected
 +        .produce_response(request, None)
 +        .ok_or("Selected native model producer is unavailable")?;
@@ -2313,7 +2316,7 @@ index 71d9e51221df4bd38ad65ee689e5d4d85ff4d622..d706cdb82a668bec7e7deaaf4356accb
                      .dispatch_tool_call_with_state(
                          session,
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 61ddcbcb8bb8e71dd7931fff99ba6bb3e7e9d185..5a4c2b2072ceb8101c07263dc943ee8ef895222e 100644
+index c88a52fe916551c68d06e6abca65b90cd3a89ad2..a106db511a2ea20be390efdd4876e20d2db79233 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
 @@ -159,6 +159,9 @@ pub use model_request::ResponseEvent;
@@ -2324,8 +2327,8 @@ index 61ddcbcb8bb8e71dd7931fff99ba6bb3e7e9d185..5a4c2b2072ceb8101c07263dc943ee8e
 +    CapturedModelAttempt, ModelAttemptAdmission, ModelAttemptInput, ModelRetryInput,
 +};
  
- mod model_request_observation;
- pub use model_request::PreparedRequestAdmission;
+ mod model_attempt;
+ pub use model_attempt::ModelAttemptOperation;
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
 index dedec722862e27bceeee1c2982113690ee9e64f7..4fc7b9d004b83331bfe33665fcdb9087139ffd2d 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs

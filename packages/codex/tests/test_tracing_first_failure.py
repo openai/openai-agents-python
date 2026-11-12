@@ -123,7 +123,9 @@ async def native_body_primary():
         scope = telemetry.span("end-and-body-failure")
         try:
             with scope:
-                scope.set_outcome(status="ok", data={"private": "synthetic-private-outcome" * 300})
+                scope.set_outcome(
+                    status="ok", data={"private": "synthetic-private-outcome" + "x" * (32 * 1024)}
+                )
                 raise primary
         except BaseException as error:
             assert error is primary
