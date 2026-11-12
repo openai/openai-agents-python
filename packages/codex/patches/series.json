@@ -723,7 +723,11 @@
     {
       "path": "sdk-tracing-id-annotations.patch",
       "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
+    },
+    {
+      "path": "sdk-application-apply-patch.patch",
+      "sha256": "353cefc34587a72a8a9a243e117e118f50e639a6cd0a5a96491ff0ec6bf69677"
     }
   ],
-  "result_tree": "6ebd2e7eae8dc58f8dd4241bd65fe7514ab3251b"
+  "result_tree": "af18e3a7cd0e0162c338e63b43f2b504c05f8169"
 }
