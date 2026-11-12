@@ -16,6 +16,7 @@ from agents import (
     Agent,
     Environment,
     FunctionTool,
+    ManagedAgentToolOrigin,
     NativeAgents,
     NativeError,
     NativeRole,
@@ -657,3 +658,51 @@ async def test_native_child_updates_reject_without_changing_the_live_session(
             encoded = json.dumps(responses.requests[1])
             assert initial_instructions in encoded
             assert rejected_instructions not in encoded
+
+
+async def test_produced_items_attribute_managed_role_tool(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    managed = NativeRoleTool(
+        name="research_topic", role="research", description="Research a topic."
+    )
+
+    @function_tool(name=managed.name)
+    def ordinary() -> str:
+        return "ordinary tool output"
+
+    responses.respond(function_call(managed.name, {}, "ordinary"))
+    responses.respond(collaboration(managed.name, {"input": "Read the record."}, "managed"))
+    responses.respond(assistant_output("child result"))
+    responses.respond(assistant_output("parent result"))
+    agent = Agent(
+        instructions="Use the research tool.",
+        model=NATIVE_ROLE_FIXTURE_MODEL,
+        provider=provider(responses),
+        tools=[
+            ordinary,
+            NativeAgents(
+                additional_roles=[_role()],
+                managed_tools=[managed],
+                approval=lambda _context, _call: True,
+            ),
+        ],
+    )
+
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        completed = await agent.run(
+            "Research the record.", environment=declaration(executor), return_items=True
+        )
+
+    assert completed.final_output == "parent result"
+    assert completed.items is not None
+    origin = ManagedAgentToolOrigin(name=managed.name, role=managed.role)
+    for call_id, expected in [("ordinary", None), ("managed", origin)]:
+        entries = [entry for entry in completed.items if entry.item.get("call_id") == call_id]
+        assert [entry.item["type"] for entry in entries] == [
+            "function_call",
+            "function_call_output",
+        ]
+        assert [entry.tool_origin for entry in entries] == [expected, expected]
+    assert len(responses.requests) == 4
