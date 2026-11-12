@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agents import Agent, NativeProvider, SessionState, apply_patch_tool, function_tool
+from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_apply_patch import patch_call
 from tests.test_native_manual_tools import next_request
@@ -59,7 +60,7 @@ async def legacy_stage(stage, endpoint, directory):
                 request = await next_request(session.interactions(), confirm)
                 assert request.call_id == "legacy-confirm"
                 await edited.wait()
-                async with asyncio.timeout(10):
+                async with timeout(10):
                     while not any(
                         item.get("type") == "function_call_output"
                         and item.get("call_id") == "native-patch"
