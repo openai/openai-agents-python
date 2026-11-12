@@ -613,6 +613,32 @@ def current_context() -> SpanContext | None:
     return _current.get()
 
 
+@contextmanager
+def use_context(context: SpanContext) -> Iterator[SpanContext]:
+    """Bind retained local ancestry without emitting span lifecycle events.
+
+    Captured and active privacy restrictions still apply. Use parent_trace on
+    Session work for portable W3C ancestry; IDs never restore a local owner.
+    """
+    if not isinstance(context, SpanContext):
+        raise TypeError("context must be a retained SpanContext")
+    ambient = current_context()
+    native = _native_tracing()
+    handle = native.borrow_trace_context(
+        context._handle,
+        ambient._handle if ambient is not None else None,
+        disabled=_tracing_disabled or _in_processor.get(),
+        include_sensitive_data=_sensitive_data_logging_enabled,
+    )
+    try:
+        with _activate(handle):
+            bound = current_context()
+            assert bound is not None
+            yield bound
+    finally:
+        native.release_trace_context(handle)
+
+
 def _native_tracing() -> Any:
     return importlib.import_module("agents._native")
 
