@@ -314,8 +314,9 @@ async def test_deferred_start_inherits_complete_observation_retention(responses,
 
 
 @pytest.mark.parametrize("max_requests", [1, 2])
+@pytest.mark.parametrize("kind", ["requests", "tokens", "combined"])
 async def test_deferred_start_preserves_request_budget_through_session_hook(
-    responses, monkeypatch, max_requests
+    responses, monkeypatch, max_requests, kind
 ):
     journal, backend = Journal(), Provider([done()])
     jobs, manual = declared(journal, backend)
@@ -325,7 +326,11 @@ async def test_deferred_start_preserves_request_budget_through_session_hook(
     agent = Agent(instructions="Render and answer.", tools=[manual], provider=provider(responses))
     hook_states = []
     async with timeout(20), agent.session() as original:
-        await original.submit("Render.", budget=RunBudget(max_requests=max_requests))
+        limits = RunBudget(
+            max_requests=max_requests if kind != "tokens" else None,
+            max_tokens=(14 if max_requests == 1 else 100) if kind != "requests" else None,
+        )
+        await original.submit("Render.", budget=limits)
         request = await next_request(original.interactions(), manual)
         session_factory = agent.session
 
@@ -345,6 +350,8 @@ async def test_deferred_start_preserves_request_budget_through_session_hook(
             else:
                 assert (await resumed.get_result()).final_output == "finished"
     assert len(hook_states) == 1
-    assert hook_states[0].run_budget.max_requests == max_requests
-    assert hook_states[0].run_budget.admitted_requests == 1
+    assert hook_states[0].run_budget.max_requests == (max_requests if kind != "tokens" else None)
+    assert hook_states[0].run_budget.admitted_requests == (1 if kind != "tokens" else None)
+    if kind != "requests":
+        assert hook_states[0].run_budget.consumed_tokens == 14
     assert len(responses.requests) == max_requests
