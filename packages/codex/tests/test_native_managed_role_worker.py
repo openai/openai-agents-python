@@ -7,8 +7,9 @@ import asyncio
 import pytest
 
 from _agents_codex._managed_tool_stream import _ManagedToolStream
-from agents import NativeRoleToolInvocation
-from agents.observation import RawProviderEvent, TurnStarted
+from _agents_codex.observation import EventStream, _ObservationBuffer
+from agents import NativeRoleToolInvocation, ToolOutput
+from agents.observation import RawProviderEvent, ToolFinished, TurnStarted
 from tests._asyncio import timeout
 
 
@@ -98,7 +99,32 @@ async def test_managed_worker_logs_handler_errors_and_keeps_order() -> None:
     assert received == [1, 2]
 
 
-async def test_managed_worker_bounds_utf8_bytes_with_a_stalled_handler() -> None:
+def payload_event(sequence, payload, kind):
+    if kind == "application_data":
+        return ToolFinished(
+            session_id="session",
+            submission_id="child",
+            turn_id="turn",
+            sequence=sequence,
+            call_id="call",
+            name="tool",
+            namespace=None,
+            status="completed",
+            output=ToolOutput([], application_data=payload),
+        )
+    return RawProviderEvent(
+        session_id="session",
+        submission_id="child",
+        turn_id="turn",
+        sequence=sequence,
+        source="responses",
+        transport="sse",
+        payload=payload,
+    )
+
+
+@pytest.mark.parametrize("kind", ["provider", "application_data"])
+async def test_managed_worker_bounds_utf8_bytes_with_a_stalled_handler(kind) -> None:
     started = asyncio.Event()
     overflows = []
     received = []
@@ -113,17 +139,7 @@ async def test_managed_worker_bounds_utf8_bytes_with_a_stalled_handler() -> None
     payload = {"text": "é" * (6 * 1024 * 1024)}
     async with timeout(5):
         for sequence in range(1, 4):
-            stream.append(
-                RawProviderEvent(
-                    session_id="session",
-                    submission_id="child",
-                    turn_id="turn",
-                    sequence=sequence,
-                    source="responses",
-                    transport="sse",
-                    payload=payload,
-                )
-            )
+            stream.append(payload_event(sequence, payload, kind))
             if sequence == 1:
                 await started.wait()
         with pytest.raises(RuntimeError, match="retained byte limit"):
@@ -132,7 +148,8 @@ async def test_managed_worker_bounds_utf8_bytes_with_a_stalled_handler() -> None
     assert received == [1]
 
 
-async def test_managed_worker_rejects_one_oversized_first_event() -> None:
+@pytest.mark.parametrize("kind", ["provider", "application_data"])
+async def test_managed_worker_rejects_one_oversized_first_event(kind) -> None:
     received = []
     overflows = []
     stream = _ManagedToolStream(
@@ -142,16 +159,7 @@ async def test_managed_worker_rejects_one_oversized_first_event() -> None:
         None,
         lambda: overflows.append(True),
     )
-    stream.append(
-        RawProviderEvent(
-            session_id="session",
-            submission_id="child",
-            turn_id="turn",
-            source="responses",
-            transport="sse",
-            payload={"text": "é" * (17 * 1024 * 1024)},
-        )
-    )
+    stream.append(payload_event(1, {"text": "é" * (17 * 1024 * 1024)}, kind))
     async with timeout(5):
         with pytest.raises(RuntimeError, match="retained byte limit"):
             await stream.drain()
@@ -200,3 +208,13 @@ async def test_managed_stream_cancels_only_once_during_cleanup() -> None:
         release.set()
         await stream.drain()
     assert cleaned.is_set()
+
+
+async def test_observation_retention_bounds_private_application_data() -> None:
+    buffer = _ObservationBuffer("session")
+    buffer.append(payload_event(1, {"text": "x" * (17 * 1024 * 1024)}, "application_data"))
+    buffer.finish("closed")
+    retained = [
+        event async for event in EventStream(buffer, after=0, _include_execution_details=True)
+    ]
+    assert not any(isinstance(event, ToolFinished) for event in retained)

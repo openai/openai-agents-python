@@ -436,6 +436,8 @@ def _observation_sizes(
         size += json_size(event.item)
     if isinstance(event, ToolFinished) and event.output is not None:
         size += json_size(event.output.to_native())
+        if event.output.application_data is not None:
+            payload_size += json_size(event.output.application_data)
     if isinstance(event, ResponseFactReceived):
         size += json_size(event.record)
     elif isinstance(event, RawProviderEvent) and include_raw_payload:
