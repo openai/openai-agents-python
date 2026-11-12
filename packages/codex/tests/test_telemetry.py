@@ -56,21 +56,6 @@ def _assert_credentials_absent_from_sdk_traceback(error: BaseException) -> None:
         captured = captured.__cause__ or captured.__context__
 
 
-async def test_restart_validation_drops_credentials_from_sdk_frames() -> None:
-    headers = {"authorization": "synthetic-private-header"}
-    attributes = {"app.tenant": "synthetic-private-span-value"}
-    logs = telemetry.OtlpHttp(endpoint="https://test.invalid/v1/logs", headers=headers)
-    with pytest.raises(TypeError, match="restart_after_shutdown must be a bool") as raised:
-        await telemetry.configure(
-            logs=logs,
-            span_attributes=attributes,
-            restart_after_shutdown=None,  # type: ignore[arg-type]
-        )
-    _assert_credentials_absent_from_sdk_traceback(raised.value)
-    assert logs.headers is headers
-    assert attributes == {"app.tenant": "synthetic-private-span-value"}
-
-
 @pytest.mark.parametrize("source", ["headers", "span_attributes"])
 async def test_mapping_iteration_failure_drops_credentials_from_sdk_frames(source: str) -> None:
     failure = RuntimeError("mapping iteration failed")

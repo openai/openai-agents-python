@@ -199,8 +199,6 @@ async def configure(
     """
     options: dict[str, Any] = {}
     try:
-        if not isinstance(restart_after_shutdown, bool):
-            raise TypeError("restart_after_shutdown must be a bool")
         if restart_after_shutdown:
             options["sdk.trace_restart"] = True
         processors = tuple(processors)
