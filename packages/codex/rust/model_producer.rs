@@ -261,6 +261,7 @@ impl PythonTools {
             if slot.is_closed() {
                 return false;
             }
+            let attempt = slot.callback.model_attempt.as_ref();
             let Some(PreparationReply::ModelProducer {
                 reply:
                     Delivery::Streaming {
@@ -271,7 +272,14 @@ impl PythonTools {
             else {
                 return false;
             };
+            let had_usage = projection.completed_usage().is_some();
             let (projected, continue_stream) = projection.push(data);
+            // Retirement can discard the reply before the iterator settles.
+            if !had_usage
+                && let (Some(attempt), Some(usage)) = (attempt, projection.completed_usage())
+            {
+                let _ = attempt.report_usage(usage.clone());
+            }
             (projected, events.clone(), continue_stream)
         };
         for event in projected {
@@ -329,18 +337,13 @@ impl PythonTools {
             Delivery::Streaming {
                 projection, finish, ..
             } => {
+                let usage = projection.completed_usage().cloned();
                 let result = projection.finish(error.then_some(FAILURE));
-                if let (Some(attempt), Ok(events)) = (&attempt, &result) {
-                    for event in events {
-                        if let ResponseEvent::Completed {
-                            token_usage: Some(usage),
-                            ..
-                        } = event
-                            && attempt.report_usage(usage.clone()).is_err()
-                        {
-                            return false;
-                        }
-                    }
+                if let (Some(attempt), Some(usage)) = (&attempt, usage)
+                    && attempt.report_usage(usage).is_err()
+                    && result.is_ok()
+                {
+                    return false;
                 }
                 return finish.send(result).is_ok();
             }

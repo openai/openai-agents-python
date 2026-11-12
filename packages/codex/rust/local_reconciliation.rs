@@ -38,6 +38,7 @@ pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>
             ..
         }
         | ResponseItem::CustomToolCallOutput { call_id: call, .. }
+        | ResponseItem::ApplyPatchCallOutput { call_id: call, .. }
         | ResponseItem::ComputerCallOutput { call_id: call, .. } => call,
         ResponseItem::ShellCallOutput {
             provider_fields, ..
@@ -165,6 +166,14 @@ pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseIt
             },
         )
         | (
+            ResponseItem::ApplyPatchCall {
+                call_id: expected, ..
+            },
+            ResponseItem::ApplyPatchCallOutput {
+                call_id: actual, ..
+            },
+        )
+        | (
             ResponseItem::ComputerCall {
                 call_id: expected, ..
             },
@@ -184,6 +193,34 @@ pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseIt
         ) => shell_call_id(expected).is_some_and(|id| shell_call_id(actual) == Some(id)),
         _ => false,
     }
+}
+
+pub(crate) fn owns_application_patch(envelope: &codex_history::ResponseItemEnvelope) -> bool {
+    matches!(envelope.item, ResponseItem::ApplyPatchCall { .. })
+        && envelope
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.sdk_application_tool.as_deref())
+            == Some("apply_patch")
+}
+
+pub(crate) fn application_patch_receipt(
+    invocation: &ResponseItem,
+    response: codex_protocol::dynamic_tools::DynamicToolResponse,
+    turn: &str,
+) -> Result<ResponseItem> {
+    use codex_tools::ToolOutput as _;
+    let ResponseItem::ApplyPatchCall { call_id, .. } = invocation else {
+        anyhow::bail!("Application patch receipt requires its original call");
+    };
+    let arguments = serde_json::to_string(invocation)?;
+    let output = codex_tools::ApplyPatchToolOutput::from_dynamic_response(&arguments, response)
+        .map_err(|_| anyhow::anyhow!("Invalid application patch receipt"))?;
+    let mut item: ResponseItem = output
+        .to_response_item(call_id, &codex_tools::ToolPayload::ApplyPatch { arguments })
+        .into();
+    item.set_turn_id_if_missing(turn);
+    Ok(item)
 }
 
 pub(crate) fn computer_receipt(
@@ -382,6 +419,10 @@ fn tag(item: &ResponseItem) -> Option<&str> {
             internal_chat_message_metadata_passthrough,
             ..
         }
+        | ResponseItem::ApplyPatchCallOutput {
+            internal_chat_message_metadata_passthrough,
+            ..
+        }
         | ResponseItem::ComputerCallOutput {
             internal_chat_message_metadata_passthrough,
             ..
@@ -405,6 +446,10 @@ fn matches_receipt(
     typed: Option<&ResponseItem>,
 ) -> bool {
     let same_result = match (item, typed) {
+        (
+            ResponseItem::ApplyPatchCallOutput { status: actual_status, output: actual_output, .. },
+            Some(ResponseItem::ApplyPatchCallOutput { status: expected_status, output: expected_output, .. }),
+        ) => actual_status == expected_status && actual_output == expected_output,
         (
             ResponseItem::ShellCallOutput { provider_fields: actual, .. },
             Some(ResponseItem::ShellCallOutput { provider_fields: expected, .. }),
@@ -548,6 +593,7 @@ fn has_sampled_model(history: &[RolloutItem]) -> bool {
             | ResponseItem::FunctionCall { .. }
             | ResponseItem::CustomToolCall { .. }
             | ResponseItem::ComputerCall { .. }
+            | ResponseItem::ApplyPatchCall { .. }
             | ResponseItem::ToolSearchCall { .. }
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. } => true,
@@ -832,9 +878,17 @@ fn plan(
                 match item {
                     ResponseItem::FunctionCall { call_id, .. }
                     | ResponseItem::CustomToolCall { call_id, .. }
-                    | ResponseItem::ComputerCall { call_id, .. } => {
-                        if matches!(item, ResponseItem::ComputerCall { .. })
-                            && seen.contains_key(&(turn, call_id.as_str()))
+                    | ResponseItem::ComputerCall { call_id, .. }
+                    | ResponseItem::ApplyPatchCall { call_id, .. } => {
+                        if matches!(item, ResponseItem::ApplyPatchCall { .. })
+                            && !owns_application_patch(envelope)
+                        {
+                            continue;
+                        }
+                        if matches!(
+                            item,
+                            ResponseItem::ComputerCall { .. } | ResponseItem::ApplyPatchCall { .. }
+                        ) && seen.contains_key(&(turn, call_id.as_str()))
                         {
                             seen.insert((turn, call_id.as_str()), None);
                             continue;
@@ -895,6 +949,15 @@ fn plan(
                 &receipt.result,
                 &receipt.turn_id,
             )?),
+            ResponseItem::ApplyPatchCall { .. } => {
+                let result: codex_protocol::models::ApplyPatchResult =
+                    serde_json::from_str(&receipt.result)
+                        .context("Application patch reconciliation requires a typed result")?;
+                Some(application_patch_receipt(call, codex_protocol::dynamic_tools::DynamicToolResponse {
+                    content_items: vec![codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText { text: receipt.result.clone() }],
+                    success: result.status == codex_protocol::models::ApplyPatchStatus::Completed,
+                }, &receipt.turn_id)?)
+            }
             _ => None,
         };
         if let Some(item) = typed.as_mut() {
@@ -903,11 +966,15 @@ fn plan(
                     internal_chat_message_metadata_passthrough,
                     ..
                 }
+                | ResponseItem::ApplyPatchCallOutput {
+                    internal_chat_message_metadata_passthrough,
+                    ..
+                }
                 | ResponseItem::ShellCallOutput {
                     internal_chat_message_metadata_passthrough,
                     ..
                 } => internal_chat_message_metadata_passthrough,
-                _ => unreachable!("typed reconciliation only creates Computer or Shell output"),
+                _ => unreachable!("typed reconciliation only creates native application output"),
             };
             *metadata = Some(InternalChatMessageMetadataPassthrough {
                 turn_id: Some(receipt.turn_id.clone()),

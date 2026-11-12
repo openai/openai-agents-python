@@ -114,6 +114,32 @@
           "_ToolBatchCompletion": "agents.completion._ToolBatchCompletion"
         }
       },
+      "agents.apply_patch": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass ApplyPatchOperation:\n    type: Literal['create_file', 'update_file', 'delete_file']\n    path: str\n    diff: str | None = None\n    move_to: str | None = None\n    ctx_wrapper: ToolContext[Any] | None = field(default=None, repr=False, compare=False)",
+          "@dataclass(frozen=True)\nclass ApplyPatchResult:\n    status: Literal['completed', 'failed'] | None = None\n    output: str | None = None",
+          "class ApplyPatchEditor(Protocol):\n\n    def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass\n\n    def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass\n\n    def delete_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass",
+          "def apply_patch_tool(editor: ApplyPatchEditor, *, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False) -> FunctionTool[Any, ToolOutput, Any]:\n    pass"
+        ],
+        "exports": {
+          "ApplyPatchEditor": "agents.apply_patch.ApplyPatchEditor",
+          "ApplyPatchOperation": "agents.apply_patch.ApplyPatchOperation",
+          "ApplyPatchResult": "agents.apply_patch.ApplyPatchResult",
+          "apply_patch_tool": "agents.apply_patch.apply_patch_tool"
+        },
+        "imports": [
+          "from collections.abc import Awaitable, Callable",
+          "from dataclasses import dataclass, field",
+          "from typing import Any, Literal, Protocol",
+          "from ._function_tools import FunctionTool, ToolContext",
+          "from .tools import ToolOutput"
+        ],
+        "references": {
+          "FunctionTool": "agents._function_tools.FunctionTool",
+          "ToolContext": "agents._function_tools.ToolContext",
+          "ToolOutput": "agents.tools.ToolOutput"
+        }
+      },
       "agents.artifacts": {
         "declarations": [
           "def json_artifact_tool(*, name: str, path: str | Path, schema: type[Any]) -> FunctionTool[Any, Any, Any]:\n    pass"
@@ -2065,6 +2091,9 @@
       "ApiRateLimitWindow": "agents.rate_limits.ApiRateLimitWindow",
       "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
       "ApplicationToolOutput": "agents.state.ApplicationToolOutput",
+      "ApplyPatchEditor": "agents.apply_patch.ApplyPatchEditor",
+      "ApplyPatchOperation": "agents.apply_patch.ApplyPatchOperation",
+      "ApplyPatchResult": "agents.apply_patch.ApplyPatchResult",
       "ApprovalDecision": "agents.manual.ApprovalDecision",
       "ApprovalRequest": "agents.manual.ApprovalRequest",
       "ApprovalRequested": "agents.manual.ApprovalRequested",
@@ -2265,6 +2294,7 @@
       "VerificationProof": "agents.manual.VerificationProof",
       "VerificationRequest": "agents.manual.VerificationRequest",
       "WebSearch": "agents.tools.WebSearch",
+      "apply_patch_tool": "agents.apply_patch.apply_patch_tool",
       "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
       "get_cleanup": "agents.session.get_cleanup",
@@ -4943,6 +4973,9 @@
       "ApiRateLimitWindow",
       "ApiRateLimits",
       "ApplicationToolOutput",
+      "ApplyPatchEditor",
+      "ApplyPatchOperation",
+      "ApplyPatchResult",
       "ApprovalDecision",
       "ApprovalRequest",
       "ApprovalRequested",
@@ -5143,6 +5176,7 @@
       "VerificationProof",
       "VerificationRequest",
       "WebSearch",
+      "apply_patch_tool",
       "computer_tool",
       "function_tool",
       "get_cleanup",
@@ -5155,6 +5189,7 @@
       "from ._tool_errors import ToolErrorContext as ToolErrorContext, ToolErrorFormatter as ToolErrorFormatter",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
+      "from .apply_patch import ApplyPatchEditor as ApplyPatchEditor, ApplyPatchOperation as ApplyPatchOperation, ApplyPatchResult as ApplyPatchResult, apply_patch_tool as apply_patch_tool",
       "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext, ResponsesCompaction as ResponsesCompaction, ResponsesCompactionContext as ResponsesCompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn, FinishToolBatch as FinishToolBatch, ToolBatchCompletionContext as ToolBatchCompletionContext, ToolBatchResult as ToolBatchResult",

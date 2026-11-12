@@ -721,6 +721,14 @@
       "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
     },
     {
+      "path": "sdk-application-apply-patch.patch",
+      "sha256": "353cefc34587a72a8a9a243e117e118f50e639a6cd0a5a96491ff0ec6bf69677"
+    },
+    {
+      "path": "0164-sdk-sender-communication-privacy.patch",
+      "sha256": "ef7d55fb13765fc4d9d441af6d799c5aa0987eda2296597a84aadd57f9f8d36c"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
       "sha256": "487a2e788517874133ef1d0aef8366cbcbd885fdb57783c1d569d374aed14220"
     },
@@ -769,6 +777,10 @@
       "sha256": "a6732ddaadb5a8caab18e88c6c46fa3c4efebada534e32a7c0ed91b7bcf8b279"
     },
     {
+      "path": "sdk-native-model-stream-completion-usage.patch",
+      "sha256": "d89d2ed9176b3a4a163a890d2d9cf2be51cf6029d13d25aa895f876eb2770609"
+    },
+    {
       "path": "sdk-stored-owner-retirement.patch",
       "sha256": "6e2609766301ec2703199766402600eed66ada05e9ae5d497d7f46542dae76a5"
     },
@@ -785,5 +797,5 @@
       "sha256": "cbf049d3d03e9071d9100217c969138574df3735def89c74abe2037da3978513"
     }
   ],
-  "result_tree": "12ad09a2104ea1adcf1d858cfabef828c6ec5eaa"
+  "result_tree": "5702edd4e60f9afd2fb9cc76f7f60523de5f6f96"
 }
