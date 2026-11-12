@@ -168,7 +168,10 @@ async def test_native_portable_lineage_requires_current_anchor_and_account():
 
 
 async def test_native_lineage_refuses_websocket_before_any_request():
-    async with timeout(30), history_peer() as (_provider, _model, _reads, base_url, wire):
+    async with (
+        timeout(30),
+        history_peer() as (_provider, _model, _reads, base_url, wire),
+    ):
         async with NativeProvider(
             base_url=base_url,
             api_key="current-owner",
@@ -185,7 +188,10 @@ async def test_native_lineage_refuses_websocket_before_any_request():
             with pytest.raises((NativeError, ValueError, RuntimeError), match="WebSocket"):
                 await agent.run(
                     "Never dispatch.",
-                    provider_history={"type": "previous_response", "id": "resp_current"},
+                    provider_history={
+                        "type": "previous_response",
+                        "id": "resp_current",
+                    },
                 )
         assert wire == []
 
@@ -264,7 +270,8 @@ async def test_native_rejected_lineage_compaction_keeps_session_usable(restore):
                 await (await session.submit("Before.")).get_result()
             before = await session.model_context()
             with pytest.raises(
-                RuntimeError, match="Compaction is unavailable for provider-managed history"
+                RuntimeError,
+                match="Compaction is unavailable for provider-managed history",
             ):
                 await session.compact(summary="Unpublished summary.")
             after = await session.model_context()
@@ -446,5 +453,73 @@ async def test_native_history_append_preserves_metadata_filtered_from_provider_i
             )
             after = await session.history_snapshot()
             assert after.items[: before.total] == before.items
+            await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "remote_mode",
+    [
+        None,
+        {"type": "conversation", "id": "conv_current"},
+        {"type": "previous_response", "id": "resp_external"},
+    ],
+)
+async def test_provider_history_fork_keeps_its_owner(remote_mode):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(
+            instructions="Continue.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"store": True},
+        )
+        async with agent.session(
+            **({"provider_history": remote_mode} if remote_mode else {})
+        ) as session:
+            await (await session.submit("Before.")).get_result()
+            before = await session.history_snapshot()
+            if remote_mode:
+                with pytest.raises(
+                    RuntimeError,
+                    match="Fork is unavailable for provider-managed history",
+                ):
+                    await session.fork()
+            else:
+                assert await session.fork()
+            assert (await session.history_snapshot()).items == before.items
+            await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
+
+
+@pytest.mark.parametrize("remote", [False, True])
+async def test_provider_history_stored_fork_keeps_its_owner(remote, tmp_path):
+    from agents import LocalStorage
+
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(instructions="Continue.", model="gpt-5.5", provider=provider)
+        async with agent.session(
+            storage=LocalStorage(tmp_path / "threads"),
+            **(
+                {"provider_history": {"type": "conversation", "id": "conv_current"}}
+                if remote
+                else {}
+            ),
+        ) as session:
+            await (await session.submit("Before.")).get_result()
+            before = {item["id"] for item in (await session.stored_sessions())["sessions"]}
+            if remote:
+                with pytest.raises(
+                    RuntimeError,
+                    match="Fork is unavailable for provider-managed history",
+                ):
+                    await session.fork_stored()
+            else:
+                fork_id = await session.fork_stored()
+            after = {item["id"] for item in (await session.stored_sessions())["sessions"]}
+            assert after == (before if remote else before | {fork_id})
             await (await session.submit("After.")).get_result()
         assert len(model.requests) == 2

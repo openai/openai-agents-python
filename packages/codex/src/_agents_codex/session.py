@@ -15891,6 +15891,8 @@ class Session(Generic[ContextT, OutputT]):
         through the same LocalStorage and current Agent; no portable conversion.
         """
         self._check_callback_operation("fork stored history of its own Session")
+        if self._provider_history is not None:
+            raise RuntimeError("Fork is unavailable for provider-managed history")
         self._check_idle_update()
         if self._realtime is not None:
             raise CapabilityError("Close native Realtime before a stored fork")
@@ -16321,6 +16323,8 @@ class Session(Generic[ContextT, OutputT]):
         self._check_open()
         self._check_portable_capture()
         self._check_callback_operation("fork its own Session")
+        if self._provider_history is not None:
+            raise RuntimeError("Fork is unavailable for provider-managed history")
         if self._active is not None:
             raise RuntimeError("fork requires an idle Session")
         return await self._checkpoint(None, fork=True)
