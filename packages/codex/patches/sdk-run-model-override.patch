@@ -311,43 +311,30 @@ index cdd5312c..75f69842 100644
      {
          return Err("the destination changes model-required approval authority".to_string());
 diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
-index ad08c4de..651ca4bc 100644
+index ad08c4de..84e77081 100644
 --- a/codex-rs/core/src/session/step_settings.rs
 +++ b/codex-rs/core/src/session/step_settings.rs
-@@ -50,6 +50,9 @@ pub(crate) struct ResolvedStepSettings {
+@@ -50,6 +50,8 @@ pub(crate) struct ResolvedStepSettings {
      /// tiers must not be reconstructed from the effective values below.
      selected: Arc<StepSettings>,
      pub(crate) model_info: Arc<ModelInfo>,
 +    /// Start-only run selection, separate from the profile defaults in `selected`.
 +    pub(crate) model_override: Option<String>,
-+    run_request_controls: Option<codex_protocol::model_request_controls::ModelRequestControls>,
      /// Known or explicitly configured usable limit, captured with this model.
      reported_context_window: Option<i64>,
      /// Effective request summary: the configured value or the pinned model's default.
-@@ -88,6 +91,8 @@ impl ResolvedStepSettings {
+@@ -88,6 +90,7 @@ impl ResolvedStepSettings {
              };
          Self {
              agent_profile: None,
 +            model_override: None,
-+            run_request_controls: None,
              selected,
              model_info,
              reported_context_window,
-@@ -102,6 +107,7 @@ impl ResolvedStepSettings {
-             let selected = Arc::make_mut(&mut self.selected);
-             selected.tool_choice = Some(ToolChoice::Auto);
-             selected.request_controls.named_tool_choice = Some(None);
-+            self.refresh_run_request_controls();
-         }
+@@ -120,6 +123,17 @@ impl ResolvedStepSettings {
+             .named_tool_choice = Some(Some(choice));
      }
  
-@@ -118,12 +124,36 @@ impl ResolvedStepSettings {
-         Arc::make_mut(&mut self.selected)
-             .request_controls
-             .named_tool_choice = Some(Some(choice));
-+        self.refresh_run_request_controls();
-+    }
-+
 +    pub(crate) fn request_model(&self) -> &str {
 +        self.model_override
 +            .as_deref()
@@ -356,30 +343,13 @@ index ad08c4de..651ca4bc 100644
 +
 +    pub(super) fn with_model_override(mut self, model_override: Option<String>) -> Self {
 +        self.model_override = model_override;
-+        self.refresh_run_request_controls();
 +        self
-     }
- 
++    }
++
      pub(crate) fn request_controls(
          &self,
      ) -> &codex_protocol::model_request_controls::ModelRequestControls {
--        &self.selected.request_controls
-+        self.run_request_controls
-+            .as_ref()
-+            .unwrap_or(&self.selected.request_controls)
-+    }
-+
-+    fn refresh_run_request_controls(&mut self) {
-+        self.run_request_controls = self.model_override.as_ref().and_then(|_| {
-+            let mut controls = self.selected.request_controls.clone();
-+            let prompt = controls.hosted_prompt.as_mut()?.as_mut()?;
-+            prompt.omit_model = false;
-+            Some(controls)
-+        });
-     }
- 
-     pub(super) fn with_agent_profile(
-@@ -202,6 +232,7 @@ impl ResolvedStepSettings {
+@@ -202,6 +216,7 @@ impl ResolvedStepSettings {
          fast_mode_enabled: bool,
      ) -> ConstraintResult<Self> {
          let selected = self.selected.apply(update, constraints)?;
@@ -387,7 +357,7 @@ index ad08c4de..651ca4bc 100644
          let model_info = if selected.collaboration_mode.model()
              == self.selected.collaboration_mode.model()
              && selected.personality == self.selected.personality
-@@ -210,7 +241,15 @@ impl ResolvedStepSettings {
+@@ -210,7 +225,15 @@ impl ResolvedStepSettings {
          {
              Arc::clone(&self.model_info)
          } else {
@@ -404,7 +374,7 @@ index ad08c4de..651ca4bc 100644
          };
          selected
              .request_controls
-@@ -223,6 +262,7 @@ impl ResolvedStepSettings {
+@@ -223,6 +246,7 @@ impl ResolvedStepSettings {
              overrides.context_window,
          );
          next.agent_profile = self.agent_profile.clone();
@@ -412,7 +382,7 @@ index ad08c4de..651ca4bc 100644
          next.mcp_approvals_reviewer_override = update
              .approvals_reviewer
              .or(self.mcp_approvals_reviewer_override);
-@@ -239,6 +279,8 @@ impl ResolvedStepSettings {
+@@ -239,6 +263,8 @@ impl ResolvedStepSettings {
          // Sharing these checks would also make ordinary settings updates stricter
          // after a requirements refresh.
          self.selected.validate(constraints)?;
@@ -421,7 +391,7 @@ index ad08c4de..651ca4bc 100644
          constraints
              .requirements
              .approval_policy
-@@ -250,10 +292,8 @@ impl ResolvedStepSettings {
+@@ -250,10 +276,8 @@ impl ResolvedStepSettings {
      }
  
      pub(super) fn telemetry(&self, base: &SessionTelemetry) -> SessionTelemetry {
@@ -434,7 +404,7 @@ index ad08c4de..651ca4bc 100644
      }
  }
  
-@@ -331,10 +371,23 @@ impl StepSettings {
+@@ -331,10 +355,23 @@ impl StepSettings {
          &self,
          models_manager: &dyn ModelsManager,
          overrides: &ModelInfoOverrides,
@@ -459,7 +429,7 @@ index ad08c4de..651ca4bc 100644
              .await
      }
  
-@@ -407,6 +460,24 @@ impl StepSettings {
+@@ -407,6 +444,24 @@ impl StepSettings {
          Ok(next)
      }
  
