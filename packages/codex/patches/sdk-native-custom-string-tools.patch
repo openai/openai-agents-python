@@ -1,0 +1,129 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 924ee5ce4b03ace41f7247e01d6918f51f09a02d..c8f688dc14e0f660dc5cc5913b571d0967999f41 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -391,6 +391,9 @@ fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
+             DynamicToolSpec::ToolSearch(_) => {
+                 return Err("client tool search requires an extension-owned executor".to_string());
+             }
++            DynamicToolSpec::Custom(_) => {
++                return Err("custom string tools require an SDK executor".into());
++            }
+             DynamicToolSpec::ApplyPatch => {
+                 if !seen_tools.insert("apply_patch") {
+                     return Err("duplicate dynamic application patch tool".into());
+@@ -1477,7 +1480,7 @@ impl ThreadRequestProcessor {
+         let dynamic_tool_count: usize = dynamic_tools
+             .iter()
+             .map(|tool| match tool {
+-                DynamicToolSpec::HostedMcp(_) => 0,
++                DynamicToolSpec::HostedMcp(_) | DynamicToolSpec::Custom(_) => 0,
+                 DynamicToolSpec::ApplyPatch
+                 | DynamicToolSpec::Computer(_)
+                 | DynamicToolSpec::Function(_)
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index c7c84623789fcb561dcc2bdd25607227b9a29f12..fa36bcebb1b8ac6983d737fa01f0e59dbcd8fdfa 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -1776,7 +1776,9 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
+                 registry.register_external(Arc::new(super::handlers::application_apply_patch::ApplicationApplyPatchHandler::new()));
+             }
+             // The SDK attaches scoped executors through ToolContributor.
+-            DynamicToolSpec::ToolSearch(_) | DynamicToolSpec::HostedMcp(_) => {}
++            DynamicToolSpec::ToolSearch(_)
++            | DynamicToolSpec::HostedMcp(_)
++            | DynamicToolSpec::Custom(_) => {}
+             DynamicToolSpec::Computer(tool) => {
+                 if let Ok(handler) = super::handlers::computer::ComputerToolHandler::new(tool) {
+                     registry.register_external(Arc::new(handler));
+diff --git a/codex-rs/protocol/src/dynamic_tools.rs b/codex-rs/protocol/src/dynamic_tools.rs
+index 8bf201d7cf4b90dd92e118bcb033cb36a17d8637..a0a32c5f3f63b7abf1705e1315a7c765ea3577f7 100644
+--- a/codex-rs/protocol/src/dynamic_tools.rs
++++ b/codex-rs/protocol/src/dynamic_tools.rs
+@@ -15,11 +15,47 @@ pub enum DynamicToolSpec {
+     Computer(DynamicComputerToolSpec),
+     ToolSearch(DynamicToolSearchSpec),
+     Function(DynamicToolFunctionSpec),
++    Custom(DynamicCustomToolSpec),
+     Namespace(DynamicToolNamespaceSpec),
+     Shell(DynamicShellToolSpec),
+     HostedMcp(DynamicHostedMcpSpec),
+ }
+ 
++/// A Responses custom tool bound to the SDK's current application callback.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++#[ts(export_to = "v2/")]
++pub struct DynamicCustomToolSpec {
++    pub name: String,
++    pub description: String,
++    pub format: DynamicCustomToolFormat,
++    pub input_field: String,
++    pub input_schema: JsonValue,
++    #[serde(default)]
++    pub defer_loading: bool,
++}
++
++impl DynamicCustomToolSpec {
++    pub fn callback_spec(&self) -> DynamicToolFunctionSpec {
++        DynamicToolFunctionSpec {
++            name: self.name.clone(),
++            description: self.description.clone(),
++            input_schema: self.input_schema.clone(),
++            strict: false,
++            defer_loading: self.defer_loading,
++            output_schema: None,
++        }
++    }
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
++#[ts(export_to = "v2/")]
++pub enum DynamicCustomToolFormat {
++    Text,
++    Grammar { syntax: String, definition: String },
++}
++
+ /// Shell execution is supplied by the SDK host. Skills describe its local environment.
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+diff --git a/codex-rs/tools/src/responses_api.rs b/codex-rs/tools/src/responses_api.rs
+index 2853b6656896fb4a31a6d82a776ef3d372692b9d..0e1f7772237d610bcdce883ffd967f2ba7b5cc47 100644
+--- a/codex-rs/tools/src/responses_api.rs
++++ b/codex-rs/tools/src/responses_api.rs
+@@ -26,7 +26,9 @@ pub struct FreeformTool {
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct FreeformToolFormat {
+     pub r#type: String,
++    #[serde(default, skip_serializing_if = "String::is_empty")]
+     pub syntax: String,
++    #[serde(default, skip_serializing_if = "String::is_empty")]
+     pub definition: String,
+ }
+ 
+diff --git a/codex-rs/tui/src/dynamic_tools.rs b/codex-rs/tui/src/dynamic_tools.rs
+index a915fba6f30954bf200309967747bd398cb2d860..7b6a5619642f99ccc57e29636f777323d1f26c9e 100644
+--- a/codex-rs/tui/src/dynamic_tools.rs
++++ b/codex-rs/tui/src/dynamic_tools.rs
+@@ -265,7 +265,7 @@ pub(crate) fn non_delegation_tool_specs() -> Vec<DynamicToolSpec> {
+         .into_iter()
+         .filter_map(|spec| match spec {
+             DynamicToolSpec::ApplyPatch => Some(DynamicToolSpec::ApplyPatch),
+-            DynamicToolSpec::HostedMcp(_) => None,
++            DynamicToolSpec::HostedMcp(_) | DynamicToolSpec::Custom(_) => None,
+             spec @ (DynamicToolSpec::Computer(_) | DynamicToolSpec::Shell(_)) => Some(spec),
+             DynamicToolSpec::ToolSearch(_) => None,
+             DynamicToolSpec::Function(function) => (!DELEGATION_TOOLS
+diff --git a/codex-rs/tui/src/dynamic_tools_mcp.rs b/codex-rs/tui/src/dynamic_tools_mcp.rs
+index ad3cd7626d73f3cf3aad7b620f1f072005e6dbd5..ba2429b2a7d85f8f7c15d3a419773a63e0b9fd91 100644
+--- a/codex-rs/tui/src/dynamic_tools_mcp.rs
++++ b/codex-rs/tui/src/dynamic_tools_mcp.rs
+@@ -266,6 +266,7 @@ impl ServerHandler for DynamicToolMcpHandler {
+                 | DynamicToolSpec::Computer(_)
+                 | DynamicToolSpec::Shell(_)
+                 | DynamicToolSpec::HostedMcp(_)
++                | DynamicToolSpec::Custom(_)
+                 | DynamicToolSpec::ToolSearch(_) => continue,
+                 DynamicToolSpec::Function(function) => vec![function],
+                 DynamicToolSpec::Namespace(namespace) => namespace

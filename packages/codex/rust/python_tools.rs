@@ -805,6 +805,9 @@ fn functions(
     for spec in specs {
         match spec {
             DynamicToolSpec::Function(tool) => functions.push((None, Cow::Borrowed(tool))),
+            DynamicToolSpec::Custom(tool) => {
+                functions.push((None, Cow::Owned(tool.callback_spec())));
+            }
             DynamicToolSpec::ApplyPatch => functions.push((
                 None,
                 Cow::Owned(DynamicToolFunctionSpec {
@@ -848,6 +851,7 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
         specs.iter().all(|spec| match spec {
             DynamicToolSpec::ApplyPatch
             | DynamicToolSpec::Function(_)
+            | DynamicToolSpec::Custom(_)
             | DynamicToolSpec::Computer(_)
             | DynamicToolSpec::HostedMcp(_)
             | DynamicToolSpec::ToolSearch(_)
@@ -2420,6 +2424,7 @@ impl PythonTools {
                 codex_tools::ComputerToolOutput::from_dynamic_response(arguments, response)
                     .map_err(|_| anyhow::anyhow!("Invalid native computer response"))?,
             ),
+            ToolPayload::Custom { .. } => Box::new(PythonOutput(response)),
             ToolPayload::HostedMcpApproval { .. } => Box::new(hosted_mcp_output(response)?),
             ToolPayload::Shell { arguments } => {
                 return crate::local_reconciliation::shell_receipt(
@@ -2474,6 +2479,25 @@ impl PythonTools {
             );
             let spec = match declaration {
                 DynamicToolSpec::ApplyPatch => ToolSpec::ApplyPatch {},
+                DynamicToolSpec::Custom(custom) => {
+                    use codex_protocol::dynamic_tools::DynamicCustomToolFormat;
+                    let (kind, syntax, definition) = match &custom.format {
+                        DynamicCustomToolFormat::Text => ("text", String::new(), String::new()),
+                        DynamicCustomToolFormat::Grammar { syntax, definition } => {
+                            ("grammar", syntax.clone(), definition.clone())
+                        }
+                    };
+                    ToolSpec::Freeform(codex_tools::FreeformTool {
+                        name: custom.name.clone(),
+                        description: custom.description.clone(),
+                        defer_loading: None,
+                        format: codex_tools::FreeformToolFormat {
+                            r#type: kind.to_string(),
+                            syntax,
+                            definition,
+                        },
+                    })
+                }
                 DynamicToolSpec::HostedMcp(hosted) => ToolSpec::Mcp(codex_tools::HostedMcpTool {
                     server_label: hosted.server_label.clone(),
                     provider_data: Default::default(),
@@ -4414,19 +4438,25 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
-                    original_payload: match &entry.spec {
-                        ToolSpec::ApplyPatch {} => Some(ToolPayload::ApplyPatch {
+                    original_payload: match (&entry.spec, &generation.specs[slot]) {
+                        (_, DynamicToolSpec::Custom(custom)) => Some(ToolPayload::Custom {
+                            input: request["msg"]["arguments"][custom.input_field.as_str()]
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("Invalid native custom input"))?
+                                .to_owned(),
+                        }),
+                        (ToolSpec::ApplyPatch {}, _) => Some(ToolPayload::ApplyPatch {
                             arguments: request["msg"]["arguments"].to_string(),
                         }),
-                        ToolSpec::Mcp(_) => Some(ToolPayload::HostedMcpApproval {
+                        (ToolSpec::Mcp(_), _) => Some(ToolPayload::HostedMcpApproval {
                             request: serde_json::from_value(request["msg"]["arguments"].clone())?,
                         }),
-                        ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
+                        (ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }, _) => {
                             Some(ToolPayload::Computer {
                                 arguments: request["msg"]["arguments"].to_string(),
                             })
                         }
-                        ToolSpec::ApplicationShell { .. } => Some(ToolPayload::Shell {
+                        (ToolSpec::ApplicationShell { .. }, _) => Some(ToolPayload::Shell {
                             arguments: request["msg"]["arguments"].to_string(),
                         }),
                         _ => None,
@@ -6468,7 +6498,15 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
 
     fn exposure(&self) -> ToolExposure {
         let exposure = self.generation.entries[self.slot].exposure;
-        match (exposure, self.use_deferred_specs, self.code_mode_enabled) {
+        let custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_));
+        if custom && exposure == ToolExposure::Direct {
+            return ToolExposure::DirectModelOnly;
+        }
+        match (
+            exposure,
+            self.use_deferred_specs,
+            self.code_mode_enabled && !custom,
+        ) {
             (ToolExposure::Deferred, true, false) => ToolExposure::DeferredModelOnly,
             (ToolExposure::Deferred, false, false) => ToolExposure::DirectModelOnly,
             (ToolExposure::Deferred, false, true) => ToolExposure::Direct,
@@ -6506,14 +6544,25 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 ));
             }
 
-            let (arguments, argument_error) = match &call.payload {
-                ToolPayload::HostedMcpApproval { request } => (
+            let declaration = &self.generation.specs[self.slot];
+            let (arguments, argument_error) = match (declaration, &call.payload) {
+                (DynamicToolSpec::Custom(custom), ToolPayload::Custom { input })
+                    if call.source == ToolCallSource::Direct =>
+                {
+                    (json!({ (&custom.input_field): input }), None)
+                }
+                (DynamicToolSpec::Custom(_), _) => {
+                    return Err(FunctionCallError::RespondToModel(
+                        "Custom string tools require their direct provider call payload".into(),
+                    ));
+                }
+                (_, ToolPayload::HostedMcpApproval { request }) => (
                     serde_json::to_value(request).map_err(|_| {
                         FunctionCallError::Fatal("Invalid hosted MCP request".into())
                     })?,
                     None,
                 ),
-                ToolPayload::ClientToolSearch(search) => (search.arguments.clone(), None),
+                (_, ToolPayload::ClientToolSearch(search)) => (search.arguments.clone(), None),
                 _ => {
                     let raw = call.function_arguments()?;
                     match serde_json::from_str::<Value>(raw) {
@@ -6772,7 +6821,7 @@ impl ToolOutput for PythonOutput {
         self.0.success
     }
 
-    fn to_response_item(&self, call_id: &str, _: &ToolPayload) -> ResponseInputItem {
+    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         let content: Vec<FunctionCallOutputContentItem> = self
             .0
             .content_items
@@ -6786,12 +6835,20 @@ impl ToolOutput for PythonOutput {
             }
             _ => FunctionCallOutputBody::ContentItems(content),
         };
+        let output = FunctionCallOutputPayload {
+            body,
+            success: Some(self.0.success),
+        };
+        if matches!(payload, ToolPayload::Custom { .. }) {
+            return ResponseInputItem::CustomToolCallOutput {
+                call_id: call_id.to_string(),
+                name: None,
+                output,
+            };
+        }
         ResponseInputItem::FunctionCallOutput {
             call_id: call_id.to_string(),
-            output: FunctionCallOutputPayload {
-                body,
-                success: Some(self.0.success),
-            },
+            output,
         }
     }
 }

@@ -871,7 +871,11 @@
     {
       "path": "sdk-native-managed-agent-result.patch",
       "sha256": "c4a96bdf440d6796107f96fd57b48d5b9648751ad287740c846dfced2a60341e"
+    },
+    {
+      "path": "sdk-native-custom-string-tools.patch",
+      "sha256": "eba69ab805f374e4b7c6648d3c040c27f0424e43d704a25c8c8edf3f3ca67600"
     }
   ],
-  "result_tree": "ca48b11a1af84cb5c6a4b99cf4cf44207904d116"
+  "result_tree": "721e4385a20f26a94304450914f49e957775fd9c"
 }
