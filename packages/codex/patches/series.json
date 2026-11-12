@@ -723,7 +723,11 @@
     {
       "path": "sdk-chat-completions-raw-response.patch",
       "sha256": "5adb96468cc0c98a5516ebec5acb2afdbd33129160b7705497cb83601063713c"
+    },
+    {
+      "path": "sdk-application-model-raw-events.patch",
+      "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
     }
   ],
-  "result_tree": "c51dcda691a9898c731b3ce98c6920642f4f842d"
+  "result_tree": "96dae4ba85d0c98d777ed41d18f4d6675c1e79f4"
 }

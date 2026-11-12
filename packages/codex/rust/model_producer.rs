@@ -158,7 +158,7 @@ impl PythonTools {
         let state = self.model_producer.lock().expect("Model producer poisoned");
         state.accepts(id)
     }
-    pub(crate) fn start_model_producer_stream(&self, id: u64) -> bool {
+    pub(crate) fn start_model_producer_stream(&self, id: u64, observe_raw: bool) -> bool {
         let mut state = self.model_producer.lock().expect("Model producer poisoned");
         if !state.accepts(id) {
             return false;
@@ -174,7 +174,7 @@ impl PythonTools {
             Delivery::Streaming {
                 events,
                 finish,
-                projection: ApplicationModelStream::default(),
+                projection: ApplicationModelStream::new(observe_raw),
             },
         ) else {
             unreachable!("model request has not started streaming")
