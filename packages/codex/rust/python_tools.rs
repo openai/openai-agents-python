@@ -3921,23 +3921,41 @@ impl PythonTools {
             self.admits_generation(&generation),
             "Expired manual continuation catalog"
         );
-        let ResponseItem::FunctionCall {
-            name,
-            namespace,
-            arguments,
-            call_id,
-            ..
-        } = item
-        else {
-            anyhow::bail!("Manual continuation requires a function call");
+        let (name, namespace, arguments, call_id, shell) = match item {
+            ResponseItem::FunctionCall {
+                name,
+                namespace,
+                arguments,
+                call_id,
+                ..
+            } => (
+                name.as_str(),
+                namespace.clone(),
+                serde_json::from_str(arguments)?,
+                call_id.as_str(),
+                false,
+            ),
+            ResponseItem::ShellCall {
+                provider_fields, ..
+            } => (
+                "shell",
+                None,
+                serde_json::to_value(item)?,
+                crate::local_reconciliation::shell_call_id(provider_fields)
+                    .context("Pending Shell lacks identity")?
+                    .as_str(),
+                true,
+            ),
+            _ => anyhow::bail!("Manual continuation requires an application tool call"),
         };
         let slot = generation
             .entries
             .iter()
             .position(|entry| {
                 entry.manual
+                    && matches!(&entry.spec, ToolSpec::ApplicationShell { .. }) == shell
                     && entry.name.clone().with_default_namespace()
-                        == ToolName::new(namespace.clone(), name.clone()).with_default_namespace()
+                        == ToolName::new(namespace.clone(), name).with_default_namespace()
             })
             .context("Pending manual declaration is absent")?;
         self.enqueue_profile(
@@ -3946,7 +3964,7 @@ impl PythonTools {
             slot,
             turn,
             call_id,
-            serde_json::from_str(arguments)?,
+            arguments,
             None,
             &ToolCallSource::Direct,
             model,

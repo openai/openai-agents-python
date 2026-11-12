@@ -215,6 +215,16 @@ pub(crate) struct Frame {
     )>,
 }
 
+fn manual_call_id(item: &ResponseItem) -> Option<&String> {
+    match item {
+        ResponseItem::FunctionCall { call_id, .. } => Some(call_id),
+        ResponseItem::ShellCall {
+            provider_fields, ..
+        } => crate::local_reconciliation::shell_call_id(provider_fields),
+        _ => None,
+    }
+}
+
 /// Recover source identity from accepted history, never a runtime allocation ID.
 pub(crate) fn validate_for_opening(
     state: &Value,
@@ -290,7 +300,7 @@ pub(crate) fn validate_for_opening(
                 "Repeated canonical handoff result"
             );
         }
-        if let ResponseItem::FunctionCall { call_id, .. } = &envelope.item {
+        if let Some(call_id) = manual_call_id(&envelope.item) {
             if let Some((receipt, graph)) = &current {
                 ensure!(
                     call_sources
@@ -300,7 +310,7 @@ pub(crate) fn validate_for_opening(
                 );
             }
         }
-        if let ResponseItem::FunctionCall { call_id, .. } = &envelope.item
+        if let Some(call_id) = manual_call_id(&envelope.item)
             && ids.contains(call_id.as_str())
         {
             ensure!(
@@ -563,7 +573,7 @@ fn validate_frame(
                 }
                 if matches!(
                     raw["type"].as_str(),
-                    Some("function_call" | "custom_tool_call")
+                    Some("function_call" | "custom_tool_call" | "shell_call")
                 ) {
                     let call = raw["call_id"]
                         .as_str()
@@ -577,7 +587,7 @@ fn validate_frame(
                 }
                 if matches!(
                     raw["type"].as_str(),
-                    Some("function_call_output" | "custom_tool_call_output")
+                    Some("function_call_output" | "custom_tool_call_output" | "shell_call_output")
                 ) {
                     let call = raw["call_id"]
                         .as_str()
@@ -623,12 +633,10 @@ fn validate_frame(
     crate::python_tools::validate_declarations(&saved_specs)?;
     let saved_names: HashSet<_> = saved_specs
         .iter()
-        .filter_map(|spec| {
-            if let DynamicToolSpec::Function(spec) = spec {
-                Some(spec.name.as_str())
-            } else {
-                None
-            }
+        .filter_map(|spec| match spec {
+            DynamicToolSpec::Function(spec) => Some(spec.name.as_str()),
+            DynamicToolSpec::Shell(_) => Some("shell"),
+            _ => None,
         })
         .collect();
     let mut admitted = Vec::new();
@@ -674,19 +682,32 @@ fn validate_frame(
         let saved = calls
             .get(call)
             .context("Pending manual has no canonical call")?;
-        ensure!(
+        let shell = saved["type"] == "shell_call";
+        let matching_arguments = if shell {
+            name == "shell"
+                && serde_json::from_str::<Value>(args)? == *saved
+                && fields.get("effective_arguments").is_none_or(|value| {
+                    value.is_null()
+                        || value.as_str().is_some_and(|text| {
+                            serde_json::from_str::<Value>(text).is_ok_and(|value| value == *saved)
+                        })
+                })
+        } else {
             saved["type"] == "function_call"
                 && saved["name"] == name
                 && matches!(saved["namespace"].as_str(), None | Some("" | "functions"))
-                && saved["arguments"] == args,
+                && saved["arguments"] == args
+        };
+        ensure!(
+            matching_arguments,
             "Pending manual arguments or name differ from accepted history"
         );
         let slot = specs
             .iter()
-            .position(|spec| {
-                matches!(spec,
-                    DynamicToolSpec::Function(spec) if spec.name == name
-                )
+            .position(|spec| match spec {
+                DynamicToolSpec::Function(spec) => !shell && spec.name == name,
+                DynamicToolSpec::Shell(_) => shell && name == "shell",
+                _ => false,
             })
             .context("Current catalog does not allow a pending manual tool")?;
         ensure!(
@@ -703,10 +724,9 @@ fn validate_frame(
         order
             .iter()
             .filter(|call| pending_ids.contains(*call))
-            .eq(admitted.iter().map(|item| match item {
-                ResponseItem::FunctionCall { call_id, .. } => call_id,
-                _ => unreachable!(),
-            })),
+            .eq(admitted
+                .iter()
+                .map(|item| manual_call_id(item).expect("validated manual call"))),
         "Pending manual requests differ from canonical receipt order"
     );
     for (call, receipt) in &accepted {
@@ -769,11 +789,42 @@ fn validate_frame(
 }
 
 fn receipt_matches(call: &Value, receipt: &Value) -> bool {
+    if call["type"] == "shell_call" {
+        let validate = || -> Result<bool> {
+            let mut output = serde_json::json!({"output": receipt["output"]});
+            if let Some(limit) = receipt.get("max_output_length") {
+                output["max_output_length"] = limit.clone();
+            }
+            let original: ResponseItem = serde_json::from_value(call.clone())?;
+            let actual: ResponseItem = serde_json::from_value(receipt.clone())?;
+            let response = DynamicToolResponse {
+                success: true,
+                content_items: vec![
+                    codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText {
+                        text: serde_json::to_string(&output)?,
+                    },
+                ],
+            };
+            let expected = crate::local_reconciliation::shell_receipt(
+                &serde_json::to_string(&original)?,
+                response,
+                "",
+                call["call_id"].as_str().context("Missing Shell identity")?,
+            )?;
+            Ok(crate::local_reconciliation::same_output_payload(
+                &expected, &actual,
+            ))
+        };
+        if !validate().unwrap_or(false) {
+            return false;
+        }
+    }
     call["call_id"] == receipt["call_id"]
         && matches!(
             (call["type"].as_str(), receipt["type"].as_str()),
             (Some("function_call"), Some("function_call_output"))
                 | (Some("custom_tool_call"), Some("custom_tool_call_output"))
+                | (Some("shell_call"), Some("shell_call_output"))
         )
 }
 
@@ -789,6 +840,8 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
     let mut search_receipts = HashSet::new();
     let mut patch_receipts = HashSet::new();
     let mut patch_calls = HashSet::new();
+    let mut shell_calls = HashSet::new();
+    let mut shell_receipts = HashSet::new();
     for item in history.iter().rev() {
         if matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))) {
             break;
@@ -808,6 +861,36 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
             | ResponseItem::FunctionCallOutput {
                 call_id: Some(_), ..
             } => {}
+            ResponseItem::ShellCall {
+                provider_fields, ..
+            } => {
+                let Some(call_id) = crate::local_reconciliation::shell_call_id(provider_fields)
+                else {
+                    return false;
+                };
+                if call_id.is_empty()
+                    || !shell_calls.insert(call_id)
+                    || envelope
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.sdk_application_tool.as_deref())
+                        != Some("shell")
+                {
+                    return false;
+                }
+                shell_receipts.remove(call_id);
+            }
+            ResponseItem::ShellCallOutput {
+                provider_fields, ..
+            } => {
+                let Some(call_id) = crate::local_reconciliation::shell_call_id(provider_fields)
+                else {
+                    return false;
+                };
+                if call_id.is_empty() || !shell_receipts.insert(call_id) {
+                    return false;
+                }
+            }
             ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
                 if call_id.is_empty() || !patch_receipts.insert(call_id) {
                     return false;
@@ -845,7 +928,7 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
             _ => return false,
         }
     }
-    search_receipts.is_empty() && patch_receipts.is_empty()
+    search_receipts.is_empty() && patch_receipts.is_empty() && shell_receipts.is_empty()
 }
 
 // Legacy or unopened runtimes have no snapshot. Admit them only when full
@@ -931,6 +1014,28 @@ impl Frame {
         value: &DynamicToolResponse,
     ) {
         if !self.sealed && key.turn == self.turn && self.order.contains(&key.call) {
+            let receipt = if let Some(item @ ResponseItem::ShellCall { .. }) = self
+                .pending
+                .iter()
+                .find(|item| manual_call_id(item) == Some(&key.call))
+            {
+                let Ok(receipt) = serde_json::to_string(item)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|arguments| {
+                        crate::local_reconciliation::shell_receipt(
+                            &arguments,
+                            value.clone(),
+                            &key.turn,
+                            &key.call,
+                        )
+                    })
+                else {
+                    return;
+                };
+                receipt
+            } else {
+                crate::python_tools::PythonOutput(value.clone()).receipt(key)
+            };
             if let Some(outcomes) = &mut self.tool_outcomes {
                 outcomes.record(&key.call, value.success);
             }
@@ -943,12 +1048,7 @@ impl Frame {
                     self.batch_completion,
                 );
             }
-            self.accepted.insert(
-                key.call.clone(),
-                crate::python_tools::PythonOutput(value.clone())
-                    .receipt(key)
-                    .into(),
-            );
+            self.accepted.insert(key.call.clone(), receipt.into());
         }
     }
 
@@ -1520,8 +1620,16 @@ pub(crate) async fn capture(
                 | ResponseItem::CustomToolCall { call_id, .. } => {
                     calls.push((call_id.clone(), item.item.clone()))
                 }
+                ResponseItem::ShellCall {
+                    provider_fields, ..
+                } => {
+                    let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
+                        .context("Shell call lacks identity")?;
+                    calls.push((call_id.clone(), item.item.clone()));
+                }
                 ResponseItem::FunctionCallOutput { .. }
-                | ResponseItem::CustomToolCallOutput { .. } => {
+                | ResponseItem::CustomToolCallOutput { .. }
+                | ResponseItem::ShellCallOutput { .. } => {
                     let output = serde_json::to_value(&item.item)?;
                     let call_id = output["call_id"]
                         .as_str()
@@ -1581,11 +1689,12 @@ pub(crate) async fn capture(
         if !pending_ids.contains(id.as_str()) {
             continue;
         }
-        let ResponseItem::FunctionCall {
-            name, arguments, ..
-        } = item
-        else {
-            anyhow::bail!("A custom call cannot own a manual reply")
+        let (name, arguments) = match item {
+            ResponseItem::FunctionCall {
+                name, arguments, ..
+            } => (name.as_str(), arguments.clone()),
+            ResponseItem::ShellCall { .. } => ("shell", serde_json::to_string(item)?),
+            _ => anyhow::bail!("This call cannot own a manual reply"),
         };
         let (required, effective_arguments) = approvals
             .get(id)
@@ -1616,6 +1725,9 @@ pub(crate) async fn capture(
                     let call_id = match &response.item {
                         ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_ref(),
                         ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id),
+                        ResponseItem::ShellCallOutput {
+                            provider_fields, ..
+                        } => crate::local_reconciliation::shell_call_id(provider_fields),
                         _ => None,
                     };
                     if call_id.is_some_and(|id| order.contains(id)) {

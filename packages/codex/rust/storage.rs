@@ -524,9 +524,8 @@ impl MemoryThreadStore {
         anyhow::ensure!(
             !prefix.iter().any(|item| matches!(item,
                 RolloutItem::ResponseItem(envelope)
-                if matches!(&envelope.item, ResponseItem::FunctionCallOutput {
-                    call_id: Some(call_id), ..
-                } if pending_ids.contains(call_id.as_str()))
+                if crate::local_reconciliation::output_identity(&envelope.item)
+                    .is_some_and(|(call_id, _)| pending_ids.contains(call_id))
             )),
             UnsupportedManualState::NativeWork
         );
@@ -543,6 +542,7 @@ impl MemoryThreadStore {
             Custom,
             Computer,
             ApplyPatch,
+            Shell,
         }
         let mut calls = HashMap::new();
         for item in prefix {
@@ -568,6 +568,28 @@ impl MemoryThreadStore {
                             UnsupportedManualState::NativeWork
                         );
                         unfinished.insert(call_id.as_str());
+                    }
+                    ResponseItem::ShellCall {
+                        provider_fields, ..
+                    } => {
+                        let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
+                            .context("Shell call lacks identity")?;
+                        anyhow::ensure!(
+                            calls.insert(call_id.as_str(), CallKind::Shell).is_none(),
+                            UnsupportedManualState::NativeWork
+                        );
+                        unfinished.insert(call_id.as_str());
+                    }
+                    ResponseItem::ShellCallOutput {
+                        provider_fields, ..
+                    } => {
+                        let call_id = crate::local_reconciliation::shell_call_id(provider_fields)
+                            .context("Shell output lacks identity")?;
+                        anyhow::ensure!(
+                            calls.get(call_id.as_str()) == Some(&CallKind::Shell)
+                                && unfinished.remove(call_id.as_str()),
+                            UnsupportedManualState::NativeWork
+                        );
                     }
                     ResponseItem::FunctionCallOutput {
                         call_id: Some(call_id),
@@ -1151,6 +1173,7 @@ impl SamplingState {
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::ComputerCall { .. }
                         | ResponseItem::ApplyPatchCall { .. }
+                        | ResponseItem::ShellCall { .. }
                 ) =>
             {
                 self.tool_calls += 1;
