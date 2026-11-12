@@ -630,7 +630,8 @@ impl EngineState {
                 installation_id,
                 None,
                 None,
-            );
+            )
+            .with_sdk_child_trace_privacy();
             match code_mode {
                 Some(provider) => manager.with_code_mode_session_provider(Arc::new(
                     crate::native_interception::Provider {

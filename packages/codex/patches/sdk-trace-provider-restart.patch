@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/provider.rs b/codex-rs/otel/src/provider.rs
-index 8d066965..29860372 100644
+index 8d066965ba8f55b8c509bb3b9e57b9272e043408..29860372cd6c85933232eb8332743d9dd096bdc3 100644
 --- a/codex-rs/otel/src/provider.rs
 +++ b/codex-rs/otel/src/provider.rs
 @@ -785,12 +785,12 @@ fn build_tracer_provider(
@@ -34,7 +34,7 @@ index 8d066965..29860372 100644
      )
  }
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
-index 71d0eeb8..b0b888e5 100644
+index 1a2e2a6dd724d543fe16dcad5b7577b5eac7a09e..2c76fbc7cbf11528ca35250437cd4f4467724ae5 100644
 --- a/codex-rs/otel/src/sdk_trace.rs
 +++ b/codex-rs/otel/src/sdk_trace.rs
 @@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -46,7 +46,7 @@ index 71d0eeb8..b0b888e5 100644
  pub use opentelemetry::trace::FutureExt;
  use opentelemetry::trace::{SamplingDecision, SamplingResult};
  use opentelemetry::trace::{
-@@ -246,6 +248,23 @@ pub fn build_span(
+@@ -314,6 +316,23 @@ pub fn build_span(
      }
  }
  
@@ -70,7 +70,7 @@ index 71d0eeb8..b0b888e5 100644
  struct Handle {
      context: Context,
      _registration: Option<Arc<PolicyRegistration>>,
-@@ -268,6 +287,17 @@ fn resolve(handle: &str) -> Result<Arc<Handle>, String> {
+@@ -336,6 +355,17 @@ fn resolve(handle: &str) -> Result<Arc<Handle>, String> {
          .cloned()
          .ok_or_else(|| "Unknown or released native tracing context".into())
  }
@@ -88,7 +88,7 @@ index 71d0eeb8..b0b888e5 100644
  #[derive(Default, Deserialize)]
  #[serde(deny_unknown_fields)]
  struct Options {
-@@ -427,11 +457,12 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+@@ -495,11 +525,12 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
      {
          return Err("Unsupported native tracing span kind".into());
      }
@@ -103,7 +103,7 @@ index 71d0eeb8..b0b888e5 100644
          .transpose()?;
      let inherited = parent.as_ref().and_then(|h| policy_for_context(&h.context));
      let ambient = restriction
-@@ -441,7 +472,7 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+@@ -509,7 +540,7 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
          .restrictions_parents
          .iter()
          .map(|key| {
@@ -112,7 +112,7 @@ index 71d0eeb8..b0b888e5 100644
                  policy_for_context(&handle.context)
                      .ok_or_else(|| "Native tracing policy unavailable".into())
              })
-@@ -518,7 +549,9 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+@@ -587,7 +618,9 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
      if parent_span.is_valid() && trace_id.is_some_and(|id| id != parent_span.trace_id()) {
          return Err("trace_id does not match the selected parent".into());
      }
@@ -123,7 +123,7 @@ index 71d0eeb8..b0b888e5 100644
      let mut builder =
          opentelemetry::trace::SpanBuilder::from_name(options.name).with_attributes(attributes);
      builder.trace_id = trace_id;
-@@ -544,7 +577,7 @@ pub fn trace_span_context(key: &str) -> Result<String, String> {
+@@ -613,7 +646,7 @@ pub fn trace_span_context(key: &str) -> Result<String, String> {
      readback(key, resolve(key)?.as_ref())
  }
  pub fn retain_trace_context(key: &str) -> Result<String, String> {
@@ -132,7 +132,7 @@ index 71d0eeb8..b0b888e5 100644
      let key = token("c");
      handles()
          .lock()
-@@ -618,7 +651,7 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
+@@ -687,7 +720,7 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
      Ok(())
  }
  pub fn context(key: &str) -> Result<Context, String> {
@@ -141,7 +141,7 @@ index 71d0eeb8..b0b888e5 100644
  }
  struct ExplicitSubmissionContext;
  
-@@ -655,6 +688,14 @@ pub fn current_context_token() -> Option<String> {
+@@ -724,6 +757,14 @@ pub fn current_context_token() -> Option<String> {
      // Native lifecycle hooks can inherit private values on the instrumented
      // span. A W3C round trip would discard those values before policy lookup.
      let context = crate::trace_context::current_span_context();
@@ -153,11 +153,11 @@ index 71d0eeb8..b0b888e5 100644
 +        return None;
 +    }
 +    let context = context.with_value(generation);
-     let policy = policy_for_context(&context)?;
+     let policy = policy_for_context(&context).filter(|policy| !policy.restriction_only)?;
      let registration = {
          let span = context.span();
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index c9abc221..18075513 100644
+index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..1807551369ac5fd04997213a639d258f3029b44d 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -7,6 +7,7 @@ use serde::Deserialize;

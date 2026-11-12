@@ -300,12 +300,14 @@ async def test_connection_credentials_survive_retry_but_not_teardown(failure, st
         async with connect_a2a(
             endpoint(url),
             authorization=authorization,
-            limits=A2ALimits(timeout=0.3, message_bytes=128),
+            limits=A2ALimits(timeout=5, message_bytes=128),
             streaming=streaming,
         ) as client:
             if failure == "timeout":
                 with pytest.raises(A2AClientTimeoutError) as caught:
-                    await client.get_task(p.GetTaskRequest(id="task"))
+                    await client.get_task(
+                        p.GetTaskRequest(id="task"), context=ClientCallContext(timeout=0.3)
+                    )
             else:
                 message = new_text_message("x" * 1024, role=p.ROLE_USER)
                 match = "message exceeds"
