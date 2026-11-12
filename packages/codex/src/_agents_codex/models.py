@@ -161,8 +161,11 @@ class ModelResponse:
     usage: dict[str, int] | None = None
     response_id: str = field(default_factory=lambda: "resp_" + uuid4().hex)
 
-    def _capture(self, *, capture_raw_usage: bool = False) -> str:
+    def _capture(
+        self, *, capture_raw_usage: bool = False, capture_raw_provider_events: bool = False
+    ) -> str:
         usage: Any = None
+        raw: Any = None
         rendered: str | None = None
         try:
             if not isinstance(self.response_id, str) or not self.response_id.strip():
@@ -186,12 +189,15 @@ class ModelResponse:
                 usage = {key: self.usage.get(key, 0) for key in fields}
                 if "total_tokens" not in self.usage:
                     usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+            if capture_raw_provider_events:
+                raw = getattr(self, "_raw_chat_completion", None)
             try:
                 rendered = json.dumps(
                     {
                         "response_id": self.response_id,
                         "output": self.output,
                         "usage": usage,
+                        **({"raw_chat_completion": raw} if raw is not None else {}),
                         **(
                             {"original_usage": _capture_responses_usage(self)}
                             if capture_raw_usage
@@ -208,7 +214,7 @@ class ModelResponse:
             return rendered
         finally:
             # Invalid provider counters must not retain output through this frame.
-            del self, usage, rendered
+            del self, usage, raw, rendered
 
 
 def _capture_responses_usage(response: ModelResponse) -> dict[str, Any] | None:
@@ -674,7 +680,10 @@ class ChatCompletionsModel:
                     else counter
                     for key, counter in usage.items()
                 }
-            return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+            response = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+            if getattr(request, "_observe_raw_provider_events", False):
+                object.__setattr__(response, "_raw_chat_completion", deepcopy(value))
+            return response
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
             del (
