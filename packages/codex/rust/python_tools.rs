@@ -2819,6 +2819,9 @@ impl PythonTools {
                 ),
             "replaceable tools require an idle, open native thread"
         );
+        // Native idle can precede retirement of a reply's physical callback.
+        // Join only retired leases; an active reply must still fail below.
+        self.finish_callbacks(None, None, false).await;
         ensure!(
             self.pending
                 .lock()
@@ -6239,6 +6242,61 @@ pub(crate) mod manual_checkpoint_tests;
 #[cfg(test)]
 pub(crate) mod managed_tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_catalog_joins_retired_callback_and_rejects_active_reply() {
+        use crate::engine::settlement_tests::Provider;
+
+        let provider = Provider::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        let engine = real_engine(&directory, &provider.url).await;
+        let native = engine
+            .start_with_tools(Default::default(), None, Some(vec![]), false)
+            .await
+            .unwrap();
+        let state = native.current().unwrap();
+        let thread = admission_thread();
+        let tools = thread.get::<PythonTools>().unwrap();
+        let _turn = start_admission(&thread, "turn").await;
+        let (key, invocation, receive) = tools
+            .enqueue(
+                "thread",
+                &tools.snapshot(),
+                0,
+                "turn",
+                "call",
+                json!({}),
+                &ToolCallSource::Direct,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+        let receipt = tools.pending.lock().unwrap()[&key]
+            .callback
+            .as_ref()
+            .unwrap()
+            .receipt
+            .clone();
+        assert!(tools.callback_operation("thread", &receipt, "enter"));
+        assert!(
+            tools
+                .check_idle(&state.thread)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Python tool replies are pending")
+        );
+        tools.retire_callback(&key, invocation, false);
+        assert!(receive.await.is_err());
+        let mut idle = Box::pin(tools.check_idle(&state.thread));
+        assert!(futures_util::poll!(idle.as_mut()).is_pending());
+        assert!(tools.callback_operation("thread", &receipt, "release"));
+        idle.await.unwrap();
+        assert!(tools.pending.lock().unwrap().is_empty());
+        state.close().await.unwrap();
+        engine.close().await.unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn owned_compaction_stop_joins_queued_start_and_leaves_later_root_untouched() {
