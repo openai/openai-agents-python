@@ -159,9 +159,10 @@ def _handoff_tool(
         application = RealtimeAgentContext(context, source)
 
         def invoke(payload: BaseModel) -> Any:
+            acknowledgement = "Handoff reserved."
             callback = handoff.on_handoff
             if callback is None:
-                return None
+                return acknowledgement
             value = (
                 callback(application, payload)
                 if handoff.input_type is not None
@@ -169,11 +170,12 @@ def _handoff_tool(
             )
             if inspect.isawaitable(value):
 
-                async def finish() -> None:
+                async def finish() -> str:
                     await value
+                    return acknowledgement
 
                 return finish()
-            return None
+            return acknowledgement
 
         async def before(_: ToolContext[Any]) -> Allow | Deny:
             enabled = handoff.is_enabled
@@ -193,7 +195,7 @@ def _handoff_tool(
             spec_json=declaration._spec_json(),
             model=model,
             field_names=tuple(model.model_fields),
-            output_adapter=TypeAdapter(type(None)),
+            output_adapter=TypeAdapter(str),
             callback=invoke,
             context_parameter=None,
             callback_timeout=None,
@@ -209,7 +211,7 @@ def _handoff_tool(
         name=name,
         description=handoff.description or f"Transfer the conversation to {handoff.agent.name}.",
         input_type=model,
-        output_type=type(None),
+        output_type=str,
         _bind=bind,
     )
 
@@ -409,6 +411,7 @@ def _capture_voice_graph(
         session._context,
         session._output_guardrails,
         session._input_guardrails,
+        run_error_formatter=session._tool_error_formatter is not None,
     )
     _complete_profile_mcp(profiles, roster, session._executor)
     return runtimes, roster

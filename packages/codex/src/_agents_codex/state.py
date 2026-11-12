@@ -195,6 +195,29 @@ class _RequestRunBudgetCheckpoint(BaseModel):
         return self
 
 
+class _TokenRunBudgetCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    version: int = Field(ge=2, le=2)
+    max_requests: int | None = Field(ge=0, le=2**53 - 1)
+    admitted_requests: int | None = Field(ge=0, le=2**53 - 1)
+    max_tokens: int = Field(ge=0, le=2**53 - 1)
+    consumed_tokens: int = Field(ge=0, le=2**53 - 1)
+    usage_missing: bool
+    missing_usage: Literal["stop", "continue"]
+
+    @model_validator(mode="after")
+    def validate_consumption(self) -> "_TokenRunBudgetCheckpoint":
+        if (self.max_requests is None) != (self.admitted_requests is None):
+            raise ValueError("Saved request limit and admissions must appear together")
+        if self.max_requests is not None and self.admitted_requests is not None:
+            if self.admitted_requests > self.max_requests:
+                raise ValueError("Admitted requests cannot exceed the saved request limit")
+        if self.consumed_tokens > self.max_tokens:
+            raise ValueError("Consumed tokens cannot exceed the saved token limit")
+        return self
+
+
 class _ManualContinuation(BaseModel):
     """Native receipt order at a settled manual boundary, never live grants."""
 
@@ -207,6 +230,7 @@ class _ManualContinuation(BaseModel):
     pending_manual: list[_PendingManual]
     tool_outcomes: _ToolOutcomes | None = None
     output_schema: dict[str, Any] | None = None
+    model_override: str | None = None
 
 
 class ApplicationToolOutput(BaseModel):
@@ -220,6 +244,46 @@ class ApplicationToolOutput(BaseModel):
     name: str
     namespace: str | None = None
     application_data: dict[str, JsonValue] = Field(repr=False)
+
+
+def _check_saved_prompt_model(model: object) -> None:
+    if not isinstance(model, dict):
+        return
+    controls = model.get("request_controls")
+    prompt = controls.get("hosted_prompt") if isinstance(controls, dict) else None
+    if isinstance(prompt, dict) and prompt.get("reference") is not None:
+        raise ValueError("Saved prompt references are not restore authority")
+
+
+def _check_saved_prompt_metadata(metadata: object) -> None:
+    profile = metadata.get("sdk_agent_profile") if isinstance(metadata, dict) else None
+    if isinstance(profile, dict):
+        _check_saved_prompt_model(profile.get("model"))
+
+
+def _check_saved_prompt_envelope(envelope: object) -> None:
+    if isinstance(envelope, dict):
+        _check_saved_prompt_metadata(envelope.get("metadata"))
+
+
+def _check_saved_prompt_history(history: list[dict[str, Any]]) -> None:
+    for row in history:
+        _check_saved_prompt_envelope(row)
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if row.get("type") == "response_item":
+            _check_saved_prompt_envelope(payload)
+        elif row.get("type") == "event_msg" and payload.get("type") == "thread_settings_applied":
+            _check_saved_prompt_model(payload.get("thread_settings"))
+        elif row.get("type") == "compacted":
+            for metadata in payload.get("replacement_history_metadata") or ():
+                _check_saved_prompt_metadata(metadata)
+            originals = payload.get("sdk_originals")
+            if isinstance(originals, dict):
+                for item in originals.get("items") or ():
+                    if isinstance(item, dict):
+                        _check_saved_prompt_envelope(item.get("projection"))
 
 
 class _RememberedApproval(BaseModel):
@@ -245,7 +309,7 @@ class SessionState(BaseModel):
     against the destination's current opening declarations. No version
     contains live grants or acquires tools from saved names. Versions 6 and 7
     also retain native CodeMode values and terminal cell observations.
-    Versions 8 and 9 have been adding request-only budget receipts to manual
+    Versions 8 and 9 have been adding versioned run budget receipts to manual
     checkpoints without and with retained CodeMode state, respectively.
 
     Verify the checkpoint's integrity before restoring it. A strict Environment
@@ -276,7 +340,7 @@ class SessionState(BaseModel):
     # None predates on_step; [] intentionally withholds every optional MCP tool.
     step_mcp_tools: list[_StepMcpTool] | None = None
     native_continuation: _ManualContinuation | None = None
-    run_budget: _RequestRunBudgetCheckpoint | None = None
+    run_budget: _RequestRunBudgetCheckpoint | _TokenRunBudgetCheckpoint | None = None
     run_usage: RunUsage | None = None
     # SDK contract identity is checked before importing native state or grants.
     output_version: Literal[1] | None = None
@@ -301,6 +365,7 @@ class SessionState(BaseModel):
 
     @model_validator(mode="after")
     def validate_tree(self) -> "SessionState":
+        self._check_prompt_references()
         approvals = [
             (item.profile_id, item.key, item.signature) for item in self.remembered_approvals
         ]
@@ -364,6 +429,14 @@ class SessionState(BaseModel):
                 seen.add(current)
                 current = parents[current]
         return self
+
+    def _check_prompt_references(self) -> None:
+        _check_saved_prompt_history(self.history)
+        for child in self.descendants:
+            _check_saved_prompt_history(child.history)
+        if self.native_continuation is not None:
+            for reply in self.native_continuation.accepted_replies.values():
+                _check_saved_prompt_envelope(reply)
 
     @property
     def instructions(self) -> str:

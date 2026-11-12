@@ -150,6 +150,7 @@ async fn validate_model(
 
 pub struct Policy {
     pub roles: Vec<String>,
+    pub managed_tools: Vec<String>,
     pub max_depth: usize,
     pub(crate) instruction_files: Vec<crate::application_instructions::InstructionFile>,
     // Current startup policy is host authority. Core reads its own copy before
@@ -162,6 +163,13 @@ impl Policy {
         self.allowed
             .get()
             .is_some_and(|policy| policy.allowed_tools.is_some() && policy.allows(name))
+    }
+
+    fn managed_tool_admission(&self, depth: usize, name: &str) -> Option<bool> {
+        self.managed_tools
+            .iter()
+            .any(|tool| tool == name)
+            .then_some(depth < self.max_depth)
     }
 
     pub fn admits(&self, depth: usize, item: &codex_protocol::models::ResponseItem) -> bool {
@@ -182,6 +190,9 @@ impl Policy {
                     // The Code Mode wrapper requires an explicit current
                     // ToolPolicy grant, just like each nested dispatch.
                     return true;
+                }
+                if let Some(admitted) = self.managed_tool_admission(depth, name) {
+                    return admitted;
                 }
                 if (depth != 0 && self.max_depth == 1)
                     || (name == "spawn_agent" && depth >= self.max_depth)
@@ -242,6 +253,9 @@ impl Policy {
             codex_code_mode::CodeModeToolKind::Function => {
                 if name.namespace.as_deref() != Some("collaboration") {
                     return true;
+                }
+                if let Some(admitted) = self.managed_tool_admission(depth, &name.name) {
+                    return admitted;
                 }
                 if (depth != 0 && self.max_depth == 1)
                     || (name.name == "spawn_agent" && depth >= self.max_depth)
@@ -976,6 +990,7 @@ pub async fn continue_retained(
             "Continue with the latest user input already in the conversation. Do not repeat completed work.",
         ),
     )));
+    request.start.model_override = receipt.model_override.clone();
     request.trace = receipt
         .tracing
         .as_ref()
@@ -1128,6 +1143,7 @@ mod steering_capture_tests {
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
+                model_attempt: None,
             }),
         }
     }
@@ -1250,7 +1266,9 @@ mod steering_capture_tests {
                         "input": [UserInput::Text { text: text.into(), text_elements: vec![] }],
                     })
                 };
-                let root = crate::ops::submit_replaceable(&state, text("Start one child"))
+                let mut opening = text("Start one child");
+                opening["start"] = serde_json::json!({"model_override": "retained-model-fixture"});
+                let root = crate::ops::submit_replaceable(&state, opening)
                     .await
                     .unwrap();
                 assert_eq!(root["status"], "started");
@@ -1277,6 +1295,7 @@ mod steering_capture_tests {
                         .collect()
                 };
                 let initial = child_requests();
+                assert_eq!(initial[0]["model"], "retained-model-fixture");
                 assert_eq!(initial.len(), 1);
                 let metadata: serde_json::Value = serde_json::from_str(
                     initial[0]["client_metadata"]["x-codex-turn-metadata"]
@@ -1374,6 +1393,7 @@ mod steering_capture_tests {
                     assert_eq!(successor.outcome().await.unwrap().result, Ok("done".into()));
                     let requests = child_requests();
                     assert_eq!(requests.len(), 2);
+                    assert_eq!(requests[1]["model"], "retained-model-fixture");
                     let metadata: serde_json::Value = serde_json::from_str(
                         requests[1]["client_metadata"]["x-codex-turn-metadata"]
                             .as_str()
@@ -1428,6 +1448,7 @@ mod steering_capture_tests {
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
+                    model_attempt: None,
                 }),
             };
             row.observe(&state, child_id, &event);
@@ -1728,6 +1749,7 @@ mod steering_capture_tests {
             thread_id: &state.id.to_string(),
             client_metadata: &mut metadata,
             model: "fixture",
+            model_omitted: false,
         }));
         assert_eq!(tentative.wait().await.unwrap().0, "original answer");
         state.close().await.unwrap();

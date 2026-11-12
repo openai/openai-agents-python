@@ -10,7 +10,7 @@ Use an SDK build from the same checkout as this example. Follow the [source buil
 PYTHONPATH=. python -m examples.codex.recipes.accepted_output
 ```
 
-`ScriptedResponses` has been supplying synthetic model responses through a loopback HTTP server and the normal native provider. The recipe has been running without API credentials or model charges. The peer has been requiring direct access or proxy bypass for `127.0.0.1` throughout execution. The script has been using no tools or external writes. Its `published` lists have been representing application publication in memory.
+`ScriptedResponses` has been supplying synthetic model responses through a loopback HTTP server and the normal native provider. The recipe has been running without API credentials or model charges. The peer has been requiring direct access or proxy bypass for `127.0.0.1` throughout execution. The section scenario has been using one application function tool. Its in-memory lists and section map have been representing application publication.
 
 The run has been checking these observable outcomes with assertions:
 
@@ -22,6 +22,7 @@ The run has been checking these observable outcomes with assertions:
 | Cancellation during approval checking | No answer |
 | Approval service failure | No answer |
 | Wrong case identifier in completed JSON | No answer |
+| Same-turn section publication | Inventory section before the next request; no delivery section or final summary |
 
 The console has been displaying application-owned progress, accepted content, and fixed failure statuses. The script has been withholding the first report draft with its unsupported success claim.
 
@@ -46,6 +47,14 @@ The synthetic report check has been matching a phrase to keep the example focuse
 The inventory and dispatch sections have been passing their own checks in separate turns. The example has been publishing each section before starting the next. The delivery section has been failing its check, so the example has been withholding it while keeping the earlier sections available.
 
 This pattern has been applying when each section has its own evidence and permission to publish. When a later check can invalidate an earlier section, the whole answer has been requiring a successful final result before delivery.
+
+## Publishing sections within one turn
+
+The same-turn scenario has been using an application-owned `publish_section` function tool. The application has been checking each proposed section against trusted facts before storing it by section ID in its in-memory destination. Repeating an accepted section has been replacing that section's entry. The peer has been verifying the inventory section's publication before responding to the next model request. It has then been proposing an unsupported delivery section, which the tool has been withholding. One submission has been covering both calls and a later final proposal.
+
+The completion callback has been rejecting that final proposal. The application has been keeping the provisional summary private while retaining the independently accepted inventory section. Section publication has been taking effect inside the tool callback, before SDK acceptance of the tool result or final answer. Later tool policies, cancellation, and final-answer rejection have not been undoing that application effect. The application has been checking facts at its publication point; final-answer acceptance has been remaining separate.
+
+This pattern has been supporting independently checked inventory facts and individually approved support updates. The example has been keeping delivery in memory. Production destinations have been requiring publication authorization, durable receipts, and reconciliation after an unknown acknowledgment. The in-memory section map has not been providing durable idempotency. Passive observations have been allowing gaps and have not been providing a durable delivery queue. Whole-answer checks that can invalidate earlier sections have been requiring publication after final acceptance instead. This recipe has not been turning raw text deltas into accepted incremental output.
 
 ## Observing accepted output
 

@@ -32,7 +32,7 @@ pub(crate) fn shell_call_id(fields: &Map<String, Value>) -> Option<&String> {
 }
 
 pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>)> {
-    let call = match item {
+    let call: &str = match item {
         ResponseItem::FunctionCallOutput {
             call_id: Some(call),
             ..
@@ -40,6 +40,10 @@ pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>
         | ResponseItem::CustomToolCallOutput { call_id: call, .. }
         | ResponseItem::ApplyPatchCallOutput { call_id: call, .. }
         | ResponseItem::ComputerCallOutput { call_id: call, .. } => call,
+        ResponseItem::McpApprovalResponse {
+            approval_request_id,
+            ..
+        } => approval_request_id.as_str(),
         ResponseItem::ShellCallOutput {
             provider_fields, ..
         } => shell_call_id(provider_fields)?,
@@ -83,6 +87,24 @@ pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseIt
                 call_id: actual, ..
             },
         ) => expected == actual,
+        (
+            ResponseItem::McpApprovalRequest {
+                id: Some(expected),
+                provider_fields,
+                ..
+            },
+            ResponseItem::McpApprovalResponse {
+                approval_request_id: actual,
+                caller,
+                ..
+            },
+        ) => {
+            expected.as_str() == actual.as_str()
+                && provider_fields
+                    .get("caller")
+                    .filter(|value| !value.is_null())
+                    == caller.as_ref().filter(|value| !value.is_null())
+        }
         (
             ResponseItem::ShellCall {
                 provider_fields: expected,
@@ -689,6 +711,7 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
             for turn in &expected.interrupted {
                 items.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
                     TurnAbortedEvent {
+                        model_attempt: None,
                         turn_id: Some(turn.clone()),
                         reason: TurnAbortReason::Interrupted,
                         error: None,

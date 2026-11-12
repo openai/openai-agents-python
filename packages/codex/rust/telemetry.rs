@@ -127,6 +127,11 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
     let (config_json, diagnostics) = crate::console_diagnostics::extract(config_json)?;
     let mut options: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&config_json)?;
+    let delivery = options
+        .remove("sdk.trace_delivery")
+        .map(codex_otel::sdk_trace_routes::HostTraceDeliverySettings::parse)
+        .transpose()
+        .map_err(|_| anyhow!("Invalid trace delivery options"))?;
     let restart = options.remove("sdk.trace_restart") == Some(serde_json::Value::Bool(true));
     let _restart = if restart {
         ensure!(
@@ -194,6 +199,9 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
             .context("Could not claim the process-wide Rust tracing subscriber")?;
         state.logger_layer = Some(handle);
         state.console_layer = Some(console_handle);
+    }
+    if let Some(delivery) = delivery {
+        codex_otel::sdk_trace_routes::configure_host_trace_delivery(delivery);
     }
 
     let provider = codex_core::otel_init::build_provider(

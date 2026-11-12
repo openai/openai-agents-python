@@ -128,3 +128,54 @@ async def test_original_nested_input_precedes_validator_mutation(responses, need
     ).session() as session:
         assert (await (await session.submit("begin")).get_result()).final_output == "recovered"
     assert seen == [{"payload": {"key": 33}}]
+
+
+@pytest.mark.parametrize("managed", [False, True])
+async def test_malformed_original_json_custom_recovery_precedes_policy_and_approval(
+    responses, managed
+):
+    raw = ' {"key": '
+    counts = {"format": 0, "before": 0, "approval": 0, "body": 0, "after": 0}
+
+    def recover(context, error, original):
+        assert isinstance(error, ValueError)
+        assert "EOF" in str(error)
+        assert original == raw
+        assert context.call_id == "malformed-opt-in"
+        assert not hasattr(context, "effective_arguments")
+        counts["format"] += 1
+        return "Custom malformed input"
+
+    def before(context):
+        counts["before"] += 1
+        return Allow()
+
+    def approve(context):
+        counts["approval"] += 1
+        return True
+
+    def after(context, output):
+        counts["after"] += 1
+        return output
+
+    @function_tool(
+        input_error_function=recover,
+        needs_approval=approve if managed else False,
+        before=before,
+        after=after,
+    )
+    async def lookup(key: str) -> str:
+        counts["body"] += 1
+        return "unexpected"
+
+    malformed = function_call("lookup", {}, "malformed-opt-in")
+    malformed["item"]["arguments"] = raw
+    responses.respond(malformed)
+    responses.respond(assistant_output("recovered"))
+    async with Agent(
+        instructions="Use lookup.", tools=[lookup], provider=provider(responses)
+    ).session() as session:
+        assert (await (await session.submit("begin")).get_result()).final_output == "recovered"
+    assert counts == {"format": 1, "before": 0, "approval": 0, "body": 0, "after": 0}
+    assert len(responses.requests) == 2
+    assert "Custom malformed input" in str(responses.requests[1]["input"])

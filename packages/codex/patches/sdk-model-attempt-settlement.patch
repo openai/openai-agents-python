@@ -1,0 +1,179 @@
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+index 1f1efe52..3af26098 100644
+--- a/codex-rs/core/src/session/model_attempts.rs
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -328,7 +328,14 @@ impl ModelAttemptAdmission for Attempt {
+ }
+ 
+ fn validate_usage(usage: &TokenUsage) -> Result<(), String> {
+-    if [
++    if !token_usage_is_nonnegative(usage) {
++        return Err("Native model usage must be nonnegative".into());
++    }
++    Ok(())
++}
++
++pub(crate) fn token_usage_is_nonnegative(usage: &TokenUsage) -> bool {
++    [
+         usage.input_tokens,
+         usage.cached_input_tokens,
+         usage.cache_write_input_tokens,
+@@ -336,12 +343,8 @@ fn validate_usage(usage: &TokenUsage) -> Result<(), String> {
+         usage.reasoning_output_tokens,
+         usage.total_tokens,
+     ]
+-    .iter()
+-    .any(|count| *count < 0)
+-    {
+-        return Err("Native model usage must be nonnegative".into());
+-    }
+-    Ok(())
++    .into_iter()
++    .all(|count| count >= 0)
+ }
+ 
+ fn add_usage(left: &TokenUsage, right: &TokenUsage) -> Result<TokenUsage, String> {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 36274fe0..e742762b 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2168,10 +2168,9 @@ async fn run_sampling_request(
+                 publish_model_attempt(
+                     &sess,
+                     &step_context,
+-                    &attempt,
++                    attempt.as_ref(),
+                     codex_protocol::model_retry::ModelAttemptPhase::Started,
+                     admission.clone(),
+-                    &ledger,
+                 )
+                 .await?;
+                 // The original prompt remains authoritative for history and retry bookkeeping.
+@@ -2261,10 +2260,9 @@ async fn run_sampling_request(
+             publish_model_attempt(
+                 &sess,
+                 &step_context,
+-                &attempt,
++                attempt.as_ref(),
+                 codex_protocol::model_retry::ModelAttemptPhase::Finished,
+                 admission.clone(),
+-                &ledger,
+             )
+             .await?;
+             let err = match outcome {
+@@ -2351,12 +2349,20 @@ async fn run_sampling_request(
+             let permanently_stopped = cancellation_token.is_cancelled()
+                 || preempt.is_cancelled()
+                 || parent_stop.requested();
++            // Default native stream recovery already owns accepted-tool replay and
++            // deduplication. The new configurable retry route retains its stricter
++            // replay gates without replacing that established recovery owner.
++            let enforce_replay_safety = retry_configured
++                || failure.is_some()
++                || attempt_deadline.expired()
++                || context.normalized.error_code.as_deref() == Some("conversation_locked");
+             let hard_veto = permanently_stopped
+                 || retirement_failed
+                 || context.normalized.is_abort
+-                || context.retry_unsafe_output
+-                || context.local_effects
+-                || err.response_integrity_reason().is_some()
++                || (enforce_replay_safety
++                    && (context.retry_unsafe_output
++                        || context.local_effects
++                        || err.response_integrity_reason().is_some()))
+                 || (failure.is_none()
+                     && matches!(
+                         err.details(),
+@@ -2438,10 +2444,9 @@ async fn run_sampling_request(
+                     publish_model_attempt(
+                         &sess,
+                         &step_context,
+-                        &attempt,
++                        attempt.as_ref(),
+                         codex_protocol::model_retry::ModelAttemptPhase::Terminal,
+                         admission.clone(),
+-                        &ledger,
+                     )
+                     .await?;
+                     attempt.release_failure();
+@@ -2461,10 +2466,9 @@ async fn run_sampling_request(
+                 publish_model_attempt(
+                     &sess,
+                     &step_context,
+-                    &attempt,
++                    attempt.as_ref(),
+                     codex_protocol::model_retry::ModelAttemptPhase::Retry,
+                     admission.clone(),
+-                    &ledger,
+                 )
+                 .await?;
+                 attempt.release_failure();
+@@ -2550,12 +2554,11 @@ async fn run_sampling_request(
+ async fn publish_model_attempt(
+     sess: &Session,
+     step: &StepContext,
+-    attempt: &Arc<super::model_attempts::Attempt>,
++    attempt: &dyn codex_extension_api::ModelAttemptAdmission,
+     phase: codex_protocol::model_retry::ModelAttemptPhase,
+     admission: Arc<dyn codex_extension_api::ModelToolAdmission>,
+-    ledger: &super::model_attempts::AttemptLedger,
+ ) -> CodexResult<()> {
+-    let snapshot = ledger.snapshot();
++    let snapshot = attempt.snapshot().map_err(CodexErr::Fatal)?;
+     for contributor in sess.services.extensions.model_request_contributors() {
+         contributor
+             .model_attempt(codex_extension_api::ModelAttemptInput {
+@@ -4375,10 +4378,36 @@ async fn try_run_sampling_request(
+                     usage_metadata,
+                     end_turn,
+                 } => {
+-                    if let (Some(attempt), Some(usage)) = (&model_attempt, &token_usage) {
+-                        attempt
+-                            .report_usage(usage.clone())
+-                            .map_err(CodexErr::Fatal)?;
++                    if let (Some(attempt), Some(admission)) =
++                        (&model_attempt, &prompt.tool_admission)
++                    {
++                        // Manual tools can wait beyond provider completion. Publish
++                        // the measured attempt before exposing that boundary.
++                        let measured = async {
++                            // Native HTTP can report unavailable counters as a
++                            // negative sentinel. Keep that attempt unmeasured.
++                            if let Some(usage) = token_usage.as_ref().filter(|usage| {
++                                super::model_attempts::token_usage_is_nonnegative(usage)
++                            }) {
++                                attempt
++                                    .report_usage(usage.clone())
++                                    .map_err(CodexErr::Fatal)?;
++                            }
++                            publish_model_attempt(
++                                &sess,
++                                &step_context,
++                                attempt.as_ref(),
++                                codex_protocol::model_retry::ModelAttemptPhase::Measured,
++                                admission.clone(),
++                            )
++                            .await
++                        }
++                        .await;
++                        if let Err(error) = measured {
++                            tool_cancellation.cancel();
++                            drop(stream);
++                            break Err(error);
++                        }
+                     }
+ 
+                     sess.services
+diff --git a/codex-rs/protocol/src/model_retry.rs b/codex-rs/protocol/src/model_retry.rs
+index a4d07713..319a00d5 100644
+--- a/codex-rs/protocol/src/model_retry.rs
++++ b/codex-rs/protocol/src/model_retry.rs
+@@ -214,6 +214,7 @@ pub struct ModelRetryResolution {
+ #[serde(rename_all = "snake_case")]
+ pub enum ModelAttemptPhase {
+     Started,
++    Measured,
+     Finished,
+     Retry,
+     Terminal,

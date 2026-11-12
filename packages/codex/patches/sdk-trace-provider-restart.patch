@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/provider.rs b/codex-rs/otel/src/provider.rs
-index 8d066965ba8f55b8c509bb3b9e57b9272e043408..29860372cd6c85933232eb8332743d9dd096bdc3 100644
+index 8d066965..29860372 100644
 --- a/codex-rs/otel/src/provider.rs
 +++ b/codex-rs/otel/src/provider.rs
 @@ -785,12 +785,12 @@ fn build_tracer_provider(
@@ -34,7 +34,7 @@ index 8d066965ba8f55b8c509bb3b9e57b9272e043408..29860372cd6c85933232eb8332743d9d
      )
  }
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
-index 8ed47834302b2aac0d7652b4594ea282228aa180..129a7b3a84484f9352e8bf1fb2556ee40dd8acd7 100644
+index 437c3cf8..c7ad6245 100644
 --- a/codex-rs/otel/src/sdk_trace.rs
 +++ b/codex-rs/otel/src/sdk_trace.rs
 @@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -157,7 +157,7 @@ index 8ed47834302b2aac0d7652b4594ea282228aa180..129a7b3a84484f9352e8bf1fb2556ee4
      let registration = {
          let span = context.span();
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a085903587c6260f5 100644
+index 76816513..4413c6fa 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -7,6 +7,7 @@ use serde::Deserialize;
@@ -168,7 +168,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a08590358
  use std::sync::{Arc, Mutex, OnceLock};
  use std::time::{Duration, Instant, UNIX_EPOCH};
  
-@@ -62,6 +63,40 @@ fn lock() -> std::sync::MutexGuard<'static, Routes> {
+@@ -109,6 +110,40 @@ fn lock() -> std::sync::MutexGuard<'static, Routes> {
      state().lock().unwrap_or_else(|e| e.into_inner())
  }
  
@@ -209,7 +209,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a08590358
  pub fn register_trace_credentials(input: &str) -> Result<String, String> {
      if input.len() > 65536 {
          return Err("trace credential headers exceed limit".into());
-@@ -989,9 +1024,21 @@ impl SpanProcessor for TraceBatchProcessor {
+@@ -1128,9 +1163,21 @@ impl SpanProcessor for TraceBatchProcessor {
  
  #[derive(Debug)]
  pub(crate) struct RoutedSpanProcessor<P> {
@@ -233,7 +233,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a08590358
  impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
      fn on_start(&self, span: &mut Span, cx: &Context) {
          let policy = crate::sdk_trace::policy_for_context(cx);
-@@ -1000,6 +1047,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+@@ -1139,6 +1186,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
          }
          self.inner.on_start(span, cx);
          let mut s = lock();
@@ -243,7 +243,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a08590358
          if let Some(data) = span.exported_data() {
              let descriptor =
                  retained_root_descriptor(&data, "start", policy.as_deref(), s.sequence + 1);
-@@ -1020,6 +1070,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+@@ -1162,6 +1212,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
              return;
          }
          let mut s = lock();
@@ -251,9 +251,9 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a08590358
 +            return;
 +        }
          let descriptor = retained_root_descriptor(&span, "end", policy.as_deref(), s.sequence + 1);
+         let credential = policy.as_ref().and_then(|p| p.credential.as_ref());
          event(
-             &mut s,
-@@ -1059,6 +1112,73 @@ mod tests {
+@@ -1203,6 +1256,73 @@ mod tests {
  
      static TEST_LOCK: Mutex<()> = Mutex::new(());
  
@@ -324,10 +324,10 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a08590358
 +        assert!(lock().queue.is_empty());
 +    }
 +
+     const DETACHED_OBSERVATION: &str = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
+ 
      #[tokio::test]
-     async fn detached_dispatch_wakes_on_acknowledgement_or_shutdown() {
-         use std::future::Future;
-@@ -1132,10 +1252,7 @@ mod tests {
+@@ -1499,10 +1619,7 @@ mod tests {
          set_trace_routes(r#"{"processor_ids":["first"],"replace":false}"#).unwrap();
          let recorder = Recorder::default();
          let provider = SdkTracerProvider::builder()
@@ -339,7 +339,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a08590358
              .build();
          let tracer = provider.tracer("route-test");
          let mut old = tracer.start("old");
-@@ -1167,6 +1284,28 @@ mod tests {
+@@ -1534,6 +1651,28 @@ mod tests {
          assert!(s.dropped > 0);
      }
  
@@ -368,7 +368,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a08590358
      #[test]
      fn credentials_overlay_without_exposing_or_revoking_queued_lease() {
          let _test = TEST_LOCK.lock().unwrap();
-@@ -1581,14 +1720,14 @@ mod tests {
+@@ -1952,14 +2091,14 @@ mod tests {
          let release = Arc::new((Mutex::new(false), Condvar::new()));
          let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
          let provider = SdkTracerProvider::builder()

@@ -77,6 +77,10 @@ pub struct ThreadOptions {
     pub(crate) manual_tool_slots: Vec<usize>,
     #[serde(rename = "_terminal_tool_slots")]
     pub(crate) terminal_tool_slots: Vec<usize>,
+    #[serde(rename = "_input_error_tool_slots")]
+    pub(crate) input_error_tool_slots: Vec<usize>,
+    #[serde(rename = "_native_agent_tools")]
+    native_agent_tools: Vec<codex_core::ManagedAgentToolSpec>,
     #[serde(rename = "_transform_context")]
     pub(crate) transform_context: bool,
     #[serde(rename = "_before_compact")]
@@ -175,6 +179,7 @@ impl ThreadOptions {
             && self.dynamic_tools.is_empty()
             && self.manual_tool_slots.is_empty()
             && (functions || self.terminal_tool_slots.is_empty())
+            && self.native_agent_tools.is_empty()
             && self.hosted_tools.is_empty()
             && self.metrics_service_name.is_none()
             && self.parent_trace.is_none()
@@ -322,6 +327,10 @@ impl ThreadOptions {
                 .thread_extension_init
                 .insert(codex_mcp::ApplicationApps::verification(registration));
         }
+        anyhow::ensure!(
+            self.native_agent_tools.is_empty() || self.native_agent_roles.is_some(),
+            "Native role tools require NativeAgents roles"
+        );
         if let Some(roles) = self.native_agent_roles {
             anyhow::ensure!(
                 config::native_agents(&runtime)?,
@@ -333,10 +342,21 @@ impl ThreadOptions {
                 .thread_extension_init
                 .insert(crate::native_agents::Policy {
                     roles,
+                    managed_tools: self
+                        .native_agent_tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect(),
                     max_depth,
                     instruction_files: self.sdk_instruction_files.unwrap_or_default(),
                     allowed: Default::default(),
                 });
+            if !self.native_agent_tools.is_empty() {
+                options.thread_extension_init.insert(
+                    codex_core::ManagedAgentToolCatalog::new(self.native_agent_tools)
+                        .map_err(anyhow::Error::msg)?,
+                );
+            }
         }
         if self.application_instructions.is_some() {
             options

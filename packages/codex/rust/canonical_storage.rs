@@ -7,7 +7,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use codex_history::RolloutItem;
+use codex_history::sdk_originals::SdkOriginalHistoryCheckpoint;
+use codex_history::{ResponseItemEnvelope, RolloutItem};
 use codex_protocol::ThreadId;
 use codex_thread_store::*;
 use pyo3::prelude::*;
@@ -22,11 +23,64 @@ fn failure() -> ThreadStoreError {
     }
 }
 
+// These snapshots have crossed the application store boundary. Live declarations
+// still deserialize references, but native snapshot serialization always omits them.
+fn validate_saved_prompt_history(history: &[RolloutItem]) -> anyhow::Result<()> {
+    let check_envelope = |envelope: &ResponseItemEnvelope| -> anyhow::Result<()> {
+        anyhow::ensure!(
+            envelope
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.sdk_agent_profile.as_ref())
+                .and_then(
+                    |profile| profile.pointer("/model/request_controls/hosted_prompt/reference")
+                )
+                .is_none_or(serde_json::Value::is_null),
+            "Saved prompt references are not restore authority"
+        );
+        Ok(())
+    };
+    for item in history {
+        match item {
+            RolloutItem::ResponseItem(envelope) => check_envelope(envelope)?,
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => anyhow::ensure!(
+                event
+                    .thread_settings
+                    .request_controls
+                    .hosted_prompt
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_none_or(|prompt| prompt.reference.is_none()),
+                "Saved prompt references are not restore authority"
+            ),
+            RolloutItem::Compacted(compacted) => {
+                for envelope in compacted.replacement_history.iter().flatten() {
+                    check_envelope(envelope)?;
+                }
+                if let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) =
+                    &compacted.sdk_originals
+                {
+                    for envelope in originals
+                        .items
+                        .iter()
+                        .filter_map(|item| item.projection.as_ref())
+                    {
+                        check_envelope(envelope)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn invocation_identity(item: &ResponseItem) -> Option<&str> {
     match item {
         ResponseItem::ApplyPatchCall { call_id, .. }
         | ResponseItem::FunctionCall { call_id, .. }
         | ResponseItem::ComputerCall { call_id, .. } => Some(call_id),
+        ResponseItem::McpApprovalRequest { id: Some(id), .. } => Some(id.as_str()),
         ResponseItem::ShellCall {
             provider_fields, ..
         } => crate::local_reconciliation::shell_call_id(provider_fields).map(String::as_str),
@@ -185,6 +239,7 @@ impl CanonicalStore {
                 return Err(failure());
             }
             crate::checkpoint::validate_imported_history(&snapshot.items).map_err(|_| failure())?;
+            validate_saved_prompt_history(&snapshot.items).map_err(|_| failure())?;
             self.inner.create_thread(snapshot.create.clone()).await?;
             // Keep the original canonical header in snapshots. The projection's
             // generated header is used only to rebuild native summary metadata.
@@ -582,14 +637,16 @@ impl ThreadStore for CanonicalStore {
         Box::pin(async move {
             let mut writers = self.writers.lock().await;
             self.load(params.thread_id, &mut writers).await?;
-            Ok(Arc::new(
+            let mut history = Arc::new(
                 writers[&params.thread_id]
                     .snapshot
                     .as_ref()
                     .unwrap()
                     .items
                     .clone(),
-            ))
+            );
+            crate::checkpoint::remove_replayed_mcp_approvals(&mut history);
+            Ok(history)
         })
     }
 

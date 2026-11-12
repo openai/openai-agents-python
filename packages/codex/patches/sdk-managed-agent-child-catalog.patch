@@ -1,0 +1,260 @@
+diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
+index e7ea531da6fb4ecca9d8f8dd37d52c2ec0c40cab..01afc39a5b59afc505962e742f4768eec6ec21d3 100644
+--- a/codex-rs/core/src/agent/control/residency_tests.rs
++++ b/codex-rs/core/src/agent/control/residency_tests.rs
+@@ -182,7 +182,6 @@ async fn spawn_v2_subagent(
+             /*inherited_environments*/ None,
+             /*inherited_exec_policy*/ None,
+             /*environments*/ None,
+-            /*application_apps*/ None,
+             codex_extension_api::ExtensionDataInit::new(),
+         )
+         .await
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index b782fd82e018b3c4f03c1c810119a4a2292f54a4..1141f4cedcc64dfad0945d5fe91b151af6ba54aa 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -43,7 +43,7 @@ const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
+ struct SpawnAgentThreadInheritance {
+     environments: Option<TurnEnvironmentSnapshot>,
+     exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+-    application_apps: Option<codex_mcp::ApplicationApps>,
++    thread_extension_init: ExtensionDataInit,
+     mcp_source: Option<crate::mcp::InheritedMcpCatalog>,
+ }
+ 
+@@ -210,39 +210,44 @@ async fn load_agent_model_context(
+ }
+ 
+ impl LocalAgentControl {
+-    // Capture only the explicit declaration from the actual live owner. Grants, proofs,
++    // Capture explicit declarations from the actual live owner. Grants, proofs,
+     // transport instances and mutable extension maps are not inherited here.
+-    async fn inherited_application_apps(
++    async fn inherited_thread_declarations(
+         &self,
+         state: &ThreadManagerState,
+         source: Option<&SessionSource>,
+         parent_thread_id: Option<ThreadId>,
+-    ) -> Option<codex_mcp::ApplicationApps> {
++    ) -> ExtensionDataInit {
++        let mut declarations = ExtensionDataInit::new();
+         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+             parent_thread_id: owner,
+             ..
+         })) = source
+         else {
+-            return None;
++            return declarations;
+         };
+         if Some(*owner) != parent_thread_id {
+-            return None;
++            return declarations;
+         }
+-        let parent = state.get_thread(*owner).await.ok()?;
++        let Ok(parent) = state.get_thread(*owner).await else {
++            return declarations;
++        };
+         if !parent.is_running()
+             || !Arc::ptr_eq(
+                 &self.runtime.registry,
+                 &parent.session.services.local_agent_runtime.registry,
+             )
+         {
+-            return None;
++            return declarations;
++        }
++        let thread_data = parent.thread_extension_data();
++        if let Some(applications) = thread_data.get::<codex_mcp::ApplicationApps>() {
++            declarations.insert((*applications).clone());
++        }
++        if let Some(tools) = thread_data.get::<crate::ManagedAgentToolCatalog>() {
++            declarations.insert((*tools).clone());
+         }
+-        parent
+-            .session
+-            .services
+-            .thread_extension_data
+-            .get::<codex_mcp::ApplicationApps>()
+-            .map(|application| (*application).clone())
++        declarations
+     }
+ 
+     /// Restore persisted V2 agent identities without reopening their runtimes.
+@@ -526,8 +531,8 @@ impl LocalAgentControl {
+         let parent_thread_id = owner_thread_id
+             .or_else(|| initial_history.get_resumed_parent_thread_id())
+             .or(stored_parent_thread_id);
+-        let application_apps = self
+-            .inherited_application_apps(&state, Some(&session_source), parent_thread_id)
++        let thread_extension_init = self
++            .inherited_thread_declarations(&state, Some(&session_source), parent_thread_id)
+             .await;
+         let (inherited_environments, inherited_exec_policy, client_mcp_extensions) = if let Some(
+             (parent, parent_environments),
+@@ -683,7 +688,7 @@ impl LocalAgentControl {
+                 inherited_instructions,
+                 inherited_exec_policy,
+                 client_mcp_extensions,
+-                application_apps,
++                thread_extension_init,
+             })
+             .await
+         {
+@@ -755,8 +760,12 @@ impl LocalAgentControl {
+             && session_source
+                 .as_ref()
+                 .is_some_and(is_v2_resident_session_source);
+-        let application_apps = self
+-            .inherited_application_apps(&state, session_source.as_ref(), options.parent_thread_id)
++        let thread_extension_init = self
++            .inherited_thread_declarations(
++                &state,
++                session_source.as_ref(),
++                options.parent_thread_id,
++            )
+             .await;
+         let (residency_slot, residency_reservation) = if spawn_uses_v2_residency {
+             let residency_reservation_started_at = Instant::now();
+@@ -796,7 +805,7 @@ impl LocalAgentControl {
+             exec_policy: self
+                 .inherited_exec_policy_for_source(&state, session_source.as_ref(), &config)
+                 .await,
+-            application_apps,
++            thread_extension_init,
+         };
+         let (session_source, mut agent_metadata) = match session_source {
+             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+@@ -864,7 +873,7 @@ impl LocalAgentControl {
+                     .as_ref()
+                     .map(TurnEnvironmentSnapshot::inheritable_selections);
+                 let child_create_started_at = Instant::now();
+-                let mut child_init = ExtensionDataInit::new();
++                let mut child_init = inheritance.thread_extension_init;
+                 if let Some(source) = &options.spawning_source {
+                     child_init.insert(source.clone());
+                 }
+@@ -884,7 +893,6 @@ impl LocalAgentControl {
+                     inheritance.environments,
+                     inheritance.exec_policy,
+                     environments,
+-                    inheritance.application_apps,
+                     child_init,
+                 ))
+                 .await?;
+@@ -1062,7 +1070,7 @@ impl LocalAgentControl {
+         let SpawnAgentThreadInheritance {
+             environments: inherited_environments,
+             exec_policy: inherited_exec_policy,
+-            application_apps,
++            mut thread_extension_init,
+             mcp_source,
+         } = inheritance;
+         if options.fork_parent_spawn_call_id.is_none() {
+@@ -1361,7 +1369,6 @@ impl LocalAgentControl {
+                 subagent_usage_hint_message.into(),
+             ));
+         }
+-        let mut thread_extension_init = ExtensionDataInit::new();
+         if let Some(source) = &options.spawning_source {
+             thread_extension_init.insert(source.clone());
+         }
+@@ -1369,9 +1376,6 @@ impl LocalAgentControl {
+             thread_extension_init.insert(source);
+         }
+         thread_extension_init.insert(selected_capability_roots);
+-        if let Some(application) = application_apps {
+-            thread_extension_init.insert(application);
+-        }
+ 
+         let fork_context = fork_context_started_at.elapsed();
+         let child_create_started_at = Instant::now();
+@@ -1548,8 +1552,8 @@ impl LocalAgentControl {
+             .inherited_exec_policy_for_source(&state, Some(&session_source), &config)
+             .await;
+ 
+-        let application_apps = self
+-            .inherited_application_apps(&state, Some(&session_source), parent_thread_id)
++        let thread_extension_init = self
++            .inherited_thread_declarations(&state, Some(&session_source), parent_thread_id)
+             .await;
+         let resumed_thread = state
+             .resume_thread_with_history_with_source(ResumeThreadWithHistoryOptions {
+@@ -1563,7 +1567,7 @@ impl LocalAgentControl {
+                 inherited_instructions: None,
+                 inherited_exec_policy,
+                 client_mcp_extensions: None,
+-                application_apps,
++                thread_extension_init,
+             })
+             .await?;
+         let mut agent_metadata = agent_metadata;
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index b335afcf371e3d10f8a71e55d8742d9561e42462..11b8da6ece87709d7f6e14e2d894bf02282e5a11 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -406,7 +406,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
+     pub(crate) inherited_instructions: Option<SessionInstructions>,
+     pub(crate) inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+     pub(crate) client_mcp_extensions: Option<ClientMcpExtensions>,
+-    pub(crate) application_apps: Option<codex_mcp::ApplicationApps>,
++    pub(crate) thread_extension_init: ExtensionDataInit,
+ }
+ 
+ /// Shared, `Arc`-owned state for [`ThreadManager`]. This `Arc` is required to have a single
+@@ -1946,7 +1946,6 @@ impl ThreadManagerState {
+             /*inherited_environments*/ None,
+             /*inherited_exec_policy*/ None,
+             /*environments*/ None,
+-            /*application_apps*/ None,
+             ExtensionDataInit::new(),
+         ))
+         .await
+@@ -1967,13 +1966,9 @@ impl ThreadManagerState {
+         inherited_environments: Option<TurnEnvironmentSnapshot>,
+         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+         environments: Option<Vec<TurnEnvironmentSelection>>,
+-        application_apps: Option<codex_mcp::ApplicationApps>,
+-        mut thread_extension_init: ExtensionDataInit,
++        thread_extension_init: ExtensionDataInit,
+     ) -> CodexResult<NewThread> {
+         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
+-        if let Some(application) = application_apps {
+-            thread_extension_init.insert(application);
+-        }
+         let options = StartThreadOptions {
+             history_mode,
+             session_source: Some(session_source),
+@@ -2009,17 +2004,13 @@ impl ThreadManagerState {
+             inherited_instructions,
+             inherited_exec_policy,
+             client_mcp_extensions,
+-            application_apps,
++            thread_extension_init,
+         } = options;
+         let client_mcp_extensions = match client_mcp_extensions {
+             Some(client_mcp_extensions) => client_mcp_extensions,
+             None => self.client_mcp_extensions_for_child(parent_thread_id).await,
+         };
+         let thread_source = initial_history.get_resumed_thread_source();
+-        let mut thread_extension_init = ExtensionDataInit::new();
+-        if let Some(application) = application_apps {
+-            thread_extension_init.insert(application);
+-        }
+         let options = StartThreadOptions {
+             initial_history,
+             session_source: Some(session_source),
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs
+index 65278adb64be17c4e4d90512957c29f5283ec2e8..fe351b220d19e584689eb299087e8162fe3db12a 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs
+@@ -47,7 +47,8 @@ pub struct ManagedAgentToolSpec {
+     pub description: String,
+ }
+ 
+-/// Installed only in the authorized SDK thread's extension data.
++/// Declared SDK role tools for a thread and its verified native descendants.
++#[derive(Clone)]
+ pub struct ManagedAgentToolCatalog(Vec<Arc<ManagedRoleTool>>);
+ 
+ impl ManagedAgentToolCatalog {

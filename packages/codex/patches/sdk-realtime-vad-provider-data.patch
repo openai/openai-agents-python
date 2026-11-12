@@ -1,0 +1,149 @@
+diff --git a/codex-rs/protocol/src/realtime_settings.rs b/codex-rs/protocol/src/realtime_settings.rs
+--- a/codex-rs/protocol/src/realtime_settings.rs
++++ b/codex-rs/protocol/src/realtime_settings.rs
+@@ -383,6 +383,9 @@
+ #[serde(tag = "type", rename_all = "snake_case")]
+ pub enum RealtimeTurnDetection {
+     ServerVad {
++        /// Vendor tuning merged only inside this VAD object; typed keys are protected.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        provider_data: Option<BTreeMap<String, Value>>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         model_version: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -399,6 +402,8 @@
+         idle_timeout_ms: Option<u32>,
+     },
+     SemanticVad {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        provider_data: Option<BTreeMap<String, Value>>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         model_version: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+@@ -83,6 +83,41 @@
+ }
+ 
+ fn validate(settings: &RealtimeV2SessionSettings) -> serde_json::Result<()> {
++    let provider_data = match &settings.turn_detection {
++        Some(Some(
++            RealtimeTurnDetection::ServerVad { provider_data, .. }
++            | RealtimeTurnDetection::SemanticVad { provider_data, .. },
++        )) => provider_data.as_ref(),
++        _ => None,
++    };
++    if provider_data.is_some_and(|data| {
++        data.keys().any(|key| {
++            matches!(
++                key.as_str(),
++                "type"
++                    | "model_version"
++                    | "modelVersion"
++                    | "create_response"
++                    | "createResponse"
++                    | "interrupt_response"
++                    | "interruptResponse"
++                    | "threshold"
++                    | "prefix_padding_ms"
++                    | "prefixPaddingMs"
++                    | "silence_duration_ms"
++                    | "silenceDurationMs"
++                    | "idle_timeout_ms"
++                    | "idleTimeoutMs"
++                    | "eagerness"
++                    | "provider_data"
++                    | "providerData"
++            )
++        })
++    }) {
++        return Err(serde::ser::Error::custom(
++            "VAD provider data cannot override typed settings",
++        ));
++    }
+     let threshold = match &settings.turn_detection {
+         Some(Some(RealtimeTurnDetection::ServerVad { threshold, .. })) => *threshold,
+         _ => None,
+@@ -123,6 +158,11 @@
+     put(&mut input, "noise_reduction", &settings.noise_reduction)?;
+     put(&mut input, "transcription", &settings.transcription)?;
+     put(&mut input, "turn_detection", &settings.turn_detection)?;
++    if let Some(Value::Object(vad)) = input.get_mut("turn_detection")
++        && let Some(Value::Object(data)) = vad.remove("provider_data")
++    {
++        vad.extend(data);
++    }
+     let mut output = Map::new();
+     if let Some(format) = settings.output_format {
+         output.insert("format".into(), format_value(format));
+@@ -595,6 +635,7 @@
+             let update = RealtimeSessionUpdate {
+                 settings: RealtimeV2SessionSettings {
+                     turn_detection: Some(Some(RealtimeTurnDetection::ServerVad {
++                        provider_data: None,
+                         model_version: None,
+                         threshold: Some(number),
+                         create_response: None,
+@@ -837,4 +878,60 @@
+             })
+         );
+     }
+-}
++    #[test]
++    fn vad_provider_data_uses_existing_sparse_settings_owner() {
++        for mode in ["server_vad", "semantic_vad"] {
++            let settings: RealtimeV2SessionSettings = serde_json::from_value(json!({
++                "turn_detection": {"type": mode, "provider_data": {
++                    "vendor_tuning": {"enabled": false, "delay_ms": 0}
++                }}
++            }))
++            .unwrap();
++            let mut session = Map::new();
++            apply(&settings, &mut session).unwrap();
++            assert_eq!(
++                session["audio"]["input"]["turn_detection"],
++                json!({
++                    "type": mode, "vendor_tuning": {"enabled": false, "delay_ms": 0}
++                })
++            );
++            let retained = session.clone();
++            apply(&RealtimeV2SessionSettings::default(), &mut session).unwrap();
++            assert_eq!(session, retained);
++            for reset in [json!({}), Value::Null] {
++                let update = serde_json::from_value(json!({"turn_detection": {
++                    "type": mode, "provider_data": reset
++                }}))
++                .unwrap();
++                apply(&update, &mut session).unwrap();
++                assert_eq!(
++                    session["audio"]["input"]["turn_detection"],
++                    json!({"type":mode})
++                );
++            }
++            let disabled = serde_json::from_value(json!({"turn_detection":null})).unwrap();
++            apply(&disabled, &mut session).unwrap();
++            assert_eq!(session["audio"]["input"]["turn_detection"], Value::Null);
++        }
++    }
++
++    #[test]
++    fn vad_provider_data_cannot_override_typed_fields_before_mutation() {
++        for key in [
++            "type",
++            "threshold",
++            "interrupt_response",
++            "interruptResponse",
++            "provider_data",
++        ] {
++            let settings = serde_json::from_value(json!({"turn_detection":{
++                "type":"server_vad", "provider_data":{key:true}
++            }}))
++            .unwrap();
++            let mut session = json!({"model":"original"}).as_object().unwrap().clone();
++            let original = session.clone();
++            assert!(apply(&settings, &mut session).is_err());
++            assert_eq!(session, original);
++        }
++    }
++}

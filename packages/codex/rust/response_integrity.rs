@@ -176,7 +176,8 @@ fn starts_tool_call(event: &ResponseEvent, admission: Option<&dyn ModelToolAdmis
             | ResponseItem::LocalShellCall { .. }
             | ResponseItem::CustomToolCall { .. }
             | ResponseItem::ApplyPatchCall { .. }
-                | ResponseItem::ComputerCall { .. }
+            | ResponseItem::ComputerCall { .. }
+            | ResponseItem::McpApprovalRequest { .. }
     ) || matches!(
         item,
         ResponseItem::ToolSearchCall { call_id: Some(_), execution, .. } if execution == "client"
@@ -204,6 +205,21 @@ impl Stream for Generation {
         let next = this.stream.as_mut().poll_next(cx);
         if let Poll::Ready(Some(Ok(event))) = &next {
             match event {
+                ResponseEvent::OutputItemAdded(ResponseItem::McpApprovalRequest { id, .. })
+                | ResponseEvent::OutputItemDone(ResponseItem::McpApprovalRequest { id, .. })
+                    if id.as_ref().is_none_or(|id| id.as_str().is_empty()) =>
+                {
+                    // Approval correlation must come from the provider. Core's
+                    // generated local item IDs cannot authorize a reply.
+                    this.rejected = true;
+                    let reason = ResponseIntegrityReason::UndecodableOutputItem;
+                    if let Some(receipt) = &this.owner.admission {
+                        receipt.reject_model(&this.owner.thread, reason);
+                    }
+                    return Poll::Ready(Some(Err(ModelResponseError::ResponseIntegrity {
+                        reason,
+                    })));
+                }
                 ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item)
                     if matches!(
                         item,
@@ -212,7 +228,8 @@ impl Stream for Generation {
                             ..
                         } | ResponseItem::CustomToolCallOutput { .. }
                             | ResponseItem::ApplyPatchCallOutput { .. }
-                | ResponseItem::ComputerCallOutput { .. }
+                            | ResponseItem::ComputerCallOutput { .. }
+                            | ResponseItem::McpApprovalResponse { .. }
                     ) || matches!(
                         item,
                         ResponseItem::ToolSearchOutput {
@@ -261,9 +278,12 @@ impl Stream for Generation {
                         // not suppress that genuine native progress.
                         ResponseItem::FunctionCall { .. }
                         | ResponseItem::ApplyPatchCall { .. }
-                | ResponseItem::ComputerCall { .. }
+                        | ResponseItem::ComputerCall { .. }
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::WebSearchCall { .. }
+                        | ResponseItem::McpListTools { .. }
+                        | ResponseItem::McpCall { .. }
+                        | ResponseItem::McpApprovalRequest { .. }
                         | ResponseItem::FileSearchCall { .. }
                         | ResponseItem::CodeInterpreterCall { .. }
                         | ResponseItem::ShellCall { .. }
