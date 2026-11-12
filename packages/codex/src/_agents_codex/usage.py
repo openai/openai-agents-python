@@ -216,7 +216,9 @@ class RunBudget:
     The budget follows live replies, same-run steering, and output repair.
     Request-only limits have been retaining prior admissions across supported
     manual checkpoints, with the original ceiling supplied again on restore.
-    Token and cost limits have been rejecting active portable capture.
+    Token limits have been retaining observed consumption and missing usage,
+    with matching current limits and missing-usage policy on restore.
+    Estimated-cost limits have been rejecting active portable capture.
     Idle checkpoints have been starting new runs with fresh budgets.
     """
 

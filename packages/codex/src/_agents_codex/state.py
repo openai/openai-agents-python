@@ -195,6 +195,29 @@ class _RequestRunBudgetCheckpoint(BaseModel):
         return self
 
 
+class _TokenRunBudgetCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    version: int = Field(ge=2, le=2)
+    max_requests: int | None = Field(ge=0, le=2**53 - 1)
+    admitted_requests: int | None = Field(ge=0, le=2**53 - 1)
+    max_tokens: int = Field(ge=0, le=2**53 - 1)
+    consumed_tokens: int = Field(ge=0, le=2**53 - 1)
+    usage_missing: bool
+    missing_usage: Literal["stop", "continue"]
+
+    @model_validator(mode="after")
+    def validate_consumption(self) -> "_TokenRunBudgetCheckpoint":
+        if (self.max_requests is None) != (self.admitted_requests is None):
+            raise ValueError("Saved request limit and admissions must appear together")
+        if self.max_requests is not None and self.admitted_requests is not None:
+            if self.admitted_requests > self.max_requests:
+                raise ValueError("Admitted requests cannot exceed the saved request limit")
+        if self.consumed_tokens > self.max_tokens:
+            raise ValueError("Consumed tokens cannot exceed the saved token limit")
+        return self
+
+
 class _ManualContinuation(BaseModel):
     """Native receipt order at a settled manual boundary, never live grants."""
 
@@ -285,7 +308,7 @@ class SessionState(BaseModel):
     against the destination's current opening declarations. No version
     contains live grants or acquires tools from saved names. Versions 6 and 7
     also retain native CodeMode values and terminal cell observations.
-    Versions 8 and 9 have been adding request-only budget receipts to manual
+    Versions 8 and 9 have been adding versioned run budget receipts to manual
     checkpoints without and with retained CodeMode state, respectively.
 
     Verify the checkpoint's integrity before restoring it. A strict Environment
@@ -316,7 +339,7 @@ class SessionState(BaseModel):
     # None predates on_step; [] intentionally withholds every optional MCP tool.
     step_mcp_tools: list[_StepMcpTool] | None = None
     native_continuation: _ManualContinuation | None = None
-    run_budget: _RequestRunBudgetCheckpoint | None = None
+    run_budget: _RequestRunBudgetCheckpoint | _TokenRunBudgetCheckpoint | None = None
     run_usage: RunUsage | None = None
     # SDK contract identity is checked before importing native state or grants.
     output_version: Literal[1] | None = None

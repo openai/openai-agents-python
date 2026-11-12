@@ -72,7 +72,7 @@ async def test_run_restores_target_default_selection_with_current_bindings(respo
         assert len(responses.requests) == 2
 
 
-async def test_token_budgeted_restore_rejects_captured_active_profile_managed_approval(responses):
+async def test_cost_budgeted_restore_rejects_captured_active_profile_managed_approval(responses):
     calls = []
 
     @function_tool(name="lookup", needs_approval=True)
@@ -92,7 +92,9 @@ async def test_token_budgeted_restore_rejects_captured_active_profile_managed_ap
         async with timeout(20):
             with pytest.raises(CapabilityError, match="cannot be captured"):
                 await source.run(
-                    "Read B.", state=saved, budget=RunBudget(max_requests=5, max_tokens=1000)
+                    "Read B.",
+                    state=saved,
+                    budget=RunBudget(max_requests=5, max_estimated_cost_micros=1000),
                 )
         assert responses.requests == []
         assert calls == []
@@ -172,7 +174,9 @@ async def test_budget_preflight_follows_static_handoff_operation_ceiling(respons
         async with timeout(20):
             if selection is None:
                 with pytest.raises(CapabilityError, match="cannot be captured"):
-                    await source.run("Read B.", budget=RunBudget(max_requests=5, max_tokens=1000))
+                    await source.run(
+                        "Read B.", budget=RunBudget(max_requests=5, max_estimated_cost_micros=1000)
+                    )
                 assert not responses.requests
             else:
                 if selection:
@@ -202,7 +206,9 @@ async def test_budget_preflight_respects_saved_handoff_defaults(responses, selec
             if select_route == "manual":
                 with pytest.raises(CapabilityError, match="cannot be captured"):
                     await root.run(
-                        "Read C.", state=saved, budget=RunBudget(max_requests=5, max_tokens=1000)
+                        "Read C.",
+                        state=saved,
+                        budget=RunBudget(max_requests=5, max_estimated_cost_micros=1000),
                     )
                 assert not responses.requests
             else:
