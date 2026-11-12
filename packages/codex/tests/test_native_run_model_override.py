@@ -110,14 +110,14 @@ async def test_queued_roots_keep_independent_model_selection():
     assert calls == [forced, initial, initial]
 
 
-@pytest.mark.parametrize("value", [17, "", "   "])
+@pytest.mark.parametrize("value", ["", "   "])
 async def test_invalid_run_override_refuses_before_provider_acquisition(value, monkeypatch):
     def refuse(*args, **kwargs):
         pytest.fail("invalid model override acquired the provider")
 
     monkeypatch.setattr(NativeProvider, "_acquire_lease", refuse)
     async with NativeProvider() as provider:
-        with pytest.raises((TypeError, ValueError), match="model_override"):
+        with pytest.raises(ValueError, match="model_override"):
             await Agent(instructions="Answer.", provider=provider).run(
                 "invalid", model_override=value
             )

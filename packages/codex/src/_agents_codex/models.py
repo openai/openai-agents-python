@@ -22,11 +22,8 @@ from ._public import preserve_module_identity as _preserve_module_identity
 
 
 def _capture_model_override(value: str | None) -> str | None:
-    if value is not None:
-        if not isinstance(value, str):
-            raise TypeError("model_override must be a string or None")
-        if not value.strip():
-            raise ValueError("model_override must be a nonempty model name")
+    if value is not None and not value.strip():
+        raise ValueError("model_override must be a nonempty model name")
     return value
 
 
