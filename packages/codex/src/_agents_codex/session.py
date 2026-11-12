@@ -227,6 +227,7 @@ from .mcp import (
     _ready as _ready,
     _result_policies as _result_policies,
     _tool_names as _tool_names,
+    _transform_and_extract_result as _transform_and_extract_result,
 )
 from .model_context import ModelContextSnapshot, ModelRequestContext
 from .models import _capture_model_override
@@ -15221,22 +15222,18 @@ class Session(Generic[ContextT, OutputT]):
                     notice["tool_name"],
                     arguments=MappingProxyType(deepcopy(notice["arguments"])),
                 )
-                value = notice["result"]
-                if callback is not None:
-                    value = await _call_callback(callback, admitted, context, value)
-                if extractor is not None and admitted() and isinstance(value, dict):
-                    application_data = _capture_application_data(
-                        await _call_callback(extractor, admitted, context, deepcopy(value))
+                value, application_data = await _transform_and_extract_result(
+                    server, context, notice["result"], admitted
+                )
+                if application_data is not None:
+                    application_output = ApplicationToolOutput(
+                        submission_id=state.handle.submission_id,
+                        turn_id=notice["turn_id"],
+                        call_id=notice["call_id"],
+                        name=ref.name,
+                        namespace=ref.namespace,
+                        application_data=application_data,
                     )
-                    if application_data is not None:
-                        application_output = ApplicationToolOutput(
-                            submission_id=state.handle.submission_id,
-                            turn_id=notice["turn_id"],
-                            call_id=notice["call_id"],
-                            name=ref.name,
-                            namespace=ref.namespace,
-                            application_data=application_data,
-                        )
             if not admitted():
                 return
             reply = json.dumps(value, allow_nan=False)
