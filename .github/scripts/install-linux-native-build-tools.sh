@@ -2,7 +2,9 @@
 set -euo pipefail
 
 script_dir=$(dirname -- "${BASH_SOURCE[0]}")
-if ! command -v clang >/dev/null ||
+if [[ -n "${OPENAI_AGENTS_NATIVE_BUILD_IMAGE:-}" ]]; then
+  dnf install --assumeyes clang cmake pkgconf-pkg-config openssl-static
+elif ! command -v clang >/dev/null ||
   ! command -v cmake >/dev/null ||
   ! command -v pkg-config >/dev/null ||
   ! pkg-config --exists openssl; then

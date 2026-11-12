@@ -56,6 +56,14 @@ jobs:
           (inputs.native_source_run != '' && '"macos-15"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
       ) }}
+    # PyPA manylinux 2026.11.07-1. See https://github.com/pypa/manylinux/actions/runs/42368406253.
+    container: &native_build_image >-
+      ${{ inputs.native_source_run == '' &&
+        (inputs.runner == 'ubuntu-24.04' &&
+          'quay.io/pypa/manylinux_2_28_x86_64@sha256:9555ba6c479fa69a2aa80ad1dc57154a60d562b19df159361d9379a02beb1e36' ||
+         inputs.runner == 'ubuntu-24.04-arm' &&
+          'quay.io/pypa/manylinux_2_28_aarch64@sha256:cb37f0d66c8a75abb93cf6085cad1f1427cd7208f0c0fc48359bb1eea9924f21')
+        || '' }}
     outputs:
       artifact_id: ${{ steps.snapshot.outputs.artifact-id }}
       artifact_digest: ${{ steps.snapshot.outputs.artifact-digest }}
@@ -67,6 +75,7 @@ jobs:
       run:
         shell: bash
     env:
+      OPENAI_AGENTS_NATIVE_BUILD_IMAGE: *native_build_image
       CARGO_INCREMENTAL: "0"
       RUSTUP_TOOLCHAIN: 1.95.0
       OPENAI_AGENTS_NATIVE_TIMINGS: "1"
@@ -91,19 +100,28 @@ jobs:
             echo "Native CI rejects tracked Python bytecode and cache paths." >&2
             exit 1
           fi
+      - name: Select the manylinux build environment
+        if: env.OPENAI_AGENTS_NATIVE_BUILD_IMAGE != ''
+        run: |
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
+          python_bin=/opt/python/cp312-cp312/bin
+          "$python_bin/python" --version
+          printf '%s\n' "$python_bin" >> "$GITHUB_PATH"
+          printf '%s\n' 'OPENAI_AGENTS_NATIVE_MANYLINUX=manylinux_2_28' 'OPENSSL_STATIC=1' >> "$GITHUB_ENV"
       - name: Check the Linux ARM64 build host
         if: inputs.runner == 'ubuntu-24.04-arm'
         run: |
           test "$RUNNER_ARCH" = ARM64
           test "$(uname -m)" = aarch64
-          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.39"
+          if [[ -z "$OPENAI_AGENTS_NATIVE_BUILD_IMAGE" ]]; then
+            test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.39"
+          fi
           printf 'Runner image: %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
           uname -m
           getconf GNU_LIBC_VERSION
           df -h "$RUNNER_TEMP"
           # Leave one CPU and memory headroom on the standard 4-vCPU, 16-GB runner.
           echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
-          echo "OPENAI_AGENTS_NATIVE_MANYLINUX=manylinux_2_39" >> "$GITHUB_ENV"
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
@@ -159,6 +177,7 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        if: env.OPENAI_AGENTS_NATIVE_BUILD_IMAGE == ''
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
@@ -357,6 +376,64 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write('identity=' + identity + '\n')
           PYTHON
+      - name: Verify the lower-glibc Linux package
+        if: env.OPENAI_AGENTS_NATIVE_BUILD_IMAGE != ''
+        run: |
+          python -I -S - <<'PYTHON'
+          import platform
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          sys.path.insert(0, str(Path("packages/codex/scripts").resolve()))
+          from native_helpers import native_helpers
+
+          def verify_elf(path, name):
+              versions = subprocess.check_output(["readelf", "-W", "-V", str(path)], text=True)
+              dynamic = subprocess.check_output(["readelf", "-W", "-d", str(path)], text=True)
+              required = {
+                  (int(major), int(minor))
+                  for major, minor in re.findall(r"\bGLIBC_(\d+)\.(\d+)", versions)
+              }
+              major, minor = max(required, default=(0, 0))
+              if (major, minor) > (2, 28):
+                  raise SystemExit(f"{name} requires glibc {major}.{minor}, above 2.28")
+              # Older readelf versions can display DT_RELR by its numeric tag.
+              if "GLIBC_ABI_DT_RELR" in versions or re.search(r"^\s*0x0*24\s", dynamic, re.M):
+                  raise SystemExit(f"{name} requires DT_RELR")
+              if re.search(r"NEEDED.*\[lib(?:crypto|ssl)\.so", dynamic):
+                  raise SystemExit(f"{name} requires a system OpenSSL library")
+              print(f"Verified manylinux 2.28 ABI: {name}")
+
+          wheel, = Path("dist").glob("openai_agents-*.whl")
+          if not wheel.name.endswith(f"-manylinux_2_28_{platform.machine()}.whl"):
+              raise SystemExit(f"Unexpected manylinux wheel tag: {wheel.name}")
+          expected = {"agents/_native.abi3.so"}
+          expected.update(f"agents/bin/{name}" for name in native_helpers("linux"))
+          found = set()
+          with tempfile.TemporaryDirectory() as directory, ZipFile(wheel) as archive:
+              for index, member in enumerate(archive.infolist()):
+                  with archive.open(member) as source:
+                      magic = source.read(4)
+                      if magic != b"\x7fELF":
+                          continue
+                      path = Path(directory) / str(index)
+                      with path.open("wb") as output:
+                          output.write(magic)
+                          shutil.copyfileobj(source, output)
+                      verify_elf(path, member.filename)
+                      found.add(member.filename)
+          if missing := expected - found:
+              raise SystemExit(f"Missing Linux native components: {sorted(missing)}")
+          verify_elf(Path("dist/exec-server-fixture"), "exec-server-fixture")
+          PYTHON
+          uv run --isolated --no-project --no-build --python /opt/python/cp310-cp310/bin/python \
+            --with "$GITHUB_WORKSPACE"/dist/openai_agents-*.whl \
+            python -I packages/codex/scripts/verify_installed.py --output "$RUNNER_TEMP/manylinux-installed.json"
       - name: Publish the native snapshot
         id: snapshot
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

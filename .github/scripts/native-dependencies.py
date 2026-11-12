@@ -55,8 +55,13 @@ def native_toolchain():
             ["c++", "--version"],
         ]
     else:
+        packages = (
+            ["dpkg-query", "-W", "-f=${Package}:${Architecture}=${Version}\\n"]
+            if shutil.which("dpkg-query")
+            else ["rpm", "-qa", "--qf", "%{NAME}:%{ARCH}=%{VERSION}-%{RELEASE}\\n"]
+        )
         commands = [
-            ["dpkg-query", "-W", "-f=${Package}:${Architecture}=${Version}\\n"],
+            packages,
             ["cc", "--version"],
             ["c++", "--version"],
         ]
@@ -91,9 +96,16 @@ def identity():
         "CXXFLAGS",
         "LDFLAGS",
     )
+    environment = {name: os.environ.get(name) for name in names}
+    if image := os.environ.get("OPENAI_AGENTS_NATIVE_BUILD_IMAGE"):
+        environment.update(
+            OPENAI_AGENTS_NATIVE_BUILD_IMAGE=image,
+            OPENAI_AGENTS_NATIVE_MANYLINUX=os.environ.get("OPENAI_AGENTS_NATIVE_MANYLINUX"),
+            OPENSSL_STATIC=os.environ.get("OPENSSL_STATIC"),
+        )
     return {
         "format": 1,
-        "environment": {name: os.environ.get(name) for name in names},
+        "environment": environment,
         "rustc": subprocess.check_output(["rustc", "-vV"], text=True),
         "native_toolchain": native_toolchain(),
         "python": sys.version,
