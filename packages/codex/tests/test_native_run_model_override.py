@@ -145,7 +145,7 @@ def test_run_sync_forwards_model_override_to_native_admission():
 
 
 async def test_manual_restore_keeps_the_admitted_override_and_future_root_default():
-    initial, forced, _ = model_names()
+    initial, forced, different = model_names()
     calls = []
     lookup = FunctionTool(
         name="lookup", description="Read a key", input_type=LookupArgs, output_type=str
@@ -171,13 +171,52 @@ async def test_manual_restore_keeps_the_admitted_override_and_future_root_defaul
         agent = Agent(model=initial, instructions="Read A.", tools=[lookup], provider=provider)
         async with agent.session() as source:
             await source.submit("read", model_override=forced)
-            await next_request(source.interactions(), lookup)
+            original_request = await next_request(source.interactions(), lookup)
+            assert original_request.call.model == forced
             saved = await source.suspend()
         state = SessionState.from_json(saved.to_json())
         with pytest.raises(ValueError, match="model override"):
             await agent.run(None, state=state, model_override=initial)
-        async with agent.session(state=state) as restored:
+        for authorized in (None, initial):
+            with pytest.raises(ValueError, match="Authorize the saved manual checkpoint model"):
+                async with agent.session(state=state, model=authorized):
+                    pass
+
+        edited = json.loads(saved.to_json())
+        changed_default = False
+        turn_contexts = []
+        for row in edited["history"]:
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if (
+                payload.get("type") == "thread_settings_applied"
+                and payload.get("thread_id") == state.source_session_id
+            ):
+                payload["thread_settings"]["model"] = different
+                changed_default = True
+            if row.get("type") == "turn_context" and payload.get("sdk_model_override") == forced:
+                turn_contexts.append(payload)
+        assert changed_default and turn_contexts
+        with pytest.raises(ValueError, match="invalid accepted model settings"):
+            async with agent.session(
+                state=SessionState.from_json(json.dumps(edited)), model=forced
+            ):
+                pass
+
+        edited["native_continuation"]["model_override"] = different
+        edited["root_metadata"]["model"] = different
+        for payload in turn_contexts:
+            payload["sdk_model_override"] = different
+        edited_state = SessionState.from_json(json.dumps(edited))
+        with pytest.raises(ValueError, match="Authorize the saved manual checkpoint model"):
+            async with agent.session(state=edited_state, model=forced):
+                pass
+        assert calls == [forced]
+
+        async with agent.session(state=state, model=forced) as restored:
             request = await next_request(restored.interactions(), lookup)
+            assert request.call.model == forced
             await request.respond("answer-A")
             assert (await restored.restored_turn.get_result()).final_output == "done"
             assert (

@@ -1486,6 +1486,8 @@ class Agent(Generic[ContextT, OutputT]):
         `model=None` inherits the Agent model. Present model_settings keys
         override Agent defaults; only a present `service_tier=None` clears a
         value. Other omitted keys keep the Agent or native defaults.
+        To restore a pending turn with a saved model override, authorize that
+        exact model with `model` and declare the saved default on the Agent.
 
         Omitted ``tools`` or ``tools=None`` uses this Agent's tools.
         A sequence replaces the finite opening definitions and defaults for
@@ -1914,6 +1916,8 @@ class Agent(Generic[ContextT, OutputT]):
         manual checkpoint, input=None resumes the existing turn. Idle state
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
+        For a saved pending model override, pass its authorized name as `model`
+        and declare the saved default on the Agent.
         return_history=True captures conversation records before close for replay
         through another Session's transact_history. That Session supplies its own instructions.
         History above 4,096 original records or 8 MiB raises NativeError after completion.

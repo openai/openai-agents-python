@@ -1076,8 +1076,11 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
             catalog.tool_batch_completion
         });
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
-    let model = crate::checkpoint::managed_settings(&history, source_id)
-        .map(|settings| settings.model.as_str());
+    let admitted_override = model_override(&history, &frame.turn);
+    let model = admitted_override.as_deref().or_else(|| {
+        crate::checkpoint::managed_settings(&history, source_id)
+            .map(|settings| settings.model.as_str())
+    });
     for (name, handoff) in &frame.handoffs {
         crate::agent_profiles::restore_handoff(
             thread,

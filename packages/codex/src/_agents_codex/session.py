@@ -445,7 +445,9 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     return result
 
 
-def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, Any]]:
+def _manual_restore_model_settings(
+    state: SessionState, *, authorized_override: str | None, declared_model: str | None
+) -> tuple[str, dict[str, Any]]:
     """Read only accepted model fields; connection and tool authority stay current."""
     metadata = state.root_metadata
     model = metadata.get("model") if metadata is not None else None
@@ -460,12 +462,15 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
         ):
             captured = payload.get("thread_settings")
             break
-    if (
-        state.native_continuation is not None
-        and state.native_continuation.model_override is not None
-        and isinstance(captured, dict)
-    ):
-        model = captured.get("model")
+    continuation = state.native_continuation
+    if continuation is not None and continuation.model_override is not None:
+        if authorized_override != continuation.model_override:
+            raise ValueError("Authorize the saved manual checkpoint model override with model=...")
+        if model != authorized_override:
+            raise ValueError("Manual checkpoint has invalid accepted model settings")
+        if declared_model is None:
+            raise ValueError("Declare the saved default model on the restoring Agent")
+        model = declared_model
     if (
         not isinstance(model, str)
         or not model.strip()
@@ -3811,11 +3816,19 @@ class Session(Generic[ContextT, OutputT]):
             if not isinstance(discover_agents_md, bool):
                 raise TypeError("discover_agents_md must be a bool")
             reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
-            if state is not None and (model is not None or model_settings is not None):
-                raise ValueError(
-                    "Opening model and model_settings overrides cannot be used with state; "
-                    "use update(model=...) after the restored Session is idle"
-                )
+            authorized_restore_model = None
+            if state is not None:
+                continuation = state.native_continuation
+                if model_settings is not None or (
+                    model is not None
+                    and (continuation is None or continuation.model_override is None)
+                ):
+                    raise ValueError(
+                        "Opening model and model_settings overrides cannot be used with state; "
+                        "use update(model=...) after the restored Session is idle"
+                    )
+                authorized_restore_model = _capture_model_override(model)
+                model = None
             policy_agent = agent
             selected = _restore_declaration.get()
             if (
@@ -3880,7 +3893,6 @@ class Session(Generic[ContextT, OutputT]):
             operation_slots = None
             restored_operation_refs = None
             restored_operation_declarations = None
-            restored_model_settings = None
             restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None = None
             restored_resource_servers: tuple[str, ...] = ()
             restored_override = False
@@ -3906,8 +3918,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 manual_restore = saved.native_continuation is not None
                 continuation = saved.native_continuation
-                if manual_restore:
-                    restored_model_settings = _manual_restore_model_settings(saved)
             if isinstance(storage, LocalStorage) and programmatic_tool_calling:
                 raise ValueError(
                     "LocalStorage does not support code mode: nested tool identities "
@@ -4032,6 +4042,15 @@ class Session(Generic[ContextT, OutputT]):
                 else restored_profile.output
                 if restored_profile is not None
                 else output
+            )
+            restored_model_settings = (
+                _manual_restore_model_settings(
+                    saved,
+                    authorized_override=authorized_restore_model,
+                    declared_model=restored_declaration.model,
+                )
+                if state is not None and manual_restore
+                else None
             )
             model, settings = _prepare_opening_model_settings(
                 agent,
