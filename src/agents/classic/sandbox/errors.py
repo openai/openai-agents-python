@@ -65,6 +65,8 @@ class ErrorCode(str, Enum):
 
 
 OpName = Literal[
+    "write_stdin",
+    "view_image",
     "start",
     "stop",
     "exec",

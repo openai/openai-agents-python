@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 2c4014b9..2a82fb4f 100644
+index d35ab88cf1f88ff1bdec061ed1c52e6221d7f6c5..a59f5fe43b08eaddc6797d183d7a64f4ebda1c92 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -3944,7 +3944,7 @@ async fn handle_assistant_item_done_in_plan_mode(
+@@ -4005,7 +4005,7 @@ async fn handle_assistant_item_done_in_plan_mode(
              step_context,
              item,
              finalized_facts.as_ref(),
@@ -12,7 +12,7 @@ index 2c4014b9..2a82fb4f 100644
          .await;
          if let Some(agent_message) = final_last_agent_message {
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index 212cbe6a..7113face 100644
+index 212cbe6a85972621091ae4e324271fc164884fc5..7113faceda33e855cd1df81db852abe5da53040b 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -83,14 +83,14 @@ pub(crate) async fn record_completed_response_item(
@@ -98,7 +98,7 @@ index 212cbe6a..7113face 100644
              .await;
              if let Some(response_item) = response_input_to_response_item(&response) {
 diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
-index 623401a1..d59fba01 100644
+index 23d8c5257e064dc3b6482f192d07064580da480b..5b9681b81c08abe008e7346335ec541db2ca1b40 100644
 --- a/codex-rs/core/src/tools/parallel.rs
 +++ b/codex-rs/core/src/tools/parallel.rs
 @@ -28,6 +28,7 @@ use crate::tools::registry::ToolArgumentDiffConsumer;
@@ -134,7 +134,7 @@ index 623401a1..d59fba01 100644
              if let Some(text) = call_state.delivered_assistant_message.get() {
                  response
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index a593164d..7be4f9a1 100644
+index b7e908a208696e0e866d0d86142e673aec6013bc..38164bdb1ee77f14f9d7bf064747c2b2e21ec7a6 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
 @@ -31,6 +31,7 @@ use codex_analytics::ControlToolCallStatus;
@@ -145,10 +145,10 @@ index a593164d..7be4f9a1 100644
  use codex_history::ResponseItemEnvelope;
  use codex_protocol::models::FunctionCallOutputPayload;
  use codex_protocol::models::ResponseInputItem;
-@@ -55,6 +56,14 @@ pub use codex_tools::ToolExposure;
- /// Implementers provide the shared `ToolExecutor` behavior plus optional
- /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
- pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> + std::any::Any {
+@@ -60,6 +61,14 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> + std::any::Any {
+         None
+     }
+ 
 +    fn managed_agent_tool_origin(&self) -> Option<ManagedAgentToolOrigin> {
 +        let role = self.managed_agent_role()?;
 +        Some(ManagedAgentToolOrigin {
@@ -160,7 +160,7 @@ index a593164d..7be4f9a1 100644
      /// Whether this built-in control tool needs a structured tool-call event.
      fn is_builtin_control_tool(&self) -> bool {
          false
-@@ -977,7 +986,12 @@ async fn handle_any_tool(
+@@ -1023,7 +1032,12 @@ async fn handle_any_tool(
      let post_tool_use_payload =
          CoreToolRuntime::post_tool_use_payload(tool, &invocation, output.as_ref());
      let result = AnyToolResult {
@@ -175,7 +175,7 @@ index a593164d..7be4f9a1 100644
          payload,
          result: output,
 diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
-index 31e88ee4..adad060f 100644
+index 31e88ee4ed53c31cbf09b72ef33f3885ae44ef2f..adad060fc05955eff341ebe64b7226eb90356dc3 100644
 --- a/codex-rs/history/src/lib.rs
 +++ b/codex-rs/history/src/lib.rs
 @@ -59,6 +59,13 @@ pub struct ResponseItemEnvelope {

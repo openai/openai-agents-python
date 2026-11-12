@@ -92,6 +92,7 @@ from ._lifecycle import (
     _SyncRun as _SyncRun,
 )
 from ._managed_workspace import (
+    _SANDBOX_EVENTS_ATTRIBUTE,
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
     ManagedWorkspaceCheckpoint,
     _capture_retired_workspace,
@@ -346,6 +347,7 @@ from .usage import (
 )
 
 if TYPE_CHECKING:
+    from ._sandbox_events import _OperationObserver
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage
     from .turn import ChildTurn
@@ -3162,6 +3164,7 @@ class _EnvironmentLease:
         self._woke_borrower = False
         self.interrupted = False
         self._workspace_instructions: str | None = None
+        self._sandbox_events: _OperationObserver | None = None
         self._owner = _create_task(self._hold(source))
 
     async def _hold(self, source: AbstractAsyncContextManager[Environment[Any]]) -> None:
@@ -3174,6 +3177,15 @@ class _EnvironmentLease:
             if instructions is not None and not isinstance(instructions, str):
                 raise TypeError("Workspace instructions must be captured text")
             self._workspace_instructions = instructions
+            observer = getattr(source, _SANDBOX_EVENTS_ATTRIBUTE, None)
+            if observer is not None:
+                from ._sandbox_events import _OperationObserver
+
+                if not isinstance(observer, _OperationObserver):
+                    raise TypeError(
+                        "Native sandbox observations require a sandbox_environment source"
+                    )
+            self._sandbox_events = observer
             self._ready.set_result(environment)
             try:
                 await asyncio.shield(self._retired)
@@ -4769,9 +4781,7 @@ class Session(Generic[ContextT, OutputT]):
                         json.dumps(saved.history)
                     )
                     session._mcp_tools = mcp_tools
-                session._model_backend = provider.model_backend
-                if provider.model_backend is not None:
-                    session._native._enable_model_producer(True)
+                session._bind_native_producers(lease, thread, provider)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
                 options.pop("_sdk_websocket_tls", None)
@@ -5074,6 +5084,7 @@ class Session(Generic[ContextT, OutputT]):
         self._provider_lease: Any = None
         self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
+        self._sandbox_events: _OperationObserver | None = None
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
@@ -5225,6 +5236,16 @@ class Session(Generic[ContextT, OutputT]):
         self._mcp_reader: asyncio.Task[None] | None = None
         if _start_readers:
             self._start_readers()
+
+    def _bind_native_producers(
+        self, lease: _EnvironmentLease | None, thread: Any, provider: NativeProvider
+    ) -> None:
+        if lease is not None and lease._sandbox_events is not None:
+            self._sandbox_events = lease._sandbox_events
+            thread._enable_sandbox_operations()
+        self._model_backend = provider.model_backend
+        if provider.model_backend is not None:
+            self._native._enable_model_producer(True)
 
     def _start_readers(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         self._start_interception(pending)
@@ -9025,6 +9046,8 @@ class Session(Generic[ContextT, OutputT]):
         native_admission: dict[str, Any] | BaseException | None = None,
     ) -> BaseException | None:
         try:
+            if self._sandbox_events is not None:
+                self._native._enable_sandbox_operations()
             state.task = _create_task(
                 self._execute(state, input, admitted=admitted, native_admission=native_admission)
             )
@@ -13668,6 +13691,16 @@ class Session(Generic[ContextT, OutputT]):
                 if self._realtime is not None and self._realtime._ingest(event):
                     continue
                 message = event.get("msg", {})
+                if message.get("type") == "_sdk_sandbox_operation":
+                    if self._sandbox_events is not None:
+                        sandbox_invocation = _Invocation(self)
+                        sandbox_token = _invocation.set(sandbox_invocation)
+                        try:
+                            await self._sandbox_events.emit(message)
+                        finally:
+                            sandbox_invocation.active = False
+                            _invocation.reset(sandbox_token)
+                    continue
                 if (
                     message.get("type") == "shutdown_complete"
                     and event.get("subagent_id") is None

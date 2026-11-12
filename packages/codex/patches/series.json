@@ -829,12 +829,16 @@
       "sha256": "cbf049d3d03e9071d9100217c969138574df3735def89c74abe2037da3978513"
     },
     {
+      "path": "sdk-native-sandbox-operation-events.patch",
+      "sha256": "1d7c7fec2d0faf1956b48dfd7e48b135f3847748d88efb1835b233e39df2f765"
+    },
+    {
       "path": "sdk-imported-provider-item-cleanup.patch",
       "sha256": "08b0c51af6002bdcdede8bc07ef7dcff9f83a34e774a70d5d3d65c7a52959cd3"
     },
     {
       "path": "sdk-managed-agent-tool-origin.patch",
-      "sha256": "437ca0793910828086e5bf866fcdd7b9356090119fa99d6eb90fb46cc9acc381"
+      "sha256": "7b5aef03f468271b27a162ec9151ee52eb6406dabde4b7a27e5e72b427052f94"
     },
     {
       "path": "sdk-hosted-mcp-approvals.patch",
@@ -853,5 +857,5 @@
       "sha256": "fabd814cbbf3ad51225dd294bcf7b4ef3fbc447f3799ed09a801f32554732e6f"
     }
   ],
-  "result_tree": "30a77d67e63c8278768da5a6f9b065ff6f84e7d8"
+  "result_tree": "be2b0be9f25723f8cb2f6b1e9706ed21200718be"
 }

@@ -2571,6 +2571,17 @@ impl NativeThread {
             .is_some_and(|tools| tools.reply_prepared_request(request_id, data_json, error)))
     }
 
+    fn _enable_sandbox_operations(&self) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Sandbox observations require managed Python tools"))?;
+        tools.enable_sandbox_operations();
+        Ok(())
+    }
+
     #[pyo3(signature = (enabled, defaults_json=None, children=false))]
     fn _select_steps(
         &self,
