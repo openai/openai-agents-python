@@ -190,6 +190,7 @@ async def capture(
         _project_guidance=None,
         _strict_executor_writes=False,
         _codex_login_binding=None,
+        _current_remembered_approvals=lambda: (),
         _profiles=None,
         _default_tools=None,
         _repair_turns=[],
