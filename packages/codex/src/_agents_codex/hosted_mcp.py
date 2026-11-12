@@ -105,8 +105,6 @@ class HostedMCP(Generic[ContextT_contra]):
 
 
 def _capture_config(value: Mapping[str, Any], *, has_approval_callback: bool) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise TypeError("Hosted MCP tool_config must be an object")
     config = json.loads(json.dumps(dict(value), allow_nan=False))
     if config.get("type") != "mcp":
         raise ValueError("Hosted MCP tool_config must declare type mcp")
