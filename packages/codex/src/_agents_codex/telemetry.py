@@ -195,12 +195,12 @@ async def configure(
     shutdown in this SDK instance. Configure console diagnostics with the
     initial subscriber.
     """
-    if not isinstance(restart_after_shutdown, bool):
-        raise TypeError("restart_after_shutdown must be a bool")
     options: dict[str, Any] = {}
-    if restart_after_shutdown:
-        options["sdk.trace_restart"] = True
     try:
+        if not isinstance(restart_after_shutdown, bool):
+            raise TypeError("restart_after_shutdown must be a bool")
+        if restart_after_shutdown:
+            options["sdk.trace_restart"] = True
         processors = tuple(processors)
         _validate_processors(processors)
         # Native gates response records on either OTLP kind, not its destination.
