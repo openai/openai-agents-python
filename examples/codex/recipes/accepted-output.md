@@ -40,3 +40,15 @@ The rejected and cancelled turns have been raising `TurnStoppedError` through `g
 The recipe has been demonstrating private computation, accepted completion, application checks, then publication. The same sequence has been applying to a response body, an answer record, or an artifact download. Cancellation has not been undoing completed tool effects or earlier publication. The application's publishing operation has been managing durable writes, retries, concurrent updates, and delivery failures separately.
 
 The synthetic report check has been matching a phrase to keep the example focused. Real report validation has been requiring application-specific checks for facts, citations, and format. The scripted peer has been exercising application control flow and the native runtime; it has not been evaluating live model quality.
+
+## Publishing independent sections
+
+The inventory and dispatch sections have been passing their own checks in separate turns. The example has been publishing each section before starting the next. The delivery section has been failing its check, so the example has been withholding it while keeping the earlier sections available.
+
+This pattern has been applying when each section has its own evidence and permission to publish. When a later check can invalidate an earlier section, the whole answer has been requiring a successful final result before delivery.
+
+## Observing accepted output
+
+On the matching source build, `agent.session(include_output_accepted=True)` has been enabling `OutputAccepted` from `agents.observation`. Turn and Session readers have been receiving this metadata after a successful logical result, including any continuation and output validation. `submission_id` has been identifying the original submission. For a manually restored Turn, it has been identifying the restored handle in the current Session. `turn_id` has been identifying the final native step.
+
+The event has been carrying identity only. `await turn.get_result()` has been supplying the accepted result for the application's own checks and publication. Bounded readers have still been able to report gaps, so the event has been serving as a notification rather than a delivery receipt.
