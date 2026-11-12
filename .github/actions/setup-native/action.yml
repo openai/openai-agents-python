@@ -27,4 +27,16 @@ runs:
     - name: Windows build tools
       if: runner.os == 'Windows'
       shell: pwsh
-      run: choco install protoc --yes --no-progress
+      run: |
+        foreach ($attempt in 1..2) {
+          choco install protoc --yes --no-progress
+          $installExit = $LASTEXITCODE
+          # Chocolatey can return zero even when it did not install protoc.
+          if ($installExit -eq 0 -and (Get-Command protoc.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+            protoc.exe --version
+            exit $LASTEXITCODE
+          }
+          if ($attempt -eq 1) { Start-Sleep -Seconds 5 }
+        }
+        if ($installExit -ne 0) { exit $installExit }
+        throw 'Chocolatey did not make protoc.exe available after two attempts.'
