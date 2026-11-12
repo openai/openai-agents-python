@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index a515905cb9d3a03bdb0dcebbad9cea8f2f7c432e..0ea3b08444717fc7f0c959cdf60bb3281488a3ee 100644
+index 1b43c75ac82d7b423b07700522eb2e61f11bc1d5..b6a0b2ff07431078516e194fe5b11297406237a1 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -1354,6 +1354,7 @@ impl ModelClient {
@@ -11,10 +11,10 @@ index a515905cb9d3a03bdb0dcebbad9cea8f2f7c432e..0ea3b08444717fc7f0c959cdf60bb328
              }) || (request.request_controls.prompt.is_some()
                  && request.tools.is_none());
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 0fead70fc369a337d06f0532576d470b19a1ceb8..3c0edb7cf79c5faed15d1fb8e3182b356ab01e11 100644
+index 9b4cef9968d4292ef2ad1acb7a1bf9bc07464bb6..2c4014b9945e6b86f11190a98e2aadf8fb12fe06 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -4011,14 +4011,30 @@ fn assign_missing_streamed_response_item_id(
+@@ -4043,14 +4043,30 @@ fn assign_missing_streamed_response_item_id(
  
  // Provider actions have no local accepted-call deduplication owner. Unknown
  // output has lost its raw type, so its replay safety cannot be established.
@@ -51,7 +51,16 @@ index 0fead70fc369a337d06f0532576d470b19a1ceb8..3c0edb7cf79c5faed15d1fb8e3182b35
          ResponseEvent::HostedToolCallProgress(progress) => progress
              .event
              .get("type")
-@@ -4272,7 +4288,7 @@ async fn try_run_sampling_request(
+@@ -4060,6 +4076,8 @@ fn provider_event_may_have_effects(event: &ResponseEvent) -> bool {
+                     || kind.starts_with("response.code_interpreter_call_code.")
+                     || kind.starts_with("response.image_generation_call.")
+                     || kind.starts_with("response.mcp_call.")
++                    || kind.starts_with("response.shell_call_command.")
++                    || kind.starts_with("response.shell_call_output_content.")
+             }),
+         _ => false,
+     }
+@@ -4309,7 +4327,7 @@ async fn try_run_sampling_request(
              {
                  break Err(CodexErr::TurnAborted);
              }

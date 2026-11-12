@@ -782,12 +782,12 @@
     },
     {
       "path": "sdk-hosted-shell-replay-fence.patch",
-      "sha256": "a6732ddaadb5a8caab18e88c6c46fa3c4efebada534e32a7c0ed91b7bcf8b279"
+      "sha256": "229d1b046d446c88120df807bf4793f4836394ee03a61ca38ee9649d1e571ff5"
     },
     {
       "path": "sdk-native-model-stream-completion-usage.patch",
       "sha256": "d89d2ed9176b3a4a163a890d2d9cf2be51cf6029d13d25aa895f876eb2770609"
     }
   ],
-  "result_tree": "1ca324b5f9042fa0cb1ce039c0abaf1dcc0ce98c"
+  "result_tree": "cc71101f557c08a0bf1520ef5f00d1423e85e304"
 }
