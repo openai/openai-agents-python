@@ -12,14 +12,12 @@ from urllib.parse import unquote, urlsplit
 from _agents_shared.sandbox_skills import (
     LazySkillSource as LazySkillSource,
     LocalDirLazySkillSource as LocalDirLazySkillSource,
+    Manifest,
+    SandboxSession,
+    SandboxWorkspaceScope,
     Skill as Skill,
     SkillMetadata as SkillMetadata,
     SkillSet,
-)
-from agents.classic.sandbox.manifest import Manifest
-from agents.classic.sandbox.session.sandbox_session import SandboxSession
-from agents.classic.sandbox.workspace_paths import (
-    SandboxWorkspaceScope,
     coerce_posix_path,
     posix_path_as_path,
 )

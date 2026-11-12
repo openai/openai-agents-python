@@ -99,6 +99,88 @@ class Source(LazySkillSource):
         return {"status": "loaded", "skill_name": "report", "path": f"{skills_path}/report"}
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
+async def test_generic_bounded_listing_preserves_permission_failure(tmp_path, monkeypatch):
+    from agents.classic.sandbox.entries import Dir
+    from agents.classic.sandbox.errors import ExecNonZeroError
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+        UnixLocalSandboxSession,
+    )
+    from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
+
+    if os.geteuid() == 0:
+        pytest.skip("Directory permissions require an unprivileged host user")
+    monkeypatch.setattr(UnixLocalSandboxSession, "ls", BaseSandboxSession.ls)
+    monkeypatch.setattr(UnixLocalSandboxSession, "_ls_bounded", BaseSandboxSession._ls_bounded)
+    client = UnixLocalSandboxClient()
+    sandbox = await client.create(
+        manifest=Manifest(entries={Path("denied"): Dir()}), options=UnixLocalSandboxClientOptions()
+    )
+    await sandbox.start()
+    denied = Path(sandbox.state.manifest.root) / "denied"
+    denied.chmod(0)
+    try:
+        with pytest.raises(ExecNonZeroError):
+            await sandbox._ls_bounded(denied, max_entries=1025)
+    finally:
+        denied.chmod(0o700)
+        await sandbox.aclose()
+        await client.delete(sandbox)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
+async def test_eager_metadata_bounds_provider_enumeration(tmp_path, monkeypatch, responses):
+    from agents.classic.sandbox.entries import Dir
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+        UnixLocalSandboxSession,
+    )
+
+    sizes = []
+    method = "_ls_bounded" if hasattr(UnixLocalSandboxSession, "_ls_bounded") else "ls"
+    original = getattr(UnixLocalSandboxSession, method)
+
+    async def observed(session, *args, **kwargs):
+        entries = await original(session, *args, **kwargs)
+        sizes.append(len(entries))
+        return entries
+
+    monkeypatch.setattr(UnixLocalSandboxSession, method, observed)
+
+    @asynccontextmanager
+    async def connect(sandbox):
+        root = Path(sandbox.state.manifest.root)
+        for index in range(2048):
+            (root / ".agents" / str(index)).mkdir()
+        async with ExecutorPeer(tmp_path / "executor").serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+            yield Environment(
+                url=peer.url,
+                headers={"Authorization": "Bearer " + peer.token},
+                cwd=str(root),
+                tools=(),
+                capability_directories=[str(root / ".agents")],
+            )
+
+    source = sandbox_environment(
+        UnixLocalSandboxClient(),
+        manifest=Manifest(),
+        options=UnixLocalSandboxClientOptions(),
+        connect=connect,
+        skills=Skills(from_=Dir()),
+    )
+    with pytest.raises(ValueError, match="metadata directory exceeds the entry limit"):
+        async with Agent(
+            instructions="Inspect.", model="gpt-5.5", provider=provider(responses)
+        ).session(environment=source):
+            pytest.fail("Published an oversized Skills index")
+    assert sizes == [1025]
+    assert responses.requests == []
+
+
 @pytest.mark.skipif(
     sys.platform not in ("linux", "darwin"), reason="POSIX sandbox resource fixture"
 )

@@ -12,6 +12,7 @@ import errno
 import fcntl
 import inspect
 import io
+import itertools
 import json
 import logging
 import os
@@ -1062,11 +1063,31 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         policy = self._workspace_path_policy()
         return policy.normalize_path(path, for_write=for_write, resolve_symlinks=True)
 
+    async def _ls_bounded(
+        self,
+        path: Path | str,
+        *,
+        max_entries: int,
+        user: str | User | None = None,
+    ) -> list[FileEntry]:
+        if user is not None or type(self).ls is not UnixLocalSandboxSession.ls:
+            return await super()._ls_bounded(path, max_entries=max_entries, user=user)
+        return await self._ls(path, user=user, max_entries=max_entries)
+
     async def ls(
         self,
         path: Path | str,
         *,
         user: str | User | None = None,
+    ) -> list[FileEntry]:
+        return await self._ls(path, user=user)
+
+    async def _ls(
+        self,
+        path: Path | str,
+        *,
+        user: str | User | None = None,
+        max_entries: int | None = None,
     ) -> list[FileEntry]:
         normalized = self.normalize_path(path)
         if user is not None:
@@ -1107,7 +1128,10 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 os.scandir(directory_fd) as entries,
             ):
                 listed: list[FileEntry] = []
-                for entry in entries:
+                selected = (
+                    entries if max_entries is None else itertools.islice(entries, max_entries)
+                )
+                for entry in selected:
                     stat_result = entry.stat(follow_symlinks=False)
                     if entry.is_symlink():
                         kind = EntryKind.SYMLINK

@@ -19,15 +19,18 @@ from agents.classic.sandbox.errors import (
     SkillsConfigError,
     WorkspaceReadNotFoundError,
 )
-from agents.classic.sandbox.manifest import Manifest
+from agents.classic.sandbox.manifest import Manifest as Manifest
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
-from agents.classic.sandbox.session.sandbox_session import _read_with_expected_span_errors
+from agents.classic.sandbox.session.sandbox_session import (
+    SandboxSession as SandboxSession,
+    _read_with_expected_span_errors,
+)
 from agents.classic.sandbox.types import User
 from agents.classic.sandbox.workspace_paths import (
     SandboxPathGrant,
-    SandboxWorkspaceScope,
-    coerce_posix_path,
-    posix_path_as_path,
+    SandboxWorkspaceScope as SandboxWorkspaceScope,
+    coerce_posix_path as coerce_posix_path,
+    posix_path_as_path as posix_path_as_path,
     windows_absolute_path,
 )
 
@@ -915,11 +918,23 @@ class SkillSet(BaseModel):
         skills_root = posix_path_as_path(
             coerce_posix_path(manifest.root) / coerce_posix_path(self.skills_path)
         )
+        listing_overflow = False
         try:
-            entries = await self.session.ls(skills_root, user=self.run_as)
+            entries = (
+                await self.session.ls(skills_root, user=self.run_as)
+                if budget is None
+                else await self.session._ls_bounded(
+                    skills_root, max_entries=_MAX_METADATA_ENTRIES + 1, user=self.run_as
+                )
+            )
+        except OverflowError:
+            listing_overflow = True
+            entries = []
         except Exception:
             return []
 
+        if listing_overflow:
+            raise ValueError("Skills metadata directory exceeds the listing byte limit")
         if budget is not None and len(entries) > _MAX_METADATA_ENTRIES:
             raise ValueError("Skills metadata directory exceeds the entry limit")
         metadata: list[SkillMetadata] = []

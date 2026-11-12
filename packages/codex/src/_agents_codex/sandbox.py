@@ -82,8 +82,12 @@ from ._managed_workspace import (
 from ._public import preserve_module_identity as _preserve_module_identity
 from .executor import Environment
 from .sandbox_skills import (
-    SandboxEnvironmentSource,
-    Skills,
+    LazySkillSource as LazySkillSource,
+    LocalDirLazySkillSource as LocalDirLazySkillSource,
+    SandboxEnvironmentSource as SandboxEnvironmentSource,
+    Skill as Skill,
+    SkillMetadata as SkillMetadata,
+    Skills as Skills,
     _append_skill_instructions,
     _SkillLease,
 )
