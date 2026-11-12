@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index c8b2070e..9d999272 100644
+index c8b2070ed..9d999272c 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -2065,6 +2065,7 @@ dependencies = [
@@ -19,7 +19,7 @@ index c8b2070e..9d999272 100644
   "codex-protocol",
   "codex-utils-cargo-bin",
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
-index bb5d510a..5cf75a4c 100644
+index bb5d510a0..5cf75a4c6 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
 @@ -598,6 +598,7 @@ mod thread_processor_behavior_tests {
@@ -31,7 +31,7 @@ index bb5d510a..5cf75a4c 100644
              env_key: None,
              env_key_instructions: None,
 diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
-index 427aa8d3..d5a925c5 100644
+index 427aa8d3b..d5a925c5a 100644
 --- a/codex-rs/cli/src/doctor.rs
 +++ b/codex-rs/cli/src/doctor.rs
 @@ -2310,6 +2310,9 @@ async fn websocket_reachability_check(
@@ -92,7 +92,7 @@ index 427aa8d3..d5a925c5 100644
      extra_headers.insert(
          OPENAI_BETA_HEADER,
 diff --git a/codex-rs/codex-api/Cargo.toml b/codex-rs/codex-api/Cargo.toml
-index 716cbc7b..8b334682 100644
+index 716cbc7b8..8b3346826 100644
 --- a/codex-rs/codex-api/Cargo.toml
 +++ b/codex-rs/codex-api/Cargo.toml
 @@ -33,6 +33,7 @@ url = { workspace = true }
@@ -104,7 +104,7 @@ index 716cbc7b..8b334682 100644
  assert_matches = { workspace = true }
  pretty_assertions = { workspace = true }
 diff --git a/codex-rs/codex-api/src/endpoint/images.rs b/codex-rs/codex-api/src/endpoint/images.rs
-index 2217ce89..e11a4860 100644
+index 2217ce896..e11a48602 100644
 --- a/codex-rs/codex-api/src/endpoint/images.rs
 +++ b/codex-rs/codex-api/src/endpoint/images.rs
 @@ -182,6 +182,7 @@ mod tests {
@@ -116,7 +116,7 @@ index 2217ce89..e11a4860 100644
              headers: HeaderMap::new(),
              retry: RetryConfig {
 diff --git a/codex-rs/codex-api/src/endpoint/memories.rs b/codex-rs/codex-api/src/endpoint/memories.rs
-index 122ca565..806ad42f 100644
+index 122ca565f..806ad42fb 100644
 --- a/codex-rs/codex-api/src/endpoint/memories.rs
 +++ b/codex-rs/codex-api/src/endpoint/memories.rs
 @@ -139,6 +139,7 @@ mod tests {
@@ -128,7 +128,7 @@ index 122ca565..806ad42f 100644
              headers: HeaderMap::new(),
              retry: RetryConfig {
 diff --git a/codex-rs/codex-api/src/endpoint/models.rs b/codex-rs/codex-api/src/endpoint/models.rs
-index c00bc011..13b5f92e 100644
+index c00bc0115..13b5f92e6 100644
 --- a/codex-rs/codex-api/src/endpoint/models.rs
 +++ b/codex-rs/codex-api/src/endpoint/models.rs
 @@ -214,6 +214,7 @@ mod tests {
@@ -140,7 +140,7 @@ index c00bc011..13b5f92e 100644
              headers: HeaderMap::new(),
              retry: RetryConfig {
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_call.rs b/codex-rs/codex-api/src/endpoint/realtime_call.rs
-index e2ed157a..640003b7 100644
+index e2ed157a8..640003b79 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_call.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_call.rs
 @@ -458,6 +458,7 @@ mod tests {
@@ -152,7 +152,7 @@ index e2ed157a..640003b7 100644
              headers: HeaderMap::new(),
              retry: RetryConfig {
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
-index 285193f9..eb55712d 100644
+index 285193f9e..eb55712d5 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 @@ -3950,6 +3950,7 @@ mod tests {
@@ -236,7 +236,7 @@ index 285193f9..eb55712d 100644
              headers: HeaderMap::new(),
              retry: crate::provider::RetryConfig {
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
-index c931ed5b..5ec63a3e 100644
+index c931ed5b8..5ec63a3e1 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 @@ -378,6 +378,7 @@ fn client(url: String) -> anyhow::Result<crate::ResponsesClient<codex_client::Re
@@ -248,10 +248,70 @@ index c931ed5b..5ec63a3e 100644
              headers: HeaderMap::new(),
              retry: crate::RetryConfig {
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 207a02ec..003599ad 100644
+index 207a02ec7..ae6139291 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-@@ -580,7 +580,7 @@ async fn connect_websocket(
+@@ -465,13 +465,16 @@ impl ResponsesWebsocketClient {
+         self.auth.add_auth_headers(&mut headers);
+ 
+         let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
+-            ws_url,
++            ws_url.clone(),
+             headers,
+             http_client_factory,
+             turn_state.clone(),
+             self.tls_selector.clone(),
+         )
+-        .await?;
++        .await
++        .map_err(|error| {
++            sanitize_handshake_rejection(error, &ws_url, self.provider.websocket_base_url.is_some())
++        })?;
+         Ok(ResponsesWebsocketConnection::new(
+             stream,
+             self.provider.stream_idle_timeout,
+@@ -511,7 +514,10 @@ impl ResponsesWebsocketClient {
+             /*turn_state*/ None,
+             self.tls_selector.clone(),
+         )
+-        .await?;
++        .await
++        .map_err(|error| {
++            sanitize_handshake_rejection(error, &ws_url, self.provider.websocket_base_url.is_some())
++        })?;
+         let immediate_close = tokio::time::timeout(immediate_close_timeout, stream.next())
+             .await
+             .ok()
+@@ -530,6 +536,28 @@ impl ResponsesWebsocketClient {
+     }
+ }
+ 
++// A configured independent endpoint can reflect its private route in rejection fields.
++// Keep typed retry/status metadata while leaving the ordinary response contract intact.
++fn sanitize_handshake_rejection(error: ApiError, url: &Url, independent: bool) -> ApiError {
++    if !independent {
++        return error;
++    }
++    match error {
++        ApiError::Transport(TransportError::Http {
++            status,
++            retry_after,
++            ..
++        }) => ApiError::Transport(TransportError::Http {
++            status,
++            url: Some(url.origin().ascii_serialization()),
++            headers: None,
++            body: None,
++            retry_after,
++        }),
++        error => error,
++    }
++}
++
+ fn immediate_close_from_message(message: Message) -> Option<ResponsesWebsocketClose> {
+     let Message::Close(frame) = message else {
+         return None;
+@@ -580,7 +608,7 @@ async fn connect_websocket(
      turn_state: Option<Arc<OnceLock<String>>>,
      tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
  ) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
@@ -260,7 +320,7 @@ index 207a02ec..003599ad 100644
  
      let mut request = url
          .as_str()
-@@ -598,11 +598,11 @@ async fn connect_websocket(
+@@ -598,11 +626,11 @@ async fn connect_websocket(
  
      let (stream, response) = match response {
          Ok((stream, response)) => {
@@ -274,7 +334,7 @@ index 207a02ec..003599ad 100644
              return Err(map_ws_error(err, &url));
          }
      };
-@@ -660,7 +660,7 @@ fn map_ws_error(err: WsError, url: &Url) -> ApiError {
+@@ -660,7 +688,7 @@ fn map_ws_error(err: WsError, url: &Url) -> ApiError {
                  .and_then(|bytes| String::from_utf8(bytes.clone()).ok());
              ApiError::Transport(TransportError::Http {
                  status,
@@ -283,10 +343,119 @@ index 207a02ec..003599ad 100644
                  headers: Some(headers),
                  body,
                  retry_after,
-@@ -1071,6 +1071,144 @@ mod tests {
+@@ -1071,6 +1099,253 @@ mod tests {
      use std::collections::HashMap;
      use std::sync::Arc;
  
++    #[tokio::test]
++    async fn independent_rejected_handshake_omits_reflected_response_fields() {
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++        struct EmptyAuth;
++        impl crate::AuthProvider for EmptyAuth {
++            fn add_auth_headers(&self, _: &mut HeaderMap) {}
++        }
++        for independent in [true, false] {
++            for suffix in [
++                "/private-path-marker?token=private-query-marker",
++                "/%70rivate-encoded?token=%73ynthetic",
++            ] {
++                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++                let endpoint = format!("http://{}{suffix}", listener.local_addr().unwrap());
++                let origin = Url::parse(&endpoint.replace("http://", "ws://"))
++                    .unwrap()
++                    .origin()
++                    .ascii_serialization();
++                let server = tokio::spawn(async move {
++                    let (mut stream, _) = listener.accept().await.unwrap();
++                    let mut request = Vec::new();
++                    let mut buffer = [0; 1024];
++                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
++                        let count = stream.read(&mut buffer).await.unwrap();
++                        assert!(count > 0 && request.len() < 16384);
++                        request.extend_from_slice(&buffer[..count]);
++                    }
++                    let request = String::from_utf8(request).unwrap();
++                    let target = request
++                        .lines()
++                        .next()
++                        .unwrap()
++                        .split_whitespace()
++                        .nth(1)
++                        .unwrap();
++                    let body = format!("Rejected target {target}");
++                    let response = format!(
++                        "HTTP/1.1 401 Unauthorized\r\nLocation: {target}\r\nRetry-After: 3\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
++                        body.len()
++                    );
++                    stream.write_all(response.as_bytes()).await.unwrap();
++                });
++                let provider = Provider {
++                    name: "reflection-test".into(),
++                    base_url: if independent {
++                        "http://127.0.0.1:1/unused".into()
++                    } else {
++                        endpoint.clone()
++                    },
++                    websocket_base_url: independent.then_some(endpoint),
++                    query_params: None,
++                    headers: HeaderMap::new(),
++                    retry: codex_client::RetryConfig {
++                        max_attempts: 1,
++                        base_delay: Duration::from_millis(1),
++                        retry_429: false,
++                        retry_5xx: false,
++                        retry_transport: false,
++                    },
++                    stream_idle_timeout: Duration::from_secs(2),
++                };
++                let client = ResponsesWebsocketClient::new(provider, Arc::new(EmptyAuth));
++                let factory =
++                    HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::ReqwestDefault);
++                let error = tokio::time::timeout(
++                    Duration::from_secs(2),
++                    client.connect(&factory, HeaderMap::new(), HeaderMap::new(), None, None),
++                )
++                .await
++                .expect("handshake settled")
++                .err()
++                .expect("upgrade rejected");
++                server.await.unwrap();
++                let diagnostic = format!("{error:?}");
++                let ApiError::Transport(TransportError::Http {
++                    status,
++                    url,
++                    headers,
++                    body,
++                    retry_after,
++                }) = error
++                else {
++                    panic!("expected typed HTTP rejection");
++                };
++                assert_eq!(status.as_u16(), 401);
++                assert_eq!(url.as_deref(), Some(origin.as_str()));
++                assert!(retry_after.is_some());
++                if independent {
++                    assert!(headers.is_none());
++                    assert!(body.is_none());
++                    for marker in [
++                        "private-path-marker",
++                        "private-query-marker",
++                        "%70rivate-encoded",
++                        "%73ynthetic",
++                    ] {
++                        assert!(
++                            !diagnostic.contains(marker),
++                            "reflected endpoint data escaped into the returned diagnostic"
++                        );
++                    }
++                } else {
++                    assert!(headers.unwrap().contains_key("location"));
++                    assert!(body.unwrap().starts_with("Rejected target /"));
++                }
++            }
++        }
++    }
++
 +    #[tokio::test]
 +    async fn rejected_handshake_diagnostic_omits_endpoint_path_and_query() {
 +        use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -429,7 +598,7 @@ index 207a02ec..003599ad 100644
      fn destination_tls_selection_preserves_secure_and_configured_ca_construction() {
          const CASE: &str = "CODEX_RESPONSES_TLS_SELECTION_TEST_CASE";
 diff --git a/codex-rs/codex-api/src/endpoint/search.rs b/codex-rs/codex-api/src/endpoint/search.rs
-index 2de48fe7..086a7f1f 100644
+index 2de48fe7d..086a7f1f8 100644
 --- a/codex-rs/codex-api/src/endpoint/search.rs
 +++ b/codex-rs/codex-api/src/endpoint/search.rs
 @@ -120,6 +120,7 @@ mod tests {
@@ -441,7 +610,7 @@ index 2de48fe7..086a7f1f 100644
              headers: HeaderMap::new(),
              retry: RetryConfig {
 diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
-index 2a6bd55a..501b5e32 100644
+index 2a6bd55a9..501b5e32c 100644
 --- a/codex-rs/codex-api/tests/clients.rs
 +++ b/codex-rs/codex-api/tests/clients.rs
 @@ -139,6 +139,7 @@ fn provider(name: &str) -> Provider {
@@ -453,7 +622,7 @@ index 2a6bd55a..501b5e32 100644
          headers: HeaderMap::new(),
          retry: codex_api::RetryConfig {
 diff --git a/codex-rs/codex-api/tests/models_integration.rs b/codex-rs/codex-api/tests/models_integration.rs
-index ed43d8aa..74358600 100644
+index ed43d8aae..743586009 100644
 --- a/codex-rs/codex-api/tests/models_integration.rs
 +++ b/codex-rs/codex-api/tests/models_integration.rs
 @@ -35,6 +35,7 @@ fn provider(base_url: &str) -> Provider {
@@ -465,7 +634,7 @@ index ed43d8aa..74358600 100644
          headers: HeaderMap::new(),
          retry: RetryConfig {
 diff --git a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
-index e43e19eb..da303f11 100644
+index e43e19eba..da303f112 100644
 --- a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
 +++ b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
 @@ -64,6 +64,7 @@ fn test_provider(base_url: String) -> Provider {
@@ -550,7 +719,7 @@ index e43e19eb..da303f11 100644
 +    let _ = trap_task.await;
 +}
 diff --git a/codex-rs/codex-api/tests/realtime_websocket_tls.rs b/codex-rs/codex-api/tests/realtime_websocket_tls.rs
-index 7b7a3363..78e0543a 100644
+index 7b7a33631..78e0543a5 100644
 --- a/codex-rs/codex-api/tests/realtime_websocket_tls.rs
 +++ b/codex-rs/codex-api/tests/realtime_websocket_tls.rs
 @@ -120,6 +120,7 @@ async fn check_connection(address: String) {
@@ -562,7 +731,7 @@ index 7b7a3363..78e0543a 100644
              headers: HeaderMap::new(),
              retry: RetryConfig {
 diff --git a/codex-rs/codex-api/tests/sse_end_to_end.rs b/codex-rs/codex-api/tests/sse_end_to_end.rs
-index aba43ce9..71cc8452 100644
+index aba43ce9f..71cc8452a 100644
 --- a/codex-rs/codex-api/tests/sse_end_to_end.rs
 +++ b/codex-rs/codex-api/tests/sse_end_to_end.rs
 @@ -60,6 +60,7 @@ fn provider(name: &str) -> Provider {
@@ -574,7 +743,7 @@ index aba43ce9..71cc8452 100644
          headers: HeaderMap::new(),
          retry: codex_api::RetryConfig {
 diff --git a/codex-rs/codex-client/src/provider.rs b/codex-rs/codex-client/src/provider.rs
-index 41a99420..d1b82623 100644
+index 41a994202..d1b826237 100644
 --- a/codex-rs/codex-client/src/provider.rs
 +++ b/codex-rs/codex-client/src/provider.rs
 @@ -45,6 +45,7 @@ impl RetryConfig {
@@ -630,7 +799,7 @@ index 41a99420..d1b82623 100644
          let scheme = match url.scheme() {
              "http" => "ws",
 diff --git a/codex-rs/config/src/thread_config.rs b/codex-rs/config/src/thread_config.rs
-index 0518ea88..8fd7e796 100644
+index 0518ea887..8fd7e796f 100644
 --- a/codex-rs/config/src/thread_config.rs
 +++ b/codex-rs/config/src/thread_config.rs
 @@ -298,6 +298,7 @@ mod tests {
@@ -642,7 +811,7 @@ index 0518ea88..8fd7e796 100644
              env_key: None,
              env_key_instructions: None,
 diff --git a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
-index b9f89c95..c8e078be 100644
+index b9f89c95c..c8e078be2 100644
 --- a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
 +++ b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
 @@ -50,6 +50,7 @@ message ModelProvider {
@@ -654,7 +823,7 @@ index b9f89c95..c8e078be 100644
  
  message StringMap {
 diff --git a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs
-index 6ffc7bbd..c65a0b8f 100644
+index 6ffc7bbdf..c65a0b8f0 100644
 --- a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs
 +++ b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs
 @@ -79,6 +79,8 @@ pub struct ModelProvider {
@@ -667,7 +836,7 @@ index 6ffc7bbd..c65a0b8f 100644
  #[derive(Clone, PartialEq, ::prost::Message)]
  pub struct StringMap {
 diff --git a/codex-rs/config/src/thread_config/remote.rs b/codex-rs/config/src/thread_config/remote.rs
-index da0af3bc..fec0c4a2 100644
+index da0af3bca..fec0c4a25 100644
 --- a/codex-rs/config/src/thread_config/remote.rs
 +++ b/codex-rs/config/src/thread_config/remote.rs
 @@ -173,6 +173,7 @@ fn model_provider_from_proto(
@@ -734,7 +903,7 @@ index da0af3bc..fec0c4a2 100644
              env_key: None,
              env_key_instructions: None,
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 43d5ed1c..ccd6aed1 100644
+index 43d5ed1c3..ccd6aed1b 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -2845,6 +2845,10 @@
@@ -749,10 +918,10 @@ index 43d5ed1c..ccd6aed1 100644
            "description": "Maximum time (in milliseconds) to wait for a websocket connection attempt before treating it as failed.",
            "format": "uint64",
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 62b0ed13..32e4cfe0 100644
+index c1a4cce0c..179e58e5e 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -1985,6 +1985,7 @@ impl ModelClientSession {
+@@ -2008,6 +2008,7 @@ impl ModelClientSession {
                  .websocket_connection(WebsocketConnectParams {
                      session_telemetry,
                      api_provider: client_setup.api_provider,
@@ -760,7 +929,7 @@ index 62b0ed13..32e4cfe0 100644
                      auth_revision: client_setup.auth_revision,
                      api_auth: client_setup.api_auth,
                      auth_owner_generation: client_setup.auth_owner_generation,
-@@ -2053,6 +2054,7 @@ impl ModelClientSession {
+@@ -2076,6 +2077,7 @@ impl ModelClientSession {
          let WebsocketConnectParams {
              session_telemetry,
              api_provider,
@@ -768,7 +937,7 @@ index 62b0ed13..32e4cfe0 100644
              auth_revision,
              api_auth,
              auth_owner_generation,
-@@ -2061,6 +2063,14 @@ impl ModelClientSession {
+@@ -2084,6 +2086,14 @@ impl ModelClientSession {
              request_route_telemetry,
              responses_headers,
          } = params;
@@ -783,7 +952,7 @@ index 62b0ed13..32e4cfe0 100644
          let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision);
          let reset_reason = match self.websocket_session.connection.as_ref() {
              Some(_)
-@@ -2555,6 +2565,7 @@ impl ModelClientSession {
+@@ -2578,6 +2588,7 @@ impl ModelClientSession {
                  .websocket_connection(WebsocketConnectParams {
                      session_telemetry,
                      api_provider: client_setup.api_provider,
@@ -791,7 +960,7 @@ index 62b0ed13..32e4cfe0 100644
                      auth_revision: client_setup.auth_revision,
                      api_auth: client_setup.api_auth,
                      auth_owner_generation: client_setup.auth_owner_generation,
-@@ -3525,6 +3536,7 @@ impl AuthRequestTelemetryContext {
+@@ -3548,6 +3559,7 @@ impl AuthRequestTelemetryContext {
  struct WebsocketConnectParams<'a> {
      session_telemetry: &'a SessionTelemetry,
      api_provider: codex_api::Provider,
@@ -800,7 +969,7 @@ index 62b0ed13..32e4cfe0 100644
      api_auth: SharedAuthProvider,
      auth_owner_generation: Option<u64>,
 diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
-index a9504eab..4cc6e1f6 100644
+index a9504eabc..4cc6e1f63 100644
 --- a/codex-rs/core/src/realtime_conversation_tests.rs
 +++ b/codex-rs/core/src/realtime_conversation_tests.rs
 @@ -678,6 +678,7 @@ async fn sdk_wire_connection_controlled(
@@ -820,7 +989,7 @@ index a9504eab..4cc6e1f6 100644
              headers: http::HeaderMap::new(),
              retry: codex_api::RetryConfig {
 diff --git a/codex-rs/core/tests/responses_headers.rs b/codex-rs/core/tests/responses_headers.rs
-index 84bf461e..ac3fc389 100644
+index 84bf461e7..ac3fc3897 100644
 --- a/codex-rs/core/tests/responses_headers.rs
 +++ b/codex-rs/core/tests/responses_headers.rs
 @@ -74,6 +74,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
@@ -848,7 +1017,7 @@ index 84bf461e..ac3fc389 100644
          env_key: None,
          env_key_instructions: None,
 diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
-index 8d9720e7..33231525 100644
+index 8d9720e73..332315252 100644
 --- a/codex-rs/core/tests/suite/client.rs
 +++ b/codex-rs/core/tests/suite/client.rs
 @@ -1630,6 +1630,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
@@ -884,7 +1053,7 @@ index 8d9720e7..33231525 100644
          // Reuse the existing environment variable to avoid using unsafe code
          env_key: Some(EXISTING_ENV_VAR_WITH_NON_EMPTY_VALUE.to_string()),
 diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
-index 58abbda8..3c7fc1f2 100755
+index 58abbda80..3c7fc1f2f 100755
 --- a/codex-rs/core/tests/suite/client_websockets.rs
 +++ b/codex-rs/core/tests/suite/client_websockets.rs
 @@ -2649,6 +2649,7 @@ fn websocket_provider_with_connect_timeout(
@@ -896,7 +1065,7 @@ index 58abbda8..3c7fc1f2 100755
          env_key: None,
          env_key_instructions: None,
 diff --git a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
-index c381b78c..a79f7a35 100644
+index c381b78cd..a79f7a354 100644
 --- a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
 +++ b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
 @@ -66,6 +66,7 @@ async fn continue_after_stream_error() {
@@ -908,7 +1077,7 @@ index c381b78c..a79f7a35 100644
          env_key: Some("PATH".into()),
          env_key_instructions: None,
 diff --git a/codex-rs/core/tests/suite/stream_no_completed.rs b/codex-rs/core/tests/suite/stream_no_completed.rs
-index 1823275e..ba9b3794 100644
+index 1823275ea..ba9b3794e 100644
 --- a/codex-rs/core/tests/suite/stream_no_completed.rs
 +++ b/codex-rs/core/tests/suite/stream_no_completed.rs
 @@ -48,6 +48,7 @@ async fn retries_on_early_close() {
@@ -920,7 +1089,7 @@ index 1823275e..ba9b3794 100644
          // Environment variable that should exist in the test environment.
          // ModelClient will return an error if the environment variable for the
 diff --git a/codex-rs/ext/guardian-v2/Cargo.toml b/codex-rs/ext/guardian-v2/Cargo.toml
-index 02e69106..a6b39bc2 100644
+index 02e69106b..a6b39bc2e 100644
 --- a/codex-rs/ext/guardian-v2/Cargo.toml
 +++ b/codex-rs/ext/guardian-v2/Cargo.toml
 @@ -38,6 +38,7 @@ tracing = { workspace = true }
@@ -932,7 +1101,7 @@ index 02e69106..a6b39bc2 100644
  codex-utils-cargo-bin = { workspace = true }
  core_test_support = { workspace = true }
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
-index cf5d463e..367f64b3 100644
+index cf5d463e6..367f64b3e 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
 @@ -34,6 +34,7 @@ use codex_model_provider::ProviderAuthScope;
@@ -1022,7 +1191,7 @@ index cf5d463e..367f64b3 100644
          let connect = client.connect(
              &self.config.http_client_factory,
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
-index 6cf716de..c33e1d12 100644
+index 6cf716de8..c33e1d12c 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
 @@ -460,3 +460,179 @@ async fn http_cache_preserves_no_constraint_redirect_policy_and_configured_heade
@@ -1206,7 +1375,7 @@ index 6cf716de..c33e1d12 100644
 +    Ok(())
 +}
 diff --git a/codex-rs/login/src/auth_env_telemetry.rs b/codex-rs/login/src/auth_env_telemetry.rs
-index 6ee0c439..e9f89d9a 100644
+index 6ee0c4392..e9f89d9ad 100644
 --- a/codex-rs/login/src/auth_env_telemetry.rs
 +++ b/codex-rs/login/src/auth_env_telemetry.rs
 @@ -61,6 +61,7 @@ mod tests {
@@ -1218,7 +1387,7 @@ index 6ee0c439..e9f89d9a 100644
              env_key: Some("sk-should-not-leak".to_string()),
              env_key_instructions: None,
 diff --git a/codex-rs/model-provider-info/src/gateway_oauth.rs b/codex-rs/model-provider-info/src/gateway_oauth.rs
-index 21c5901e..ee3db7ff 100644
+index 21c5901ec..ee3db7ff0 100644
 --- a/codex-rs/model-provider-info/src/gateway_oauth.rs
 +++ b/codex-rs/model-provider-info/src/gateway_oauth.rs
 @@ -76,6 +76,22 @@ impl GatewayOAuthConfig {
@@ -1245,7 +1414,7 @@ index 21c5901e..ee3db7ff 100644
              return Err(
                  "gateway_oauth requires a nonempty client_id and a nonzero redirect_port".into(),
 diff --git a/codex-rs/model-provider-info/src/gateway_oauth_tests.rs b/codex-rs/model-provider-info/src/gateway_oauth_tests.rs
-index f5ea122f..b50ec585 100644
+index f5ea122f9..b50ec5858 100644
 --- a/codex-rs/model-provider-info/src/gateway_oauth_tests.rs
 +++ b/codex-rs/model-provider-info/src/gateway_oauth_tests.rs
 @@ -77,3 +77,38 @@ fn rejects_unsafe_endpoints_and_delivery_collisions() {
@@ -1288,7 +1457,7 @@ index f5ea122f..b50ec585 100644
 +    }
 +}
 diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
-index 3a328dd2..f6686618 100644
+index 3a328dd22..f6686618e 100644
 --- a/codex-rs/model-provider-info/src/lib.rs
 +++ b/codex-rs/model-provider-info/src/lib.rs
 @@ -142,6 +142,9 @@ pub struct ModelProviderInfo {
@@ -1404,7 +1573,7 @@ index 3a328dd2..f6686618 100644
          env_key: None,
          env_key_instructions: None,
 diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
-index 9c15c54b..69ae70b5 100644
+index 9c15c54b7..69ae70b51 100644
 --- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 +++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 @@ -78,6 +78,7 @@ base_url = "http://localhost:11434/v1"
@@ -1586,7 +1755,7 @@ index 9c15c54b..69ae70b5 100644
 +    );
 +}
 diff --git a/codex-rs/model-provider/src/auth.rs b/codex-rs/model-provider/src/auth.rs
-index f4d27646..fc0553aa 100644
+index f4d276465..fc0553aa8 100644
 --- a/codex-rs/model-provider/src/auth.rs
 +++ b/codex-rs/model-provider/src/auth.rs
 @@ -16,6 +16,7 @@ use codex_login::auth::AgentIdentityAuth;
@@ -1791,7 +1960,7 @@ index f4d27646..fc0553aa 100644
 +    }
 +}
 diff --git a/codex-rs/model-provider/src/lib.rs b/codex-rs/model-provider/src/lib.rs
-index 9c818af7..19277608 100644
+index 9c818af7d..192776086 100644
 --- a/codex-rs/model-provider/src/lib.rs
 +++ b/codex-rs/model-provider/src/lib.rs
 @@ -22,6 +22,7 @@ pub use auth::ProviderAuthScope;
@@ -1803,7 +1972,7 @@ index 9c818af7..19277608 100644
  pub use bearer_auth_provider::BearerAuthProvider;
  pub use bearer_auth_provider::BearerAuthProvider as CoreAuthProvider;
 diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
-index f8f0790d..8779e9c1 100644
+index f8f0790dd..8779e9c1d 100644
 --- a/codex-rs/model-provider/src/provider.rs
 +++ b/codex-rs/model-provider/src/provider.rs
 @@ -636,6 +636,7 @@ mod tests {
