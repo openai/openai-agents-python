@@ -660,8 +660,12 @@ async def test_native_child_updates_reject_without_changing_the_live_session(
             assert rejected_instructions not in encoded
 
 
+@pytest.mark.parametrize("scenario", ["success", "empty-input", "child-failure"])
 async def test_produced_items_attribute_managed_role_tool(
-    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Literal["success", "empty-input", "child-failure"],
 ) -> None:
     managed = NativeRoleTool(
         name="research_topic", role="research", description="Research a topic."
@@ -672,8 +676,23 @@ async def test_produced_items_attribute_managed_role_tool(
         return "ordinary tool output"
 
     responses.respond(function_call(managed.name, {}, "ordinary"))
-    responses.respond(collaboration(managed.name, {"input": "Read the record."}, "managed"))
-    responses.respond(assistant_output("child result"))
+    managed_input = "" if scenario == "empty-input" else "Read the record."
+    responses.respond(collaboration(managed.name, {"input": managed_input}, "managed"))
+    if scenario == "success":
+        responses.respond(assistant_output("child result"))
+    if scenario == "child-failure":
+        responses.respond(
+            {
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_prompt",
+                        "message": "Synthetic child model failure",
+                    }
+                },
+            }
+        )
     responses.respond(assistant_output("parent result"))
     agent = Agent(
         instructions="Use the research tool.",
@@ -705,4 +724,8 @@ async def test_produced_items_attribute_managed_role_tool(
             "function_call_output",
         ]
         assert [entry.tool_origin for entry in entries] == [expected, expected]
-    assert len(responses.requests) == 4
+    assert len(responses.requests) == (3 if scenario == "empty-input" else 4)
+    if scenario == "child-failure":
+        assert "Managed agent did not complete its turn" in json.dumps(
+            responses.requests[-1]["input"]
+        )

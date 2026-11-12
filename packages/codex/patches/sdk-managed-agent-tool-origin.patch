@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 1ac18a45fc3fb39240c1650ae6f0e8ff4f596bb0..333800df0704a195498ed5fae1025f7501346f9c 100644
+index 2c4014b9..2a82fb4f 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -3838,7 +3838,7 @@ async fn handle_assistant_item_done_in_plan_mode(
+@@ -3944,7 +3944,7 @@ async fn handle_assistant_item_done_in_plan_mode(
              step_context,
              item,
              finalized_facts.as_ref(),
@@ -12,7 +12,7 @@ index 1ac18a45fc3fb39240c1650ae6f0e8ff4f596bb0..333800df0704a195498ed5fae1025f75
          .await;
          if let Some(agent_message) = final_last_agent_message {
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index adcd277706ed47abe2f026becef815b183a75804..b817d2fd03eb1281074bf7affc7f0ff64bfc9c5b 100644
+index 212cbe6a..7113face 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -83,14 +83,14 @@ pub(crate) async fn record_completed_response_item(
@@ -55,7 +55,7 @@ index adcd277706ed47abe2f026becef815b183a75804..b817d2fd03eb1281074bf7affc7f0ff6
              }],
          )
          .await;
-@@ -443,11 +440,22 @@ pub(crate) async fn handle_output_item_done(
+@@ -428,11 +425,22 @@ pub(crate) async fn handle_output_item_done(
                  codex_tools::ToolPayload::ApplyPatch { .. } => Some("apply_patch"),
                  _ => None,
              };
@@ -79,7 +79,7 @@ index adcd277706ed47abe2f026becef815b183a75804..b817d2fd03eb1281074bf7affc7f0ff6
              )
              .await;
              if application_tool.is_some() {
-@@ -499,7 +507,7 @@ pub(crate) async fn handle_output_item_done(
+@@ -484,7 +492,7 @@ pub(crate) async fn handle_output_item_done(
                  ctx.step_context.as_ref(),
                  &item,
                  finalized_facts.as_ref(),
@@ -88,7 +88,7 @@ index adcd277706ed47abe2f026becef815b183a75804..b817d2fd03eb1281074bf7affc7f0ff6
              )
              .await;
  
-@@ -522,7 +530,7 @@ pub(crate) async fn handle_output_item_done(
+@@ -507,7 +515,7 @@ pub(crate) async fn handle_output_item_done(
                  ctx.sess.as_ref(),
                  ctx.step_context.as_ref(),
                  &item,
@@ -97,8 +97,44 @@ index adcd277706ed47abe2f026becef815b183a75804..b817d2fd03eb1281074bf7affc7f0ff6
              )
              .await;
              if let Some(response_item) = response_input_to_response_item(&response) {
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 623401a1..d59fba01 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -28,6 +28,7 @@ use crate::tools::registry::ToolArgumentDiffConsumer;
+ use crate::tools::router::ToolCall;
+ use crate::tools::router::ToolCallSource;
+ use crate::unified_exec::PendingLocalExec;
++use codex_history::CodexHarnessMetadata;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::models::ResponseInputItem;
+@@ -269,11 +270,18 @@ impl ToolCallRuntime {
+                 Err(other) if matches!(error_call.payload, ToolPayload::Computer { .. } | ToolPayload::ApplyPatch { .. }) => {
+                     return Err(CodexErr::Fatal(other.to_string()));
+                 }
+-                Err(other) => (
+-                    ResponseItemEnvelope::new(Self::failure_response(error_call, other).into()),
+-                    None,
+-                    false,
+-                ),
++                Err(other) => {
++                    let metadata = retained_step_context
++                        .tool_router
++                        .tool_runtime(&error_call.tool_name)
++                        .and_then(|tool| tool.managed_agent_tool_origin())
++                        .map(|origin| CodexHarnessMetadata {
++                            sdk_managed_agent_tool: Some(origin),
++                            ..Default::default()
++                        });
++                    let item = Self::failure_response(error_call, other).into();
++                    (ResponseItemEnvelope { item, metadata }, None, false)
++                }
+             };
+             if let Some(text) = call_state.delivered_assistant_message.get() {
+                 response
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
-index a6d5fae564d674620ea9f420d198643d58f7a9ad..b23b1205e45ac14a0f8b2c5f10275d159d4751cb 100644
+index a593164d..7be4f9a1 100644
 --- a/codex-rs/core/src/tools/registry.rs
 +++ b/codex-rs/core/src/tools/registry.rs
 @@ -31,6 +31,7 @@ use codex_analytics::ControlToolCallStatus;
@@ -124,7 +160,7 @@ index a6d5fae564d674620ea9f420d198643d58f7a9ad..b23b1205e45ac14a0f8b2c5f10275d15
      /// Whether this built-in control tool needs a structured tool-call event.
      fn is_builtin_control_tool(&self) -> bool {
          false
-@@ -1024,7 +1033,12 @@ async fn handle_any_tool(
+@@ -977,7 +986,12 @@ async fn handle_any_tool(
      let post_tool_use_payload =
          CoreToolRuntime::post_tool_use_payload(tool, &invocation, output.as_ref());
      let result = AnyToolResult {
@@ -139,7 +175,7 @@ index a6d5fae564d674620ea9f420d198643d58f7a9ad..b23b1205e45ac14a0f8b2c5f10275d15
          payload,
          result: output,
 diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
-index 39ffca3b9dccfb6e569e1dee8adffbfc6d3cbc72..713f333657995d1409f67fb22153064920fef1d1 100644
+index 31e88ee4..adad060f 100644
 --- a/codex-rs/history/src/lib.rs
 +++ b/codex-rs/history/src/lib.rs
 @@ -59,6 +59,13 @@ pub struct ResponseItemEnvelope {
@@ -156,7 +192,7 @@ index 39ffca3b9dccfb6e569e1dee8adffbfc6d3cbc72..713f333657995d1409f67fb221530649
  /// Metadata owned by the Codex harness and persisted with a response item.
  ///
  #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-@@ -75,6 +82,9 @@ pub struct CodexHarnessMetadata {
+@@ -69,6 +76,9 @@ pub struct CodexHarnessMetadata {
      /// Accepted SDK handoff outcome; canonical provenance, never execution authority.
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub sdk_agent_handoff: Option<codex_protocol::agent_profile::AgentProfileHandoff>,
