@@ -66,6 +66,7 @@ class _Submission:
     guardrail_results: list[GuardrailRecord] = field(default_factory=list)
     guardrail_input: UserInput | None = field(default=None, repr=False)
     original_input: UserInput | None = field(default=None, repr=False)
+    input_guardrails_passed: bool | None = None
     input_guardrails_started: bool = False
     input_guardrails_task: asyncio.Task[None] | None = field(default=None, repr=False)
     calls: set[str] = field(default_factory=set)

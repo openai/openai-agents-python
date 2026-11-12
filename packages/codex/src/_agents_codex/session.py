@@ -295,7 +295,6 @@ from .recovery import (
 from .response_facts import _response_fact_record
 from .retry import _CombinedRetryPolicy
 from .sandbox_memory import (
-    _MAX_RECORDS as _MAX_MEMORY_RECORDS,
     _MEMORY_OWNER_ATTRIBUTE,
     _current_memory_owner,
     _SandboxMemoryOwner,
@@ -3756,6 +3755,7 @@ class Session(Generic[ContextT, OutputT]):
         _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
+        authenticated_memory_history = isinstance(state, ManagedWorkspaceCheckpoint)
         state, managed_source = _prepare_open_state(
             state,
             environment,
@@ -4109,6 +4109,17 @@ class Session(Generic[ContextT, OutputT]):
             )
             verify_remembered_approvals = None
             remembered_approvals = await verification
+            if checkpoint is not None and not authenticated_memory_history:
+                imported = json.loads(checkpoint)
+                for thread in [imported, *imported.get("descendants", [])]:
+                    for item in thread.get("history", []):
+                        if item.get("type") != "turn_context":
+                            continue
+                        payload = item.get("payload")
+                        receipt = payload.get("sdk_receipt") if isinstance(payload, dict) else None
+                        if isinstance(receipt, dict):
+                            receipt.pop("sandbox_memory_input_admitted", None)
+                checkpoint = json.dumps(imported)
             if environment is not None and not isinstance(environment, Environment):
                 if not isinstance(environment, AbstractAsyncContextManager):
                     raise TypeError("environment must be an Environment or async context manager")
@@ -5066,6 +5077,8 @@ class Session(Generic[ContextT, OutputT]):
         self._sandbox_events: _OperationObserver | None = None
         self._memory_flush: asyncio.Task[None] | None = None
         self._memory_restored = False
+        self._memory_restore_turn: Turn[Any] | None = None
+        self._memory_admission: tuple[Turn[Any], bool, BaseException | None] | None = None
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
@@ -8154,14 +8167,15 @@ class Session(Generic[ContextT, OutputT]):
     ) -> None:
         self._environment_lease = lease
         self._memory_restored = state is not None or resume is not None
+        self._memory_restore_turn = self._last_turn
 
     async def flush_memory(self) -> None:
-        """Memory generation for a successful settled source turn.
+        """Memory generation has been retaining admitted settled source history.
 
-        Configuration: sandbox_environment(memory=...). Shared concurrent flushes;
-        one generation per history revision. Input: admitted text messages and
-        retained tool records. Restored Sessions and non-text message content:
-        unsupported.
+        sandbox_environment(memory=...) has been configuring the two phases.
+        Concurrent flushes have been sharing one generation per history revision.
+        Restored Sessions have been requiring a newly admitted source turn.
+        Rejected inputs and unverified imported history have been remaining ineligible.
         """
         self._check_callback_operation("flush sandbox memory on its source Session")
         lease = self._environment_lease
@@ -8180,18 +8194,64 @@ class Session(Generic[ContextT, OutputT]):
         self._check_idle_update()
         if lease is None or memory is None:
             raise TypeError("Configure memory on sandbox_environment before flushing")
-        if self._memory_restored:
-            raise NativeError("Native sandbox memory is unavailable on restored Sessions")
         turn = self._last_turn
+        if self._memory_restored and (turn is None or turn is self._memory_restore_turn):
+            raise NativeError(
+                "Native sandbox memory requires a newly admitted source turn after restore"
+            )
         if turn is None:
             raise NativeError("Native sandbox memory requires a successful source turn")
         scope = lease._sandbox_memory_scope
         assert scope is not None
 
         async def flush() -> None:
-            await turn.get_result()
-            snapshot = await self._read_canonical_history(_MAX_MEMORY_RECORDS, for_replay=True)
-            await memory.flush(self.id, snapshot)
+            terminal = {
+                "terminal_state": "completed",
+                "exception_type": None,
+                "exception_message": None,
+                "has_final_output": True,
+            }
+            try:
+                completed = await turn.get_result()
+                terminal["has_final_output"] = completed.final_output is not None
+            except Exception as error:
+                settled = turn._result
+                admission = self._memory_admission
+                if (
+                    turn.turn_id is None
+                    or settled is None
+                    or not settled.done()
+                    or settled.cancelled()
+                    or settled.exception() is not error
+                    or admission is None
+                    or admission[0] is not turn
+                    or not admission[1]
+                    or isinstance(error, GuardrailTripwire)
+                    and error.record.kind == "input"
+                ):
+                    raise
+                terminal = {
+                    "terminal_state": "guardrail_tripped"
+                    if isinstance(error, GuardrailTripwire)
+                    else "cancelled"
+                    if isinstance(error, TurnStoppedError)
+                    and isinstance(error.__cause__, asyncio.CancelledError)
+                    else "failed",
+                    "exception_type": type(error).__name__,
+                    "exception_message": str(error) or None,
+                    "has_final_output": False,
+                }
+            admission = self._memory_admission
+            if admission is not None and admission[0] is turn and admission[2] is not None:
+                raise admission[2]
+            assert turn.turn_id is not None
+            value = json.loads(await self._native._memory_history(turn.turn_id))
+            snapshot = CanonicalHistorySnapshot(
+                value["revision"],
+                value["total"],
+                tuple(json.loads(item) for item in value["items"]),
+            )
+            await memory.flush(self.id, snapshot, terminal_metadata=terminal)
 
         pending = scope.copy().run(_create_task, flush())
         self._memory_flush = pending
@@ -9191,6 +9251,15 @@ class Session(Generic[ContextT, OutputT]):
         admitted: bool = False,
         native_admission: dict[str, Any] | BaseException | None = None,
     ) -> BaseException | None:
+        if state.continued_from is None:
+            state.input_guardrails_passed = not (
+                self._input_guardrails
+                or self._effective_agent().input_guardrails
+                or any(
+                    runtime.profile.declaration.input_guardrails
+                    for runtime in self._profiles.values()
+                )
+            )
         try:
             if self._sandbox_events is not None:
                 self._native._enable_sandbox_operations()
@@ -11077,12 +11146,43 @@ class Session(Generic[ContextT, OutputT]):
                 if error is None:
                     error = cleanup_error
             finally:
+                if (
+                    self._environment_lease is not None
+                    and self._environment_lease._sandbox_memory is not None
+                ):
+                    try:
+                        await _join(_create_task(self._capture_memory_admission(state)))
+                    except BaseException as admission_cancel:
+                        if error is None:
+                            error = admission_cancel
+                    if error is None and state.failure.done():
+                        error = state.failure.result()
                 if delegate_close:
                     # The execution task can finish so Session close can join
                     # the graph and thread. Consumers wait for their outcome.
                     state.deferred_close = (input is not None, error, outcome)
                 else:
                     self._settle_submission(state, input is not None, error, outcome)
+
+    async def _capture_memory_admission(self, state: _Submission) -> None:
+        lease = self._environment_lease
+        turn = state.issued or self._last_turn
+        if lease is None or lease._sandbox_memory is None or turn is None:
+            return
+        admitted = (
+            state.handle is not None
+            and state.handle.turn_id is not None
+            and state.input_guardrails_passed is True
+            and (not self._memory_restored or turn is not self._memory_restore_turn)
+        )
+        self._memory_admission = (turn, admitted, None)
+        if not admitted:
+            return
+        assert state.handle is not None and state.handle.turn_id is not None
+        try:
+            await self._native._record_memory_input_admission(state.handle.turn_id)
+        except BaseException as error:
+            self._memory_admission = (turn, admitted, error)
 
     @staticmethod
     def _retire_questions(state: _CallbackState) -> None:
@@ -11140,6 +11240,7 @@ class Session(Generic[ContextT, OutputT]):
                     run_usage=state.run_usage,
                     submission_request_attempts=state.submission_request_attempts,
                     original_input=state.original_input,
+                    input_guardrails_passed=state.input_guardrails_passed,
                     guardrail_results=state.guardrail_results,
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
@@ -13261,6 +13362,8 @@ class Session(Generic[ContextT, OutputT]):
     ) -> None:
         if not checks:
             return
+        if isinstance(state, _Submission):
+            state.input_guardrails_passed = False
         assert (
             state.handle is not None
             and state.handle.turn_id is not None
@@ -13336,6 +13439,8 @@ class Session(Generic[ContextT, OutputT]):
             await asyncio.gather(*tasks, return_exceptions=True)
         if tripped is not None:
             raise GuardrailTripwire(tripped, tuple(state.guardrail_results))
+        if isinstance(state, _Submission):
+            state.input_guardrails_passed = True
 
     async def _call_completion_callback(
         self,
@@ -13762,6 +13867,8 @@ class Session(Generic[ContextT, OutputT]):
             # input checks join at completion, not during this preparation.
             if not state.input_guardrails_started and state.guardrail_input is not None:
                 state.input_guardrails_started = True
+                if isinstance(state, _Submission) and not checks:
+                    state.input_guardrails_passed = True
                 guardrail_step_index = state.step_index
                 await self._run_input_guardrails(
                     state,
@@ -13776,6 +13883,8 @@ class Session(Generic[ContextT, OutputT]):
                         state, message, guardrail_agent, parallel, step_index=guardrail_step_index
                     )
                 elif parallel:
+                    if isinstance(state, _Submission):
+                        state.input_guardrails_passed = False
 
                     async def run_parallel() -> None:
                         scope = _Invocation(self)
@@ -16448,8 +16557,8 @@ class Session(Generic[ContextT, OutputT]):
     async def suspend_workspace(self) -> ManagedWorkspaceCheckpoint:
         """Retire this owned sandbox Session and capture its paired workspace.
 
-        Configured memory finishes generating for a successful settled turn
-        before workspace capture begins.
+        Configured memory has been finishing generation for the admitted settled
+        source before workspace capture has been starting.
         """
         self._check_loop()
         self._check_callback_operation("suspend its managed workspace")
@@ -16475,7 +16584,7 @@ class Session(Generic[ContextT, OutputT]):
         memory_turn = (
             self._last_turn
             if active is None
-            and not self._memory_restored
+            and (not self._memory_restored or self._last_turn is not self._memory_restore_turn)
             and lease is not None
             and lease._sandbox_memory is not None
             else None
@@ -16489,8 +16598,7 @@ class Session(Generic[ContextT, OutputT]):
                     try:
                         await memory_turn.get_result()
                     except Exception:
-                        # A failed source turn has no completed memory to generate.
-                        pass
+                        await self.flush_memory()
                     else:
                         await self.flush_memory()
                     self._check_open()

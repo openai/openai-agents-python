@@ -10,7 +10,7 @@ from _agents_codex.history import CanonicalHistorySnapshot
 from _agents_codex.sandbox_memory import _memory_transcript
 from agents import Agent, ToolOutput, ToolOutputFile, ToolOutputImage, ToolOutputText, function_tool
 from agents.sandbox import Manifest, SandboxMemoryOptions, sandbox_environment
-from agents.testing import ScriptedResponses, text, tool_call
+from agents.testing import ScriptedResponses, event, text, tool_call
 from tests._asyncio import timeout
 from tests.test_native_sandbox_memory import _workspace_gateway
 
@@ -127,27 +127,26 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
             rollout = json.loads(lines[0])
             items = rollout["items"]
             assert [item.get("type", "message") for item in items] == [
-                "function_call",
-                "function_call_output",
                 "message",
                 "function_call",
                 "function_call_output",
                 "message",
             ]
-            assert items[0]["call_id"] == items[1]["call_id"] == "imported-tool"
-            assert items[1]["output"] == [{"type": "input_text", "text": "Imported answer"}]
-            assert items[3]["name"] == "lookup_preference"
-            assert items[3]["call_id"] == items[4]["call_id"] == "source-tool"
-            assert json.loads(items[3]["arguments"]) == {"subject": "tone"}
-            assert "role" not in items[0] and "role" not in items[1]
-            result = items[4].get("error", items[4].get("output"))
+            assert items[1]["name"] == "lookup_preference"
+            assert items[1]["call_id"] == items[2]["call_id"] == "source-tool"
+            assert json.loads(items[1]["arguments"]) == {"subject": "tone"}
+            result = items[2].get("error", items[2].get("output"))
             expected_result = "preference unavailable" if kind == "failed" else "plain language"
             assert expected_result in json.dumps(result)
             if kind == "media":
                 assert result == [
                     {"type": "input_text", "text": "SYNTHETIC_TOOL_RESULT: plain language"},
-                    {"type": "input_image"},
-                    {"type": "input_file"},
+                    {"type": "input_image", "file_id": "private-tool-image-id", "detail": "low"},
+                    {
+                        "type": "input_file",
+                        "file_data": "data:text/plain;base64,cHJpdmF0ZQ==",
+                        "filename": "private-tool-output.txt",
+                    },
                 ]
             assert rollout["terminal_metadata"]["terminal_state"] == "completed"
             assert "PRIVATE_SOURCE_INSTRUCTION" not in lines[0]
@@ -165,8 +164,8 @@ async def test_memory_flush_retains_the_source_tool_exchange_without_replaying_i
             assert "PRIVATE_APPLICATION_NOTE" not in phase_one_input
             assert "PRIVATE_IMPORTED_TOOL" not in phase_one_input
             for private in ("private-tool-image-id", "cHJpdmF0ZQ==", "private-tool-output.txt"):
-                assert private not in lines[0]
-                assert private not in phase_one_input
+                assert (private in lines[0]) == (kind == "media")
+                assert (private in phase_one_input) == (kind == "media")
 
 
 def test_memory_preserves_projected_failed_function_output() -> None:
@@ -195,11 +194,122 @@ def test_memory_preserves_projected_failed_function_output() -> None:
 
 
 @pytest.mark.parametrize("kind", ["file_search_call", "code_interpreter_call", "mcp_list_tools"])
-def test_memory_refuses_unprojected_hosted_tool_history(kind: str) -> None:
+def test_memory_preserves_known_hosted_tool_history(kind: str) -> None:
     snapshot = CanonicalHistorySnapshot(
         revision="test-revision",
         total=1,
         items=({"type": kind, "id": "hosted-call", "status": "completed"},),
     )
-    with pytest.raises(ValueError, match="requires text messages and function tool history"):
-        _memory_transcript("native-thread", snapshot, "sandbox")
+    assert _memory_transcript("native-thread", snapshot, "sandbox")["items"] == list(snapshot.items)
+
+
+async def test_memory_retains_admitted_user_media_and_known_records(tmp_path, monkeypatch):
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    workspace = tmp_path / "workspace"
+    extraction = {
+        "rollout_slug": "media",
+        "rollout_summary": "Image context.",
+        "raw_memory": "Image context.",
+    }
+    consolidation = {"summary": "Image context.", "memory": "Image context."}
+    async with (
+        timeout(30),
+        _workspace_gateway(workspace, monkeypatch) as connect,
+        ScriptedResponses(
+            [
+                event(
+                    {
+                        "type": "response.output_item.done",
+                        "item": {
+                            "type": "file_search_call",
+                            "id": "synthetic-search",
+                            "status": "completed",
+                            "queries": ["synthetic-query"],
+                            "results": None,
+                        },
+                    }
+                ),
+                event(
+                    {
+                        "type": "response.output_item.done",
+                        "item": {
+                            "type": "image_generation_call",
+                            "id": "synthetic-generation",
+                            "status": "failed",
+                            "result": None,
+                        },
+                    }
+                ),
+                text("Image accepted."),
+            ],
+            [text(json.dumps(extraction))],
+            [text(json.dumps(consolidation))],
+        ) as peer,
+    ):
+        environment = sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(workspace)),
+            options=UnixLocalSandboxClientOptions(),
+            connect=connect,
+            memory=SandboxMemoryOptions(
+                phase_one=Agent(instructions="Extract.", provider=peer.provider),
+                phase_two=Agent(instructions="Consolidate.", provider=peer.provider),
+            ),
+        )
+        async with Agent(instructions="Describe.", model="gpt-5.5", provider=peer.provider).session(
+            environment=environment
+        ) as session:
+            before = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=before.revision,
+                keep=before.total,
+                items=[
+                    {
+                        "type": "file_search_call",
+                        "id": "synthetic-search",
+                        "status": "completed",
+                        "queries": ["synthetic-query"],
+                        "results": [],
+                    },
+                    {"type": "application_note", "value": "SYNTHETIC_OPAQUE_AUDIT_ONLY"},
+                    {
+                        "type": "image_generation_call",
+                        "id": "synthetic-generation",
+                        "status": "completed",
+                        "result": "SYNTHETIC_GENERATED_IMAGE",
+                    },
+                ],
+            )
+            await (
+                await session.submit(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "SYNTHETIC_ADMITTED_IMAGE_CONTEXT"},
+                            {
+                                "type": "input_image",
+                                "file_id": "file-synthetic-memory-image",
+                                "detail": "low",
+                            },
+                        ],
+                    }
+                )
+            ).get_result()
+            await session.flush_memory()
+            await session.flush_memory()
+            lines = (workspace / "sessions" / f"{session.id}.jsonl").read_text().splitlines()
+            assert len(lines) == 1
+            payload = json.loads(lines[0])
+            assert any(item.get("type") == "file_search_call" for item in payload["items"])
+            assert "file-synthetic-memory-image" in lines[0]
+            assert "SYNTHETIC_OPAQUE_AUDIT_ONLY" not in lines[0]
+            assert "SYNTHETIC_GENERATED_IMAGE" not in lines[0]
+            extract_input = json.dumps(peer.requests[1]["input"])
+            assert "file-synthetic-memory-image" in extract_input
+            assert "synthetic-query" in extract_input
+            assert "SYNTHETIC_OPAQUE_AUDIT_ONLY" not in extract_input
+            assert len(peer.requests) == 3
