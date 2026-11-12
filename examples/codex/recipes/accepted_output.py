@@ -181,11 +181,42 @@ async def support_answer(mode: SupportMode) -> list[SupportAnswer]:
     return published
 
 
+async def accepted_sections() -> None:
+    # The application checks each section independently. It can publish a section
+    # before the next turn because later sections cannot change its facts.
+    expected = (
+        ("inventory", "7 units available"),
+        ("dispatch", "2 orders packed"),
+        ("delivery", "Delivery unconfirmed"),
+    )
+    published: list[tuple[str, str]] = []
+    async with ScriptedResponses(
+        [text("7 units available")],
+        [text("2 orders packed")],
+        [text("All orders delivered")],
+    ) as peer:
+        agent = Agent(instructions="Report one section at a time.", provider=peer.provider)
+        async with agent.session() as session:
+            for index, (section, verified_text) in enumerate(expected):
+                assert published == list(expected[:index])
+                assert len(peer.requests) == index
+                turn = await session.submit(f"Report the verified {section} facts.")
+                result = await turn.get_result()
+                if result.final_output != verified_text:
+                    print(f"Section withheld: {section}.")
+                    break
+                published.append((section, verified_text))
+                print(f"Accepted {section}: {verified_text}")
+        assert len(peer.requests) == len(expected)
+    assert published == list(expected[:2])
+
+
 async def main() -> None:
     await revised_report()
     modes: tuple[SupportMode, ...] = ("accepted", "rejected", "cancelled", "failed", "invalid")
     for mode in modes:
         await support_answer(mode)
+    await accepted_sections()
 
 
 if __name__ == "__main__":
