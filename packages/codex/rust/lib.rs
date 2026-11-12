@@ -4616,6 +4616,15 @@ fn drain_trace_events<'py>(py: Python<'py>, max_count: u32) -> PyResult<Bound<'p
     })
 }
 
+#[pyfunction]
+fn dispatch_trace_event<'py>(py: Python<'py>, encoded: String) -> PyResult<Bound<'py, PyAny>> {
+    async_bridge::future_into_py(py, async move {
+        codex_otel::sdk_trace_routes::dispatch_trace_event(&encoded)
+            .await
+            .map_err(py_error)
+    })
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
@@ -4684,6 +4693,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(release_trace_span, module)?)?;
     module.add_function(wrap_pyfunction!(force_flush_telemetry, module)?)?;
     module.add_function(wrap_pyfunction!(drain_trace_events, module)?)?;
+    module.add_function(wrap_pyfunction!(dispatch_trace_event, module)?)?;
 
     module.add("CODEX_REVISION", include_str!("../CODEX_REVISION").trim())?;
     let mut operations = ops::OPERATIONS.to_vec();

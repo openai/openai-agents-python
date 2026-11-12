@@ -1483,6 +1483,32 @@ def _timeout(timeout_ms: int) -> int:
     return timeout_ms
 
 
+async def dispatch_trace_event(event: TraceLifecycleEvent) -> None:
+    """Deliver a recorded lifecycle event to the current trace processors.
+
+    IDs and timestamps remain observation data. Delivery receives a fresh
+    sequence and routes; it never activates a span or recovers credentials.
+    Calls from a trace processor are rejected before queue admission.
+    """
+    current = encoded = None
+    try:
+        if _in_processor.get():
+            raise RuntimeError("Trace event dispatch cannot run inside a trace processor callback")
+        current = _current.get()
+        if _tracing_disabled or (current is not None and current.disabled):
+            with _processor_lock:
+                if _processor_closing:
+                    raise RuntimeError("Telemetry has been shutting down")
+            return
+        encoded = json.dumps(
+            event, default=dict, allow_nan=False, ensure_ascii=False, separators=(",", ":")
+        )
+        _ensure_processor_pump()
+        await _native_tracing().dispatch_trace_event(encoded)
+    finally:
+        del event, encoded, current
+
+
 async def force_flush(*, timeout_ms: int = 10_000) -> FlushResult:
     """Flush completed records through a barrier within one total budget.
 

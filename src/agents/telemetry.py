@@ -91,6 +91,7 @@ from _agents_codex.telemetry import (
     contextmanager as contextmanager,
     current_context as current_context,
     dataclass as dataclass,
+    dispatch_trace_event as dispatch_trace_event,
     field as field,
     force_flush as force_flush,
     generate_group_id as generate_group_id,
@@ -138,4 +139,5 @@ __all__ += [
     "set_tracing_disabled",
     "set_sensitive_data_logging_enabled",
     "force_flush",
+    "dispatch_trace_event",
 ]
