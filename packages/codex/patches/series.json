@@ -699,7 +699,11 @@
     {
       "path": "sdk-application-tool-durable-owner.patch",
       "sha256": "a6e10d1e8a347c5a8623ffd275b858738b848380460cfbdace7f567fa1905705"
+    },
+    {
+      "path": "0163-sdk-followup-mailbox-trace.patch",
+      "sha256": "3b4b270ab86c1f76b39d1d49f8e1c17e1896c6e4c6fdecba17a011a0a97ffbaf"
     }
   ],
-  "result_tree": "225c9445452c40e9ca489a70b13bd62d6431362f"
+  "result_tree": "5ba7742538a04e6596007564436dc7c37bca39ee"
 }
