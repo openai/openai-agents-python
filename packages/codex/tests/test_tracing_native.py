@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +131,7 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "no_export",
         "flush_budget",
         "manual_restore",
+        "manual_restore_state_only",
         "shutdown_budget",
         "mcp_policy",
         "terminal_queue",
@@ -230,8 +232,10 @@ async def _native_case(case: str) -> None:
                     await _flush_budget()
                 elif case == "shutdown_budget":
                     await _flush_budget(shutdown=True)
-                elif case == "manual_restore":
-                    await _manual_restore(fixture, provider, peer)
+                elif case in ("manual_restore", "manual_restore_state_only"):
+                    await _manual_restore(
+                        fixture, provider, peer, state_only=case == "manual_restore_state_only"
+                    )
                 elif case == "mcp_policy":
                     await _mcp_policy(fixture, provider, recorder)
                 elif case == "host_contexts":
@@ -598,9 +602,14 @@ async def _flush_budget(*, shutdown: bool = False) -> None:
 
 
 async def _manual_restore(
-    fixture: ResponsesFixture, provider: NativeProvider, peer: DecodedCollector
+    fixture: ResponsesFixture,
+    provider: NativeProvider,
+    peer: DecodedCollector,
+    *,
+    state_only: bool,
 ) -> None:
     checking_restore = False
+    expected_trace_id = ""
     restored_input_contexts = []
 
     class Arguments(BaseModel):
@@ -611,7 +620,7 @@ async def _manual_restore(
             if checking_restore:
                 current = telemetry.current_context()
                 assert current is not None
-                assert current.trace_id == restored_scope.context.trace_id
+                assert current.trace_id == expected_trace_id
                 assert not current.include_sensitive_data
                 with telemetry.span(
                     "restored validator nested work",
@@ -627,6 +636,7 @@ async def _manual_restore(
     agent = Agent(instructions="Answer.", model="gpt-5.1-codex", tools=[manual], provider=provider)
     fixture.respond(function_call("manual_lookup", {"key": "synthetic"}, "restored-call"))
     with telemetry.trace("source workflow") as source_scope:
+        source_trace_id = source_scope.context.trace_id
         async with agent.session() as source:
             original = await source.submit("pause")
             async for interaction in source.interactions():
@@ -647,16 +657,33 @@ async def _manual_restore(
     assert "tracing_context" not in serialized
     assert "credential_ref" not in serialized
     assert "default-key" not in serialized
+    checkpoint = type(saved).from_json(serialized)
+    source_span_ids: set[str] = set()
+    if state_only:
+        result = await telemetry.force_flush()
+        assert result.status == "success", result
+        source_span_ids = {row["spanId"] for row in _spans(peer)}
+        telemetry.set_sensitive_data_logging_enabled(False)
     _answer(fixture, "RESTORED_OUTPUT_CANARY")
     checking_restore = True
-    with telemetry.trace(
-        "restored workflow",
-        options=telemetry.TraceOptions(
-            include_sensitive_data=True,
-        ),
-    ) as restored_scope:
+    restore_scope = (
+        nullcontext()
+        if state_only
+        else telemetry.trace(
+            "restored workflow",
+            options=telemetry.TraceOptions(include_sensitive_data=True),
+        )
+    )
+    with restore_scope as restored_scope:
+        if restored_scope is None:
+            expected_trace_id = source_trace_id
+        else:
+            expected_trace_id = restored_scope.context.trace_id
         async with agent.session(
-            state=saved, trace_options=telemetry.TraceOptions(include_sensitive_data=False)
+            state=checkpoint,
+            trace_options=(
+                None if state_only else telemetry.TraceOptions(include_sensitive_data=False)
+            ),
         ) as restored:
             assert len(restored_input_contexts) == 1
             async for interaction in restored.interactions():
@@ -674,13 +701,24 @@ async def _manual_restore(
     result = await telemetry.force_flush()
     assert result.status == "success", result
     spans = _spans(peer)
-    continuation = [row for row in spans if row["traceId"] == restored_scope.context.trace_id]
+    continuation = [
+        row
+        for row in spans
+        if row["traceId"] == expected_trace_id and row["spanId"] not in source_span_ids
+    ]
+    admitting_span_id = (
+        restored_scope.context.span_id
+        if restored_scope is not None
+        else next(
+            row["spanId"] for row in continuation if _attrs(row).get("sdk.span.kind") == "operation"
+        )
+    )
     assert any(row["name"] == "receiving_stream" for row in continuation)
     assert any(_attrs(row).get("sdk.span.kind") == "validation" for row in continuation)
     assert all(
-        _descends(row, restored_scope.context.span_id, spans)
+        _descends(row, admitting_span_id, spans)
         for row in continuation
-        if row["spanId"] != restored_scope.context.span_id
+        if row["spanId"] != admitting_span_id
     )
     assert "RESTORED_OUTPUT_CANARY" not in json.dumps(continuation)
     assert len(fixture.requests) == 2

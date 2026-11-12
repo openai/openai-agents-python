@@ -394,6 +394,8 @@ class SessionState(BaseModel):
     codex_login_binding: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     original_input: UserInput | None = Field(default=None, repr=False)
+    # Historical correlation only. Restore uses the current process trace policy.
+    continuation_trace_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
     @model_validator(mode="after")
     def validate_tree(self) -> "SessionState":
@@ -409,6 +411,11 @@ class SessionState(BaseModel):
             if self.native_continuation is None:
                 raise ValueError("Original run input requires a manual continuation")
             _native_input(self.original_input)
+        if self.continuation_trace_id is not None:
+            if self.native_continuation is None or self.continuation_trace_id == "0" * 32:
+                raise ValueError(
+                    "Continuation trace ID requires a manual checkpoint and a valid ID"
+                )
         if (self.format_version in (8, 9)) != (self.run_budget is not None):
             raise ValueError("Request budget requires a version 8 or 9 manual checkpoint")
         if (self.format_version in (3, 5, 7, 8, 9)) != (self.native_continuation is not None):

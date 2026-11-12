@@ -1761,6 +1761,7 @@ class Agent(Generic[ContextT, OutputT]):
                 _atomic_first_turn=_atomic_first_turn,
                 _completed_input=_completed_input,
                 _private_text_run=_private_text_run,
+                _tracing_context_policy_only=captured.policy_only,
                 **cast(
                     "_TracingOpeningOptions",
                     {"_tracing_context": captured.context} if captured.context is not None else {},

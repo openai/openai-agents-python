@@ -210,6 +210,7 @@ from .mcp import (
     ChatGPTAppsMCP as ChatGPTAppsMCP,
     HostedVerificationMCP as HostedVerificationMCP,
     HttpMCP as HttpMCP,
+    MCPDiscoveryContext as MCPDiscoveryContext,
     MCPGetPromptResult as MCPGetPromptResult,
     MCPListResourcesResult as MCPListResourcesResult,
     MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
@@ -217,6 +218,7 @@ from .mcp import (
     MCPPrompt as MCPPrompt,
     MCPReadResourceResult as MCPReadResourceResult,
     MCPResultContext as MCPResultContext,
+    MCPToolDefinition as MCPToolDefinition,
     StdioMCP as StdioMCP,
     _ready as _ready,
     _result_policies as _result_policies,
@@ -2659,13 +2661,23 @@ def _capture_profile_runtimes(
                 "selecting_steps": any(
                     check.child_callback is not None
                     for check in (*declaration.input_guardrails, *input_guardrails)
-                ),
+                )
+                or any(server.tool_filter is not None for server in mcp),
                 "output_fingerprint": output.fingerprint,
                 # Fingerprinting uses admitted MCP identities, not credentials.
                 # Connection configs are completed only after environment entry.
                 "mcp_servers": {server.name: {} for server in mcp},
                 "mcp_result_tools": json.loads(_result_policies(mcp, 0))["servers"],
                 "mcp_metadata_tools": json.loads(_result_policies(mcp, 0))["metadata_servers"],
+                **(
+                    {
+                        "mcp_discovery_tools": json.loads(_result_policies(mcp, 0))[
+                            "discovery_servers"
+                        ]
+                    }
+                    if any(server.tool_filter is not None for server in mcp)
+                    else {}
+                ),
                 "mcp_tools": _mcp_profile_declarations(mcp),
             }
         )
@@ -3073,6 +3085,7 @@ def _prepare_native_checkpoint(
         restored_override = True
         payload["agent_options"].pop("_sdk_output_override")
     payload.pop("original_input", None)
+    payload.pop("continuation_trace_id", None)
     payload.pop("codex_login_binding", None)
     payload.pop("executor_read_only", None)
     if saved.format_version in (8, 9):
@@ -3748,6 +3761,7 @@ class Session(Generic[ContextT, OutputT]):
         _captured_siwc_provider: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
+        _tracing_context_policy_only: bool = False,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
@@ -4832,6 +4846,7 @@ class Session(Generic[ContextT, OutputT]):
                         and (
                             native_agents.before_step is not None
                             or session._has_child_input_guardrails()
+                            or session._has_mcp_discovery_filters()
                             or any(
                                 isinstance(tool, FunctionTool) and tool.is_enabled is not True
                                 for tool in session._bindings
@@ -4839,7 +4854,13 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     )
                     # The native reader can receive restored requests during preparation.
-                    active.tracing = _capture(fallback=_tracing_context)
+                    active.tracing = _capture(
+                        fallback=_tracing_context,
+                        fallback_policy_only=_tracing_context_policy_only,
+                        continuation_trace_id=(
+                            saved.continuation_trace_id if parent_trace is None else None
+                        ),
+                    )
                     await thread._prepare_manual_restore()
                     session._validate_pending_manual(active)
                     session._observations.append(
@@ -6788,7 +6809,7 @@ class Session(Generic[ContextT, OutputT]):
             }
             if expected_turn_id is not None:
                 request["exact_steering"] = True
-            captured = _CapturedTrace(None, None)
+            captured = _CapturedTrace(None, None, policy_only=False)
             if state.tracing is not None and state.tracing.context is not None:
                 # Steering belongs to the admitted root, even if the caller's
                 # ambient workflow changed. Retain it through native acceptance.
@@ -10775,6 +10796,7 @@ class Session(Generic[ContextT, OutputT]):
                         and (
                             self._native_agents.before_step is not None
                             or self._has_child_input_guardrails()
+                            or self._has_mcp_discovery_filters()
                             or any(
                                 isinstance(tool, FunctionTool) and tool.is_enabled is not True
                                 for tool in self._bindings
@@ -13242,6 +13264,12 @@ class Session(Generic[ContextT, OutputT]):
         if tripped is not None:
             raise GuardrailTripwire(tripped, tuple(state.guardrail_results))
 
+    def _has_mcp_discovery_filters(self) -> bool:
+        tools = [*self._bindings]
+        for runtime in self._profiles.values():
+            tools.extend(runtime.profile.declaration.tools)
+        return any(isinstance(tool, _MCP) and tool.tool_filter is not None for tool in tools)
+
     def _has_child_input_guardrails(self) -> bool:
         checks = [*self._input_guardrails, *self._effective_agent().input_guardrails]
         if self._profiles:
@@ -13983,6 +14011,51 @@ class Session(Generic[ContextT, OutputT]):
                     raise TypeError("FunctionTool is_enabled must return a bool")
                 if not enabled:
                     refs.discard(ref)
+            filters = {
+                server.name: server
+                for server in source_bindings
+                if isinstance(server, _MCP) and server.tool_filter is not None
+            }
+            for row in message.get("mcp_names", ()):
+                server = filters.get(row["server"])
+                discovery_ref = mcp_names.get((row["server"], row["tool"]))
+                if server is None or discovery_ref is None or discovery_ref not in refs:
+                    continue
+                if row["tool"] not in server.tools:
+                    raise CapabilityError("MCP discovery is outside its captured declaration")
+                definition = row.get("definition")
+                if (
+                    not isinstance(definition, dict)
+                    or definition.get("name") != row["tool"]
+                    or not isinstance(definition.get("inputSchema"), dict)
+                ):
+                    raise CapabilityError("MCP discovery lacks its captured raw definition")
+                discovery = MCPDiscoveryContext(
+                    context=self._context,
+                    submission=state.handle,
+                    agent=guardrail_agent,
+                    server_name=server.name,
+                    step_index=index,
+                )
+                discovery_filter = server.tool_filter
+                assert discovery_filter is not None
+                captured_definition = cast(MCPToolDefinition, deepcopy(definition))
+                filter_tool = partial(discovery_filter, discovery, captured_definition)
+                keep = await self._call_decision_callback(
+                    state,
+                    message,
+                    lambda _step, filter_tool=filter_tool: filter_tool(),
+                    active,
+                    ChildStepContext(context=self._context, child=state.handle, step_index=index)
+                    if isinstance(state, _ChildCallbacks)
+                    else self.active_turn or state.handle,
+                )
+                if not active():
+                    return
+                if type(keep) is not bool:
+                    raise TypeError("MCP tool_filter must return a bool")
+                if not keep:
+                    refs.discard(discovery_ref)
             candidates = {
                 ToolRef(item["name"], item["namespace"] or "functions")
                 for item in message["candidates"]
@@ -16689,6 +16762,7 @@ class Session(Generic[ContextT, OutputT]):
         )
         executor_policy_digest = None
         guardrail_records: list[dict[str, Any]] = []
+        continuation_trace_id = None
         if (
             active_uses_executor
             or self._strict_executor_writes
@@ -16703,6 +16777,8 @@ class Session(Generic[ContextT, OutputT]):
             if drain_budget_usage and self._reader.done():
                 raise NativeError("Native event reader ended before manual capture")
             guardrail_records = self._checkpoint_guardrail_records(active)
+            if active.tracing is not None:
+                continuation_trace_id = active.tracing.correlation_id()
             # Block replies and suppress expected ShutdownComplete/EOF while
             # Core decides whether it can stop the original writer. Readers
             # must keep dispatching until native capture confirms suspension.
@@ -16918,6 +16994,8 @@ class Session(Generic[ContextT, OutputT]):
             if active is not None:
                 if active.original_input is not None:
                     payload["original_input"] = active.original_input
+                if continuation_trace_id is not None:
+                    payload["continuation_trace_id"] = continuation_trace_id
                 usage = active.run_usage.snapshot()
                 payload["guardrail_results"] = guardrail_records
                 payload["run_usage"] = {

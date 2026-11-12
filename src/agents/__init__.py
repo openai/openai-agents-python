@@ -131,6 +131,7 @@ if TYPE_CHECKING:
         HttpMCP as HttpMCP,
         MCPBlobResourceContents as MCPBlobResourceContents,
         MCPCallContext as MCPCallContext,
+        MCPDiscoveryContext as MCPDiscoveryContext,
         MCPGetPromptResult as MCPGetPromptResult,
         MCPListResourcesResult as MCPListResourcesResult,
         MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
@@ -149,6 +150,7 @@ if TYPE_CHECKING:
         MCPResourceTemplate as MCPResourceTemplate,
         MCPResultContext as MCPResultContext,
         MCPTextResourceContents as MCPTextResourceContents,
+        MCPToolDefinition as MCPToolDefinition,
         StdioMCP as StdioMCP,
     )
     from .model_context import (
@@ -510,6 +512,8 @@ _MODULES = {
     "ToolTimeoutError": "._function_tools",
     "ToolCallInfo": ".tools",
     "MCPCallContext": ".mcp",
+    "MCPDiscoveryContext": ".mcp",
+    "MCPToolDefinition": ".mcp",
     "MCPMetadataContext": ".mcp",
     "function_tool": "._function_tools",
     "Completed": ".session",

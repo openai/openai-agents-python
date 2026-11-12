@@ -1817,7 +1817,7 @@ index cb0334d8..dc17c2f1 100644
          let checkpoint = codex_history::CompactedItem {
              sdk_originals: Some(originals.clone().into()),
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 51493b00..3d4746a0 100644
+index 82d26e0b..0f962223 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -691,6 +691,11 @@ impl Session {
@@ -1915,7 +1915,7 @@ index b06c448a..7582f074 100644
                  let _ = startup.session.set(Arc::clone(&sess));
              }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 57f672f5..771852f0 100644
+index a37bfa50..aab17cd5 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -6645,6 +6645,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {

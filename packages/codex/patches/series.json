@@ -885,9 +885,13 @@
       "sha256": "1a3130959a633e67c297f679c7cf9b275ef4f2105ef375ab19eb9370bf531451"
     },
     {
+      "path": "sdk-mcp-discovery-cache.patch",
+      "sha256": "f70e4a2e85f8928eb8f37a1bfe31a62d647ac08a8a2c9ca8d3c2482ba5712c20"
+    },
+    {
       "path": "sdk-provider-history-lineage.patch",
-      "sha256": "90d7b1b962eb4f4960cf35114f2a7f5181482a83160ae357f21d515f2588b2de"
+      "sha256": "1b9e3c0972d34be57bdd6058cdac59cddee0d117440ee7b08f0b58f6f4069d8c"
     }
   ],
-  "result_tree": "4d4fcb28a73b0ff1a49b66036fb0572c49b1eb9a"
+  "result_tree": "b8a8f089346f95d5a63d88363c8ac35cd5aec6b0"
 }
