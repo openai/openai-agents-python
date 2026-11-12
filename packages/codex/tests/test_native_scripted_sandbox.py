@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,6 +22,10 @@ from tests.native_executor_fixtures import ExecutorPeer
 from tests.test_sandbox_environment import Client, Options
 
 
+@pytest.mark.skipif(
+    sys.platform not in {"linux", "darwin"},
+    reason="Strict executor integration requires Linux or macOS",
+)
 async def test_scripted_commands_and_files_through_native_session_and_cold_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -135,3 +140,28 @@ def test_scripted_resource_does_not_advertise_unconfigured_or_durable_capabiliti
     with pytest.raises(UnconsumedSandboxSteps) as remaining:
         fixture.assert_complete()
     assert remaining.value.remaining_steps == 1
+
+
+@pytest.mark.parametrize("outcome", ["result", "responder", "error"])
+async def test_scripted_patch_consumes_its_fifo_step(outcome: str):
+    seen = []
+    failure = RuntimeError("synthetic patch failure")
+
+    async def respond(call):
+        seen.append(call)
+        return "configured patch output"
+
+    value = {"result": "configured patch output", "responder": respond, "error": failure}[outcome]
+    fixture = scripted_sandbox_session([{"method": "apply_patch", outcome: value}])
+    if outcome == "error":
+        with pytest.raises(RuntimeError, match="synthetic patch failure") as error:
+            await fixture.apply_patch([])
+        assert error.value is failure
+    else:
+        assert await fixture.apply_patch([]) == "configured patch output"
+    fixture.assert_complete()
+    assert len(fixture.calls) == 1
+    assert fixture.calls[0].method == "apply_patch"
+    assert fixture.calls[0].args == ([],)
+    assert fixture.calls[0].kwargs == {"patch_format": "v4a"}
+    assert len(seen) == (outcome == "responder")

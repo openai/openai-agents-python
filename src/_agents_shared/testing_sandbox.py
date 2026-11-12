@@ -14,13 +14,13 @@ from typing_extensions import TypedDict
 
 from _agents_shared.sandbox_session_state import SandboxSessionState
 from _agents_shared.snapshot import NoopSnapshot
-from agents.classic.editor import ApplyPatchOperation
-from agents.classic.sandbox.apply_patch import PatchFormat
+from agents.classic.editor import ApplyPatchOperation as ApplyPatchOperation
+from agents.classic.sandbox.apply_patch import PatchFormat as PatchFormat
 from agents.classic.sandbox.files import FileEntry
 from agents.classic.sandbox.manifest import Manifest
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.classic.sandbox.session.pty_types import PtyExecUpdate
-from agents.classic.sandbox.types import ExecResult, User
+from agents.classic.sandbox.types import ExecResult as ExecResult, User
 
 SandboxMethod = Literal[
     "apply_patch",

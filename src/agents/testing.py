@@ -26,10 +26,9 @@ Dynamic responders select the current default after returning.
 from __future__ import annotations
 
 from _agents_codex.testing import (
+    TYPE_CHECKING as TYPE_CHECKING,
     AbstractAsyncContextManager as AbstractAsyncContextManager,
     BaseHTTPRequestHandler as BaseHTTPRequestHandler,
-    ExecResult as ExecResult,
-    InvalidSandboxStep as InvalidSandboxStep,
     JsonValue as JsonValue,
     Lock as Lock,
     Mapping as Mapping,
@@ -37,22 +36,16 @@ from _agents_codex.testing import (
     NativeProvider as NativeProvider,
     RealtimeConnectCall as RealtimeConnectCall,
     RealtimeStep as RealtimeStep,
-    SandboxCall as SandboxCall,
-    SandboxCallMatcherError as SandboxCallMatcherError,
-    SandboxScriptError as SandboxScriptError,
-    SandboxStepSpec as SandboxStepSpec,
     ScriptedModel as ScriptedModel,
     ScriptedRealtimeAdapter as ScriptedRealtimeAdapter,
     ScriptedResponse as ScriptedResponse,
     ScriptedResponses as ScriptedResponses,
-    ScriptedSandboxSession as ScriptedSandboxSession,
     Sequence as Sequence,
     TCPServer as TCPServer,
     Thread as Thread,
     ThreadingHTTPServer as ThreadingHTTPServer,
     TracebackType as TracebackType,
-    UnconsumedSandboxSteps as UnconsumedSandboxSteps,
-    UnexpectedSandboxCall as UnexpectedSandboxCall,
+    __getattr__ as __getattr__,
     _close_after_error as _close_after_error,
     _Handler as _Handler,
     _join as _join,
@@ -67,12 +60,26 @@ from _agents_codex.testing import (
     event as event,
     json as json,
     partial as partial,
-    scripted_sandbox_session as scripted_sandbox_session,
     socket as socket,
     text as text,
     tool_call as tool_call,
     uuid4 as uuid4,
 )
+
+if TYPE_CHECKING:
+    from _agents_codex.testing_sandbox import (
+        ExecResult as ExecResult,
+        InvalidSandboxStep as InvalidSandboxStep,
+        SandboxCall as SandboxCall,
+        SandboxCallMatcherError as SandboxCallMatcherError,
+        SandboxScriptError as SandboxScriptError,
+        SandboxStepSpec as SandboxStepSpec,
+        ScriptedSandboxSession as ScriptedSandboxSession,
+        UnconsumedSandboxSteps as UnconsumedSandboxSteps,
+        UnexpectedSandboxCall as UnexpectedSandboxCall,
+        scripted_sandbox_session as scripted_sandbox_session,
+    )
+
 
 __all__ = [
     "ExecResult",

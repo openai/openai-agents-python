@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, Literal
 
+from .sandbox import Manifest, SandboxSession
+
+# isort: split
 from _agents_shared.testing_sandbox import (
     _HIDDEN_LIFECYCLE_METHODS,
     _SCRIPTABLE_METHODS,
     _UNSUPPORTED_OPTIONAL_METHODS,
+    ApplyPatchOperation,
+    ExecResult as ExecResult,
     InvalidSandboxStep as InvalidSandboxStep,
+    PatchFormat,
     SandboxCall as SandboxCall,
     SandboxCallMatcherError as SandboxCallMatcherError,
     SandboxScriptError as SandboxScriptError,
@@ -19,9 +25,6 @@ from _agents_shared.testing_sandbox import (
     UnexpectedSandboxCall as UnexpectedSandboxCall,
     scripted_sandbox_session as _scripted_resource,
 )
-from agents.classic.sandbox.manifest import Manifest
-from agents.classic.sandbox.session.sandbox_session import SandboxSession
-from agents.classic.sandbox.types import ExecResult as ExecResult
 
 from ._public import preserve_module_identity as _preserve_module_identity
 
@@ -71,6 +74,18 @@ class ScriptedSandboxSession(SandboxSession):
         resource = self._inner
         assert isinstance(resource, _ScriptedResource)
         return resource.remaining_steps
+
+    async def apply_patch(
+        self,
+        operations: ApplyPatchOperation
+        | dict[str, object]
+        | list[ApplyPatchOperation | dict[str, object]],
+        *,
+        patch_format: PatchFormat | Literal["v4a"] = "v4a",
+    ) -> str:
+        resource = self._inner
+        assert isinstance(resource, _ScriptedResource)
+        return await resource.apply_patch(operations, patch_format=patch_format)
 
     def assert_complete(self) -> None:
         resource = self._inner

@@ -123,6 +123,18 @@ def test_public_modules_only_forward_to_the_runtime(module: str) -> None:
                 target,
             )
             forwarded |= target == "_agents_codex." + module
+        elif isinstance(statement, ast.If):
+            assert module == "testing", path
+            assert isinstance(statement.test, ast.Name) and statement.test.id == "TYPE_CHECKING", (
+                path
+            )
+            assert not statement.orelse, path
+            for declaration in statement.body:
+                assert isinstance(declaration, ast.ImportFrom), path
+                assert (
+                    declaration.level == 0 and declaration.module == "_agents_codex.testing_sandbox"
+                ), path
+                assert all(alias.name == alias.asname for alias in declaration.names), path
         elif isinstance(statement, ast.Assign):
             if (
                 module == "experimental._mcp_tasks_wire"
@@ -692,4 +704,48 @@ assert pickle.loads(pickle.dumps(private.Deferred)) is private.Deferred
         ],
         check=True,
         timeout=30,
+    )
+
+
+def test_testing_model_imports_do_not_require_classic_dependencies() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib.abc
+import sys
+class NoClassic(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'agents.classic' or fullname.split('.')[0] in {
+            'openai', 'griffe', 'requests', 'websockets', 'mcp', 'certifi',
+            'httpx2', 'jwt', 'multipart', 'starlette', 'urllib3'
+        }:
+            raise ModuleNotFoundError('Classic dependency unavailable', name=fullname)
+sys.meta_path.insert(0, NoClassic())
+from agents.testing import ScriptedModel, ScriptedResponses
+assert ScriptedModel is not None and ScriptedResponses is not None
+assert not any(name.startswith('agents.classic') for name in sys.modules)
+assert '_agents_codex.testing_sandbox' not in sys.modules
+""",
+        ],
+        check=True,
+    )
+
+
+def test_scripted_sandbox_import_is_safe_in_a_fresh_process() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from agents.testing import scripted_sandbox_session
+from agents.sandbox import SandboxSession
+resource = scripted_sandbox_session()
+assert isinstance(resource, SandboxSession)
+assert resource.calls == ()
+resource.assert_complete()
+""",
+        ],
+        check=True,
     )
