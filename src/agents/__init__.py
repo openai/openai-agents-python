@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         ApplyPatchEditor as ApplyPatchEditor,
         ApplyPatchOperation as ApplyPatchOperation,
         ApplyPatchResult as ApplyPatchResult,
+        apply_patch_batch_tool as apply_patch_batch_tool,
         apply_patch_tool as apply_patch_tool,
     )
     from .canonical_storage import (
@@ -58,6 +59,10 @@ if TYPE_CHECKING:
         ComputerProvider as ComputerProvider,
         ComputerSafetyError as ComputerSafetyError,
         computer_tool as computer_tool,
+    )
+    from .conversations import (
+        ConversationsHistory as ConversationsHistory,
+        ConversationsWriteError as ConversationsWriteError,
     )
     from .decisions import (
         DecisionError as DecisionError,
@@ -356,6 +361,8 @@ _MODULES = {
     "LocalStorage": ".state",
     "AsyncSQLAlchemySessionStore": ".canonical_storage",
     "CustomStorage": ".canonical_storage",
+    "ConversationsHistory": ".conversations",
+    "ConversationsWriteError": ".conversations",
     "DaprSessionStore": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
     "MongoDBSessionStore": ".canonical_storage",
@@ -409,6 +416,7 @@ _MODULES = {
     "ApplyPatchEditor": ".apply_patch",
     "ApplyPatchOperation": ".apply_patch",
     "ApplyPatchResult": ".apply_patch",
+    "apply_patch_batch_tool": ".apply_patch",
     "apply_patch_tool": ".apply_patch",
     "Computer": ".computer",
     "ComputerProvider": ".computer",

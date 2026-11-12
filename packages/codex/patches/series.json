@@ -741,9 +741,13 @@
       "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
     },
     {
+      "path": "sdk-realtime-vad-provider-data.patch",
+      "sha256": "bb38997bdffe09280acb438f7e31ae6e7b0a609f85c2ac072340b8a8dc7cb729"
+    },
+    {
       "path": "sdk-native-sandbox-operation-events.patch",
-      "sha256": "a7b909514a885fbd7a292e1f8f62e8904528d1b2a7b3afdfbe512427cee8aa70"
+      "sha256": "1d7c7fec2d0faf1956b48dfd7e48b135f3847748d88efb1835b233e39df2f765"
     }
   ],
-  "result_tree": "c3fcd0a1807a690cc8ed00f6895f3fb190cff8a5"
+  "result_tree": "ae42be67ce031a463e5586160241cbabe6ef8a5a"
 }

@@ -85,7 +85,8 @@ pub(super) fn on_finish(input: &ToolFinishInput<'_>) {
         && let Some(duration) = input.builtin_sandbox_duration
         && let Some(tools) = input.thread_store.get::<PythonTools>()
     {
-        let ok = matches!(input.outcome, ToolCallOutcome::Completed { success: true });
+        let ok = matches!(input.outcome, ToolCallOutcome::Completed { success: true })
+            && input.builtin_sandbox_exit_code.is_none_or(|code| code == 0);
         publish(
             &tools,
             operation,

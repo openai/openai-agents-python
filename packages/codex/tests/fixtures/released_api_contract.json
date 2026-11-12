@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "ef2816ec842aa1862420c610d169764da260c7bb",
+  "baseline_commit": "958cb07d8471a5641c9cf1d674197f98cf19d369",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -113,12 +113,14 @@
           "@dataclass(frozen=True)\nclass ApplyPatchOperation:\n    type: Literal['create_file', 'update_file', 'delete_file']\n    path: str\n    diff: str | None = None\n    move_to: str | None = None\n    ctx_wrapper: ToolContext[Any] | None = field(default=None, repr=False, compare=False)",
           "@dataclass(frozen=True)\nclass ApplyPatchResult:\n    status: Literal['completed', 'failed'] | None = None\n    output: str | None = None",
           "class ApplyPatchEditor(Protocol):\n\n    def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass\n\n    def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass\n\n    def delete_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass",
-          "def apply_patch_tool(editor: ApplyPatchEditor, *, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False) -> FunctionTool[Any, ToolOutput, Any]:\n    pass"
+          "def apply_patch_tool(editor: ApplyPatchEditor, *, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False) -> FunctionTool[Any, ToolOutput, Any]:\n    pass",
+          "def apply_patch_batch_tool(editor: ApplyPatchEditor, *, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False) -> FunctionTool[Any, ToolOutput, Any]:\n    pass"
         ],
         "exports": {
           "ApplyPatchEditor": "agents.apply_patch.ApplyPatchEditor",
           "ApplyPatchOperation": "agents.apply_patch.ApplyPatchOperation",
           "ApplyPatchResult": "agents.apply_patch.ApplyPatchResult",
+          "apply_patch_batch_tool": "agents.apply_patch.apply_patch_batch_tool",
           "apply_patch_tool": "agents.apply_patch.apply_patch_tool"
         },
         "imports": [
@@ -326,6 +328,30 @@
           "from typing_extensions import TypeAliasType"
         ],
         "references": {}
+      },
+      "agents.conversations": {
+        "declarations": [
+          "OutputT = TypeVar('OutputT')",
+          "class ConversationsWriteError(RuntimeError):\n\n    def __init__(self, conversation_id: str, items: tuple[dict[str, Any], ...], acknowledged: int) -> None:\n        pass",
+          "class ConversationsHistory:\n\n    def __init__(self, client: AsyncOpenAI, *, conversation_id: str | None=None) -> None:\n        pass\n\n    @property\n    def conversation_id(self) -> str | None:\n        pass\n\n    async def get_conversation_id(self) -> str:\n        pass\n\n    async def get_items(self, limit: int | None=None) -> list[dict[str, Any]]:\n        pass\n\n    async def add_items(self, items: Sequence[Mapping[str, Any]]) -> None:\n        pass\n\n    async def pop_item(self) -> dict[str, Any] | None:\n        pass\n\n    async def clear(self) -> None:\n        pass\n\n    async def run(self, agent: Agent[Any, OutputT], input: UserInput, **session_options: Any) -> Completed[OutputT]:\n        pass"
+        ],
+        "exports": {
+          "ConversationsHistory": "_agents_codex.conversations.ConversationsHistory",
+          "ConversationsWriteError": "_agents_codex.conversations.ConversationsWriteError"
+        },
+        "imports": [
+          "from collections.abc import Mapping, Sequence",
+          "from typing import Any, TypeVar",
+          "from openai import AsyncOpenAI",
+          "from .agent import Agent",
+          "from .input import UserInput",
+          "from .session import Completed"
+        ],
+        "references": {
+          "Agent": "agents.agent.Agent",
+          "Completed": "agents.session.Completed",
+          "UserInput": "agents.input.UserInput"
+        }
       },
       "agents.decisions": {
         "declarations": [
@@ -2074,6 +2100,8 @@
       "ComputerProvider": "agents.computer.ComputerProvider",
       "ComputerSafetyError": "agents.computer.ComputerSafetyError",
       "ContinueTurn": "agents.completion.ContinueTurn",
+      "ConversationsHistory": "agents.conversations.ConversationsHistory",
+      "ConversationsWriteError": "agents.conversations.ConversationsWriteError",
       "CustomStorage": "agents.canonical_storage.CustomStorage",
       "DaprSessionStore": "agents.canonical_storage.DaprSessionStore",
       "DecisionError": "agents.decisions.DecisionError",
@@ -2230,6 +2258,7 @@
       "VerificationProof": "agents.manual.VerificationProof",
       "VerificationRequest": "agents.manual.VerificationRequest",
       "WebSearch": "agents.tools.WebSearch",
+      "apply_patch_batch_tool": "agents.apply_patch.apply_patch_batch_tool",
       "apply_patch_tool": "agents.apply_patch.apply_patch_tool",
       "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
@@ -2458,8 +2487,8 @@
         "declarations": [
           "class NativeRealtimeTranscription(TypedDict, total=False):\n    model: str\n    language: str\n    prompt: str\n    keywords: list[str]\n    languages: list[str]\n    delay: Literal['minimal', 'low', 'medium', 'high', 'xhigh']",
           "class NativeRealtimeNoiseReduction(TypedDict):\n    type: Literal['near_field', 'far_field']",
-          "class NativeRealtimeServerVad(TypedDict, total=False):\n    type: Required[Literal['server_vad']]\n    create_response: bool\n    interrupt_response: bool\n    threshold: float\n    prefix_padding_ms: int\n    silence_duration_ms: int\n    idle_timeout_ms: int\n    model_version: str",
-          "class NativeRealtimeSemanticVad(TypedDict, total=False):\n    type: Required[Literal['semantic_vad']]\n    create_response: bool\n    interrupt_response: bool\n    eagerness: Literal['auto', 'low', 'medium', 'high']\n    model_version: str",
+          "class NativeRealtimeServerVad(TypedDict, total=False):\n    type: Required[Literal['server_vad']]\n    create_response: bool\n    interrupt_response: bool\n    threshold: float\n    prefix_padding_ms: int\n    silence_duration_ms: int\n    idle_timeout_ms: int\n    model_version: str\n    provider_data: dict[str, Any] | None",
+          "class NativeRealtimeSemanticVad(TypedDict, total=False):\n    type: Required[Literal['semantic_vad']]\n    create_response: bool\n    interrupt_response: bool\n    eagerness: Literal['auto', 'low', 'medium', 'high']\n    model_version: str\n    provider_data: dict[str, Any] | None",
           "class NativeRealtimeCustomVoice(TypedDict):\n    id: str",
           "class NativeRealtimePromptText(TypedDict):\n    type: Literal['input_text']\n    text: str",
           "class NativeRealtimePromptImage(TypedDict, total=False):\n    type: Required[Literal['input_image']]\n    image_url: str\n    file_id: str\n    detail: Literal['auto', 'low', 'high', 'original']",
@@ -4952,6 +4981,8 @@
       "ComputerProvider",
       "ComputerSafetyError",
       "ContinueTurn",
+      "ConversationsHistory",
+      "ConversationsWriteError",
       "CustomStorage",
       "DaprSessionStore",
       "DecisionError",
@@ -5108,6 +5139,7 @@
       "VerificationProof",
       "VerificationRequest",
       "WebSearch",
+      "apply_patch_batch_tool",
       "apply_patch_tool",
       "computer_tool",
       "function_tool",
@@ -5120,11 +5152,12 @@
       "from ._tool_errors import ToolErrorContext as ToolErrorContext, ToolErrorFormatter as ToolErrorFormatter",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
-      "from .apply_patch import ApplyPatchEditor as ApplyPatchEditor, ApplyPatchOperation as ApplyPatchOperation, ApplyPatchResult as ApplyPatchResult, apply_patch_tool as apply_patch_tool",
+      "from .apply_patch import ApplyPatchEditor as ApplyPatchEditor, ApplyPatchOperation as ApplyPatchOperation, ApplyPatchResult as ApplyPatchResult, apply_patch_batch_tool as apply_patch_batch_tool, apply_patch_tool as apply_patch_tool",
       "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn, FinishToolBatch as FinishToolBatch, ToolBatchCompletionContext as ToolBatchCompletionContext, ToolBatchResult as ToolBatchResult",
       "from .computer import Computer as Computer, ComputerProvider as ComputerProvider, ComputerSafetyError as ComputerSafetyError, computer_tool as computer_tool",
+      "from .conversations import ConversationsHistory as ConversationsHistory, ConversationsWriteError as ConversationsWriteError",
       "from .decisions import DecisionError as DecisionError, DecisionInput as DecisionInput, DecisionProvider as DecisionProvider, DecisionRequest as DecisionRequest, DecisionResponse as DecisionResponse, OpenAIDecisions as OpenAIDecisions",
       "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",
       "from .guardrails import GuardrailRecord as GuardrailRecord, GuardrailResult as GuardrailResult, GuardrailTripwire as GuardrailTripwire, InputGuardrail as InputGuardrail, OutputGuardrail as OutputGuardrail",
