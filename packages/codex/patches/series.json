@@ -739,7 +739,11 @@
     {
       "path": "sdk-application-model-raw-events.patch",
       "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
+    },
+    {
+      "path": "sdk-realtime-vad-provider-data.patch",
+      "sha256": "bb38997bdffe09280acb438f7e31ae6e7b0a609f85c2ac072340b8a8dc7cb729"
     }
   ],
-  "result_tree": "eb3c756f20d7f0bc0822378f58894872a2acf1bb"
+  "result_tree": "4a5d85f1b98149be51d8dd6f05c0bcff16d6a137"
 }
