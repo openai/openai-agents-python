@@ -1,0 +1,726 @@
+diff --git a/codex-rs/state/migrations/0060_threads_retired.sql b/codex-rs/state/migrations/0060_threads_retired.sql
+new file mode 100644
+index 00000000..28b954fb
+--- /dev/null
++++ b/codex-rs/state/migrations/0060_threads_retired.sql
+@@ -0,0 +1,2 @@
++-- Retain logical IDs and shared journals after explicit owner retirement.
++ALTER TABLE threads ADD COLUMN is_retired INTEGER NOT NULL DEFAULT 0 CHECK (is_retired IN (0, 1));
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index f534fd61..89d4f759 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -6,6 +6,30 @@ use std::sync::atomic::AtomicI64;
+ use std::sync::atomic::Ordering;
+ 
+ impl StateRuntime {
++    /// Permanently retires an existing logical owner without removing shared rollout data.
++    /// Ordinary metadata upserts intentionally omit this insert-default-only column.
++    pub async fn retire_thread_owner(&self, id: ThreadId) -> anyhow::Result<bool> {
++        Ok(
++            sqlx::query("UPDATE threads SET is_retired = 1 WHERE id = ? AND is_retired = 0")
++                .bind(id.to_string())
++                .execute(self.pool.as_ref())
++                .await?
++                .rows_affected()
++                == 1,
++        )
++    }
++
++    pub async fn is_thread_retired(&self, id: ThreadId) -> anyhow::Result<bool> {
++        Ok(
++            sqlx::query_scalar::<_, i64>("SELECT is_retired FROM threads WHERE id = ?")
++                .bind(id.to_string())
++                .fetch_optional(self.pool.as_ref())
++                .await?
++                .unwrap_or(0)
++                != 0,
++        )
++    }
++
+     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
+         let row = sqlx::query(
+             r#"
+@@ -56,7 +80,7 @@ SELECT
+     threads.git_branch,
+     threads.git_origin_url
+ FROM threads
+-WHERE threads.id = ?
++WHERE threads.id = ? AND threads.is_retired = 0
+             "#,
+         )
+         .bind(id.to_string())
+@@ -1188,11 +1212,18 @@ ON CONFLICT(id) DO UPDATE SET
+             return Ok(0);
+         }
+ 
+-        let thread_id_strings = thread_ids
++        // Retired rows reserve their IDs and retain data needed by surviving lineage.
++        let mut active_thread_ids = Vec::new();
++        for thread_id in thread_ids {
++            if !self.is_thread_retired(*thread_id).await? {
++                active_thread_ids.push(*thread_id);
++            }
++        }
++        let thread_id_strings = active_thread_ids
+             .iter()
+             .map(ThreadId::to_string)
+             .collect::<Vec<_>>();
+-        for (thread_id, thread_id_string) in thread_ids.iter().zip(&thread_id_strings) {
++        for (thread_id, thread_id_string) in active_thread_ids.iter().zip(&thread_id_strings) {
+             sqlx::query("DELETE FROM logs WHERE thread_id = ?")
+                 .bind(thread_id_string)
+                 .execute(self.logs_pool.as_ref())
+@@ -1220,7 +1251,7 @@ ON CONFLICT(id) DO UPDATE SET
+         }
+         let mut rows_affected = 0;
+         for thread_id_string in &thread_id_strings {
+-            rows_affected += sqlx::query("DELETE FROM threads WHERE id = ?")
++            rows_affected += sqlx::query("DELETE FROM threads WHERE id = ? AND is_retired = 0")
+                 .bind(thread_id_string)
+                 .execute(&mut *tx)
+                 .await?
+@@ -1466,7 +1497,7 @@ fn push_thread_filters_with_preview<'a>(
+         sort_direction,
+         search_term,
+     } = options;
+-    builder.push(" WHERE 1 = 1");
++    builder.push(" WHERE threads.is_retired = 0");
+     if archived_only {
+         builder.push(" AND threads.archived = 1");
+     } else {
+@@ -1641,6 +1672,36 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use std::path::PathBuf;
+ 
++    #[tokio::test]
++    async fn retired_thread_owner_survives_upsert_and_metadata_deletion() {
++        let home = unique_temp_dir();
++        let runtime = StateRuntime::init(
++            crate::SqliteConfig::new_for_testing(home.as_path().abs()),
++            "test-provider".to_string(),
++        )
++        .await
++        .expect("state database");
++        let id = ThreadId::new();
++        let mut metadata = test_thread_metadata(&home, id, home.clone());
++        runtime
++            .upsert_thread(&metadata)
++            .await
++            .expect("initial owner");
++        assert!(runtime.get_thread(id).await.unwrap().is_some());
++        assert!(runtime.retire_thread_owner(id).await.unwrap());
++        assert!(runtime.get_thread(id).await.unwrap().is_none());
++        metadata.title = "stale metadata refresh".to_string();
++        runtime
++            .upsert_thread(&metadata)
++            .await
++            .expect("ordinary reconciliation");
++        assert!(runtime.is_thread_retired(id).await.unwrap());
++        assert!(runtime.get_thread(id).await.unwrap().is_none());
++        assert_eq!(runtime.delete_threads_strict(&[id]).await.unwrap(), 0);
++        assert!(runtime.is_thread_retired(id).await.unwrap());
++        assert!(!runtime.retire_thread_owner(id).await.unwrap());
++    }
++
+     const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
+     #[tokio::test]
+     async fn upsert_thread_keeps_creation_memory_mode_for_existing_rows() {
+diff --git a/codex-rs/thread-store/src/local/archive_thread.rs b/codex-rs/thread-store/src/local/archive_thread.rs
+index 397ab0f9..cf6f0bcd 100644
+--- a/codex-rs/thread-store/src/local/archive_thread.rs
++++ b/codex-rs/thread-store/src/local/archive_thread.rs
+@@ -39,6 +39,9 @@ pub(super) async fn archive_threads(
+         }
+     }
+     let _writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
++    for thread_id in &thread_ids {
++        store.check_thread_not_retired(*thread_id).await?;
++    }
+     // Only inspect active files whose names belong to the threads being archived.
+     let reference_index = RolloutReferenceIndex::scan_unarchived_threads(
+         store.config.codex_home.as_path(),
+diff --git a/codex-rs/thread-store/src/local/delete_thread.rs b/codex-rs/thread-store/src/local/delete_thread.rs
+index 75e55ef8..215ad063 100644
+--- a/codex-rs/thread-store/src/local/delete_thread.rs
++++ b/codex-rs/thread-store/src/local/delete_thread.rs
+@@ -70,10 +70,12 @@ pub(super) async fn delete_thread(
+     let thread_id = params.thread_id;
+     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     let reference_index = scan_reference_index(store).await?;
+     let thread_rollouts = ThreadRollouts::from_index(&reference_index, thread_id);
+     ensure_no_external_references(&reference_index, std::slice::from_ref(&thread_rollouts))?;
+     let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
++    store.check_thread_not_retired(thread_id).await?;
+     if let Some(cleanup) = &store.thread_data_cleanup {
+         cleanup(vec![thread_id]).await?;
+     }
+@@ -111,6 +113,7 @@ pub(super) async fn delete_threads(
+     let mut _live_writer_guards = Vec::with_capacity(lock_thread_ids.len());
+     for &thread_id in &lock_thread_ids {
+         _live_writer_guards.push(store.live_writer_locks.lock(thread_id).await);
++        store.check_thread_not_retired(thread_id).await?;
+     }
+ 
+     let reference_index = scan_reference_index(store).await?;
+@@ -121,6 +124,9 @@ pub(super) async fn delete_threads(
+     ensure_no_external_references(&reference_index, thread_rollouts.as_slice())?;
+ 
+     let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
++    for thread_id in &thread_ids {
++        store.check_thread_not_retired(*thread_id).await?;
++    }
+     if let Some(cleanup) = &store.thread_data_cleanup {
+         cleanup(thread_ids.clone()).await?;
+     }
+diff --git a/codex-rs/thread-store/src/local/list_threads.rs b/codex-rs/thread-store/src/local/list_threads.rs
+index 8256cf93..bad31214 100644
+--- a/codex-rs/thread-store/src/local/list_threads.rs
++++ b/codex-rs/thread-store/src/local/list_threads.rs
+@@ -99,6 +99,15 @@ async fn list_threads_impl(
+         })
+         .collect::<Vec<_>>();
+ 
++    let mut visible = Vec::with_capacity(items.len());
++    for thread in items {
++        match store.check_thread_not_retired(thread.thread_id).await {
++            Ok(()) => visible.push(thread),
++            Err(ThreadStoreError::ThreadNotFound { .. }) => {}
++            Err(error) => return Err(error),
++        }
++    }
++    items = visible;
+     let thread_history_modes = items
+         .iter()
+         .map(|thread| (thread.thread_id, thread.history_mode))
+diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
+index e1b49e82..17be7707 100644
+--- a/codex-rs/thread-store/src/local/live_writer.rs
++++ b/codex-rs/thread-store/src/local/live_writer.rs
+@@ -28,9 +28,12 @@ pub(super) async fn create_thread(
+ ) -> ThreadStoreResult<()> {
+     let thread_id = params.thread_id;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     let history_mode = params.history_mode;
+     store.ensure_live_recorder_absent(thread_id).await?;
++    // Recheck under the cross-process writer fence before creating a durable owner.
+     let writer_lock = store.acquire_writer_lock(thread_id)?;
++    store.check_thread_not_retired(thread_id).await?;
+     let recorder = create_thread::create_thread(store, params, writer_lock.clone()).await?;
+     store
+         .insert_live_recorder(thread_id, recorder, thread_id, history_mode, writer_lock)
+@@ -42,8 +45,10 @@ pub(super) async fn resume_thread(
+     params: ResumeThreadParams,
+ ) -> ThreadStoreResult<Arc<Vec<RolloutItem>>> {
+     let _live_writer_guard = store.live_writer_locks.lock(params.thread_id).await;
++    store.check_thread_not_retired(params.thread_id).await?;
+     store.ensure_live_recorder_absent(params.thread_id).await?;
+     let writer_lock = store.acquire_writer_lock(params.thread_id)?;
++    store.check_thread_not_retired(params.thread_id).await?;
+     let rollout_path = match params.rollout_path {
+         Some(rollout_path) => rollout_path,
+         None => {
+@@ -72,6 +77,14 @@ pub(super) async fn resume_thread(
+             message: format!("thread {} is archived", params.thread_id),
+         });
+     }
++    let header = codex_rollout::read_session_meta_line(&rollout_path)
++        .await
++        .map_err(thread_store_io_error)?;
++    if header.meta.id != params.thread_id {
++        return Err(ThreadStoreError::InvalidRequest {
++            message: "rollout path does not belong to the requested thread".to_string(),
++        });
++    }
+     let history = match params.history {
+         Some(history)
+             if !matches!(
+@@ -218,6 +231,7 @@ pub(super) async fn discard_thread(
+ ) -> ThreadStoreResult<()> {
+     let mut pending_metadata = store.pending_thread_metadata.lock(thread_id).await;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     if pending_metadata.take().is_some() {
+         store.pending_thread_metadata.remove(thread_id).await;
+     }
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 0611d061..82b61b85 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -11,6 +11,7 @@ mod paginated_fork;
+ mod pending_thread_metadata;
+ mod projects;
+ mod read_thread;
++mod retired_owner;
+ mod revert_thread;
+ mod rollout_migration;
+ // This lands before the reader PRs that consume the shared lineage resolver.
+@@ -398,6 +399,7 @@ impl LocalThreadStore {
+         &self,
+         params: LoadThreadHistoryParams,
+     ) -> ThreadStoreResult<StoredThreadHistory> {
++        self.check_thread_not_retired(params.thread_id).await?;
+         if let Ok(rollout_path) = live_writer::rollout_path(self, params.thread_id).await {
+             if !params.include_archived
+                 && helpers::rollout_path_is_archived(
+@@ -506,6 +508,7 @@ impl ThreadStore for LocalThreadStore {
+                     message: "pending thread metadata cannot set rollout_path".to_string(),
+                 });
+             }
++            self.check_thread_not_retired(thread_id).await?;
+             self.pending_thread_metadata.stage(thread_id, patch).await
+         })
+     }
+@@ -2447,6 +2450,7 @@ impl LocalThreadStore {
+         &self,
+         params: LoadThreadHistoryParams,
+     ) -> ThreadStoreResult<Vec<crate::OriginalHistorySegment>> {
++        self.check_thread_not_retired(params.thread_id).await?;
+         let path = if let Ok(path) = live_writer::rollout_path(self, params.thread_id).await {
+             if !params.include_archived
+                 && helpers::rollout_path_is_archived(
+diff --git a/codex-rs/thread-store/src/local/paginated_fork.rs b/codex-rs/thread-store/src/local/paginated_fork.rs
+index 0b140912..155603cc 100644
+--- a/codex-rs/thread-store/src/local/paginated_fork.rs
++++ b/codex-rs/thread-store/src/local/paginated_fork.rs
+@@ -21,6 +21,7 @@ pub(super) async fn prepare(
+         boundary,
+     } = params;
+     let source_reservation = store.live_writer_locks.reserve_lifecycle(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     // Keep the source reserved until persistence and lineage materialization finish, even if the
+     // caller cancels fork preparation.
+     let lineage_store = store.clone();
+diff --git a/codex-rs/thread-store/src/local/read_thread.rs b/codex-rs/thread-store/src/local/read_thread.rs
+index 3401702d..d784f79a 100644
+--- a/codex-rs/thread-store/src/local/read_thread.rs
++++ b/codex-rs/thread-store/src/local/read_thread.rs
+@@ -33,6 +33,7 @@ pub(super) async fn read_thread(
+     params: ReadThreadParams,
+ ) -> ThreadStoreResult<StoredThread> {
+     let thread_id = params.thread_id;
++    store.check_thread_not_retired(thread_id).await?;
+     let sqlite_metadata = read_sqlite_metadata(store, thread_id).await;
+     let persisted_model_settings = sqlite_metadata
+         .as_ref()
+@@ -140,6 +141,7 @@ pub(super) async fn read_thread_by_rollout_path(
+ ) -> ThreadStoreResult<StoredThread> {
+     let path = resolve_requested_rollout_path(store, rollout_path).await?;
+     let mut thread = read_thread_from_rollout_path(store, path.clone()).await?;
++    store.check_thread_not_retired(thread.thread_id).await?;
+     if !include_archived && thread.archived_at.is_some() {
+         return Err(ThreadStoreError::InvalidRequest {
+             message: format!("thread {} is archived", thread.thread_id),
+diff --git a/codex-rs/thread-store/src/local/retired_owner.rs b/codex-rs/thread-store/src/local/retired_owner.rs
+new file mode 100644
+index 00000000..ba5a0d45
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/retired_owner.rs
+@@ -0,0 +1,50 @@
++//! Logical owner retirement; immutable shared rollout IDs remain readable by descendants.
++
++use codex_protocol::ThreadId;
++
++use super::LocalThreadStore;
++use crate::ThreadStoreError;
++use crate::ThreadStoreResult;
++
++impl LocalThreadStore {
++    /// Retires only the public owner. This does not promise physical erasure of shared data.
++    pub async fn retire_thread_owner(&self, thread_id: ThreadId) -> ThreadStoreResult<()> {
++        let _lifecycle = self.live_writer_locks.lock_lifecycle(thread_id).await;
++        let _writer = self.live_writer_locks.lock(thread_id).await;
++        self.ensure_live_recorder_absent(thread_id).await?;
++        let _writer_lock = self.acquire_writer_lock(thread_id)?;
++        let state = self.state_db().await.ok_or(ThreadStoreError::Unsupported {
++            operation: "retire_thread_owner",
++        })?;
++        if !state
++            .retire_thread_owner(thread_id)
++            .await
++            .map_err(|error| ThreadStoreError::Internal {
++                message: format!("failed to retire stored thread owner: {error}"),
++            })?
++        {
++            return Err(ThreadStoreError::ThreadNotFound { thread_id });
++        }
++        Ok(())
++    }
++
++    pub(super) async fn check_thread_not_retired(
++        &self,
++        thread_id: ThreadId,
++    ) -> ThreadStoreResult<()> {
++        if let Some(state) = self.state_db().await
++            && state.is_thread_retired(thread_id).await.map_err(|error| {
++                ThreadStoreError::Internal {
++                    message: format!("failed to read stored thread retirement: {error}"),
++                }
++            })?
++        {
++            return Err(ThreadStoreError::ThreadNotFound { thread_id });
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++#[path = "retired_owner_tests.rs"]
++mod tests;
+diff --git a/codex-rs/thread-store/src/local/retired_owner_tests.rs b/codex-rs/thread-store/src/local/retired_owner_tests.rs
+new file mode 100644
+index 00000000..ca416f04
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/retired_owner_tests.rs
+@@ -0,0 +1,295 @@
++use std::sync::Arc;
++use std::time::Duration;
++
++use codex_protocol::ThreadId;
++use codex_protocol::models::BaseInstructions;
++use codex_protocol::protocol::{SessionSource, ThreadHistoryMode, ThreadMemoryMode};
++use codex_rollout::RolloutItem;
++use codex_utils_absolute_path::test_support::PathExt;
++use tempfile::TempDir;
++
++use super::super::LocalThreadStore;
++use super::super::test_support::test_config;
++use crate::{
++    AppendThreadItemsParams, CreateThreadParams, DeleteThreadParams, ForkBoundary,
++    ListThreadsParams, LoadThreadHistoryParams, PersistContext, PrepareForkParams,
++    ReadThreadByRolloutPathParams, ReadThreadParams, ResumeThreadParams, SortDirection,
++    ThreadPersistenceMetadata, ThreadSortKey, ThreadStore,
++};
++
++fn metadata() -> ThreadPersistenceMetadata {
++    ThreadPersistenceMetadata {
++        cwd: Some(std::env::current_dir().unwrap()),
++        model_provider: "test-provider".to_string(),
++        memory_mode: ThreadMemoryMode::Disabled,
++    }
++}
++
++fn create(store: &LocalThreadStore, id: ThreadId) -> CreateThreadParams {
++    CreateThreadParams {
++        sdk_mcp_source_required: true,
++        creator_user_id: None,
++        creator_account_id: None,
++        session_id: id.into(),
++        thread_id: id,
++        extra_config: None,
++        forked_from_id: None,
++        parent_thread_id: None,
++        source: SessionSource::Exec,
++        thread_source: None,
++        originator: "retirement-test".to_string(),
++        base_instructions: BaseInstructions::default(),
++        dynamic_tools: Vec::new(),
++        selected_capability_roots: Vec::new(),
++        multi_agent_version: None,
++        history_mode: ThreadHistoryMode::Paginated,
++        history_base: None,
++        subagent_history_start_ordinal: None,
++        initial_window_id: "window-1".to_string(),
++        runtime_workspace_roots: Some(vec![store.config.codex_home.join("workspace").abs()]),
++        metadata: metadata(),
++    }
++}
++
++fn listing(archived: bool) -> ListThreadsParams {
++    ListThreadsParams {
++        page_size: 10,
++        cursor: None,
++        sort_key: ThreadSortKey::CreatedAt,
++        sort_direction: SortDirection::Asc,
++        allowed_sources: vec![SessionSource::Exec],
++        model_providers: Some(Vec::new()),
++        cwd_filters: None,
++        section: None,
++        project_id: None,
++        archived,
++        search_term: None,
++        relation_filter: None,
++        use_state_db_only: true,
++    }
++}
++
++#[tokio::test]
++async fn retirement_preserves_child_checkpoint_but_rejects_source_paths_and_id_reuse() {
++    let home = TempDir::new().unwrap();
++    let config = test_config(home.path());
++    let db = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .unwrap();
++    let store = LocalThreadStore::new(config, Some(db));
++    let source = ThreadId::new();
++    store.create_thread(create(&store, source)).await.unwrap();
++    let message = serde_json::from_value(serde_json::json!({
++        "type":"message", "role":"user",
++        "content":[{"type":"input_text","text":"shared original 😀"}]
++    }))
++    .unwrap();
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id: source,
++            items: vec![RolloutItem::ResponseItem(message)],
++        })
++        .await
++        .unwrap();
++    store
++        .persist_thread(source, PersistContext::Standard)
++        .await
++        .unwrap();
++    let source_path = store.live_rollout_path(source).await.unwrap();
++    store.shutdown_thread(source).await.unwrap();
++    let prepared = store
++        .prepare_fork(PrepareForkParams {
++            thread_id: source,
++            boundary: ForkBoundary::Latest,
++        })
++        .await
++        .unwrap();
++    let child = ThreadId::new();
++    let mut child_params = create(&store, child);
++    child_params.forked_from_id = Some(source);
++    child_params.history_base = prepared.history_base;
++    store.create_thread(child_params).await.unwrap();
++    store
++        .persist_thread(child, PersistContext::Standard)
++        .await
++        .unwrap();
++    let child_path = store.live_rollout_path(child).await.unwrap();
++    store.shutdown_thread(child).await.unwrap();
++    drop(prepared);
++    let original = store
++        .load_original_history(LoadThreadHistoryParams {
++            thread_id: child,
++            include_archived: true,
++        })
++        .await
++        .unwrap();
++    let saved_child = Arc::new(
++        store
++            .load_latest_model_context(LoadThreadHistoryParams {
++                thread_id: child,
++                include_archived: true,
++            })
++            .await
++            .unwrap()
++            .items,
++    );
++    let saved_revision = super::super::history_revision::read(&child_path)
++        .await
++        .unwrap();
++    let source_bytes = tokio::fs::read(&source_path).await.unwrap();
++    let child_bytes = tokio::fs::read(&child_path).await.unwrap();
++    assert!(
++        store
++            .delete_thread(DeleteThreadParams { thread_id: source })
++            .await
++            .is_err()
++    );
++
++    // Same existing fork reservation order as archive/delete: no early owner retirement.
++    let reservation = store.live_writer_locks.reserve_lifecycle(source).await;
++    let mut retire = Box::pin(store.retire_thread_owner(source));
++    tokio::select! {
++        biased;
++        result = &mut retire => panic!("retirement passed a pending fork reservation: {result:?}"),
++        _ = tokio::task::yield_now() => {}
++    }
++    let writer = tokio::time::timeout(Duration::from_secs(1), store.live_writer_locks.lock(source))
++        .await
++        .expect("waiting retirement must not take the writer lock first");
++    drop(writer);
++    drop(reservation);
++    retire.await.unwrap();
++
++    assert_eq!(tokio::fs::read(&source_path).await.unwrap(), source_bytes);
++    assert_eq!(tokio::fs::read(&child_path).await.unwrap(), child_bytes);
++    assert_eq!(
++        super::super::history_revision::read(&child_path)
++            .await
++            .as_deref(),
++        Some(saved_revision.as_str())
++    );
++    assert!(
++        store
++            .read_thread(ReadThreadParams {
++                thread_id: source,
++                include_archived: true,
++                include_history: false
++            })
++            .await
++            .is_err()
++    );
++    assert!(
++        ThreadStore::read_thread_by_rollout_path(
++            &store,
++            ReadThreadByRolloutPathParams {
++                rollout_path: source_path.clone(),
++                include_archived: true,
++                include_history: false,
++            }
++        )
++        .await
++        .is_err()
++    );
++    assert!(
++        store
++            .resume_thread(ResumeThreadParams {
++                thread_id: source,
++                rollout_path: Some(source_path),
++                history: None,
++                history_revision: None,
++                include_archived: true,
++                metadata: metadata(),
++            })
++            .await
++            .is_err()
++    );
++    assert!(store.create_thread(create(&store, source)).await.is_err());
++    let page = store
++        .list_threads_including_empty_preview(listing(false))
++        .await
++        .unwrap();
++    assert_eq!(
++        page.items
++            .iter()
++            .map(|thread| thread.thread_id)
++            .collect::<Vec<_>>(),
++        vec![child]
++    );
++    assert!(
++        store
++            .list_threads_including_empty_preview(listing(true))
++            .await
++            .unwrap()
++            .items
++            .is_empty()
++    );
++    let cold = store
++        .load_original_history(LoadThreadHistoryParams {
++            thread_id: child,
++            include_archived: true,
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        serde_json::to_value(&cold.items).unwrap(),
++        serde_json::to_value(&original.items).unwrap()
++    );
++    let resumed = store
++        .resume_thread(ResumeThreadParams {
++            thread_id: child,
++            rollout_path: Some(child_path),
++            history: Some(saved_child.clone()),
++            history_revision: Some(saved_revision),
++            include_archived: true,
++            metadata: metadata(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        serde_json::to_value(&*resumed).unwrap(),
++        serde_json::to_value(&*saved_child).unwrap()
++    );
++    store.shutdown_thread(child).await.unwrap();
++}
++
++#[tokio::test]
++async fn supplied_history_cannot_resume_another_owners_retired_rollout() {
++    let home = TempDir::new().unwrap();
++    let config = test_config(home.path());
++    let db = codex_state::StateRuntime::init(
++        config.sqlite.clone(),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .unwrap();
++    let store = LocalThreadStore::new(config, Some(db));
++    let source = ThreadId::new();
++    store.create_thread(create(&store, source)).await.unwrap();
++    store
++        .persist_thread(source, PersistContext::Standard)
++        .await
++        .unwrap();
++    let source_path = store.live_rollout_path(source).await.unwrap();
++    store.shutdown_thread(source).await.unwrap();
++    store.retire_thread_owner(source).await.unwrap();
++    let bytes = tokio::fs::read(&source_path).await.unwrap();
++    let error = store
++        .resume_thread(ResumeThreadParams {
++            thread_id: ThreadId::new(),
++            rollout_path: Some(source_path.clone()),
++            history: Some(Arc::new(Vec::new())),
++            history_revision: None,
++            include_archived: true,
++            metadata: metadata(),
++        })
++        .await
++        .unwrap_err();
++    assert!(matches!(
++        error,
++        crate::ThreadStoreError::InvalidRequest { .. }
++    ));
++    assert_eq!(tokio::fs::read(&source_path).await.unwrap(), bytes);
++}
+diff --git a/codex-rs/thread-store/src/local/revert_thread.rs b/codex-rs/thread-store/src/local/revert_thread.rs
+index ca44c96b..661e278c 100644
+--- a/codex-rs/thread-store/src/local/revert_thread.rs
++++ b/codex-rs/thread-store/src/local/revert_thread.rs
+@@ -33,8 +33,10 @@ pub(super) async fn revert(
+         })?;
+     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
+     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     store.ensure_live_recorder_absent(thread_id).await?;
+     let writer_lock = store.acquire_writer_lock(thread_id)?;
++    store.check_thread_not_retired(thread_id).await?;
+ 
+     // Resolution may return a compressed sibling. Keep SQLite's exact stored path for the CAS.
+     let stored_metadata = state_db
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
+index 556ca037..3ebc84d9 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
+@@ -61,6 +61,8 @@ impl LocalThreadStore {
+         representation: LineageRepresentation,
+         mut initial_path: Option<PathBuf>,
+     ) -> ThreadStoreResult<RolloutLineage> {
++        // Only the requested logical owner is gated; ancestor rollout IDs stay usable.
++        self.check_thread_not_retired(requested_thread_id).await?;
+         let mut segments = Vec::new();
+         let mut seen = HashSet::new();
+         let mut next_rollout_id = None;
+diff --git a/codex-rs/thread-store/src/local/thread_rollout_resolver.rs b/codex-rs/thread-store/src/local/thread_rollout_resolver.rs
+index 5fad0edd..12aaa121 100644
+--- a/codex-rs/thread-store/src/local/thread_rollout_resolver.rs
++++ b/codex-rs/thread-store/src/local/thread_rollout_resolver.rs
+@@ -75,6 +75,7 @@ async fn resolve(
+     thread_id: ThreadId,
+     scope: LookupScope,
+ ) -> ThreadStoreResult<Option<ResolvedThreadRollout>> {
++    store.check_thread_not_retired(thread_id).await?;
+     if let Ok(path) = live_writer::rollout_path(store, thread_id).await
+         && codex_rollout::existing_rollout_path(path.as_path())
+             .await
+diff --git a/codex-rs/thread-store/src/local/update_thread_metadata.rs b/codex-rs/thread-store/src/local/update_thread_metadata.rs
+index 393513eb..8771c096 100644
+--- a/codex-rs/thread-store/src/local/update_thread_metadata.rs
++++ b/codex-rs/thread-store/src/local/update_thread_metadata.rs
+@@ -40,6 +40,8 @@ pub(super) async fn update_thread_metadata(
+     params: UpdateThreadMetadataParams,
+ ) -> ThreadStoreResult<StoredThread> {
+     let thread_id = params.thread_id;
++    let _lifecycle = store.live_writer_locks.reserve_lifecycle(thread_id).await;
++    store.check_thread_not_retired(thread_id).await?;
+     let mut pending_metadata = store.pending_thread_metadata.lock(thread_id).await;
+     let pending_patch = pending_metadata
+         .as_ref()

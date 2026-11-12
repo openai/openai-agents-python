@@ -2622,7 +2622,7 @@ impl NativeThread {
             .map_err(py_error)
     }
 
-    #[pyo3(signature = (id, summary, thread=None, instance=None, *, error=false))]
+    #[pyo3(signature = (id, summary, thread=None, instance=None, *, error=false, window_json=None, verified_provider_scope=false))]
     fn _reply_compaction(
         &self,
         id: u64,
@@ -2630,7 +2630,20 @@ impl NativeThread {
         thread: Option<&str>,
         instance: Option<&str>,
         error: bool,
+        window_json: Option<&str>,
+        verified_provider_scope: bool,
     ) -> PyResult<()> {
+        if summary.is_some() && window_json.is_some() {
+            return Err(py_error("Conflicting compaction reply"));
+        }
+        let result = if let Some(window) = window_json {
+            let mut window: codex_extension_api::CompactionWindow = serde_json::from_str(window)
+                .map_err(|_| py_error("Invalid compaction window"))?;
+            window.verified_provider_scope = verified_provider_scope;
+            Some(codex_extension_api::CompactionResult::Window(window))
+        } else {
+            summary.map(codex_extension_api::CompactionResult::Summary)
+        };
         let inner = self.current()?;
         let tools = inner
             .thread
@@ -2640,7 +2653,32 @@ impl NativeThread {
         tools
             .reply_compaction(
                 id,
-                if error { Err(()) } else { Ok(summary) },
+                if error { Err(()) } else { Ok(result) },
+                thread,
+                instance,
+            )
+            .map_err(py_error)
+    }
+
+    #[pyo3(signature = (id, decision, thread=None, instance=None, *, error=false))]
+    fn _reply_compaction_policy(
+        &self,
+        id: u64,
+        decision: Option<bool>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Compaction policy requires Python tools"))?;
+        tools
+            .reply_compaction_policy(
+                id,
+                if error { Err(()) } else { Ok(decision) },
                 thread,
                 instance,
             )

@@ -57,6 +57,8 @@ pub(crate) struct ProfileSpec {
     transform_context: bool,
     #[serde(default)]
     before_compact: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    post_turn_compact: bool,
     #[serde(default)]
     before_complete: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -215,7 +217,7 @@ impl OpeningProfiles {
         Ok((saved, slots))
     }
 
-    pub(crate) fn capabilities(&self) -> [bool; 5] {
+    pub(crate) fn capabilities(&self) -> [bool; 6] {
         [
             self.roster.iter().any(|profile| profile.selecting_steps),
             self.roster.iter().any(|profile| profile.transform_context),
@@ -224,6 +226,7 @@ impl OpeningProfiles {
             self.roster
                 .iter()
                 .any(|profile| profile.tool_batch_completion),
+            self.roster.iter().any(|profile| profile.post_turn_compact),
         ]
     }
 }
@@ -617,6 +620,7 @@ async fn prepare_profile(
         descriptor.before_compact,
         descriptor.before_complete,
         descriptor.tool_batch_completion,
+        descriptor.post_turn_compact,
     ];
     let input_error_slots = descriptor
         .input_error_slots
@@ -1119,6 +1123,7 @@ pub(crate) async fn configure(
                 prepared.catalog.before_compact,
                 prepared.catalog.before_complete,
                 prepared.catalog.tool_batch_completion,
+                prepared.catalog.post_turn_compact,
             ],
             default_slots,
         )?;
@@ -1366,6 +1371,7 @@ pub(crate) async fn replace_tools(
             previous.before_compact,
             previous.before_complete,
             previous.tool_batch_completion,
+            previous.post_turn_compact,
         ],
         false,
     )?;

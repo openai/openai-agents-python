@@ -756,6 +756,7 @@ impl EngineState {
         );
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
+        let post_turn_compact = options.post_turn_compact;
         let before_complete = options.before_complete;
         let tool_batch_completion = options.tool_batch_completion;
         let resume = options.sdk_resume_thread_id;
@@ -853,6 +854,7 @@ impl EngineState {
                 before_compact,
                 before_complete,
                 tool_batch_completion,
+                post_turn_compact,
             )?;
         }
         if let Some(items) = sdk_history {
@@ -1120,6 +1122,7 @@ impl EngineState {
             .context("local recovery requires native local storage")?;
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
+        let post_turn_compact = options.post_turn_compact;
         let before_complete = options.before_complete;
         let tool_batch_completion = options.tool_batch_completion;
         let agent_profiles = options.agent_profiles.take();
@@ -1154,6 +1157,7 @@ impl EngineState {
             before_compact,
             before_complete,
             tool_batch_completion,
+            post_turn_compact,
         )?;
         // Compare and publish under the same retained writer, including the
         // ordinary missing-result append. Preparation alone is not publication.
@@ -1391,6 +1395,7 @@ impl EngineState {
         let _guard = self.lifecycle.lock().await;
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
+        let post_turn_compact = options.post_turn_compact;
         let before_complete = options.before_complete;
         let tool_batch_completion = options.tool_batch_completion;
         let agent_profiles = options.agent_profiles.take();
@@ -1533,6 +1538,7 @@ impl EngineState {
                 before_compact,
                 before_complete,
                 tool_batch_completion,
+                post_turn_compact,
             )?;
         }
         let new = if stored {

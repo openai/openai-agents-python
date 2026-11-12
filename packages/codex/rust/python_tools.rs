@@ -67,6 +67,7 @@ pub(crate) struct ProfileCatalog {
     pub(crate) selecting_steps: bool,
     pub(crate) transform_context: bool,
     pub(crate) before_compact: bool,
+    pub(crate) post_turn_compact: bool,
     pub(crate) before_complete: bool,
     pub(crate) tool_batch_completion: bool,
 }
@@ -224,6 +225,7 @@ pub struct PythonTools {
     selecting_children: AtomicBool,
     context_transform_enabled: bool,
     before_compact_enabled: bool,
+    post_turn_compact_enabled: bool,
     before_complete_enabled: bool,
     pub(crate) tool_batch_completion_enabled: bool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
@@ -276,7 +278,10 @@ enum PreparationReply {
     },
     Step(StepReply),
     Context(oneshot::Sender<Option<ModelContextUpdate>>),
-    Compaction(oneshot::Sender<std::result::Result<Option<String>, ()>>),
+    Compaction(
+        oneshot::Sender<std::result::Result<Option<codex_extension_api::CompactionResult>, ()>>,
+    ),
+    CompactionPolicy(oneshot::Sender<std::result::Result<Option<bool>, ()>>),
     Completion {
         reply: oneshot::Sender<std::result::Result<Option<String>, ()>>,
         stop: crate::native_interception::CapturedTurnStop,
@@ -293,6 +298,7 @@ impl PreparationReply {
             Self::Step(reply) => reply.reply.is_closed(),
             Self::Context(reply) => reply.is_closed(),
             Self::Compaction(reply) => reply.is_closed(),
+            Self::CompactionPolicy(reply) => reply.is_closed(),
             Self::Completion { reply, .. } => reply.is_closed(),
         }
     }
@@ -1361,7 +1367,7 @@ impl PythonTools {
         terminal_slots: &[usize],
         input_error_slots: &[usize],
         defaults: Option<&[usize]>,
-        flags: [bool; 5],
+        flags: [bool; 6],
         _reuse_initial: bool,
     ) -> Result<ProfileCatalog> {
         self.allocate_profile_catalog(
@@ -1382,7 +1388,7 @@ impl PythonTools {
         terminal_slots: &[usize],
         input_error_slots: &[usize],
         defaults: Option<&[usize]>,
-        flags: [bool; 5],
+        flags: [bool; 6],
     ) -> Result<ProfileCatalog> {
         self.allocate_profile_catalog(
             specs,
@@ -1402,7 +1408,7 @@ impl PythonTools {
         terminal_slots: &[usize],
         input_error_slots: &[usize],
         defaults: Option<&[usize]>,
-        flags: [bool; 5],
+        flags: [bool; 6],
         managed: bool,
     ) -> Result<ProfileCatalog> {
         // Graph profiles always allocate a fresh identity, including the root.
@@ -1438,12 +1444,13 @@ impl PythonTools {
             before_compact: flags[2],
             before_complete: flags[3],
             tool_batch_completion: flags[4],
+            post_turn_compact: flags[5],
         })
     }
 
     pub(crate) fn startup_profile_catalog(
         &self,
-        flags: [bool; 5],
+        flags: [bool; 6],
         defaults: Option<&[usize]>,
     ) -> Result<ProfileCatalog> {
         let generation = self.snapshot();
@@ -2087,6 +2094,7 @@ impl PythonTools {
         before_compact: bool,
         before_complete: bool,
         tool_batch_completion: bool,
+        post_turn_compact: bool,
     ) -> Result<()> {
         Self::install_manual(
             startup,
@@ -2096,6 +2104,7 @@ impl PythonTools {
             before_compact,
             before_complete,
             tool_batch_completion,
+            post_turn_compact,
         )
     }
 
@@ -2107,6 +2116,7 @@ impl PythonTools {
         before_compact: bool,
         before_complete: bool,
         tool_batch_completion: bool,
+        post_turn_compact: bool,
     ) -> Result<()> {
         // Core resolves absent source options from resumed metadata at startup.
         let resumed_sources = startup.initial_history.get_resumed_session_sources();
@@ -2169,6 +2179,8 @@ impl PythonTools {
             transform_context || profile_capabilities.is_some_and(|flags| flags[1]);
         let before_compact = before_compact || profile_capabilities.is_some_and(|flags| flags[2]);
         let before_complete = before_complete || profile_capabilities.is_some_and(|flags| flags[3]);
+        let post_turn_compact =
+            post_turn_compact || profile_capabilities.is_some_and(|flags| flags[5]);
         let tools = Self {
             current: RwLock::new(Arc::new(Generation {
                 id: 0,
@@ -2196,6 +2208,7 @@ impl PythonTools {
             selecting_children: AtomicBool::new(false),
             context_transform_enabled: transform_context,
             before_compact_enabled: before_compact,
+            post_turn_compact_enabled: post_turn_compact,
             before_complete_enabled: before_complete,
             tool_batch_completion_enabled: tool_batch_completion,
             step_defaults: RwLock::new(None),
@@ -2342,6 +2355,7 @@ impl PythonTools {
             ),
             context_transform_enabled: parent.context_transform_enabled,
             before_compact_enabled: parent.before_compact_enabled,
+            post_turn_compact_enabled: parent.post_turn_compact_enabled,
             before_complete_enabled: parent.before_complete_enabled,
             tool_batch_completion_enabled: parent.tool_batch_completion_enabled,
             step_defaults: RwLock::new(
@@ -2786,10 +2800,82 @@ impl PythonTools {
         self.before_compact_enabled
     }
 
+    pub(crate) fn schedules_post_turn_compaction(
+        &self,
+        step: &codex_extension_api::ExtensionData,
+    ) -> bool {
+        self.post_turn_compact_enabled
+            && step
+                .get::<ProfileCatalog>()
+                .is_none_or(|catalog| catalog.post_turn_compact)
+    }
+
+    pub(crate) async fn post_turn_compaction(
+        self: &Arc<Self>,
+        input: codex_extension_api::CompactionInput<'_>,
+    ) -> Result<Option<bool>> {
+        if !self.post_turn_compact_enabled
+            || input
+                .step_store
+                .and_then(|step| step.get::<ProfileCatalog>())
+                .is_some_and(|catalog| !catalog.post_turn_compact)
+        {
+            return Ok(None);
+        }
+        let source = self.source_metadata(input.step_store)?;
+        let owner = self.admission_ready(input.turn_id)?;
+        self.exchange_preparation(
+            owner,
+            None,
+            input
+                .step_store
+                .and_then(|step| step.get::<codex_extension_api::ToolsOnlyWorkCancellation>())
+                .map(|scope| scope.0.clone()),
+            [
+                "Expired compaction policy owner",
+                "Compaction policy reader closed",
+                "Compaction policy cancelled",
+            ],
+            PreparationReply::CompactionPolicy,
+            |id| {
+                let mut request = json!({"id": input.turn_id, "msg": {
+                    "type": "_sdk_before_compact_policy", "turn_id": input.turn_id,
+                    "thread": input.thread_id, "instance": self.instance,
+                    "step_id": id, "model": input.model, "trigger": "auto",
+                    "candidate_indexes": input.candidate_indexes, "model_omitted": input.model_omitted, "items": input.items, "provider_response": input.provider_response,
+                }});
+                request["msg"]
+                    .as_object_mut()
+                    .expect("constructed callback object")
+                    .extend(source.clone());
+                request
+            },
+            |decision| decision.map_err(|_| anyhow::anyhow!("Compaction policy callback failed")),
+        )
+        .await
+    }
+
+    pub(crate) fn reply_compaction_policy(
+        self: &Arc<Self>,
+        id: u64,
+        decision: std::result::Result<Option<bool>, ()>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let PreparationReply::CompactionPolicy(reply) =
+            self.step_owner(thread, instance)?.take_preparation(id)?
+        else {
+            anyhow::bail!("Invalid compaction policy reply");
+        };
+        reply
+            .send(decision)
+            .map_err(|_| anyhow::anyhow!("Expired compaction policy callback"))
+    }
+
     pub(crate) async fn before_compact(
         self: &Arc<Self>,
         input: codex_extension_api::CompactionInput<'_>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<codex_extension_api::CompactionResult>> {
         let source = self.source_metadata(input.step_store)?;
         if input
             .step_store
@@ -2820,7 +2906,8 @@ impl PythonTools {
                         "thread": input.thread_id, "instance": self.instance,
                         "step_id": id, "model": input.model,
                         "trigger": if input.automatic { "auto" } else { "manual" },
-                        "items": input.items,
+                        "optional": input.optional, "candidate_indexes": input.candidate_indexes, "model_omitted": input.model_omitted,
+                        "items": input.items, "provider_response": input.provider_response,
                     }
                 });
                 request["msg"]
@@ -2837,7 +2924,7 @@ impl PythonTools {
     pub(crate) fn reply_compaction(
         self: &Arc<Self>,
         id: u64,
-        summary: std::result::Result<Option<String>, ()>,
+        summary: std::result::Result<Option<codex_extension_api::CompactionResult>, ()>,
         thread: Option<&str>,
         instance: Option<&str>,
     ) -> Result<()> {
@@ -5712,6 +5799,7 @@ impl ToolContributor for PythonContributor {
                             selecting_steps: tools.selecting_steps.load(Ordering::Acquire),
                             transform_context: tools.context_transform_enabled,
                             before_compact: tools.before_compact_enabled,
+                            post_turn_compact: tools.post_turn_compact_enabled,
                             before_complete: tools.before_complete_enabled,
                             tool_batch_completion: tools.tool_batch_completion_enabled,
                         }
@@ -9050,6 +9138,7 @@ pub(crate) mod managed_tests {
             selecting_children: AtomicBool::new(false),
             context_transform_enabled: false,
             before_compact_enabled: false,
+            post_turn_compact_enabled: false,
             before_complete_enabled: false,
             tool_batch_completion_enabled: false,
             step_defaults: RwLock::new(None),
@@ -9745,7 +9834,7 @@ pub(crate) mod managed_tests {
         *tools.current.write().unwrap() = Arc::new(tools.prepare(1, specs.clone()).unwrap());
         tools.generation_high_water.store(1, Ordering::Release);
         let narrowed = tools
-            .startup_profile_catalog([false; 5], Some(&[1]))
+            .startup_profile_catalog([false; 6], Some(&[1]))
             .unwrap();
         assert_eq!(
             narrowed.checkpoint_specs().unwrap(),
@@ -9754,7 +9843,7 @@ pub(crate) mod managed_tests {
         assert!(narrowed.default_names(Some(&[2])).is_err());
         assert!(narrowed.default_names(Some(&[0, 0])).is_err());
         let declared = tools
-            .profile_catalog(specs, &[], &[], &[], None, [false; 5], false)
+            .profile_catalog(specs, &[], &[], &[], None, [false; 6], false)
             .unwrap();
         let thread = ExtensionData::new("source");
         thread.insert(Arc::try_unwrap(tools).ok().expect("exclusive fixture"));
@@ -9781,7 +9870,7 @@ pub(crate) mod managed_tests {
         };
         assert_eq!(advertise(narrowed), vec!["b"]);
         let cleared = tools
-            .startup_profile_catalog([false; 5], Some(&[]))
+            .startup_profile_catalog([false; 6], Some(&[]))
             .unwrap();
         assert!(advertise(cleared).is_empty());
         // A later declaration activation retains its own complete defaults.
@@ -9848,7 +9937,7 @@ pub(crate) mod managed_tests {
                 &[],
                 &[],
                 None,
-                [false; 5],
+                [false; 6],
                 true,
             )
             .unwrap();
@@ -9859,7 +9948,7 @@ pub(crate) mod managed_tests {
                 &[],
                 &[],
                 None,
-                [false; 5],
+                [false; 6],
                 false,
             )
             .unwrap();
@@ -9938,7 +10027,7 @@ pub(crate) mod managed_tests {
                 &[],
                 &[],
                 None,
-                [false; 5],
+                [false; 6],
                 true,
             )
             .unwrap();

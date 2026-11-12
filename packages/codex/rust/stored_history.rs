@@ -16,8 +16,13 @@ use std::sync::{Arc, Mutex};
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum CloseOperation {
-    Revert { before_turn_id: String },
-    Delete,
+    Revert {
+        before_turn_id: String,
+    },
+    Delete {
+        #[serde(default)]
+        preserve_descendants: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -47,7 +52,7 @@ pub(crate) fn fork_boundary(encoded: &str) -> Result<codex_thread_store::ForkBou
 
 /// One Session close action, after its writer joins and before database teardown.
 pub struct CloseAction {
-    store: Arc<dyn ThreadStore>,
+    store: Arc<crate::storage::LocalChecklistStore>,
     id: ThreadId,
     operation: Mutex<Option<CloseOperation>>,
 }
@@ -55,10 +60,9 @@ pub struct CloseAction {
 impl CloseAction {
     pub fn capture(state: &ThreadState, encoded: &str) -> Result<Self> {
         let _operation = state.engine.operation(false)?;
-        ensure!(
-            state.engine.local_checklist_store.is_some(),
-            "stored history revert/delete requires native LocalStorage; other stores are unsupported"
-        );
+        let local_store = state.engine.local_checklist_store.as_ref().context(
+            "stored history revert/delete requires native LocalStorage; other stores are unsupported",
+        )?;
         let operation: CloseOperation = serde_json::from_str(encoded)?;
         if let CloseOperation::Revert { before_turn_id } = &operation {
             ensure!(
@@ -67,7 +71,7 @@ impl CloseAction {
             );
         }
         Ok(Self {
-            store: Arc::clone(&state.engine.store),
+            store: Arc::clone(local_store),
             id: state.id,
             operation: Mutex::new(Some(operation)),
         })
@@ -90,10 +94,16 @@ impl CloseAction {
                     })
                     .await?
             }
-            CloseOperation::Delete => {
-                self.store
-                    .delete_thread(DeleteThreadParams { thread_id: self.id })
-                    .await?
+            CloseOperation::Delete {
+                preserve_descendants,
+            } => {
+                if preserve_descendants {
+                    self.store.retire_thread_owner(self.id).await?;
+                } else {
+                    self.store
+                        .delete_thread(DeleteThreadParams { thread_id: self.id })
+                        .await?;
+                }
             }
         }
         Ok(())

@@ -811,7 +811,23 @@
     {
       "path": "sdk-managed-agent-child-catalog.patch",
       "sha256": "aa9744156b870e194d6dc7e6244e311a290332c7b453747a7440682e69cf674a"
+    },
+    {
+      "path": "sdk-stored-owner-retirement.patch",
+      "sha256": "6e2609766301ec2703199766402600eed66ada05e9ae5d497d7f46542dae76a5"
+    },
+    {
+      "path": "sdk-borrowed-responses-compaction.patch",
+      "sha256": "2bd50e43bafefb05a078af67760366c2e26fe2989140f647fcf55dded09e3583"
+    },
+    {
+      "path": "sdk-managed-receipt-original-identity.patch",
+      "sha256": "34fe1f7148b64f5c47be3106db23350ada4b22086e9d73bd4a4da7d50db71995"
+    },
+    {
+      "path": "sdk-acknowledged-provider-window.patch",
+      "sha256": "cbf049d3d03e9071d9100217c969138574df3735def89c74abe2037da3978513"
     }
   ],
-  "result_tree": "3c17334065d06a7648b89c7d9a44da5ceda22138"
+  "result_tree": "d2b7382a4f22da95c9b90989eee624657de347e1"
 }

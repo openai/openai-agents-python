@@ -65,6 +65,7 @@ def _capture_opening_agent(
         programmatic_tool_calling=agent.programmatic_tool_calling,
         transform_context=agent.transform_context,
         before_compact=agent.before_compact,
+        compaction=agent.compaction,
         before_complete=agent.before_complete,
         tool_batch_completion=agent.tool_batch_completion,
         input_guardrails=agent.input_guardrails,
