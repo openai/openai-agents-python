@@ -8,11 +8,20 @@ import re
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
 
 import pytest
 
-from agents import Agent, Environment, NativeError, ToolRef, function_tool
+from agents import (
+    Agent,
+    ChatCompletionsModel,
+    Environment,
+    NativeError,
+    NativeProvider,
+    ToolRef,
+    function_tool,
+)
 from agents.observation import ExecutionItemCompleted
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
@@ -100,6 +109,87 @@ def declaration(peer: ExecutorPeer, **kwargs: Any) -> Environment:
         tools=["exec_command", "write_stdin", "apply_patch"],
         **kwargs,
     )
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_chat_completions_applies_native_workspace_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch = (
+        "*** Begin Patch\n"
+        "*** Add File: first.txt\n+first\n"
+        "*** Add File: second.txt\n+second\n"
+        "*** End Patch"
+    )
+    requests: list[dict[str, Any]] = []
+    approvals: list[Any] = []
+
+    async def create(**body: Any) -> dict[str, Any]:
+        requests.append(body)
+        if len(requests) == 1:
+            [tool] = body["tools"]
+            assert tool["type"] == "function"
+            assert tool["function"]["name"] == "apply_patch"
+            message = {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_patch",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": json.dumps({"patch": patch}),
+                        },
+                    }
+                ],
+            }
+            finish = "tool_calls"
+        else:
+            assistant = next(item for item in body["messages"] if item.get("tool_calls"))
+            [call] = assistant["tool_calls"]
+            assert call["id"] == "call_patch"
+            assert json.loads(call["function"]["arguments"]) == {"patch": patch}
+            result = next(
+                item for item in body["messages"] if item.get("tool_call_id") == "call_patch"
+            )
+            assert result["role"] == "tool"
+            assert isinstance(result["content"], str) and result["content"]
+            message = {"content": "patched"}
+            finish = "stop"
+        return {
+            "id": f"chat_patch_{len(requests)}",
+            "choices": [{"finish_reason": finish, "message": message}],
+        }
+
+    def approve(_context: Any, arguments: Any) -> bool:
+        approvals.append(arguments)
+        return True
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    model = NativeProvider(
+        base_url="https://example.invalid/v1",
+        api_key="synthetic",
+        model_backend=ChatCompletionsModel(client),
+    )
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        selected = Environment(
+            url=peer.url,
+            cwd=str(peer.root),
+            headers={"Authorization": "Bearer " + peer.token},
+            tools=["apply_patch"],
+            approval=approve,
+        )
+        async with Agent(instructions="Edit the requested files.", provider=model).session(
+            environment=selected
+        ) as session:
+            turn = await session.submit("Apply the patch.")
+            assert (await turn.get_result()).final_output == "patched"
+        assert approvals == [patch]
+        assert (peer.root / "first.txt").read_text() == "first\n"
+        assert (peer.root / "second.txt").read_text() == "second\n"
+    assert len(requests) == 2
 
 
 @pytest.mark.requires_native_linux_sandbox
