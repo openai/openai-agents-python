@@ -1,0 +1,1058 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 1599fda7..21063c1e 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -2666,6 +2666,7 @@ mod tests {
+         assert_eq!(
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
+             Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                sdk_ownership_id: None,
+                 response_id: None,
+                 handoff_id: "handoff_123".to_string(),
+                 item_id: "item_123".to_string(),
+@@ -2892,6 +2893,7 @@ mod tests {
+         });
+         events.update_active_transcript(&mut covered).await;
+         let mut handoff = RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++            sdk_ownership_id: None,
+             response_id: None,
+             handoff_id: "handoff_1".to_string(),
+             item_id: "item_1".to_string(),
+@@ -2902,6 +2904,7 @@ mod tests {
+         assert_eq!(
+             handoff,
+             RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                sdk_ownership_id: None,
+                 response_id: None,
+                 handoff_id: "handoff_1".to_string(),
+                 item_id: "item_1".to_string(),
+@@ -3382,6 +3385,7 @@ mod tests {
+         assert_eq!(
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
+             Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                sdk_ownership_id: None,
+                 response_id: None,
+                 handoff_id: "call_123".to_string(),
+                 item_id: "item_123".to_string(),
+@@ -4292,6 +4296,7 @@ mod tests {
+         assert_eq!(
+             added_event,
+             RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                sdk_ownership_id: None,
+                 response_id: None,
+                 handoff_id: "handoff_1".to_string(),
+                 item_id: "item_2".to_string(),
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs
+index c755224f..6694247f 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs
+@@ -111,6 +111,7 @@ fn parse_delegation_created(parsed: &Value) -> Option<RealtimeEvent> {
+         .collect::<String>();
+ 
+     Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: item_id.clone(),
+         item_id,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs
+index d7c66388..17a4a31a 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi_tests.rs
+@@ -6,6 +6,7 @@ use codex_protocol::protocol::RealtimeHandoffRequested;
+ #[test]
+ fn legacy_and_frameless_delegations_decode_to_the_same_handoff() {
+     let expected = Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: "handoff-123".to_string(),
+         item_id: "handoff-123".to_string(),
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
+index 0e8bcaa3..b814d5c4 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
+@@ -81,6 +81,7 @@ pub(super) fn parse_realtime_event_v1(payload: &str) -> Option<RealtimeEvent> {
+                 .and_then(Value::as_str)
+                 .map(str::to_string)?;
+             Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                sdk_ownership_id: None,
+                 response_id: None,
+                 handoff_id,
+                 item_id,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+index 4c854a76..0b81667c 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+@@ -244,6 +244,7 @@ fn parse_handoff_requested_event(item: &JsonMap<String, Value>) -> Option<Realti
+     let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("");
+ 
+     Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: call_id.to_string(),
+         item_id,
+diff --git a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+index 436641f6..e43e19eb 100644
+--- a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
++++ b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+@@ -671,6 +671,7 @@ async fn realtime_ws_e2e_realtime_v2_parser_emits_handoff_requested() {
+     assert_eq!(
+         event,
+         RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++            sdk_ownership_id: None,
+             response_id: None,
+             handoff_id: "call_123".to_string(),
+             item_id: "item_123".to_string(),
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 15cf5233..1c6bdd75 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -480,6 +480,8 @@ pub(crate) enum SdkRealtimeCommand {
+         handoff_id: String,
+     },
+     Interrupt {
++        cancel_tools: bool,
++        owned_handoffs: Vec<(String, Option<String>, String)>,
+         response_id: Option<String>,
+         event_id: Option<String>,
+         playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
+@@ -548,6 +550,8 @@ struct SdkSeenCall {
+     response_id: Option<String>,
+     accepted_configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
+     function_fingerprint: Option<[u8; 32]>,
++    preserve_on_response_cancel: bool,
++    ownership_id: String,
+ }
+ 
+ #[derive(Debug)]
+@@ -757,16 +761,33 @@ impl SdkRealtimeState {
+         &self,
+         retire_generation: bool,
+         response_id: Option<&str>,
++        preserve_media_calls: bool,
+     ) -> SdkToolRetirement {
+         if retire_generation {
+             self.active.store(false, Ordering::Release);
+         }
++        let mut calls = self.function_calls.lock().await;
++        let seen = self.seen.lock().await;
++        let mut pending = self.pending.lock().await;
++        let protected: std::collections::HashSet<_> = seen
++            .iter()
++            .filter(|(id, call)| {
++                preserve_media_calls
++                    && !retire_generation
++                    && call.preserve_on_response_cancel
++                    && pending.contains_key(*id)
++            })
++            .map(|(id, _)| id.clone())
++            .collect();
++        let protected_batches: Vec<_> = calls
++            .iter()
++            .filter(|(id, _)| protected.contains(*id))
++            .filter_map(|(_, call)| call.batch.clone())
++            .collect();
+         self.history
+             .lock()
+             .unwrap()
+-            .retire_caller_calls(response_id);
+-        let mut calls = self.function_calls.lock().await;
+-        let mut pending = self.pending.lock().await;
++            .retire_caller_calls_preserving(response_id, &protected);
+         let mut work = SdkToolRetirement {
+             retire_generation,
+             ..Default::default()
+@@ -782,12 +803,22 @@ impl SdkRealtimeState {
+                         .or(call.request.response_id.as_deref())
+                         == response_id
+             })
++            .filter(|call| !protected.contains(&call.request.call_id))
+             .filter_map(|call| {
+                 pending.remove(&call.request.call_id);
+                 work.call_ids.insert(call.request.call_id.clone());
+-                work.batches.extend(call.batch.clone());
++                let shared_batch = call.batch.as_ref().is_some_and(|batch| {
++                    protected_batches
++                        .iter()
++                        .any(|protected| Arc::ptr_eq(protected, batch))
++                });
++                if !shared_batch {
++                    work.batches.extend(call.batch.clone());
++                }
+                 work.preparations.extend(call.preparation.clone());
+-                if let Some(batch) = &call.batch {
++                if let Some(batch) = &call.batch
++                    && !shared_batch
++                {
+                     batch.automatic_retired.store(true, Ordering::Release);
+                     batch.pending_create.store(false, Ordering::Release);
+                     if response_id.is_none() || retire_generation {
+@@ -801,6 +832,63 @@ impl SdkRealtimeState {
+         work.roots = candidates;
+         work
+     }
++    async fn preserve_admitted_tools(
++        &self,
++        response_id: Option<&str>,
++        owned_handoffs: &[(String, Option<String>, String)],
++    ) -> Vec<(String, String, bool)> {
++        let calls = self.function_calls.lock().await;
++        let mut seen = self.seen.lock().await;
++        let pending = self.pending.lock().await;
++        seen.iter_mut()
++            .filter(|(id, call)| {
++                pending.contains_key(*id)
++                    && response_id.is_none_or(|target| call.response_id.as_deref() == Some(target))
++                    && match calls.get(*id) {
++                        Some(function) => function.claimed && function.native_turn_id.is_some(),
++                        None => {
++                            call.function_fingerprint.is_none()
++                                && owned_handoffs.iter().any(|(owned_id, source, ownership)| {
++                                    owned_id == *id
++                                        && source == &call.response_id
++                                        && ownership == &call.ownership_id
++                                })
++                        }
++                    }
++            })
++            .map(|(id, call)| {
++                let previous = call.preserve_on_response_cancel;
++                call.preserve_on_response_cancel = true;
++                (id.clone(), call.ownership_id.clone(), previous)
++            })
++            .collect()
++    }
++    async fn restore_media_preservation(&self, previous: &[(String, String, bool)]) {
++        let mut seen = self.seen.lock().await;
++        for (id, ownership, was_preserved) in previous {
++            if !was_preserved
++                && let Some(call) = seen.get_mut(id)
++                && &call.ownership_id == ownership
++            {
++                call.preserve_on_response_cancel = false;
++            }
++        }
++    }
++    async fn media_independent_calls(
++        &self,
++        response_id: Option<&str>,
++    ) -> std::collections::HashSet<String> {
++        let seen = self.seen.lock().await;
++        let pending = self.pending.lock().await;
++        seen.iter()
++            .filter(|(id, call)| {
++                call.preserve_on_response_cancel
++                    && pending.contains_key(*id)
++                    && response_id.is_none_or(|target| call.response_id.as_deref() == Some(target))
++            })
++            .map(|(id, _)| id.clone())
++            .collect()
++    }
+     async fn eligible_retired_roots(
+         &self,
+         roots: &std::collections::HashSet<String>,
+@@ -921,6 +1009,8 @@ impl SdkRealtimeState {
+                 response_id: response_id.map(str::to_owned),
+                 accepted_configuration: None,
+                 function_fingerprint: None,
++                preserve_on_response_cancel: false,
++                ownership_id: uuid::Uuid::new_v4().to_string(),
+             },
+         );
+         self.pending.lock().await.insert(id.to_owned(), false);
+@@ -1623,6 +1713,7 @@ impl RealtimeConversationManager {
+         generation: &str,
+         retire_generation: bool,
+         response_id: Option<&str>,
++        preserve_media_calls: bool,
+     ) -> Option<(Arc<SdkRealtimeState>, SdkToolRetirement)> {
+         let sdk = self
+             .state
+@@ -1635,7 +1726,9 @@ impl RealtimeConversationManager {
+             .as_ref()
+             .filter(|sdk| sdk.generation == generation)?
+             .clone();
+-        let work = sdk.retire_tool_work(retire_generation, response_id).await;
++        let work = sdk
++            .retire_tool_work(retire_generation, response_id, preserve_media_calls)
++            .await;
+         Some((sdk, work))
+     }
+     #[cfg(test)]
+@@ -1646,7 +1739,7 @@ impl RealtimeConversationManager {
+         response_id: Option<&str>,
+     ) -> Vec<String> {
+         match self
+-            .capture_sdk_tool_retirement(generation, retire_generation, response_id)
++            .capture_sdk_tool_retirement(generation, retire_generation, response_id, false)
+             .await
+         {
+             Some((sdk, work)) => {
+@@ -1784,6 +1877,8 @@ impl RealtimeConversationManager {
+         }
+         drop(calls);
+         if let SdkRealtimeCommand::Interrupt {
++            cancel_tools,
++            owned_handoffs,
+             response_id,
+             playback,
+             feedback,
+@@ -1797,6 +1892,25 @@ impl RealtimeConversationManager {
+                     "Playback and feedback require the RealtimeV2 protocol".into(),
+                 ));
+             }
++            let mut unique = HashSet::new();
++            if owned_handoffs.len() > SDK_HANDOFF_LIMIT
++                || (*cancel_tools && !owned_handoffs.is_empty())
++                || owned_handoffs.iter().any(|(id, source, ownership)| {
++                    id.is_empty()
++                        || ownership.is_empty()
++                        || source.as_ref().is_some_and(String::is_empty)
++                        || !unique.insert(id)
++                })
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "Invalid owned Realtime handoff identities".into(),
++                ));
++            }
++            if !*cancel_tools && state.handoff.event_parser != RealtimeEventParser::RealtimeV2 {
++                return Err(CodexErr::InvalidRequest(
++                    "Speech-only interruption requires the RealtimeV2 protocol".into(),
++                ));
++            }
+             if feedback.is_some() && response_id.is_none() {
+                 return Err(CodexErr::InvalidRequest(
+                     "Guardrail feedback requires an explicit response ID".into(),
+@@ -3475,6 +3589,8 @@ pub(crate) async fn dispatch_interrupt_sdk(
+     event_id: Option<String>,
+     playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
+     feedback: Option<String>,
++    cancel_tools: bool,
++    owned_handoffs: Vec<(String, Option<String>, String)>,
+     reply: tokio::sync::oneshot::Sender<
+         CodexResult<codex_protocol::protocol::RealtimeInterruptReceipt>,
+     >,
+@@ -3486,6 +3602,8 @@ pub(crate) async fn dispatch_interrupt_sdk(
+         .sdk_enqueue(
+             &generation,
+             SdkRealtimeCommand::Interrupt {
++                cancel_tools,
++                owned_handoffs,
+                 response_id,
+                 event_id,
+                 playback,
+@@ -3610,10 +3728,25 @@ async fn cancel_sdk_tool_work(
+     generation: &str,
+     retire_generation: bool,
+     response_id: Option<&str>,
++) {
++    cancel_sdk_tool_work_with_policy(sess, generation, retire_generation, response_id, false).await;
++}
++
++async fn cancel_sdk_tool_work_with_policy(
++    sess: &Arc<Session>,
++    generation: &str,
++    retire_generation: bool,
++    response_id: Option<&str>,
++    preserve_media_calls: bool,
+ ) {
+     if let Some((sdk, work)) = sess
+         .conversation
+-        .capture_sdk_tool_retirement(generation, retire_generation, response_id)
++        .capture_sdk_tool_retirement(
++            generation,
++            retire_generation,
++            response_id,
++            preserve_media_calls,
++        )
+         .await
+     {
+         let _ = work.join(sess, &sdk).await;
+@@ -4326,11 +4459,12 @@ async fn handle_start_inner_with_adapter(
+             if sdk_owned {
+                 match &event {
+                     RealtimeEvent::ResponseCancelled(response) => {
+-                        cancel_sdk_tool_work(
++                        cancel_sdk_tool_work_with_policy(
+                             &sess_clone,
+                             &sub_id,
+                             false,
+                             response.response_id.as_deref(),
++                            true,
+                         )
+                         .await
+                     }
+@@ -6007,6 +6141,8 @@ async fn handle_sdk_realtime_command(
+             }
+         }
+         SdkRealtimeCommand::Interrupt {
++            cancel_tools,
++            owned_handoffs,
+             response_id,
+             event_id,
+             playback,
+@@ -6014,6 +6150,14 @@ async fn handle_sdk_realtime_command(
+             reply,
+         } => {
+             let requested = response_id.clone();
++            let preservation = if cancel_tools {
++                Vec::new()
++            } else {
++                sdk.preserve_admitted_tools(requested.as_deref(), &owned_handoffs)
++                    .await
++            };
++            let preserved: std::collections::HashSet<_> =
++                preservation.iter().map(|(id, _, _)| id.clone()).collect();
+             let result = if handoff.event_parser == RealtimeEventParser::RealtimeV2 {
+                 match writer
+                     .interrupt_response(
+@@ -6030,6 +6174,7 @@ async fn handle_sdk_realtime_command(
+                 {
+                     Ok(result) => Some(result),
+                     Err(ApiError::InvalidRequest { message }) => {
++                        sdk.restore_media_preservation(&preservation).await;
+                         if let Some(reply) = reply.and_then(|reply| reply.lock().unwrap().take()) {
+                             let _ = reply.send(Err(CodexErr::InvalidRequest(message)));
+                         }
+@@ -6042,6 +6187,11 @@ async fn handle_sdk_realtime_command(
+             };
+             let receipt = codex_protocol::protocol::RealtimeInterruptReceipt {
+                 joined_root_turn_ids: Vec::new(),
++                preserved_call_ids: {
++                    let mut ids: Vec<_> = preserved.iter().cloned().collect();
++                    ids.sort();
++                    ids
++                },
+                 cancelled_response_id: result
+                     .as_ref()
+                     .and_then(|result| result.cancelled_response_id.clone()),
+@@ -6068,7 +6218,7 @@ async fn handle_sdk_realtime_command(
+                         .or_else(|| seen.get(id).and_then(|known| known.response_id.as_deref()))
+                         == Some(target)
+                 });
+-                if matched {
++                if matched && !preserved.contains(id) {
+                     if let Some(call) = calls.get(id) {
+                         call.cancel.cancel();
+                     }
+@@ -6080,7 +6230,9 @@ async fn handle_sdk_realtime_command(
+             drop(pending);
+             drop(seen);
+             drop(calls);
+-            let work = sdk.retire_tool_work(false, requested.as_deref()).await;
++            let work = sdk
++                .retire_tool_work(false, requested.as_deref(), !cancel_tools)
++                .await;
+             let calls = sdk.function_calls.lock().await;
+             let release_user = requested.as_ref().and_then(|_| {
+                 calls
+@@ -6485,12 +6637,13 @@ async fn handle_realtime_server_event_with_configuration(
+                     .context("SDK speech event has no accepted configuration")?
+                     .interrupts_on_speech_started()
+             {
+-                let work = sdk.retire_tool_work(false, None).await;
++                let work = sdk.retire_tool_work(false, None, false).await;
+                 if !work.has_joined_work() {
+                     let completion = SdkInterruptCompletion {
+                         work,
+                         receipt: codex_protocol::protocol::RealtimeInterruptReceipt {
+                             joined_root_turn_ids: Vec::new(),
++                            preserved_call_ids: Vec::new(),
+                             cancelled_response_id: None,
+                             retired_response_ids: Vec::new(),
+                         },
+@@ -6563,10 +6716,11 @@ async fn handle_realtime_server_event_with_configuration(
+                 return Ok(());
+             }
+             if let (Some(sdk), Some(id)) = (&handoff_state.sdk, response.response_id.as_deref()) {
++                let preserved = sdk.media_independent_calls(Some(id)).await;
+                 sdk.history
+                     .lock()
+                     .unwrap()
+-                    .finish_caller_response(id, /*cancelled*/ true);
++                    .finish_caller_response_preserving(id, true, &preserved);
+             }
+             defer_sdk_create_until_handoff(handoff_state, response_create_queue).await;
+             if response.response_id == response_create_queue.sdk_response_id {
+@@ -6955,8 +7109,18 @@ async fn handle_realtime_server_event_with_configuration(
+                 {
+                     return Ok(());
+                 }
++                let mut admitted = handoff.clone();
++                admitted.sdk_ownership_id = Some(
++                    sdk.seen
++                        .lock()
++                        .await
++                        .get(&handoff.handoff_id)
++                        .context("SDK handoff has no admitted owner")?
++                        .ownership_id
++                        .clone(),
++                );
+                 events_tx
+-                    .send(event)
++                    .send(RealtimeEvent::HandoffRequested(admitted))
+                     .await
+                     .context("SDK Realtime event channel closed")?;
+                 return Ok(());
+@@ -7040,10 +7204,11 @@ async fn handle_realtime_server_event_with_configuration(
+                 _ => None,
+             };
+             if let (Some(sdk), Some((id, cancelled))) = (&handoff_state.sdk, terminal) {
++                let preserved = sdk.media_independent_calls(Some(id)).await;
+                 sdk.history
+                     .lock()
+                     .unwrap()
+-                    .finish_caller_response(id, cancelled);
++                    .finish_caller_response_preserving(id, cancelled, &preserved);
+             }
+             false
+         }
+diff --git a/codex-rs/core/src/realtime_conversation/item_deletion.rs b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+index e9f70c69..e65fc491 100644
+--- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
++++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+@@ -737,6 +737,8 @@ mod tests {
+                 response_id: None,
+                 accepted_configuration: None,
+                 function_fingerprint: None,
++                preserve_on_response_cancel: false,
++                ownership_id: uuid::Uuid::new_v4().to_string(),
+             },
+         );
+         assert!(
+@@ -984,6 +986,7 @@ mod reserved_and_approval_tests {
+         state
+             .observe(&RealtimeEvent::HandoffRequested(
+                 codex_protocol::protocol::RealtimeHandoffRequested {
++                    sdk_ownership_id: None,
+                     response_id: Some("response".into()),
+                     handoff_id: "background-call".into(),
+                     item_id: "background-item".into(),
+diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
+index c036d9de..a85869d9 100644
+--- a/codex-rs/core/src/realtime_conversation/provider_history.rs
++++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
+@@ -944,7 +944,17 @@ impl State {
+     }
+ 
+     pub(super) fn retire_caller_calls(&mut self, response_id: Option<&str>) {
+-        for call in self.replayed_calls.values_mut() {
++        self.retire_caller_calls_preserving(response_id, &std::collections::HashSet::new());
++    }
++    pub(super) fn retire_caller_calls_preserving(
++        &mut self,
++        response_id: Option<&str>,
++        preserved: &std::collections::HashSet<String>,
++    ) {
++        for (id, call) in self.replayed_calls.iter_mut() {
++            if preserved.contains(id) {
++                continue;
++            }
+             if call.caller.as_ref().is_some_and(|caller| {
+                 response_id.is_none_or(|response| caller.response_id == response)
+             }) {
+@@ -954,14 +964,26 @@ impl State {
+     }
+ 
+     pub(super) fn finish_caller_response(&mut self, response_id: &str, cancelled: bool) {
+-        for call in self.replayed_calls.values_mut() {
++        self.finish_caller_response_preserving(
++            response_id,
++            cancelled,
++            &std::collections::HashSet::new(),
++        );
++    }
++    pub(super) fn finish_caller_response_preserving(
++        &mut self,
++        response_id: &str,
++        cancelled: bool,
++        preserved: &std::collections::HashSet<String>,
++    ) {
++        for (id, call) in self.replayed_calls.iter_mut() {
+             if let Some(caller) = call
+                 .caller
+                 .as_mut()
+                 .filter(|caller| caller.response_id == response_id)
+             {
+                 caller.response_finished = true;
+-                if cancelled || caller.detached {
++                if (cancelled && !preserved.contains(id)) || caller.detached {
+                     call.confirmed = false;
+                 }
+             }
+diff --git a/codex-rs/core/src/realtime_conversation/raw_event.rs b/codex-rs/core/src/realtime_conversation/raw_event.rs
+index 82ba8583..bb98b6f6 100644
+--- a/codex-rs/core/src/realtime_conversation/raw_event.rs
++++ b/codex-rs/core/src/realtime_conversation/raw_event.rs
+@@ -278,6 +278,8 @@ pub(crate) async fn handle_send_event_sdk(
+                 event_id,
+                 None,
+                 None,
++                true,
++                Vec::new(),
+                 completion(reply, |receipt: RealtimeInterruptReceipt| {
+                     Some(serde_json::json!(receipt))
+                 }),
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index 8bb14418..8db8c471 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -32,6 +32,7 @@ use tokio::sync::Mutex;
+ #[test]
+ fn prefers_handoff_input_transcript_over_active_transcript() {
+     let handoff = RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: "handoff_1".to_string(),
+         item_id: "item_1".to_string(),
+@@ -56,6 +57,7 @@ fn prefers_handoff_input_transcript_over_active_transcript() {
+ #[test]
+ fn extracts_text_from_handoff_request_active_transcript_if_input_missing() {
+     let handoff = RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: "handoff_1".to_string(),
+         item_id: "item_1".to_string(),
+@@ -74,6 +76,7 @@ fn extracts_text_from_handoff_request_active_transcript_if_input_missing() {
+ #[test]
+ fn wraps_handoff_with_transcript_delta() {
+     let handoff = RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: "handoff_1".to_string(),
+         item_id: "item_1".to_string(),
+@@ -101,6 +104,7 @@ fn wraps_handoff_with_transcript_delta() {
+ #[test]
+ fn extracts_text_from_handoff_request_input_transcript_if_messages_missing() {
+     let handoff = RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: "handoff_1".to_string(),
+         item_id: "item_1".to_string(),
+@@ -116,6 +120,7 @@ fn extracts_text_from_handoff_request_input_transcript_if_messages_missing() {
+ #[test]
+ fn ignores_empty_handoff_request_input_transcript() {
+     let handoff = RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: "handoff_1".to_string(),
+         item_id: "item_1".to_string(),
+@@ -472,6 +477,8 @@ async fn sdk_full_command_queue_does_not_consume_a_handoff() {
+             .sdk_enqueue(
+                 "voice-1",
+                 SdkRealtimeCommand::Interrupt {
++                    cancel_tools: true,
++                    owned_handoffs: Vec::new(),
+                     event_id: None,
+                     reply: None,
+                     playback: None,
+@@ -523,6 +530,8 @@ async fn sdk_close_is_idempotent_and_stale_close_cannot_stop_current_owner() {
+             .sdk_enqueue(
+                 "voice-2",
+                 super::SdkRealtimeCommand::Interrupt {
++                    cancel_tools: true,
++                    owned_handoffs: Vec::new(),
+                     event_id: None,
+                     reply: None,
+                     playback: None,
+@@ -815,6 +824,8 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
+     sdk.register("pending-after-done").await.unwrap();
+     super::handle_sdk_realtime_command(
+         Ok(SdkRealtimeCommand::Interrupt {
++            cancel_tools: true,
++            owned_handoffs: Vec::new(),
+             event_id: None,
+             reply: None,
+             playback: None,
+@@ -831,6 +842,8 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
+     assert!(sdk.pending.lock().await.contains_key("pending-after-done"));
+     super::handle_sdk_realtime_command(
+         Ok(SdkRealtimeCommand::Interrupt {
++            cancel_tools: true,
++            owned_handoffs: Vec::new(),
+             event_id: None,
+             reply: None,
+             playback: None,
+@@ -848,6 +861,8 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
+     for response in ["old-response", "new-response", "new-response"] {
+         super::handle_sdk_realtime_command(
+             Ok(SdkRealtimeCommand::Interrupt {
++                cancel_tools: true,
++                owned_handoffs: Vec::new(),
+                 event_id: None,
+                 reply: None,
+                 playback: None,
+@@ -895,6 +910,7 @@ async fn sdk_duplicate_handoff_is_emitted_once_without_steering_ack() {
+     for _ in 0..2 {
+         super::handle_realtime_server_event(
+             codex_api::RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                sdk_ownership_id: None,
+                 response_id: None,
+                 handoff_id: "call-1".into(),
+                 item_id: "item-1".into(),
+@@ -930,6 +946,7 @@ async fn sdk_duplicate_handoff_is_emitted_once_without_steering_ack() {
+ #[test]
+ fn sdk_delegation_input_retains_accumulated_voice_context() {
+     let handoff = RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         handoff_id: "call-1".into(),
+         item_id: "item-1".into(),
+@@ -951,6 +968,7 @@ fn sdk_delegation_input_retains_accumulated_voice_context() {
+     assert!(input.contains("Tuesday is available"));
+     assert_eq!(input, realtime_delegation_from_handoff(&handoff).unwrap());
+     let empty = RealtimeHandoffRequested {
++        sdk_ownership_id: None,
+         response_id: None,
+         input_transcript: String::new(),
+         active_transcript: vec![],
+@@ -2689,6 +2707,8 @@ async fn sdk_scoped_interrupt_preserves_b_and_uncorrelated_native_work() {
+         .clone();
+     super::handle_sdk_realtime_command(
+         Ok(SdkRealtimeCommand::Interrupt {
++            cancel_tools: true,
++            owned_handoffs: Vec::new(),
+             event_id: None,
+             reply: None,
+             response_id: Some("a".into()),
+@@ -2946,6 +2966,8 @@ async fn sdk_interrupt_completion_reports_actual_source_after_execution() {
+         .sdk_enqueue(
+             "receipt-1",
+             SdkRealtimeCommand::Interrupt {
++                cancel_tools: true,
++                owned_handoffs: Vec::new(),
+                 event_id: None,
+                 response_id: None,
+                 playback: None,
+@@ -4243,6 +4265,8 @@ async fn sdk_wire_pending_handoff_case(interrupt: bool, full_terminal_queue: boo
+     if interrupt {
+         super::handle_sdk_realtime_command(
+             Ok(super::SdkRealtimeCommand::Interrupt {
++                cancel_tools: true,
++                owned_handoffs: Vec::new(),
+                 event_id: None,
+                 response_id: Some("handoff-source".into()),
+                 playback: None,
+@@ -4712,6 +4736,7 @@ async fn sdk_terminal_handoff_rollover_preserves_recent_duplicates() {
+     for index in 0..super::SDK_HANDOFF_LIMIT + 4 {
+         let id = format!("terminal-handoff-{index}");
+         let request = RealtimeHandoffRequested {
++            sdk_ownership_id: None,
+             response_id: Some(format!("response-{index}")),
+             handoff_id: id.clone(),
+             item_id: format!("item-{index}"),
+@@ -4729,10 +4754,15 @@ async fn sdk_terminal_handoff_rollover_preserves_recent_duplicates() {
+         )
+         .await
+         .unwrap();
+-        assert!(matches!(
+-            rx.try_recv().unwrap(),
+-            RealtimeEvent::HandoffRequested(_)
+-        ));
++        let RealtimeEvent::HandoffRequested(mut admitted) = rx.try_recv().unwrap() else {
++            panic!("SDK handoff has no admitted event");
++        };
++        assert_eq!(
++            admitted.sdk_ownership_id.as_deref(),
++            Some(sdk.seen.lock().await[&id].ownership_id.as_str()),
++        );
++        assert!(admitted.sdk_ownership_id.take().is_some());
++        assert_eq!(admitted, request);
+         // The actual command path marks accepted publication before removing pending.
+         sdk.seen.lock().await.get_mut(&id).unwrap().output_published = true;
+         sdk.pending.lock().await.remove(&id);
+@@ -4740,6 +4770,7 @@ async fn sdk_terminal_handoff_rollover_preserves_recent_duplicates() {
+             let before = sdk.seen.lock().await.keys().cloned().collect::<Vec<_>>();
+             super::handle_realtime_server_event(
+                 RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                    sdk_ownership_id: None,
+                     response_id: Some("response-0".into()),
+                     handoff_id: "terminal-handoff-0".into(),
+                     item_id: "item-0".into(),
+@@ -5095,3 +5126,209 @@ async fn sdk_sip_config_uses_native_source_and_serializer_without_reserving_voic
+         .await
+         .unwrap();
+ }
++
++async fn register_media_interrupt_test_call(
++    sdk: &super::SdkRealtimeState,
++    id: &str,
++    response: &str,
++    claimed: bool,
++    root: Option<&str>,
++    batch: Option<Arc<super::RealtimeFunctionBatch>>,
++) {
++    assert!(sdk.register_for_response(id, Some(response)).await.unwrap());
++    sdk.function_calls.lock().await.insert(
++        id.into(),
++        super::SdkFunctionCall {
++            preparation: None,
++            configuration: batch.as_ref().map(|batch| batch.configuration.clone()),
++            batch,
++            request: codex_protocol::protocol::RealtimeFunctionCallRequested {
++                source_profile: None,
++                namespace: None,
++                call_id: id.into(),
++                item_id: format!("item-{id}"),
++                name: "lookup".into(),
++                arguments: "{}".into(),
++                response_id: Some(response.into()),
++            },
++            claimed,
++            native_turn_id: root.map(str::to_owned),
++            cancel: tokio_util::sync::CancellationToken::new(),
++            completed: tokio_util::sync::CancellationToken::new(),
++        },
++    );
++}
++
++#[tokio::test]
++async fn media_interrupt_protects_only_admitted_unresolved_calls_in_its_response() {
++    let sdk = super::SdkRealtimeState::new("media-admission".into());
++    register_media_interrupt_test_call(&sdk, "admitted", "a", true, Some("root"), None).await;
++    register_media_interrupt_test_call(&sdk, "unclaimed", "a", false, None, None).await;
++    register_media_interrupt_test_call(&sdk, "unrooted", "a", true, None, None).await;
++    register_media_interrupt_test_call(&sdk, "other", "b", true, Some("root"), None).await;
++    register_media_interrupt_test_call(&sdk, "settled", "a", true, Some("root"), None).await;
++    sdk.pending.lock().await.remove("settled");
++    assert!(
++        sdk.register_for_response("handoff", Some("a"))
++            .await
++            .unwrap()
++    );
++    let ownership = sdk.seen.lock().await["handoff"].ownership_id.clone();
++    let mut admitted = sdk
++        .preserve_admitted_tools(
++            Some("a"),
++            &[("handoff".into(), Some("a".into()), ownership)],
++        )
++        .await;
++    admitted.sort();
++    assert_eq!(
++        admitted
++            .iter()
++            .map(|(id, _, previous)| (id.as_str(), *previous))
++            .collect::<Vec<_>>(),
++        vec![("admitted", false), ("handoff", false)]
++    );
++    let mut retained: Vec<_> = sdk
++        .media_independent_calls(Some("a"))
++        .await
++        .into_iter()
++        .collect();
++    retained.sort();
++    assert_eq!(retained, vec!["admitted", "handoff"]);
++    assert!(sdk.media_independent_calls(Some("b")).await.is_empty());
++    assert!(
++        !sdk.pending.lock().await["admitted"],
++        "unresolved false is not absence of admission"
++    );
++}
++
++#[tokio::test]
++async fn media_interrupt_rejection_rolls_back_only_new_protection() {
++    let sdk = super::SdkRealtimeState::new("media-rollback".into());
++    register_media_interrupt_test_call(&sdk, "prior", "a", true, Some("root"), None).await;
++    sdk.preserve_admitted_tools(Some("a"), &[]).await;
++    register_media_interrupt_test_call(&sdk, "new", "a", true, Some("root"), None).await;
++    let attempted = sdk.preserve_admitted_tools(Some("a"), &[]).await;
++    sdk.restore_media_preservation(&attempted).await;
++    assert_eq!(
++        sdk.media_independent_calls(None).await,
++        std::collections::HashSet::from(["prior".to_owned()])
++    );
++    sdk.retire_tool_work(false, None, false).await;
++    assert!(
++        sdk.function_calls.lock().await["prior"]
++            .cancel
++            .is_cancelled()
++    );
++    assert!(sdk.function_calls.lock().await["new"].cancel.is_cancelled());
++    assert!(sdk.media_independent_calls(None).await.is_empty());
++}
++
++#[tokio::test]
++async fn media_interrupt_preserves_shared_batch_without_protecting_other_calls() {
++    use std::sync::atomic::{AtomicBool, Ordering};
++    let (connection, _, server) = sdk_wire_connection().await;
++    let sdk = super::SdkRealtimeState::new("media-shared".into());
++    let batch = Arc::new(super::RealtimeFunctionBatch {
++        completed: std::sync::OnceLock::new(),
++        root_dispatch: std::sync::OnceLock::new(),
++        response_id: "a".into(),
++        call_ids: vec!["protected".into(), "unclaimed".into()],
++        configuration: connection
++            .writer()
++            .configuration()
++            .unwrap()
++            .accepted()
++            .unwrap(),
++        handoff_pending: AtomicBool::new(false),
++        handoff_accepted: AtomicBool::new(false),
++        pending_create: AtomicBool::new(true),
++        user_create: std::sync::Mutex::new(None),
++        automatic_retired: AtomicBool::new(false),
++        committed_target: std::sync::Mutex::new(None),
++        update_reserved: AtomicBool::new(false),
++        continued: AtomicBool::new(false),
++    });
++    register_media_interrupt_test_call(
++        &sdk,
++        "protected",
++        "a",
++        true,
++        Some("shared"),
++        Some(batch.clone()),
++    )
++    .await;
++    register_media_interrupt_test_call(&sdk, "unclaimed", "a", false, None, Some(batch.clone()))
++        .await;
++    register_media_interrupt_test_call(&sdk, "other", "b", true, Some("shared"), None).await;
++    sdk.preserve_admitted_tools(Some("a"), &[]).await;
++    let retired = sdk.retire_tool_work(false, None, true).await;
++    assert!(
++        sdk.eligible_retired_roots(&retired.roots, false)
++            .await
++            .is_empty(),
++        "a shared root must retain its admitted protected call"
++    );
++    let calls = sdk.function_calls.lock().await;
++    assert!(!calls["protected"].cancel.is_cancelled());
++    assert!(calls["unclaimed"].cancel.is_cancelled());
++    assert!(calls["other"].cancel.is_cancelled());
++    assert!(
++        retired.batches.is_empty(),
++        "sibling cleanup must not join the retained batch"
++    );
++    assert!(!batch.automatic_retired.load(Ordering::Acquire));
++    assert!(batch.pending_create.load(Ordering::Acquire));
++    drop(calls);
++    sdk.retire_tool_work(true, None, true).await;
++    assert!(!sdk.active.load(Ordering::Acquire));
++    assert!(
++        sdk.function_calls.lock().await["protected"]
++            .cancel
++            .is_cancelled()
++    );
++    assert!(batch.automatic_retired.load(Ordering::Acquire));
++    server.abort();
++}
++
++#[tokio::test]
++async fn media_interrupt_does_not_admit_unowned_or_reused_legacy_handoffs() {
++    for source in [None, Some("a")] {
++        let sdk = super::SdkRealtimeState::new("media-owner-lag".into());
++        assert!(sdk.register_for_response("unread", source).await.unwrap());
++        assert!(sdk.preserve_admitted_tools(None, &[]).await.is_empty());
++        assert!(sdk.register_for_response("owned", source).await.unwrap());
++        let original_owner = sdk.seen.lock().await["owned"].ownership_id.clone();
++        let captured = [(
++            "owned".to_owned(),
++            source.map(str::to_owned),
++            original_owner.clone(),
++        )];
++        let original_grant = sdk.preserve_admitted_tools(None, &captured).await;
++        assert_eq!(
++            original_grant,
++            vec![("owned".to_owned(), original_owner.clone(), false)]
++        );
++        sdk.seen.lock().await.shift_remove("owned");
++        sdk.pending.lock().await.remove("owned");
++        assert!(sdk.register_for_response("owned", source).await.unwrap());
++        let replacement_owner = sdk.seen.lock().await["owned"].ownership_id.clone();
++        assert_ne!(original_owner, replacement_owner);
++        assert!(
++            sdk.preserve_admitted_tools(None, &captured)
++                .await
++                .is_empty()
++        );
++        let replacement = [(
++            "owned".to_owned(),
++            source.map(str::to_owned),
++            replacement_owner,
++        )];
++        let replacement_grant = sdk.preserve_admitted_tools(None, &replacement).await;
++        assert_eq!(replacement_grant.len(), 1);
++        sdk.restore_media_preservation(&original_grant).await;
++        assert!(sdk.seen.lock().await["owned"].preserve_on_response_cancel);
++        sdk.restore_media_preservation(&replacement_grant).await;
++        assert!(!sdk.seen.lock().await["owned"].preserve_on_response_cancel);
++    }
++}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 46ba93f2..a122cacf 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -857,6 +857,8 @@ pub(super) async fn submission_loop(
+                 }
+                 Op::RealtimeConversationInterruptSdk {
+                     generation,
++                    cancel_tools,
++                    owned_handoffs,
+                     response_id,
+                     playback,
+                     feedback,
+@@ -869,6 +871,8 @@ pub(super) async fn submission_loop(
+                         None,
+                         playback,
+                         feedback,
++                        cancel_tools,
++                        owned_handoffs,
+                         reply,
+                     )
+                     .await;
+diff --git a/codex-rs/core/tests/suite/realtime_conversation.rs b/codex-rs/core/tests/suite/realtime_conversation.rs
+index e06f8f61..53eb11f7 100644
+--- a/codex-rs/core/tests/suite/realtime_conversation.rs
++++ b/codex-rs/core/tests/suite/realtime_conversation.rs
+@@ -1480,6 +1480,7 @@ async fn conversation_webrtc_live_reconnects_sideband_after_unclean_disconnect(
+     assert_eq!(
+         handoff,
+         RealtimeHandoffRequested {
++            sdk_ownership_id: None,
+             response_id: None,
+             handoff_id: "handoff_reconnect".to_string(),
+             item_id: "handoff_reconnect".to_string(),
+diff --git a/codex-rs/core/tests/suite/turn_input_submission.rs b/codex-rs/core/tests/suite/turn_input_submission.rs
+index 7ac22708..7a182c08 100644
+--- a/codex-rs/core/tests/suite/turn_input_submission.rs
++++ b/codex-rs/core/tests/suite/turn_input_submission.rs
+@@ -437,6 +437,7 @@ async fn host_drain_closes_realtime_after_handoff_error() -> anyhow::Result<()>
+     for expected in [
+         EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+             payload: RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                sdk_ownership_id: None,
+                 response_id: None,
+                 handoff_id: "rejected".to_string(),
+                 item_id: "rejected".to_string(),
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index b76be2b8..5097799f 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -458,6 +458,9 @@ pub struct RealtimeInterruptReceipt {
+     /// Exact tools roots whose admission is sealed and terminal cleanup has joined.
+     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+     pub joined_root_turn_ids: Vec<String>,
++    /// Exact admitted tool calls retained by a speech-only interruption.
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub preserved_call_ids: Vec<String>,
+ }
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+@@ -554,6 +557,8 @@ pub struct RealtimeTranscriptEntry {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct RealtimeHandoffRequested {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_ownership_id: Option<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub response_id: Option<String>,
+     pub handoff_id: String,
+@@ -1129,6 +1134,8 @@ pub enum Op {
+     /// SDK-owned Realtime operation, fenced by connection generation.
+     RealtimeConversationInterruptSdk {
+         generation: String,
++        cancel_tools: bool,
++        owned_handoffs: Vec<(String, Option<String>, String)>,
+         response_id: Option<String>,
+         playback: Option<RealtimePlaybackPosition>,
+         feedback: Option<String>,

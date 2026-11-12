@@ -16,6 +16,7 @@ from agents import (
     CapabilityError,
     CodexLogin,
     CustomStorage,
+    FunctionTool,
     HostedMCP,
     InteractionExpiredError,
     InteractionRequired,
@@ -23,6 +24,7 @@ from agents import (
     NativeError,
     NativeProvider,
     SQLiteSessionStore,
+    Tool,
     TurnStoppedError,
 )
 from agents.realtime import realtime_handoff
@@ -1261,3 +1263,102 @@ async def test_native_hosted_mcp_update_narrows_provider_advertisement_to_curren
         for tool in responses.requests[0].get("tools", [])
         if tool["type"] == "mcp"
     ] == (["docs"] if retained else [])
+
+
+@pytest.mark.asyncio
+async def test_native_hosted_mcp_manual_restore_keeps_selected_server_with_handoffs(
+    responses: ResponsesFixture,
+) -> None:
+    from agents.state import SessionState
+    from tests.test_native_manual_tools import LookupArgs, next_request
+
+    docs = declaration(require_approval="never")
+    other = declaration("other", require_approval="never")
+    lookup = FunctionTool(
+        name="lookup", description="Read a key", input_type=LookupArgs, output_type=str
+    )
+    fixture = Path(__file__).with_name("fixtures") / "request-control-models.json"
+    model = next(
+        row["slug"]
+        for row in json.loads(fixture.read_text())["models"]
+        if not row.get("use_responses_lite")
+    )
+    target = Agent(name="specialist", instructions="Respond.", model=model)
+    responses.respond(function_call("lookup", {"key": "A"}, "manual_lookup"))
+    async with timeout(30), provider(responses) as native:
+        agent = Agent(
+            instructions="Use the selected server.",
+            provider=native,
+            model=model,
+            tools=[lookup, docs, other],
+            handoffs=[target],
+        )
+        async with agent.session() as source:
+            original = await source.submit("Read A.", tools=[lookup.ref, docs.ref])
+            first = await next_request(source.interactions(), lookup)
+            saved = await source.suspend()
+        async with agent.session(state=SessionState.from_json(saved.to_json())) as restored:
+            request = await next_request(restored.interactions(), lookup)
+            assert (request.turn_id, request.call_id) == (original.turn_id, first.call_id)
+            assert len(responses.requests) == 1
+            responses.respond(assistant_output("Restored selected server."))
+            await request.respond("answer-A")
+            assert restored.restored_turn is not None
+            assert (await restored.restored_turn.get_result()).final_output == (
+                "Restored selected server."
+            )
+        assert len(responses.requests) == 2
+        for wire in responses.requests:
+            assert [tool for tool in wire.get("tools", []) if tool["type"] == "mcp"] == [
+                dict(docs.tool_config)
+            ]
+        outputs = [
+            item
+            for item in responses.requests[1]["input"]
+            if item.get("type") == "function_call_output"
+        ]
+        assert len(outputs) == 1
+        assert outputs[0]["call_id"] == "manual_lookup"
+
+
+@pytest.mark.parametrize("active_profile", [False, True])
+def test_hosted_mcp_restore_keeps_original_ceiling_and_binding(active_profile: bool) -> None:
+    from types import SimpleNamespace
+    from typing import cast
+
+    from _agents_codex.session import _capture_tools, _restore_operation_tools, _split_tools
+    from agents.state import SessionState
+    from tests.test_native_manual_tools import LookupArgs
+
+    docs = declaration(require_approval="never")
+    other = declaration("other", require_approval="never")
+    lookup = FunctionTool(
+        name="lookup", description="Read a key", input_type=LookupArgs, output_type=str
+    )
+    declarations: list[Tool[Any]] = [lookup, docs, other]
+    functions, _, _ = _split_tools(declarations)
+    catalog = _capture_tools(0, functions, None)
+    saved = cast(
+        SessionState,
+        SimpleNamespace(
+            operation_tools=(lookup.ref, docs.ref),
+            native_continuation=SimpleNamespace(
+                pending_manual=(SimpleNamespace(tool=lookup.name),)
+            ),
+        ),
+    )
+    slots, refs, servers, originals = _restore_operation_tools(
+        saved,
+        catalog,
+        declarations,
+        declarations if active_profile else None,
+        programmatic_tool_calling=False,
+        environment=None,
+        native_agents=None,
+        handoffs={"transfer_to_specialist": "specialist"},
+    )
+    assert originals == (lookup, docs)
+    assert originals[1] is docs
+    assert refs == (lookup.ref, docs.ref)
+    assert slots == (0, 1)
+    assert servers == ()

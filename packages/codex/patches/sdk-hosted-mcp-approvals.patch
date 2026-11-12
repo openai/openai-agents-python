@@ -81,7 +81,7 @@ index 826551c64c3af1bd47c6815aad812de943ec9963..da5915f7184ffbd8b2336d0acb4c3aba
              | ResponseItem::CodeInterpreterCall { .. }
              | ResponseItem::ShellCall { .. }
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 84e3cdb9681c7e2bbd713a24594698378f1dbc41..06250a436f5a637408abfac6adbbc0935d82b1ea 100644
+index a743ae733ccb4b5dff5504658cf05056e2c65227..c1a7e404b403278a3859601826a3c121e14e69dc 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -932,6 +932,10 @@ fn reject_compaction_tool_output(item: &ResponseItem) -> CodexResult<()> {
@@ -269,10 +269,10 @@ index 0965eaa5d224e0a060d610248015169e68bd6b99..6ca280742dd7eeb12a37717fd782810e
      }
  }
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index d06e31f4c2168bf258b0127a6c5e8a53234ab107..9961135a4d499f49db1624097bba96871b02e830 100644
+index 2c4014b9945e6b86f11190a98e2aadf8fb12fe06..191e73a22b8f203eaf6fa6f7f426ff8a18aa3e2c 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -4046,6 +4046,10 @@ async fn try_run_sampling_request(
+@@ -4477,6 +4477,10 @@ async fn try_run_sampling_request(
                          | ResponseItem::CustomToolCallOutput { .. }
                          | ResponseItem::ToolSearchOutput { .. }
                          | ResponseItem::WebSearchCall { .. }
@@ -433,7 +433,7 @@ index 66ce8b5da96d6d0b1ba08f87be01c6e5af487dfe..6d7e664e3bffc8933798624ceb44bb9e
                  | ToolSpec::Shell(_)
                  | ToolSpec::ApplicationShell { .. }
 diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
-index b0e52ee5f9a9617d1cf351092a6ba7957d4bd352..c42a24ef25ca9894b419b6388be07bc0fb12b6db 100644
+index 623401a118b13790cdee19bccfca44a14e568aa8..154e4044d1b32250abcdb23c026a1788d5bc0de1 100644
 --- a/codex-rs/core/src/tools/parallel.rs
 +++ b/codex-rs/core/src/tools/parallel.rs
 @@ -266,7 +266,14 @@ impl ToolCallRuntime {
@@ -452,7 +452,7 @@ index b0e52ee5f9a9617d1cf351092a6ba7957d4bd352..c42a24ef25ca9894b419b6388be07bc0
                      return Err(CodexErr::Fatal(other.to_string()));
                  }
                  Err(other) => (
-@@ -441,6 +448,9 @@ impl ToolCallRuntime {
+@@ -444,6 +451,9 @@ impl ToolCallRuntime {
                                  if matches!(call.payload, ToolPayload::Computer { .. } | ToolPayload::ApplyPatch { .. }) {
                                      return Err(FunctionCallError::Fatal("computer call cancelled".into()));
                                  }
@@ -462,7 +462,7 @@ index b0e52ee5f9a9617d1cf351092a6ba7957d4bd352..c42a24ef25ca9894b419b6388be07bc0
                                  let response = Self::aborted_response(&call, secs);
                                  call_trace::result_ready(
                                      thread_id,
-@@ -485,6 +495,16 @@ impl ToolCallRuntime {
+@@ -488,6 +498,16 @@ impl ToolCallRuntime {
  
      fn failure_response(call: ToolCall, err: FunctionCallError) -> ResponseInputItem {
          let message = err.to_string();
@@ -864,12 +864,12 @@ index b26066ec9c925d179aac9339e853678a2bab2bfa..8f97de2dd29a4f9673c9eddb66fc545d
              | ResponseItem::CodeInterpreterCall { .. }
              | ResponseItem::ShellCall { .. }
 diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
-index d77c9401434190281828714dc286d4462b8d7317..c45ea3c7160fe48e35bd4a5582ed38c8982b7be1 100644
+index 9e87075f4687ff3f6bf8c9ab582f67104a503a54..ddea7ed609355c21073daa4d35e3a9a93dd9ce7d 100644
 --- a/codex-rs/history/src/sdk_originals.rs
 +++ b/codex-rs/history/src/sdk_originals.rs
-@@ -73,6 +73,11 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
-     let item: ResponseItem =
-         serde_json::from_str(value).map_err(|_| "Invalid canonical history item".to_string())?;
+@@ -86,6 +86,11 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
+         item.set_id(None);
+     }
      Ok(match item {
 +        ResponseItem::McpApprovalResponse { approve: true, .. } => {
 +            return Err(
@@ -1236,7 +1236,7 @@ index 709e973b41aa1c2a453076db13016fa4ef560d97..6c05c4da401ea519bac3231d30d0c1f4
          ResponseItem::CodeInterpreterCall { .. } => "response.code_interpreter_call",
          ResponseItem::ShellCall { .. } => "response.shell_call",
 diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
-index d490564cad2bc4b4444dbd9a7361d2e0bd8c9229..a1a76b0316b8aa36288c6144ae93ee72254d0e60 100644
+index b6fe962c01a5403f2da721f4a1451c6a60c92173..3644a5e5abd57c902ee5a334720f8e16d4b926fe 100644
 --- a/codex-rs/rollout/src/policy.rs
 +++ b/codex-rs/rollout/src/policy.rs
 @@ -97,6 +97,10 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {

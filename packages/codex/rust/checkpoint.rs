@@ -908,10 +908,13 @@ pub async fn restore(
         "Agent profiles require managed tools"
     );
     let application_instructions = match &agent_profiles {
-        Some(profiles) => Some(crate::agent_profiles::validate_restored(
-            profiles,
-            &checkpoint.history,
-        )?),
+        Some(profiles) => {
+            crate::agent_profiles::restore_source(profiles, &checkpoint.history)?;
+            Some(crate::agent_profiles::validate_restored(
+                profiles,
+                &checkpoint.history,
+            )?)
+        }
         None => options
             .application_instructions
             .as_deref()
@@ -1205,6 +1208,7 @@ async fn import(
         });
         history.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
             TurnAbortedEvent {
+                model_attempt: None,
                 turn_id,
                 reason: TurnAbortReason::Interrupted,
                 error: None,

@@ -51,6 +51,7 @@ from urllib.parse import urlsplit as urlsplit
 
 from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar
 
+from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
 from ._lifecycle import (
     _close_after_error as _close_after_error,
     _join as _join,
@@ -69,8 +70,9 @@ from .guardrails import InputGuardrail, OutputGuardrail
 from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
-from .model_context import _ContextTransform
+from .model_context import HostedPromptSource, _ContextTransform
 from .models import ModelProvider, NativeModel
+from .retry import ModelRetrySettings as ModelRetrySettings
 from .tools import ToolRef
 from .usage import RunBudget
 
@@ -83,6 +85,7 @@ if TYPE_CHECKING:
     from ._managed_workspace import ManagedWorkspaceCheckpoint
     from .canonical_storage import CustomStorage
     from .executor import Environment, EnvironmentSource
+    from .handoffs import Handoff
     from .input import UserInput
     from .native_agents import NativeAgents
     from .prepared_request import _PrepareRequest
@@ -144,6 +147,10 @@ class ModelSettings(TypedDict, total=False, closed=True):
     integer milliseconds (at most 4,294,967,295). ``None`` clears it. It includes
     internal request waits and retries. Cleanup can finish after expiry; accepted
     terminal responses disarm the clock before result settlement.
+    ``attempt_timeout_ms`` applies separately to each native generation attempt;
+    retry backoff runs outside this clock. ``retry`` configures native retry
+    decisions. Its policy is captured with the Agent, excluded from configuration
+    JSON, and never starts a host retry loop.
     """
 
     reasoning_effort: str
@@ -162,6 +169,8 @@ class ModelSettings(TypedDict, total=False, closed=True):
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
     invocation_timeout_ms: int | None
+    attempt_timeout_ms: int | None
+    retry: ModelRetrySettings | None
     truncation: Literal["auto", "disabled"] | None
     include: list[str] | None
     context_management: list[dict[str, Any]] | None
@@ -178,20 +187,25 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
     unknown = settings.keys() - ModelSettings.__annotations__.keys()
     if unknown:
         raise ValueError(f"Unsupported model setting(s): {sorted(unknown)}")
-    if "invocation_timeout_ms" in settings:
-        timeout_ms = settings["invocation_timeout_ms"]
+    for timeout_name in ("invocation_timeout_ms", "attempt_timeout_ms"):
+        if timeout_name not in settings:
+            continue
+        timeout_ms = cast(Mapping[str, Any], settings)[timeout_name]
         if timeout_ms is not None and (
             type(timeout_ms) is not int or not 1 <= timeout_ms <= 4_294_967_295
         ):
             raise ValueError(
-                "invocation_timeout_ms must be an integer in the range 1..=4294967295 or None"
+                f"{timeout_name} must be an integer in the range 1..=4294967295 or None"
             )
 
     captured: dict[str, Any] = dict(settings)
     for key, value in captured.items():
         if value is None:
             continue
-        if key == "input_modalities":
+        if key == "retry":
+            if not isinstance(value, ModelRetrySettings):
+                raise TypeError("retry must be ModelRetrySettings or None")
+        elif key == "input_modalities":
             if (
                 not isinstance(value, Sequence)
                 or isinstance(value, (str, bytes))
@@ -897,6 +911,20 @@ class NativeProvider:
 _PROVIDER_LOCK = RLock()
 
 
+# dataclasses.replace forwards the public fields. Empty markers retain omission
+# while keeping their normal string and tuple behavior.
+class _OmittedInstructions(str):
+    __slots__ = ()
+
+
+class _OmittedTools(tuple[()]):
+    __slots__ = ()
+
+
+_OMITTED_INSTRUCTIONS = _OmittedInstructions()
+_OMITTED_TOOLS = _OmittedTools()
+
+
 @dataclass(init=False, eq=False, repr=False)
 class Agent(Generic[ContextT, OutputT]):
     """Declare a native agent without starting a runtime or connection.
@@ -948,7 +976,11 @@ class Agent(Generic[ContextT, OutputT]):
     name: str | None
     tools: tuple[Tool[ContextT], ...]
     handoffs: tuple[
-        Agent[ContextT, OutputT] | RealtimeHandoff | _Callable[[], Agent[ContextT, OutputT]], ...
+        Agent[ContextT, OutputT]
+        | Handoff[ContextT, OutputT]
+        | RealtimeHandoff
+        | _Callable[[], Agent[ContextT, OutputT]],
+        ...,
     ]
     model: str | None
     model_settings: ModelSettings
@@ -963,6 +995,7 @@ class Agent(Generic[ContextT, OutputT]):
     input_guardrails: tuple[InputGuardrail[ContextT], ...]
     output_guardrails: tuple[OutputGuardrail[ContextT], ...]
     tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
+    hosted_prompt: HostedPromptSource | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -984,7 +1017,10 @@ class Agent(Generic[ContextT, OutputT]):
             *args: Any,
             tools: Sequence[Tool[ContextT]] | None = None,
             handoffs: Sequence[
-                Agent[ContextT, str] | RealtimeHandoff | _Callable[[], Agent[ContextT, str]]
+                Agent[ContextT, str]
+                | Handoff[ContextT, str]
+                | RealtimeHandoff
+                | _Callable[[], Agent[ContextT, str]]
             ]
             | None = None,
             output_type: None = None,
@@ -1004,7 +1040,10 @@ class Agent(Generic[ContextT, OutputT]):
             output_type: OutputSpec[OutputT],
             tools: Sequence[Tool[ContextT]] | None = None,
             handoffs: Sequence[
-                Agent[ContextT, OutputT] | RealtimeHandoff | _Callable[[], Agent[ContextT, OutputT]]
+                Agent[ContextT, OutputT]
+                | Handoff[ContextT, OutputT]
+                | RealtimeHandoff
+                | _Callable[[], Agent[ContextT, OutputT]]
             ]
             | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
@@ -1033,7 +1072,10 @@ class Agent(Generic[ContextT, OutputT]):
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         handoffs: Sequence[
-            Agent[ContextT, str] | RealtimeHandoff | _Callable[[], Agent[ContextT, str]]
+            Agent[ContextT, str]
+            | Handoff[ContextT, str]
+            | RealtimeHandoff
+            | _Callable[[], Agent[ContextT, str]]
         ]
         | None = None,
         model: str | None = None,
@@ -1049,6 +1091,39 @@ class Agent(Generic[ContextT, OutputT]):
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+        hosted_prompt: HostedPromptSource | None = None,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        # Mypy 1.17 needs the class context here to preserve explicit generics
+        # while specializing the default output. Pyright rejects this form.
+        self: Agent[ContextT, str],  # pyright: ignore[reportInvalidTypeVarUse]
+        *,
+        instructions: str | None = None,
+        hosted_prompt: HostedPromptSource,
+        name: str | None = None,
+        tools: Sequence[Tool[ContextT]] | None = None,
+        handoffs: Sequence[
+            Agent[ContextT, str]
+            | Handoff[ContextT, str]
+            | RealtimeHandoff
+            | _Callable[[], Agent[ContextT, str]]
+        ]
+        | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
+        output_type: None = None,
+        programmatic_tool_calling: bool = False,
+        transform_context: _ContextTransform[ContextT] | None = None,
+        before_compact: _BeforeCompact[ContextT] | None = None,
+        before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
+        input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
+        output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+        realtime: RealtimeAgentConfig | None = None,
     ) -> None: ...
 
     @overload
@@ -1060,7 +1135,10 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: OutputSpec[OutputT],
         tools: Sequence[Tool[ContextT]] | None = None,
         handoffs: Sequence[
-            Agent[ContextT, OutputT] | RealtimeHandoff | _Callable[[], Agent[ContextT, OutputT]]
+            Agent[ContextT, OutputT]
+            | Handoff[ContextT, OutputT]
+            | RealtimeHandoff
+            | _Callable[[], Agent[ContextT, OutputT]]
         ]
         | None = None,
         model: str | None = None,
@@ -1075,16 +1153,50 @@ class Agent(Generic[ContextT, OutputT]):
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+        hosted_prompt: HostedPromptSource | None = None,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        *,
+        instructions: str | None = None,
+        hosted_prompt: HostedPromptSource,
+        name: str | None = None,
+        output_type: OutputSpec[OutputT],
+        tools: Sequence[Tool[ContextT]] | None = None,
+        handoffs: Sequence[
+            Agent[ContextT, OutputT]
+            | Handoff[ContextT, OutputT]
+            | RealtimeHandoff
+            | _Callable[[], Agent[ContextT, OutputT]]
+        ]
+        | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
+        programmatic_tool_calling: bool = False,
+        transform_context: _ContextTransform[ContextT] | None = None,
+        before_compact: _BeforeCompact[ContextT] | None = None,
+        before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
+        input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
+        output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+        realtime: RealtimeAgentConfig | None = None,
     ) -> None: ...
 
     def __init__(
         self,
         *,
-        instructions: str,
+        instructions: str | None = None,
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         handoffs: Sequence[
-            Agent[ContextT, Any] | RealtimeHandoff | _Callable[[], Agent[ContextT, Any]]
+            Agent[ContextT, Any]
+            | Handoff[ContextT, Any]
+            | RealtimeHandoff
+            | _Callable[[], Agent[ContextT, Any]]
         ]
         | None = None,
         model: str | None = None,
@@ -1100,9 +1212,17 @@ class Agent(Generic[ContextT, OutputT]):
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+        hosted_prompt: HostedPromptSource | None = None,
     ) -> None:
-        if not isinstance(instructions, str):
-            raise TypeError("instructions must be a string")
+        if isinstance(instructions, _OmittedInstructions):
+            instructions = None
+        if isinstance(tools, _OmittedTools):
+            tools = None
+        captured_prompt = _capture_hosted_prompt_source(hosted_prompt)
+        if not isinstance(instructions, str) and not (
+            instructions is None and captured_prompt is not None
+        ):
+            raise TypeError("instructions are required without a hosted prompt")
         if name is not None and not isinstance(name, str):
             raise TypeError("name must be a string or None")
         if not isinstance(programmatic_tool_calling, bool):
@@ -1119,20 +1239,28 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
             raise TypeError("provider must be a NativeProvider or None")
+        from .handoffs import Handoff
         from .realtime_agents import RealtimeAgentConfig, RealtimeHandoff
 
         captured_handoffs = tuple(handoffs or ())
         if any(
-            not isinstance(target, (Agent, RealtimeHandoff)) and not callable(target)
+            not isinstance(target, (Agent, Handoff, RealtimeHandoff)) and not callable(target)
             for target in captured_handoffs
         ):
             raise TypeError("handoffs must contain native Agents or synchronous target resolvers")
         if realtime is not None and not isinstance(realtime, RealtimeAgentConfig):
             raise TypeError("realtime must be RealtimeAgentConfig or None")
         object.__setattr__(self, "realtime", realtime._capture() if realtime is not None else None)
-        object.__setattr__(self, "instructions", instructions)
+        object.__setattr__(self, "hosted_prompt", captured_prompt)
+        object.__setattr__(self, "_hosted_tools_provided", tools is not None)
+        object.__setattr__(self, "_hosted_instructions_provided", instructions is not None)
+        object.__setattr__(
+            self,
+            "instructions",
+            instructions if instructions is not None else _OMITTED_INSTRUCTIONS,
+        )
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "tools", tuple(tools or ()))
+        object.__setattr__(self, "tools", tuple(tools) if tools is not None else _OMITTED_TOOLS)
         object.__setattr__(self, "handoffs", captured_handoffs)
         object.__setattr__(self, "model", model)
         if decisions is not None:
@@ -1239,6 +1367,17 @@ class Agent(Generic[ContextT, OutputT]):
         native = importlib.import_module("agents._native")
 
         def check(declaration: Agent[Any, Any]) -> None:
+            _hosted_prompt_controls(
+                declaration.hosted_prompt,
+                model=declaration.model,
+                instructions=(
+                    declaration.instructions
+                    if getattr(declaration, "_hosted_instructions_provided", False)
+                    else None
+                ),
+                tools_provided=getattr(declaration, "_hosted_tools_provided", False),
+                extra_body=declaration.model_settings.get("extra_body"),
+            )
             python_tools, mcp_tools, native_agents = _split_tools(
                 declaration.tools, declaration.programmatic_tool_calling
             )
@@ -1419,9 +1558,9 @@ class Agent(Generic[ContextT, OutputT]):
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
-        resume_budget has been supplying the original current request-only
-        ceiling for a budgeted manual checkpoint. Prior admissions have been
-        remaining consumed. Other openings have been rejecting this option.
+        resume_budget has been supplying the original current limits and missing-usage
+        policy for a budgeted manual checkpoint. Prior admissions and token usage
+        have been remaining consumed. Other openings have been rejecting this option.
 
         restored_output_type selects only a pending restored turn's output
         decoder, validator and repair policy. It must match the saved contract.
@@ -2022,7 +2161,7 @@ class Agent(Generic[ContextT, OutputT]):
                 state is None
                 and budget is not None
                 and pause_manual
-                and (budget.max_tokens is not None or budget.max_estimated_cost_micros is not None)
+                and budget.max_estimated_cost_micros is not None
             ):
                 raise CapabilityError(
                     "An active run with a budget cannot be captured for manual replies. "
@@ -2227,10 +2366,7 @@ class Agent(Generic[ContextT, OutputT]):
                         if (
                             budget is not None
                             and has_reachable_manual
-                            and (
-                                budget.max_tokens is not None
-                                or budget.max_estimated_cost_micros is not None
-                            )
+                            and budget.max_estimated_cost_micros is not None
                         ):
                             raise CapabilityError(
                                 "An active run with a budget cannot be captured "

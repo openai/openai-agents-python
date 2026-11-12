@@ -61,8 +61,6 @@ async def test_budget_follows_live_managed_approval(responses, max_requests):
         )
         request = await next_request(session.interactions(), record)
         assert effects == []
-        with pytest.raises(CapabilityError, match="Only request-only"):
-            await session.suspend()
         await request.approve()
         if max_requests == 1:
             with pytest.raises(NativeError) as stopped:
@@ -382,7 +380,7 @@ async def test_budgeted_idle_restore_uses_saved_default_selection(
 ) -> None:
     lookup = lookup_tool()
     agent = Agent(instructions="Answer.", provider=provider(responses), tools=[lookup])
-    budget = RunBudget(max_requests=1, max_tokens=1000)
+    budget = RunBudget(max_requests=1, max_estimated_cost_micros=1000)
     async with timeout(15):
         async with agent.session() as session:
             await session.update(tools=[lookup.ref] if manual_selected else [])
@@ -404,7 +402,7 @@ async def test_budget_keeps_live_manual_boundary_but_refuses_capture(
 ) -> None:
     lookup = lookup_tool()
     agent = Agent(instructions="Look up the key.", provider=provider(responses), tools=[lookup])
-    budget = RunBudget(max_requests=1, max_tokens=1000)
+    budget = RunBudget(max_requests=1, max_estimated_cost_micros=1000)
     async with timeout(20):
         with pytest.raises(CapabilityError, match="cannot be captured"):
             await agent.run("no automatic capture", budget=budget)
@@ -414,7 +412,7 @@ async def test_budget_keeps_live_manual_boundary_but_refuses_capture(
             turn = await session.submit("look up A", budget=budget)
             request = await next_request(session.interactions(), lookup)
             assert (await session.checkpoint_status(kind="manual_wait")).status == "not_ready"
-            with pytest.raises(CapabilityError, match="Only request-only"):
+            with pytest.raises(CapabilityError, match="Estimated-cost"):
                 await session.suspend()
             await request.respond("result from the live application")
             with pytest.raises(NativeError) as stopped:
@@ -618,6 +616,79 @@ async def test_request_budget_survives_portable_same_turn_restart(
         assert len(responses.requests) == max_requests
 
 
+async def test_restore_detaches_caller_input_before_native_acquisition(responses, monkeypatch):
+    from agents import RunDiagnosticError, _native
+
+    lookup = lookup_tool()
+    limits = RunBudget(max_requests=1, max_tokens=14)
+    agent = Agent(instructions="Look up and answer.", provider=provider(responses), tools=[lookup])
+    responses.respond(function_call("lookup", {"key": "A"}, "pending"))
+    original_input = {"role": "user", "content": [{"type": "input_text", "text": "Look up A"}]}
+    acquired, release = asyncio.Event(), asyncio.Event()
+    create = _native.create_checkpoint_engine
+    acquisitions = []
+
+    async def held_acquisition(*args, **kwargs):
+        engine = await create(*args, **kwargs)
+        acquisitions.append(engine)
+        acquired.set()
+        await release.wait()
+        return engine
+
+    async with timeout(20):
+        with pytest.raises(RunDiagnosticError) as pending:
+            await agent.run(original_input, budget=limits, capture_error_details=True)
+        assert isinstance(pending.value.__cause__, InteractionRequired)
+        saved = pending.value.__cause__.state
+        monkeypatch.setattr(_native, "create_checkpoint_engine", held_acquisition)
+        for invalid in (
+            None,
+            RunBudget(max_requests=2, max_tokens=14),
+            RunBudget(max_requests=1, max_tokens=14, missing_usage="continue"),
+        ):
+            with pytest.raises(CapabilityError):
+                async with agent.session(state=saved, resume_budget=invalid):
+                    pytest.fail("Invalid current limits acquired restore resources")
+        assert acquisitions == [] and len(responses.requests) == 1
+
+        scope = agent.session(state=saved, resume_budget=limits)
+        assert acquisitions == []
+        saved.original_input["content"][0]["text"] = "Captured on context entry"
+        expected_input = {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Captured on context entry"}],
+        }
+
+        async def restore():
+            async with scope as restored:
+                request = await next_request(restored.interactions(), lookup)
+                assert request.call_id == "pending"
+                return await restored.suspend()
+
+        opening = asyncio.create_task(restore())
+        try:
+            await acquired.wait()
+            assert saved.original_input == expected_input
+            saved.original_input["content"][0]["text"] = "Changed after acquisition"
+        finally:
+            release.set()
+            detached = await opening
+        assert detached.original_input == expected_input
+        assert detached.run_budget == saved.run_budget
+        assert detached.run_budget.admitted_requests == 1
+        assert detached.run_budget.consumed_tokens == 14
+        assert detached.run_budget.usage_missing is False
+        assert detached.run_usage.total_tokens == 14
+        async with agent.session(state=detached, resume_budget=limits) as resumed:
+            request = await next_request(resumed.interactions(), lookup)
+            await request.respond("A result")
+            with pytest.raises(NativeError) as stopped:
+                await resumed.restored_turn.get_result()
+            assert stopped.value.code == "run_budget_exceeded"
+        assert len(acquisitions) == 2 and len(responses.requests) == 1
+    await agent.provider.aclose()
+
+
 @pytest.mark.parametrize("version", [True, 1.0, 2])
 def test_request_budget_checkpoint_requires_an_exact_version(version):
     from _agents_codex.state import _RequestRunBudgetCheckpoint
@@ -665,3 +736,202 @@ def test_request_budget_checkpoint_rejects_malformed_admissions(fields):
 
     with pytest.raises(ValueError):
         _RequestRunBudgetCheckpoint.model_validate({"version": 1, **fields})
+
+
+@pytest.mark.parametrize("max_requests", [None, 2])
+@pytest.mark.parametrize("max_tokens", [10, 15])
+async def test_token_budget_survives_portable_approval(responses, max_requests, max_tokens):
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def record() -> str:
+        effects.append("approved")
+        return "recorded"
+
+    responses.respond(function_call("record", {}, "pending"))
+    responses.respond(assistant_output("Done"))
+    limits = RunBudget(max_requests=max_requests, max_tokens=max_tokens)
+    agent = Agent(instructions="Record and answer.", provider=provider(responses), tools=[record])
+    async with timeout(20):
+        async with agent.session() as source:
+            await source.submit("begin", budget=limits)
+            await next_request(source.interactions(), record)
+            saved = await source.suspend()
+        assert saved.run_budget.version == 2
+        assert saved.run_budget.consumed_tokens == min(14, max_tokens)
+        assert saved.run_usage.total_tokens == 14
+        assert saved.run_budget.admitted_requests == (1 if max_requests is not None else None)
+        for invalid in (
+            None,
+            RunBudget(max_requests=max_requests, max_tokens=max_tokens + 1),
+            RunBudget(max_requests=max_requests, max_tokens=max_tokens, missing_usage="continue"),
+            RunBudget(max_requests=3, max_tokens=max_tokens),
+            RunBudget(max_tokens=max_tokens, max_estimated_cost_micros=100),
+        ):
+            with pytest.raises(CapabilityError):
+                async with agent.session(state=saved, resume_budget=invalid):
+                    pytest.fail("Invalid current limits acquired restore resources")
+        assert len(responses.requests) == 1
+        async with agent.session(state=saved, resume_budget=limits) as restored:
+            # Resealing an untouched restored hold must not join its live reader.
+            await next_request(restored.interactions(), record)
+            saved_again = await restored.suspend()
+        async with agent.session(state=saved_again, resume_budget=limits) as restored:
+            request = await next_request(restored.interactions(), record)
+            await request.approve()
+            if max_tokens <= 14:
+                with pytest.raises(NativeError) as stopped:
+                    await restored.restored_turn.get_result()
+                assert stopped.value.code == "run_budget_exceeded"
+            else:
+                result = await restored.restored_turn.get_result()
+                assert result.final_output == "Done"
+                assert result.run_usage.total_tokens == 28
+    assert effects == ["approved"]
+    assert len(responses.requests) == (1 if max_tokens <= 14 else 2)
+
+
+@pytest.mark.parametrize("missing_usage", ["stop", "continue"])
+async def test_token_budget_one_shot_preserves_missing_usage(responses, missing_usage):
+    async def omit_usage(event):
+        if event["type"] == "response.completed":
+            event["response"].pop("usage", None)
+
+    responses.before_event = omit_usage
+    lookup = lookup_tool()
+    responses.respond(function_call("lookup", {"key": "A"}, "pending"))
+    responses.respond(assistant_output("Done"))
+    agent = Agent(instructions="Look up and answer.", provider=provider(responses), tools=[lookup])
+    limits = RunBudget(max_tokens=100, missing_usage=missing_usage)
+    async with timeout(20):
+        with pytest.raises(InteractionRequired) as pending:
+            await agent.run("begin", budget=limits)
+        saved = pending.value.state
+        assert saved.run_budget.usage_missing is True
+        assert saved.run_budget.consumed_tokens == 0
+        restored = agent.run(
+            None,
+            state=saved,
+            budget=limits,
+            on_interaction=lambda event: lookup.match(event).reply("result"),
+        )
+        if missing_usage == "stop":
+            with pytest.raises(NativeError) as stopped:
+                await restored
+            assert stopped.value.code == "run_budget_usage_unavailable"
+        else:
+            assert (await restored).final_output == "Done"
+    assert len(responses.requests) == (1 if missing_usage == "stop" else 2)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"version": True},
+        {"version": 2.0},
+        {"version": 3},
+        {"max_tokens": True},
+        {"max_tokens": 2**53},
+        {"consumed_tokens": 11},
+        {"consumed_tokens": -1},
+        {"consumed_tokens": 1.0},
+        {"usage_missing": 1},
+        {"missing_usage": "ignore"},
+        {"admitted_requests": 1},
+        {"max_requests": 2},
+        {"max_requests": 2, "admitted_requests": 3},
+        {"extra": 1},
+    ],
+)
+def test_token_budget_checkpoint_rejects_malformed_receipts(fields):
+    from _agents_codex.state import _TokenRunBudgetCheckpoint
+
+    with pytest.raises(ValueError):
+        _TokenRunBudgetCheckpoint.model_validate(
+            {
+                "version": 2,
+                "max_requests": None,
+                "admitted_requests": None,
+                "max_tokens": 10,
+                "consumed_tokens": 1,
+                "usage_missing": False,
+                "missing_usage": "stop",
+                **fields,
+            }
+        )
+
+
+@pytest.mark.parametrize("reader_failure", [False, True])
+async def test_manual_capture_drains_usage_before_retiring_reader(
+    responses, monkeypatch, reader_failure
+):
+    from agents import _native
+
+    usage_waiting, release_usage, sealed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_next = _native.NativeThread._next_session_event
+    original_seal = _native.NativeThread._seal_manual
+
+    manual_seen = False
+    pending_usage = None
+
+    async def delayed_next(native):
+        nonlocal manual_seen, pending_usage
+        if manual_seen and pending_usage is not None:
+            raw, pending_usage = pending_usage, None
+        else:
+            raw = await original_next(native)
+        event = json.loads(raw)
+        message = event.get("msg", {})
+        if message.get("type") == "dynamic_tool_call_request":
+            manual_seen = True
+        if message.get("type") == "raw_response_completed":
+            if not manual_seen:
+                # The independent tool channel can publish its request before usage.
+                # Deliver that request before holding the root reader for capture.
+                pending_usage = raw
+                return await delayed_next(native)
+            usage_waiting.set()
+            await release_usage.wait()
+            if reader_failure:
+                raise RuntimeError("Synthetic reader failure")
+        return raw
+
+    async def seal(native, *args, **kwargs):
+        result = await original_seal(native, *args, **kwargs)
+        sealed.set()
+        return result
+
+    monkeypatch.setattr(_native.NativeThread, "_next_session_event", delayed_next)
+    monkeypatch.setattr(_native.NativeThread, "_seal_manual", seal)
+    lookup = lookup_tool()
+    responses.respond(function_call("lookup", {"key": "A"}, "pending"))
+    agent = Agent(instructions="Look up and answer.", provider=provider(responses), tools=[lookup])
+    limits = RunBudget(max_tokens=14)
+    async with timeout(20):
+        async with agent.session() as source:
+            capturing = None
+            try:
+                await source.submit("begin", budget=limits)
+                await next_request(source.interactions(), lookup)
+                await usage_waiting.wait()
+                capturing = asyncio.create_task(source.suspend())
+                await sealed.wait()
+                assert not capturing.done()
+                release_usage.set()
+                if reader_failure:
+                    with pytest.raises(NativeError, match="did not drain"):
+                        await capturing
+                    return
+                saved = await capturing
+            finally:
+                release_usage.set()
+                if capturing is not None:
+                    await asyncio.gather(capturing, return_exceptions=True)
+        assert saved.run_budget.consumed_tokens == 14
+        async with agent.session(state=saved, resume_budget=limits) as restored:
+            request = await next_request(restored.interactions(), lookup)
+            await request.respond("result")
+            with pytest.raises(NativeError) as stopped:
+                await restored.restored_turn.get_result()
+            assert stopped.value.code == "run_budget_exceeded"
+    assert len(responses.requests) == 1

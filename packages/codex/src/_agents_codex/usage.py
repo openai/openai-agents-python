@@ -37,8 +37,9 @@ class TokenUsage:
 class RunUsage(TokenUsage):
     """Measured owner-local run totals, separate from native thread/context estimates.
 
-    requests counts observed native response completions and explicitly reported
-    external requests. missing_usage_requests counts requests without token data.
+    requests includes native logical generation attempts, untagged internal or
+    legacy completions, and explicit external reports. missing_usage_requests
+    includes requests without measured token data.
     Child owners remain separate until an authoritative parent run is known.
     """
 
@@ -60,6 +61,12 @@ class _UsageCollector:
         self.lock = RLock()
         self.value = initial or RunUsage(0, 0, 0, 0, 0, 0, 0, 0)
         self.children: set[_UsageCollector] = set()
+        # Native generation totals replace this mirror; value retains only explicit,
+        # historical-offset and untagged internal-request contributions.
+        self.model_usage: RunUsage | None = None
+        self.model_owner_attempt_id: str | None = None
+        self.model_terminal_attempt_id: str | None = None
+        self.model_final = False
 
     @staticmethod
     def capture(usage: TokenUsage | None, requests: int = 1) -> RunUsage:
@@ -89,12 +96,61 @@ class _UsageCollector:
     def report(self, usage: TokenUsage | None, requests: int = 1) -> None:
         self.add(self.capture(usage, requests))
 
-    def observe(self, raw: dict[str, Any] | None) -> None:
+    def observe(self, raw: dict[str, Any] | None, model_attempt_id: str | None = None) -> None:
+        if model_attempt_id is not None:
+            if not isinstance(model_attempt_id, str) or not model_attempt_id:
+                raise ValueError("Invalid native model attempt identity")
+            # The exact native attempt owns count, tokens and missing usage together.
+            # Untagged legacy and compaction completions retain their additive path.
+            return
         try:
             usage = None if raw is None else TokenUsage(**raw)
             self.report(usage)
         except (TypeError, ValueError):
             self.report(None)
+
+    def replace_model_attempt(self, snapshot: dict[str, Any], *, final: bool = False) -> None:
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("usage"), dict):
+            raise ValueError("Invalid native model attempt snapshot")
+        raw = snapshot["usage"]
+        requests, missing = raw.get("requests"), raw.get("requests_without_token_usage")
+        if (
+            type(requests) is not int
+            or not 0 <= requests <= 2**64 - 1
+            or type(missing) is not int
+            or not 0 <= missing <= requests
+        ):
+            raise ValueError("Invalid native model usage counters")
+        owner = snapshot.get("owner_attempt_id")
+        if (requests == 0 and owner is not None) or (
+            requests > 0 and (not isinstance(owner, str) or not owner)
+        ):
+            raise ValueError("Invalid native model usage owner")
+        terminal = snapshot.get("terminal_attempt_id")
+        if terminal is not None and (not isinstance(terminal, str) or not terminal):
+            raise ValueError("Invalid native model terminal identity")
+        tokens = raw.get("token_usage")
+        if not isinstance(tokens, dict):
+            raise ValueError("Invalid native model token usage")
+        measured = self.capture(TokenUsage(**tokens), requests)
+        captured = RunUsage(
+            **{name: getattr(measured, name) for name in TokenUsage.__dataclass_fields__},
+            requests=requests,
+            missing_usage_requests=missing,
+        )
+        with self.lock:
+            if self.model_final and not final:
+                return
+            if self.model_owner_attempt_id is not None and owner != self.model_owner_attempt_id:
+                raise ValueError("Native model usage owner changed")
+            if self.model_usage is not None and captured.requests < self.model_usage.requests:
+                if final:
+                    raise ValueError("Native final model usage regressed")
+                return
+            self.model_usage = captured
+            self.model_owner_attempt_id = owner
+            self.model_terminal_attempt_id = terminal
+            self.model_final = self.model_final or final
 
     def attach(self, child: _UsageCollector) -> None:
         with self.lock:
@@ -103,6 +159,13 @@ class _UsageCollector:
     def snapshot(self) -> RunUsage:
         with self.lock:
             value = self.value
+            if self.model_usage is not None:
+                value = RunUsage(
+                    *(
+                        getattr(value, name) + getattr(self.model_usage, name)
+                        for name in RunUsage.__dataclass_fields__
+                    )
+                )
             children = tuple(self.children)
         for child in children:
             nested = child.snapshot()
@@ -153,7 +216,9 @@ class RunBudget:
     The budget follows live replies, same-run steering, and output repair.
     Request-only limits have been retaining prior admissions across supported
     manual checkpoints, with the original ceiling supplied again on restore.
-    Token and cost limits have been rejecting active portable capture.
+    Token limits have been retaining observed consumption and missing usage,
+    with matching current limits and missing-usage policy on restore.
+    Estimated-cost limits have been rejecting active portable capture.
     Idle checkpoints have been starting new runs with fresh budgets.
     """
 

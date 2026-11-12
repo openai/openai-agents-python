@@ -78,7 +78,8 @@ async def test_handoff_configuration_waits_for_app_agent_update():
 
     configured = []
 
-    async def apply(response_id, target):
+    async def apply(response_id, target, *, source_work=None):
+        assert source_work is None
         configured.append((response_id, target))
 
     owner = SimpleNamespace(
@@ -144,7 +145,7 @@ async def test_structured_handoff_preserves_declared_shape_and_callback_value(in
     with pytest.raises(ValidationError):
         captured._parse_arguments({"reason": 123})
     parsed = captured._parse_arguments('{"reason":"requested"}')
-    assert captured.callback(**captured._arguments(parsed)) is None
+    assert captured.callback(**captured._arguments(parsed)) == "Handoff reserved."
     assert received == [input_type(reason="requested")]
 
 
@@ -311,7 +312,7 @@ async def test_custom_handoff_reuses_validated_callback_and_exact_source():
         captured._parse_arguments({"reason": ""})
     assert received == []
     parsed = captured._parse_arguments({"reason": "requested"})
-    assert await captured.callback(**captured._arguments(parsed)) is None
+    assert await captured.callback(**captured._arguments(parsed)) == "Handoff reserved."
     assert received[0][0].agent is source
     assert received[0][0].context is application
     assert received[0][1] is parsed
@@ -364,6 +365,7 @@ def test_live_graph_capture_preserves_provider_output_and_runtime_contracts(sess
     opening = Agent(instructions="Original", provider=provider)
     session = SimpleNamespace(
         _opening_agent=opening,
+        _tool_error_formatter=None,
         _context=None,
         _executor=None,
         _input_guardrails=(

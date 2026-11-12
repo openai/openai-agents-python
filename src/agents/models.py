@@ -9,6 +9,7 @@ from _agents_codex.models import (
     ModelRequestOptions as ModelRequestOptions,
     ModelRequestOptionsFactory as ModelRequestOptionsFactory,
     ModelResponse as ModelResponse,
+    ModelRetryAdviceRequest as ModelRetryAdviceRequest,
     NativeModel as NativeModel,
     NativeStreamingModel as NativeStreamingModel,
     ResponsesModel as ResponsesModel,

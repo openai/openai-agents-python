@@ -22,6 +22,7 @@ from ._events import (
     SessionSnapshot as SessionSnapshot,
     TokenUsage as TokenUsage,
 )
+from ._hosted_projection import project_hosted_response_item as project_hosted_response_item
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._subagent_projection import project_subagent_item as project_subagent_item
 from ._web_projection import project_web_search_item as project_web_search_item
@@ -204,44 +205,6 @@ def project_execution_completion(
     ):
         return None
     return cast(ExecutionItem | None, _execution_item(native, thread_id, turn_id))
-
-
-def project_hosted_response_item(
-    raw: dict[str, Any], turn_id: str | None, *, item_id: str | None = None
-) -> dict[str, Any] | None:
-    """Keep the complete provider payload alongside its public typed fields."""
-    raw = {
-        key: value
-        for key, value in raw.items()
-        if key != "internal_chat_message_metadata_passthrough"
-    }
-    kind = raw.get("type", "")
-    fields = {
-        "mcp_list_tools": ("server_label", "tools", "error"),
-        "mcp_call": ("server_label", "name", "arguments", "output", "error"),
-        "file_search_call": ("queries", "results"),
-        "code_interpreter_call": ("container_id", "code", "outputs"),
-        "shell_call": ("call_id", "action"),
-        "shell_call_output": ("call_id", "output"),
-        "image_generation_call": ("result", "revised_prompt"),
-    }.get(kind)
-    resolved_id = raw.get("id") or item_id
-    if fields is None or not resolved_id:
-        return None
-    if kind in {"shell_call", "shell_call_output"}:
-        status = raw.get("status") or "unknown"
-    elif kind in {"mcp_list_tools", "mcp_call"}:
-        status = raw.get("status", "failed" if raw.get("error") is not None else "completed")
-    else:
-        status = raw["status"]
-    return {
-        "type": kind,
-        "id": resolved_id,
-        "turn_id": turn_id,
-        "status": status,
-        "provider_data": raw,
-        **{key: raw.get(key) for key in fields},
-    }
 
 
 def project_model_output_item(

@@ -7,6 +7,7 @@ from typing import (
     Generic as Generic,
     Literal as Literal,
     TypeAlias as TypeAlias,
+    TypedDict as TypedDict,
     TypeVar as TypeVar,
 )
 
@@ -60,6 +61,21 @@ class ModelRequestContext(Generic[ContextT]):
     request_id: str
     model: str
     purpose: Literal["turn", "compaction", "output_repair"]
+
+
+class _PromptIdentity(TypedDict):
+    id: str
+
+
+class HostedPromptReference(_PromptIdentity, total=False):
+    version: str
+    variables: dict[str, Any]
+
+
+HostedPromptSource: TypeAlias = (
+    HostedPromptReference
+    | Callable[[ModelRequestContext[Any]], HostedPromptReference | Awaitable[HostedPromptReference]]
+)
 
 
 _ContextTransform: TypeAlias = Callable[

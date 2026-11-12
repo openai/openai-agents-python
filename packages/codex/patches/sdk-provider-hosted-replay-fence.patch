@@ -1,0 +1,260 @@
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index bc9da7d9..ac2d05f0 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -541,7 +541,8 @@ impl ResponsesEventError {
+ pub fn process_responses_event(
+     event: ResponsesStreamEvent,
+ ) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
+-    if event.kind.starts_with("response.file_search_call.")
++    if event.kind.starts_with("response.mcp_call.")
++        || event.kind.starts_with("response.file_search_call.")
+         || event.kind.starts_with("response.code_interpreter_call.")
+         || event
+             .kind
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index f9a64766..2a0e088f 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1382,6 +1382,23 @@ impl ModelClient {
+         };
+         crate::file_admission::validate_response_items(profile, model_info, request.input.iter())
+             .map_err(CodexErr::InvalidRequest)?;
++        if let Some(attempt) = prompt
++            .tool_admission
++            .as_ref()
++            .and_then(|owner| owner.model_attempt())
++        {
++            // extra_body cannot override tools. Omitted template tools remain unknown;
++            // an explicit wire catalog (including []) overrides that template uncertainty.
++            let provider_tools = prompt.tools.iter().any(|tool| {
++                matches!(
++                    tool,
++                    codex_tools::ToolSpec::CodeInterpreter(_)
++                        | codex_tools::ToolSpec::ImageGeneration(_)
++                )
++            }) || (request.request_controls.prompt.is_some()
++                && request.tools.is_none());
++            attempt.observe_provider_tools(provider_tools);
++        }
+         Ok(request)
+     }
+ 
+@@ -2110,10 +2127,6 @@ impl ModelClientSession {
+                 .as_ref()
+                 .and_then(|admission| admission.model_attempt())
+             {
+-                if attempt.disable_provider_retries() {
+-                    // This provider belongs to this request, including its HTTP fallback.
+-                    client_setup.api_provider.retry.max_attempts = 0;
+-                }
+                 attempt
+                     .observe_request(
+                         if prompt.prefer_buffered_response {
+@@ -2225,6 +2238,16 @@ impl ModelClientSession {
+                 responses_metadata,
+                 include_internal,
+             )?;
++            if let Some(attempt) = prompt
++                .tool_admission
++                .as_ref()
++                .and_then(|admission| admission.model_attempt())
++            {
++                if attempt.disable_provider_retries() {
++                    // Final request projection has captured potential provider effects.
++                    client_setup.api_provider.retry.max_attempts = 0;
++                }
++            }
+             if prompt.prefer_buffered_response {
+                 request.stream = false;
+                 request.stream_options = None;
+@@ -2449,16 +2472,6 @@ impl ModelClientSession {
+                 .client
+                 .current_client_setup(ClientRouting::Workspace)
+                 .await?;
+-            if let Some(attempt) = prompt
+-                .tool_admission
+-                .as_ref()
+-                .and_then(|admission| admission.model_attempt())
+-            {
+-                if attempt.disable_provider_retries() {
+-                    // This provider belongs to this request, including its HTTP fallback.
+-                    client_setup.api_provider.retry.max_attempts = 0;
+-                }
+-            }
+ 
+             let include_internal = self
+                 .client
+@@ -2484,6 +2497,16 @@ impl ModelClientSession {
+                 responses_metadata,
+                 include_internal,
+             )?;
++            if let Some(attempt) = prompt
++                .tool_admission
++                .as_ref()
++                .and_then(|admission| admission.model_attempt())
++            {
++                if attempt.disable_provider_retries() {
++                    // Final request projection has captured potential provider effects.
++                    client_setup.api_provider.retry.max_attempts = 0;
++                }
++            }
+             if is_guardian_reviewer(&responses_headers) {
+                 request.service_tier = None;
+             }
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+index 3af26098..313bd7a9 100644
+--- a/codex-rs/core/src/session/model_attempts.rs
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -31,6 +31,8 @@ pub(crate) struct Attempt {
+     request: Mutex<RequestState>,
+     pub(crate) response_started: AtomicBool,
+     pub(crate) unsafe_output: AtomicBool,
++    pub(crate) provider_effects: AtomicBool,
++    pub(crate) provider_tools: AtomicBool,
+     pub(crate) local_effects: AtomicBool,
+ }
+ 
+@@ -95,6 +97,8 @@ impl AttemptLedger {
+             }),
+             response_started: AtomicBool::new(false),
+             unsafe_output: AtomicBool::new(false),
++            provider_effects: AtomicBool::new(false),
++            provider_tools: AtomicBool::new(false),
+             local_effects: AtomicBool::new(false),
+         });
+         state
+@@ -241,6 +245,14 @@ impl ModelAttemptAdmission for Attempt {
+     fn mark_unsafe_output(&self) {
+         self.unsafe_output.store(true, Ordering::Release);
+     }
++    fn observe_provider_tools(&self, may_have_effects: bool) {
++        self.provider_tools
++            .fetch_or(may_have_effects, Ordering::Release);
++    }
++    fn mark_provider_effect(&self) {
++        self.provider_effects.store(true, Ordering::Release);
++        self.mark_unsafe_output();
++    }
+     fn mark_local_effect(&self) {
+         self.local_effects.store(true, Ordering::Release);
+     }
+@@ -255,7 +267,7 @@ impl ModelAttemptAdmission for Attempt {
+         self.retry_configured
+     }
+     fn disable_provider_retries(&self) -> bool {
+-        self.disable_provider_retries
++        self.disable_provider_retries || self.provider_tools.load(Ordering::Acquire)
+     }
+     fn cancellation(&self) -> CancellationToken {
+         self.cancellation.clone()
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 70668f84..edf4b7a3 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2309,6 +2309,9 @@ async fn run_sampling_request(
+                 conversation_id: state.conversation_id,
+                 usage: attempt.usage(),
+             };
++            let provider_tool_request = attempt
++                .provider_tools
++                .load(std::sync::atomic::Ordering::Acquire);
+             let permanently_stopped = cancellation_token.is_cancelled()
+                 || preempt.is_cancelled()
+                 || parent_stop.requested();
+@@ -2321,6 +2324,9 @@ async fn run_sampling_request(
+                 || context.normalized.error_code.as_deref() == Some("conversation_locked");
+             let hard_veto = permanently_stopped
+                 || retirement_failed
++                || attempt
++                    .provider_effects
++                    .load(std::sync::atomic::Ordering::Acquire)
+                 || context.normalized.is_abort
+                 || (enforce_replay_safety
+                     && (context.retry_unsafe_output
+@@ -2339,6 +2345,7 @@ async fn run_sampling_request(
+                 && retry_settings.is_some_and(|settings| settings.has_policy == Some(true))
+                 && policy_attempt <= u64::from(context.max_retries);
+             let compatibility_retry = !hard_veto
++                && !provider_tool_request
+                 && context.normalized.error_code.as_deref() == Some("conversation_locked")
+                 && retry_settings.and_then(|settings| settings.max_retries) != Some(0)
+                 && locked_retries < 3;
+@@ -2371,6 +2378,17 @@ async fn run_sampling_request(
+                     }
+                 }
+             }
++            // Dispatch may launch hosted actions even when no response frame arrives.
++            // Only captured provider advice, never a policy override, proves that
++            // replaying this potentially dispatched request is safe.
++            let advice = resolution
++                .as_ref()
++                .and_then(|reply| reply.provider_advice.as_ref())
++                .unwrap_or(&context.provider_advice);
++            let hard_veto = hard_veto
++                || (provider_tool_request
++                    && advice.replay_safety
++                        != codex_protocol::model_retry::ModelReplaySafety::Safe);
+             let use_configured_retry = retry_configured
+                 || failure.is_some()
+                 || compatibility_retry
+@@ -3737,6 +3755,30 @@ fn assign_missing_streamed_response_item_id(
+     Session::assign_missing_response_item_id(item);
+ }
+ 
++// Provider actions have no local accepted-call deduplication owner. Unknown
++// output has lost its raw type, so its replay safety cannot be established.
++fn provider_event_may_have_effects(event: &ResponseEvent) -> bool {
++    match event {
++        ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item) => matches!(
++            item,
++            ResponseItem::CodeInterpreterCall { .. }
++                | ResponseItem::ImageGenerationCall { .. }
++                | ResponseItem::Other
++        ),
++        ResponseEvent::HostedToolCallProgress(progress) => progress
++            .event
++            .get("type")
++            .and_then(serde_json::Value::as_str)
++            .is_some_and(|kind| {
++                kind.starts_with("response.code_interpreter_call.")
++                    || kind.starts_with("response.code_interpreter_call_code.")
++                    || kind.starts_with("response.image_generation_call.")
++                    || kind.starts_with("response.mcp_call.")
++            }),
++        _ => false,
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ #[instrument(level = "trace",
+     skip_all,
+@@ -3981,6 +4023,11 @@ async fn try_run_sampling_request(
+             {
+                 break Err(CodexErr::TurnAborted);
+             }
++            if provider_event_may_have_effects(&event) {
++                if let Some(attempt) = &model_attempt {
++                    attempt.mark_provider_effect();
++                }
++            }
+             sess.services
+                 .session_telemetry
+                 .record_responses(&handle_responses, &event);
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index f7de24da..9263b065 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -335,6 +335,12 @@ pub trait ModelAttemptAdmission: Send + Sync + std::fmt::Debug {
+     /// Only the native stream and admitted tool dispatcher publish these fences.
+     fn mark_response_started(&self);
+     fn mark_unsafe_output(&self);
++    /// Capture potential hosted actions from the finalized native request projection.
++    fn observe_provider_tools(&self, _may_have_effects: bool) {}
++    /// Record provider action evidence through the captured native admission.
++    fn mark_provider_effect(&self) {
++        self.mark_unsafe_output();
++    }
+     fn mark_local_effect(&self);
+ }
+ 

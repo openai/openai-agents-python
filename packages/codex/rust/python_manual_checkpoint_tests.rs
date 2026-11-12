@@ -109,7 +109,7 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
         // SDK sender. The SDK's successful send is deliberately before Core
         // can commit a terminal outcome.
         for _ in 0..2 {
-            let request = tools.next_request().await;
+            let request = super::managed_tests::next_callback_request(&tools).await;
             let key: PendingKey = serde_json::from_value(request["msg"].clone()).unwrap();
             if key.call == "call-B" {
                 let sender = tools.take_reply(&state.id.to_string(), &key).unwrap().unwrap();
@@ -122,18 +122,26 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
         hold.entered.acquire().await.unwrap().forget();
         let version = tools.manual_progress();
         assert!(!manual_checkpoint::ready(&state, &native.manual).await.unwrap());
-        assert!(manual_checkpoint::capture(&state, &native.manual, None).await.unwrap().is_none());
+        assert!(manual_checkpoint::capture(&state, &native.manual, None, false).await.unwrap().is_none());
 
         hold.release.add_permits(1);
         // This must also work if Core finishes before the waiter subscribes.
         tools.wait_manual_progress(version).await.unwrap();
         assert!(manual_checkpoint::ready(&state, &native.manual).await.unwrap());
-        let checkpoint = manual_checkpoint::capture(&state, &native.manual, None).await.unwrap().unwrap();
+        let checkpoint = manual_checkpoint::capture(&state, &native.manual, None, false).await.unwrap().unwrap();
         assert_eq!(checkpoint["format_version"], 3);
         assert_eq!(checkpoint["native_continuation"]["pending_manual"][0]["call_id"], "call-A");
         let replies = checkpoint["native_continuation"]["accepted_replies"].as_object().unwrap();
         assert_eq!(replies.len(), 1);
-        assert_eq!(replies["call-B"]["call_id"], "call-B");
+        let reply: codex_history::RolloutItem =
+            serde_json::from_value(replies["call-B"].clone()).unwrap();
+        let codex_history::RolloutItem::ResponseItem(reply) = reply else {
+            panic!("Accepted reply must preserve its canonical envelope");
+        };
+        assert!(matches!(reply.item,
+            codex_protocol::models::ResponseItem::FunctionCallOutput { call_id, .. }
+                if call_id.as_deref() == Some("call-B")
+        ));
         assert!(replies["call-B"].to_string().contains("known-B"), "{replies:?}");
         assert!(!replies["call-B"].to_string().contains("aborted"), "{replies:?}");
         assert_eq!(requests.load(Ordering::SeqCst), 1);

@@ -1,0 +1,973 @@
+diff --git a/codex-rs/core/src/agent/api.rs b/codex-rs/core/src/agent/api.rs
+index 18213d1540eb39f49548cbd6e7e2da97ad1647eb..eb520594d75c20089d9751c92f2b2ba4920b1ea2 100644
+--- a/codex-rs/core/src/agent/api.rs
++++ b/codex-rs/core/src/agent/api.rs
+@@ -17,16 +17,22 @@ use crate::rollout_budget::RolloutBudgetReminder;
+ use codex_protocol::AgentPath;
+ use codex_protocol::SessionId;
+ use codex_protocol::ThreadId;
++use codex_protocol::error::CodexErr;
+ use codex_protocol::error::Result;
+ use codex_protocol::protocol::AgentStatus;
+ use codex_protocol::protocol::CodexErrorInfo;
+ use codex_protocol::protocol::MultiAgentVersion;
+ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::TokenUsage;
++use codex_protocol::protocol::ToolTurnCompletion;
+ use codex_protocol::turn_input::TurnStartOptions;
+ use codex_protocol::user_input::UserInput;
+ use codex_rollout_trace::ThreadTraceContext;
+ use futures::future::BoxFuture;
++use std::sync::Mutex;
++use tokio::sync::oneshot;
++use tokio_util::sync::CancellationToken;
++use tokio_util::sync::DropGuard;
+ 
+ // Keep dynamic dispatch a compile-time property of the contract.
+ const _: Option<&dyn AgentControl> = None;
+@@ -58,6 +64,18 @@ pub trait AgentControl: Send + Sync {
+         request: SpawnRequest,
+     ) -> BoxFuture<'_, Result<(LiveAgent, ThreadConfigSnapshot)>>;
+ 
++    /// Admit a child for a tool call and retain its exact initial turn's outcome.
++    fn spawn_managed_tool(
++        &self,
++        _request: SpawnRequest,
++    ) -> BoxFuture<'_, Result<ManagedAgentTool>> {
++        Box::pin(async {
++            Err(CodexErr::UnsupportedOperation(
++                "this agent controller does not support managed tools".to_string(),
++            ))
++        })
++    }
++
+     /// Resolve, reload if needed and accept input. Agent messages retain their attribution
+     /// and wake mode: queue-only messages do not start work and follow-ups cannot target
+     /// the root. Legacy user input can address loaded threads outside the agent registry.
+@@ -230,7 +248,77 @@ pub struct DeliveryReceipt {
+     pub submission_id: String,
+ }
+ 
++pub struct ManagedAgentTool {
++    pub agent: LiveAgent,
++    pub turn_id: String,
++    pub(crate) completion: oneshot::Receiver<ManagedAgentToolResult>,
++    pub(crate) retire_on_drop: DropGuard,
++}
++
++impl ManagedAgentTool {
++    pub async fn wait(self) -> Result<ManagedAgentToolResult> {
++        let result = self.completion.await.map_err(|_| {
++            CodexErr::Fatal("managed child ended without its terminal outcome".to_string())
++        })?;
++        self.retire_on_drop.disarm();
++        Ok(result)
++    }
++}
++
++pub struct ManagedAgentToolResult {
++    pub thread_id: ThreadId,
++    pub turn_id: String,
++    pub status: AgentStatus,
++    pub output: Option<ToolTurnCompletion>,
++}
++
++/// Ephemeral destination for the first turn admitted by a managed tool. The
++/// initializer is inherited, so retain the first turn's ID after consuming the reply.
++pub(crate) struct ManagedToolCompletion {
++    state: Mutex<ManagedToolCompletionState>,
++    pub(crate) abandonment: CancellationToken,
++    pub(crate) finished: CancellationToken,
++}
++
++struct ManagedToolCompletionState {
++    reply: Option<oneshot::Sender<ManagedAgentToolResult>>,
++    turn_id: Option<String>,
++}
++
++pub(crate) enum ManagedToolTerminal {
++    Reply(oneshot::Sender<ManagedAgentToolResult>),
++    AlreadyRouted,
++    Ordinary,
++}
++
++impl ManagedToolCompletion {
++    pub(crate) fn new(reply: oneshot::Sender<ManagedAgentToolResult>) -> Self {
++        Self {
++            state: Mutex::new(ManagedToolCompletionState {
++                reply: Some(reply),
++                turn_id: None,
++            }),
++            abandonment: CancellationToken::new(),
++            finished: CancellationToken::new(),
++        }
++    }
++
++    pub(crate) fn claim(&self, turn_id: &str) -> ManagedToolTerminal {
++        let mut state = self.state.lock().expect("managed tool completion lock");
++        match state.turn_id.as_deref() {
++            Some(owned) if owned == turn_id => ManagedToolTerminal::AlreadyRouted,
++            Some(_) => ManagedToolTerminal::Ordinary,
++            None => {
++                state.turn_id = Some(turn_id.to_owned());
++                self.finished.cancel();
++                ManagedToolTerminal::Reply(state.reply.take().expect("initial managed tool reply"))
++            }
++        }
++    }
++}
++
+ pub struct AgentTurnOutcome {
++    pub(crate) managed_tool_reply: Option<oneshot::Sender<ManagedAgentToolResult>>,
+     /// Typed tool-origin value, retained separately from assistant-message status.
+     pub tool_completion: Option<codex_protocol::protocol::ToolTurnCompletion>,
+     pub thread_id: ThreadId,
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index 32ab1691414265e592f68c3dc1c1d7a941560b89..85f77fedca14037eb04834ecd4729743d1ecdec3 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -2,6 +2,7 @@ use crate::TurnInputRequest;
+ use crate::TurnInputSubmission;
+ use crate::TurnStartOptions;
+ use crate::agent::AgentStatus;
++use crate::agent::api::ManagedToolCompletion;
+ use crate::agent::role::DEFAULT_ROLE_NAME;
+ use crate::agent::role::resolve_role_config;
+ use crate::agent::status::is_final;
+@@ -21,7 +22,10 @@ use crate::thread_manager::ThreadIdGenerator;
+ use crate::thread_manager::ThreadManagerState;
+ use crate::thread_manager::default_thread_id_generator;
+ use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
++use crate::turn_extension_data::WithTurnExtensionData;
+ use crate::turn_timing::now_unix_timestamp_ms;
++use codex_extension_api::ExtensionDataInit;
++use codex_extension_api::ThreadIdleCause;
+ use codex_history::InitialHistory;
+ use codex_history::ResumedHistory;
+ use codex_history::RolloutItem;
+@@ -48,6 +52,9 @@ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::SubAgentSource;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_protocol::protocol::ThreadSource;
++use codex_protocol::protocol::TurnAbortReason;
++use codex_protocol::turn_input::StartIfIdleSubmission;
++use codex_protocol::turn_input::TurnInput;
+ use codex_protocol::user_input::UserInput;
+ use codex_thread_store::LoadThreadHistoryParams;
+ use codex_thread_store::ReadThreadParams;
+@@ -182,6 +189,7 @@ impl LocalAgentControl {
+             communication,
+             agent_communication_context,
+             start_options,
++            /*managed_completion*/ None,
+         )
+         .await
+     }
+@@ -242,6 +250,7 @@ impl LocalAgentControl {
+         communication: InterAgentCommunication,
+         context: AgentCommunicationContext,
+         start_options: TurnStartOptions,
++        managed_completion: Option<ManagedToolCompletion>,
+     ) -> CodexResult<String> {
+         self.submit_inter_agent_communication(
+             agent_id,
+@@ -249,6 +258,7 @@ impl LocalAgentControl {
+             communication,
+             context,
+             start_options,
++            managed_completion,
+         )
+         .await
+     }
+@@ -260,6 +270,7 @@ impl LocalAgentControl {
+         communication: InterAgentCommunication,
+         context: AgentCommunicationContext,
+         start_options: TurnStartOptions,
++        managed_completion: Option<ManagedToolCompletion>,
+     ) -> CodexResult<String> {
+         let communication_for_log =
+             crate::agent_communication::logging_enabled().then(|| communication.clone());
+@@ -296,17 +307,70 @@ impl LocalAgentControl {
+             (None, None)
+         };
+         let thread = state.get_thread(agent_id).await?;
+-        let result = state
+-            .send_op_to_thread(
+-                &thread,
+-                Op::InterAgentCommunication {
+-                    communication,
+-                    start_options,
+-                },
+-                parent_turn_id,
+-                root_turn_id,
+-            )
+-            .await;
++        let result = if let Some(completion) = managed_completion {
++            let activity = self.runtime.admit_task().ok_or_else(|| {
++                CodexErr::UnsupportedOperation("agent tree is draining".to_string())
++            })?;
++            let abandoned = completion.abandonment.clone();
++            let finished = completion.finished.clone();
++            let mut data = ExtensionDataInit::new();
++            data.insert(completion);
++            let request = TurnInputRequest::new(TurnInput::InterAgentCommunication(communication))
++                .on_start(start_options);
++            match thread
++                .start_turn_if_idle(WithTurnExtensionData::new(request, data))
++                .await
++            {
++                Ok(StartIfIdleSubmission::Started { turn_id }) => {
++                    let child = Arc::clone(&thread);
++                    let expected_turn = turn_id.clone();
++                    let shutdown = self.runtime.shutdown.clone();
++                    // The agent tree owns retirement after parallel tool dispatch drops its
++                    // handler. Core compares the accepted turn ID before taking the task.
++                    tokio::spawn(async move {
++                        let _activity = activity;
++                        tokio::select! {
++                            biased;
++                            _ = finished.cancelled() => return,
++                            _ = child.wait_until_terminated() => return,
++                            _ = abandoned.cancelled() => {},
++                            _ = shutdown.cancelled() => {},
++                        }
++                        if child
++                            .session
++                            .abort_turn_if_active(
++                                &expected_turn,
++                                TurnAbortReason::Interrupted,
++                                /*error*/ None,
++                            )
++                            .await
++                        {
++                            child
++                                .session
++                                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Interrupted)
++                                .await;
++                        }
++                    });
++                    Ok(turn_id)
++                }
++                Ok(StartIfIdleSubmission::NotSubmitted { reason }) => Err(
++                    CodexErr::InvalidRequest(format!("child turn was not submitted: {reason:?}")),
++                ),
++                Err(error) => Err(error),
++            }
++        } else {
++            state
++                .send_op_to_thread(
++                    &thread,
++                    Op::InterAgentCommunication {
++                        communication,
++                        start_options,
++                    },
++                    parent_turn_id,
++                    root_turn_id,
++                )
++                .await
++        };
+         let result = Self::handle_thread_request_result(&thread, state, result).await;
+         if let (Some(communication), Ok(communication_id)) =
+             (communication_for_log, result.as_ref())
+diff --git a/codex-rs/core/src/agent/control/api.rs b/codex-rs/core/src/agent/control/api.rs
+index ef0a6994867fb212128e45493167fa4363cbfd2f..51be411f202d0f6759d6bc990c780e4a89b21b37 100644
+--- a/codex-rs/core/src/agent/control/api.rs
++++ b/codex-rs/core/src/agent/control/api.rs
+@@ -27,6 +27,7 @@ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::Result;
+ use codex_protocol::protocol::MultiAgentVersion;
+ use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::SubAgentSource;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_rollout_trace::ThreadTraceContext;
+ use futures::future::BoxFuture;
+@@ -67,33 +68,51 @@ impl AgentControl for LocalAgentControl {
+                 source,
+                 options,
+             } = request;
+-            let input = match input {
+-                AgentInput::UserInput(input) => SpawnInitialInput::UserInput(input),
+-                AgentInput::Message { message, mode } => {
+-                    if mode != MessageDeliveryMode::TriggerTurn {
+-                        return Err(CodexErr::InvalidRequest(
+-                            "spawn input must start the child turn".to_string(),
+-                        ));
+-                    }
+-                    let recipient = source.get_agent_path().ok_or_else(|| {
+-                        CodexErr::InvalidRequest(
+-                            "spawned agent is missing a canonical task name".to_string(),
+-                        )
+-                    })?;
+-                    let author = recipient
+-                        .as_str()
+-                        .rsplit_once('/')
+-                        .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
+-                        .ok_or_else(|| {
+-                            CodexErr::InvalidRequest("spawn input needs a child path".to_string())
+-                        })?;
+-                    SpawnInitialInput::InterAgentCommunication(
+-                        message.into_communication(author, recipient, mode),
+-                        AgentCommunicationContext::new(AgentCommunicationKind::Spawn, caller),
+-                    )
+-                }
+-            };
+-            Box::pin(self.spawn_agent_internal(config, input, Some(source), options)).await
++            let input = spawn_initial_input(caller, input, &source, None)?;
++            let (agent, config, _) =
++                Box::pin(self.spawn_agent_internal(config, input, Some(source), options)).await?;
++            Ok((agent, config))
++        })
++    }
++
++    fn spawn_managed_tool(
++        &self,
++        request: SpawnRequest,
++    ) -> BoxFuture<'_, Result<crate::ManagedAgentTool>> {
++        Box::pin(async move {
++            let SpawnRequest {
++                caller,
++                config,
++                input,
++                source,
++                options,
++            } = request;
++            if options.spawning_source.is_none()
++                || options.parent_thread_id != Some(caller)
++                || !matches!(
++                    &source,
++                    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                        parent_thread_id, ..
++                    }) if *parent_thread_id == caller
++                )
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "managed agent tools require their producing step and parent thread"
++                        .to_string(),
++                ));
++            }
++            let (reply, completion) = tokio::sync::oneshot::channel();
++            let destination = crate::agent::api::ManagedToolCompletion::new(reply);
++            let retire_on_drop = destination.abandonment.clone().drop_guard();
++            let input = spawn_initial_input(caller, input, &source, Some(destination))?;
++            let (agent, _, turn_id) =
++                Box::pin(self.spawn_agent_internal(config, input, Some(source), options)).await?;
++            Ok(crate::ManagedAgentTool {
++                agent,
++                turn_id,
++                completion,
++                retire_on_drop,
++            })
+         })
+     }
+ 
+@@ -325,3 +344,43 @@ impl AgentControl for LocalAgentControl {
+         })
+     }
+ }
++
++fn spawn_initial_input(
++    caller: ThreadId,
++    input: AgentInput,
++    source: &SessionSource,
++    completion: Option<crate::agent::api::ManagedToolCompletion>,
++) -> Result<SpawnInitialInput> {
++    match input {
++        AgentInput::UserInput(input) if completion.is_none() => {
++            Ok(SpawnInitialInput::UserInput(input))
++        }
++        AgentInput::UserInput(_) => Err(CodexErr::InvalidRequest(
++            "managed agent tools require an agent message".to_string(),
++        )),
++        AgentInput::Message { message, mode } => {
++            if mode != MessageDeliveryMode::TriggerTurn {
++                return Err(CodexErr::InvalidRequest(
++                    "spawn input must start the child turn".to_string(),
++                ));
++            }
++            let recipient = source.get_agent_path().ok_or_else(|| {
++                CodexErr::InvalidRequest(
++                    "spawned agent is missing a canonical task name".to_string(),
++                )
++            })?;
++            let author = recipient
++                .as_str()
++                .rsplit_once('/')
++                .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
++                .ok_or_else(|| {
++                    CodexErr::InvalidRequest("spawn input needs a child path".to_string())
++                })?;
++            Ok(SpawnInitialInput::InterAgentCommunication(
++                message.into_communication(author, recipient, mode),
++                AgentCommunicationContext::new(AgentCommunicationKind::Spawn, caller),
++                completion,
++            ))
++        }
++    }
++}
+diff --git a/codex-rs/core/src/agent/control/completion.rs b/codex-rs/core/src/agent/control/completion.rs
+index 9a5be514143a7a240bbf4d69590385564be70c57..cb52dcc00ad4ecdff90de411a0acd6ae0b8bd11e 100644
+--- a/codex-rs/core/src/agent/control/completion.rs
++++ b/codex-rs/core/src/agent/control/completion.rs
+@@ -6,6 +6,7 @@
+ use super::LocalAgentControl;
+ use crate::TurnStartOptions;
+ use crate::agent::api::AgentTurnOutcome;
++use crate::agent::api::ManagedAgentToolResult;
+ use crate::agent_communication::AgentCommunicationContext;
+ use crate::agent_communication::AgentCommunicationKind;
+ use crate::session_prefix::format_guardian_interruption_message;
+@@ -87,6 +88,16 @@ impl LocalAgentControl {
+             }
+         }
+ 
++        if let Some(reply) = outcome.managed_tool_reply {
++            let _ = reply.send(ManagedAgentToolResult {
++                thread_id: outcome.thread_id,
++                turn_id: outcome.turn_id,
++                status,
++                output: outcome.tool_completion,
++            });
++            return;
++        }
++
+         let message = if let Some(completion) = outcome.tool_completion.as_ref()
+             && matches!(status, AgentStatus::Completed(_))
+         {
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 855c832b4e1dc6f6d9ff5ef72bba1de1772a9df3..aa53b22f522c4f22a1bc369c263f153ca00393ab 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -3,6 +3,7 @@ use super::spawn_guard::PendingSpawn;
+ use super::spawn_telemetry::SpawnMeasurements;
+ use super::spawn_telemetry::record_spawn_success;
+ use super::*;
++use crate::agent::api::ManagedToolCompletion;
+ use crate::agent::child_config::build_agent_resume_config;
+ use crate::agent::role::apply_role_to_config;
+ use crate::agent::types::AgentMetadata;
+@@ -61,7 +62,11 @@ struct SpawnedThreadResult {
+ #[allow(clippy::large_enum_variant)]
+ pub(super) enum SpawnInitialInput {
+     UserInput(Vec<UserInput>),
+-    InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
++    InterAgentCommunication(
++        InterAgentCommunication,
++        AgentCommunicationContext,
++        Option<ManagedToolCompletion>,
++    ),
+ }
+ 
+ fn default_agent_nickname_list() -> Vec<&'static str> {
+@@ -329,7 +334,7 @@ impl LocalAgentControl {
+         initial_input: Vec<UserInput>,
+         session_source: Option<SessionSource>,
+     ) -> CodexResult<ThreadId> {
+-        let (spawned_agent, _) = Box::pin(self.spawn_agent_internal(
++        let (spawned_agent, _, _) = Box::pin(self.spawn_agent_internal(
+             config,
+             SpawnInitialInput::UserInput(initial_input),
+             session_source,
+@@ -706,7 +711,7 @@ impl LocalAgentControl {
+         initial_input: SpawnInitialInput,
+         session_source: Option<SessionSource>,
+         options: SpawnAgentOptions,
+-    ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
++    ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot, String)> {
+         let mcp_source = options
+             .spawning_source
+             .as_ref()
+@@ -725,6 +730,16 @@ impl LocalAgentControl {
+                 &config,
+             )
+             .await;
++        if matches!(
++            &initial_input,
++            SpawnInitialInput::InterAgentCommunication(_, _, Some(_))
++        )
++            && multi_agent_version != MultiAgentVersion::V2
++        {
++            return Err(CodexErr::UnsupportedOperation(
++                "managed agent tools require native multi-agent V2".to_string(),
++            ));
++        }
+         let product_sku = config.apps_mcp_product_sku.clone();
+         if let Some(session_source) = session_source.as_ref() {
+             self.ensure_execution_capacity(multi_agent_version, session_source)?;
+@@ -956,22 +971,23 @@ impl LocalAgentControl {
+             ..Default::default()
+         };
+         let input_admission_started_at = Instant::now();
+-        match initial_input {
++        let submission_id = match initial_input {
+             SpawnInitialInput::UserInput(input) => {
+                 self.send_input(new_thread.thread_id, input, start_options)
+-                    .await?;
++                    .await?
+             }
+-            SpawnInitialInput::InterAgentCommunication(communication, context) => {
++            SpawnInitialInput::InterAgentCommunication(communication, context, completion) => {
+                 self.send_inter_agent_communication_after_capacity_check(
+                     new_thread.thread_id,
+                     &state,
+                     communication,
+                     context,
+                     start_options,
++                    completion,
+                 )
+-                .await?;
++                .await?
+             }
+-        }
++        };
+         let input_admission = input_admission_started_at.elapsed();
+         reservation.commit(agent_metadata.clone());
+         if let Some(residency_slot) = residency_slot {
+@@ -1021,7 +1037,7 @@ impl LocalAgentControl {
+                 total: spawn_started_at.elapsed(),
+             },
+         );
+-        Ok((agent, config))
++        Ok((agent, config, submission_id))
+     }
+ 
+     async fn spawn_forked_thread(
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 1c89558bb4d9e3ca3a9892336ed330653ef7fab6..0e2af8029f10d2c22f2b40037b22631ee83ab05a 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -6232,6 +6232,7 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
+         .admit_task()
+         .expect("second child finalizer admitted");
+     let outcome = |turn: &str| crate::agent::api::AgentTurnOutcome {
++        managed_tool_reply: None,
+         tool_completion: None,
+         thread_id: ThreadId::new(),
+         turn_id: turn.to_owned(),
+@@ -6247,6 +6248,44 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
+         status: AgentStatus::Completed(Some("finished".to_owned())),
+         error_info: None,
+     };
++    let (reply, received) = tokio::sync::oneshot::channel();
++    let slot = crate::agent::api::ManagedToolCompletion::new(reply);
++    let mut managed = outcome("managed");
++    let child_id = managed.thread_id;
++    let typed = codex_protocol::protocol::ToolTurnCompletion {
++        call_id: "managed-output".to_owned(),
++        name: "complete_agent".to_owned(),
++        namespace: None,
++        final_output: serde_json::json!({"checked": true}),
++        batch_call_ids: None,
++    };
++    managed.tool_completion = Some(typed.clone());
++    let crate::agent::api::ManagedToolTerminal::Reply(reply) = slot.claim("managed") else {
++        panic!("managed turn must claim its original result");
++    };
++    managed.managed_tool_reply = Some(reply);
++    assert!(matches!(
++        slot.claim("managed"),
++        crate::agent::api::ManagedToolTerminal::AlreadyRouted
++    ));
++    assert!(matches!(
++        slot.claim("later"),
++        crate::agent::api::ManagedToolTerminal::Ordinary
++    ));
++    timeout(
++        Duration::from_secs(5),
++        control.notify_parent_of_terminal_turn(
++            managed,
++            &codex_rollout_trace::ThreadTraceContext::disabled(),
++        ),
++    )
++    .await
++    .expect("managed completion cannot block on the full parent mailbox");
++    let received = received.await.expect("typed managed completion");
++    assert_eq!(received.thread_id, child_id);
++    assert_eq!(received.turn_id, "managed");
++    assert_eq!(received.output, Some(typed));
++
+     let first = outcome("first");
+     let first_control = control.clone();
+     let first_delivery = tokio::spawn(async move {
+@@ -6308,7 +6347,7 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
+     .await
+     .expect("read canonical history after writer close");
+     assert_eq!(parse_errors, 0, "canonical history parses cleanly");
+-    for turn in ["first", "second"] {
++    for turn in ["managed", "first", "second"] {
+         let id = format!("subagent-completed-{turn}");
+         assert_eq!(history.iter().filter(|item| matches!(item,
+             RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index aec349884169df1265d6cc9255a3b11d5c5fae97..fda0a57e54c003b7c1d6eb80c597f59ea06849e2 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -77,6 +77,11 @@ pub use agent::api::AgentInput;
+ pub use agent::api::AgentTarget;
+ pub use agent::api::AgentTurnOutcome;
+ pub use agent::api::DeliveryReceipt;
++pub use agent::api::ManagedAgentTool;
++pub use agent::api::ManagedAgentToolResult;
++pub use tools::handlers::multi_agents_v2::managed_tool::{
++    ManagedAgentToolCatalog, ManagedAgentToolContributor, ManagedAgentToolSpec,
++};
+ pub use agent::api::SendRequest;
+ pub use agent::api::SpawnRequest;
+ pub use agent::types::AgentExecutionGuard;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index df24879d8b6342087011ea4414b48bfb0ab012d2..edd40c649ce83c0c2e230a0f02a9c83d66f3f75d 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2631,7 +2631,19 @@ impl Session {
+                 }
+             }
+         };
+-        if !is_final(&status) {
++        use crate::agent::api::ManagedToolCompletion;
++        use crate::agent::api::ManagedToolTerminal;
++
++        let managed_tool_reply = match turn_context
++            .extension_data
++            .get::<ManagedToolCompletion>()
++            .map(|completion| completion.claim(&turn_context.sub_id))
++        {
++            Some(ManagedToolTerminal::Reply(reply)) => Some(reply),
++            Some(ManagedToolTerminal::AlreadyRouted) => return,
++            Some(ManagedToolTerminal::Ordinary) | None => None,
++        };
++        if !is_final(&status) && managed_tool_reply.is_none() {
+             return;
+         }
+ 
+@@ -2639,6 +2651,7 @@ impl Session {
+             .agent_control
+             .turn_finished(
+                 AgentTurnOutcome {
++                    managed_tool_reply,
+                     tool_completion: match msg {
+                         EventMsg::TurnComplete(done) => done.tool_completion.clone(),
+                         _ => None,
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index 66ce8b5da96d6d0b1ba08f87be01c6e5af487dfe..4a255d22ec7dd54b1987be7667f283126f82638c 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -64,6 +64,9 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+         ToolInvocation: 'a,
+     {
+         Box::pin(async move {
++            if let Some(role) = self.0.managed_agent_role() {
++                return super::multi_agents_v2::managed_tool::run(invocation, role).await;
++            }
+             let environment_accessors = invocation.step_context.environments();
+             let environments = environment_accessors
+                 .iter()
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
+index ea44c0a427837bad62969097cacc947d9b0ed069..2030b980a08580ef11c5f28921ba7568d9175835 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
+@@ -36,6 +36,7 @@ mod analytics;
+ mod followup_task;
+ mod interrupt_agent;
+ mod list_agents;
++pub(crate) mod managed_tool;
+ mod message_tool;
+ mod send_message;
+ mod spawn;
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..65278adb64be17c4e4d90512957c29f5283ec2e8
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs
+@@ -0,0 +1,277 @@
++use std::collections::HashSet;
++use std::sync::Arc;
++
++use codex_extension_api::ExtensionData;
++use codex_extension_api::ToolContributor;
++use codex_protocol::AgentPath;
++use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
++use codex_protocol::items::SubAgentActivityItem;
++use codex_protocol::protocol::AgentStatus;
++use codex_protocol::protocol::MultiAgentVersion;
++use codex_protocol::protocol::SubAgentActivityKind;
++use codex_tools::ResponsesApiNamespace;
++use codex_tools::ResponsesApiNamespaceTool;
++use codex_tools::ToolCall;
++use codex_tools::ToolExecutor;
++use codex_tools::ToolExecutorFuture;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
++use codex_tools::default_namespace_description;
++use codex_tools::dynamic_tool_to_responses_api_tool;
++use serde::Deserialize;
++
++use crate::AgentInput;
++use crate::AgentSpawnSource;
++use crate::SpawnAgentOptions;
++use crate::SpawnRequest;
++use crate::agent::child_config::SpawnConfigOptions;
++use crate::agent::child_config::SpawnConfigVersion;
++use crate::agent::child_config::prepare_agent_spawn_config;
++use crate::agent::next_thread_spawn_depth;
++use crate::agent::types::AgentMessage;
++use crate::agent::types::MessageDeliveryMode;
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::FunctionToolOutput;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolOutput;
++use crate::tools::handlers::multi_agents_common::collab_spawn_error;
++use crate::tools::handlers::multi_agents_common::function_arguments;
++use crate::tools::handlers::multi_agents_common::thread_spawn_source;
++use crate::tools::handlers::parse_arguments;
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct ManagedAgentToolSpec {
++    pub name: String,
++    pub role: String,
++    pub description: String,
++}
++
++/// Installed only in the authorized SDK thread's extension data.
++pub struct ManagedAgentToolCatalog(Vec<Arc<ManagedRoleTool>>);
++
++impl ManagedAgentToolCatalog {
++    pub fn new(declarations: Vec<ManagedAgentToolSpec>) -> Result<Self, String> {
++        let mut names = HashSet::new();
++        let mut tools = Vec::with_capacity(declarations.len());
++        for declaration in declarations {
++            AgentPath::root().join(&declaration.name)?;
++            AgentPath::root().join(&declaration.role)?;
++            if matches!(
++                declaration.name.as_str(),
++                "spawn_agent"
++                    | "wait_agent"
++                    | "send_message"
++                    | "followup_task"
++                    | "interrupt_agent"
++                    | "list_agents"
++                    | "close_agent"
++            ) || !names.insert(declaration.name.clone())
++            {
++                return Err(format!(
++                    "Duplicate or reserved managed agent tool {}",
++                    declaration.name
++                ));
++            }
++            if declaration.description.trim().is_empty() {
++                return Err(format!(
++                    "Managed agent tool {} needs a description",
++                    declaration.name
++                ));
++            }
++            let name = ToolName::new(Some("collaboration".to_owned()), declaration.name.clone());
++            let function = dynamic_tool_to_responses_api_tool(&DynamicToolFunctionSpec {
++                name: declaration.name,
++                description: declaration.description,
++                input_schema: serde_json::json!({
++                    "type": "object",
++                    "properties": { "input": { "type": "string" } },
++                    "required": ["input"],
++                    "additionalProperties": false,
++                }),
++                strict: true,
++                output_schema: None,
++                defer_loading: false,
++            })
++            .map_err(|error| error.to_string())?;
++            tools.push(Arc::new(ManagedRoleTool {
++                name,
++                role: declaration.role,
++                spec: ToolSpec::Namespace(ResponsesApiNamespace {
++                    name: "collaboration".to_owned(),
++                    description: default_namespace_description("collaboration"),
++                    tools: vec![ResponsesApiNamespaceTool::Function(function)],
++                }),
++            }));
++        }
++        Ok(Self(tools))
++    }
++}
++
++pub struct ManagedAgentToolContributor;
++
++impl ToolContributor for ManagedAgentToolContributor {
++    fn tools(
++        &self,
++        _: &ExtensionData,
++        thread_store: &ExtensionData,
++    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
++        let Some(catalog) = thread_store.get::<ManagedAgentToolCatalog>() else {
++            return Vec::new();
++        };
++        catalog
++            .0
++            .iter()
++            .cloned()
++            .map(|tool| tool as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>)
++            .collect()
++    }
++}
++
++struct ManagedRoleTool {
++    name: ToolName,
++    role: String,
++    spec: ToolSpec,
++}
++
++impl<'call> ToolExecutor<ToolCall<'call>> for ManagedRoleTool {
++    fn tool_name(&self) -> ToolName {
++        self.name.clone()
++    }
++
++    fn spec(&self) -> ToolSpec {
++        self.spec.clone()
++    }
++
++    fn managed_agent_role(&self) -> Option<&str> {
++        Some(&self.role)
++    }
++
++    fn supports_parallel_tool_calls(&self) -> bool {
++        true
++    }
++
++    fn handle<'a>(&'a self, _: ToolCall<'call>) -> ToolExecutorFuture<'a>
++    where
++        ToolCall<'call>: 'a,
++    {
++        Box::pin(async {
++            Err(FunctionCallError::Fatal(
++                "managed agent tool requires its native producing step".to_owned(),
++            ))
++        })
++    }
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct ManagedToolInput {
++    input: String,
++}
++
++pub(crate) async fn run(
++    invocation: ToolInvocation,
++    role: &str,
++) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++    let ToolInvocation {
++        session,
++        step_context,
++        payload,
++        call_id,
++        ..
++    } = invocation;
++    let turn = &step_context.turn;
++    if turn.multi_agent_version != MultiAgentVersion::V2 {
++        return Err(FunctionCallError::RespondToModel(
++            "Managed agent tools require native multi-agent V2".to_owned(),
++        ));
++    }
++    let args: ManagedToolInput = parse_arguments(&function_arguments(payload)?)?;
++    if args.input.trim().is_empty() {
++        return Err(FunctionCallError::RespondToModel(
++            "Managed agent tool input must contain a message".to_owned(),
++        ));
++    }
++    let prepared = prepare_agent_spawn_config(
++        &session,
++        step_context.as_ref(),
++        SpawnConfigOptions {
++            version: SpawnConfigVersion::V2,
++            full_history_fork: false,
++            role_name: Some(role),
++            model: None,
++            reasoning_effort: None,
++        },
++    )
++    .await
++    .map_err(FunctionCallError::RespondToModel)?;
++    let task_name = format!("tool_{}", uuid::Uuid::now_v7().simple());
++    let source = thread_spawn_source(
++        session.thread_id,
++        &turn.session_source,
++        next_thread_spawn_depth(&turn.session_source),
++        prepared.role_name.as_deref(),
++        Some(task_name),
++    )?;
++    let agent_path = source.get_agent_path().ok_or_else(|| {
++        FunctionCallError::Fatal("managed child is missing its canonical agent path".to_owned())
++    })?;
++    let managed = session
++        .services
++        .agent_control
++        .spawn_managed_tool(SpawnRequest {
++            caller: session.thread_id,
++            config: prepared.config,
++            input: AgentInput::Message {
++                message: AgentMessage::Plaintext(args.input),
++                mode: MessageDeliveryMode::TriggerTurn,
++            },
++            source,
++            options: SpawnAgentOptions {
++                spawning_source: Some(AgentSpawnSource::from_step_context(Arc::clone(
++                    &step_context,
++                ))),
++                parent_thread_id: Some(session.thread_id),
++                parent_turn_id: Some(turn.sub_id.clone()),
++                root_turn_id: turn.turn_metadata_state.root_turn_id(),
++                turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
++                environments: Some(step_context.environments.clone()),
++                cyber_access_program: turn.cyber_access_program,
++                ..Default::default()
++            },
++        })
++        .await
++        .map_err(collab_spawn_error)?;
++    let thread_id = managed.agent.thread_id;
++    let turn_id = managed.turn_id.clone();
++    super::emit_sub_agent_activity(
++        &session,
++        turn,
++        SubAgentActivityItem {
++            id: call_id,
++            agent_thread_id: thread_id,
++            agent_path,
++            kind: SubAgentActivityKind::Started,
++        },
++    )
++    .await;
++    let result = managed.wait().await.map_err(|_| {
++        FunctionCallError::Fatal("managed child did not deliver its terminal outcome".to_owned())
++    })?;
++    if result.thread_id != thread_id || result.turn_id != turn_id {
++        return Err(FunctionCallError::Fatal(
++            "managed child delivered an unrelated terminal outcome".to_owned(),
++        ));
++    }
++    let AgentStatus::Completed(message) = result.status else {
++        return Err(FunctionCallError::RespondToModel(
++            "Managed agent did not complete its turn".to_owned(),
++        ));
++    };
++    let text = match result.output.map(|output| output.final_output) {
++        Some(serde_json::Value::String(text)) => text,
++        Some(value) => value.to_string(),
++        None => message.unwrap_or_default(),
++    };
++    Ok(Box::new(FunctionToolOutput::from_text(text, Some(true))))
++}
+diff --git a/codex-rs/tools/src/tool_executor.rs b/codex-rs/tools/src/tool_executor.rs
+index b0fd7a14075a00f43661343f8464b135d02516bf..1a76893f9b966c8fbc1e65a6e5b1c2aa69191a86 100644
+--- a/codex-rs/tools/src/tool_executor.rs
++++ b/codex-rs/tools/src/tool_executor.rs
+@@ -139,6 +139,11 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
+         false
+     }
+ 
++    /// Native child role selected by a trusted SDK tool declaration.
++    fn managed_agent_role(&self) -> Option<&str> {
++        None
++    }
++
+     /// Observes the final native result after all output policies accept it.
+     /// The host records this disposition outside model-visible tool content.
+     fn on_result_accepted(

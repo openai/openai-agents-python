@@ -27,6 +27,57 @@ Use guides from the same release as your installed wheel. The links below descri
 
 For current-branch native voice APIs, read the [native voice guide](../../examples/codex/native_voice.md). It covers Session-owned Realtime, credentials, custom adapters, and speech pipelines. Use it with the matching build; published wheels may not include these APIs.
 
+## Hosted prompts
+
+Native Agents have been using `hosted_prompt` to select a stored Responses prompt. A static reference has been supplying fixed variables. A factory has been deriving variables from each request's application context.
+
+Prerequisites: the matching native v1 build, `OPENAI_API_KEY`, and `OPENAI_PROMPT_ID` for a project prompt with a `topic` variable.
+
+```python
+import asyncio
+import os
+
+from agents import Agent, NativeProvider
+
+
+async def main() -> None:
+    prompt_id = os.environ["OPENAI_PROMPT_ID"]
+    async with NativeProvider() as provider:
+        fixed = Agent(
+            hosted_prompt={"id": prompt_id, "variables": {"topic": "native"}},
+            provider=provider,
+        )
+        fixed_result = await fixed.run("Give one example.")
+        print(fixed_result.final_output)
+
+        contextual = Agent[dict[str, str], str](
+            hosted_prompt=lambda request: {
+                "id": prompt_id,
+                "variables": {"topic": request.context["topic"]},
+            },
+            provider=provider,
+        )
+        contextual_result = await contextual.run("Give one example.", context={"topic": "history"})
+        print(contextual_result.final_output)
+
+
+asyncio.run(main())
+```
+
+An optional `version` string in the reference has been selecting a specific prompt version. An asynchronous factory has been working through the same callback path.
+
+Omitted settings have been inheriting prompt values. Explicit settings have been overriding them:
+
+| Setting | Omitted | Explicit |
+| --- | --- | --- |
+| `model` | Stored prompt's model | The supplied model |
+| `instructions` | Stored prompt's instructions | The supplied text, including `""` |
+| `tools` | Stored prompt's tools | The declared native tools, including `[]` |
+
+Native tool selections and policies have also been overriding inherited prompt tools, including explicit empty selections. Combining `hosted_prompt` with a `prompt` entry in `model_settings["extra_body"]` has been raising a configuration error.
+
+After restoration, the current Agent declaration has been supplying the prompt reference or factory. Before dispatch, the SDK has been rejecting new explicit settings for fields previously inherited from the prompt.
+
 This component owns the Codex Python implementation in `src/_agents_codex`, native inputs, tests, and examples. The root project builds one `openai-agents` wheel; application code continues to import `agents`.
 
 For SDK development and source builds, see [CONTRIBUTING.md](../../CONTRIBUTING.md). See the [maintenance guide](MAINTAINING.md) for native builds and artifact checks.
