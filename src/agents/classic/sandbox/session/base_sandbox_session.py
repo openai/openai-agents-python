@@ -63,7 +63,7 @@ import stat
 import sys
 
 root, path, operation, length = sys.argv[1:]
-parts = path.split("/")
+parts = [] if operation == "directory" and path == "." else path.split("/")
 if any(part in ("", ".", "..") for part in parts):
     sys.exit(45)
 flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW

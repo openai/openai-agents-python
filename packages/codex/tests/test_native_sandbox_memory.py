@@ -22,7 +22,7 @@ from agents.sandbox import (
     sandbox_environment,
 )
 from agents.testing import ScriptedResponse, ScriptedResponses, text, tool_call
-from tests._asyncio import timeout
+from tests._asyncio import capture_cancellation, timeout
 from tests.native_executor_fixtures import ExecutorPeer
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
@@ -519,7 +519,8 @@ async def test_native_sandbox_memory_replaces_output_links(tmp_path: Path, monke
         assert (workspace / "memories/MEMORY.md").read_text() == "combined memory"
 
 
-async def test_docker_memory_writes_replace_leaves_and_reject_ancestor_links(monkeypatch):
+@pytest.mark.parametrize("at_root", [False, True], ids=["directories", "workspace-root"])
+async def test_docker_memory_writes_replace_leaves_and_reject_ancestor_links(monkeypatch, at_root):
     import io
 
     docker = pytest.importorskip("docker")
@@ -547,7 +548,13 @@ async def test_docker_memory_writes_replace_leaves_and_reject_ancestor_links(mon
     inner = resource._inner
     try:
         await inner.start()
-        storage = SandboxMemoryStorage(session=inner, layout=MemoryLayoutConfig(), bounded=True)
+        storage = SandboxMemoryStorage(
+            session=inner,
+            layout=MemoryLayoutConfig(memories_dir=".", sessions_dir=".")
+            if at_root
+            else MemoryLayoutConfig(),
+            bounded=True,
+        )
         await storage.ensure_layout()
         await inner.write(Path("victim.txt"), io.BytesIO(b"unchanged sentinel"))
         generated = "generated native memory \u2603"
@@ -560,14 +567,17 @@ async def test_docker_memory_writes_replace_leaves_and_reject_ancestor_links(mon
             return await original_stream(**options)
 
         monkeypatch.setattr(inner, "_stream_into_exec", streamed_write)
-        destinations = (
-            "sessions/source.jsonl",
-            "memories/raw_memories/source.md",
-            "memories/rollout_summaries/source.md",
-            "memories/raw_memories.md",
-            "memories/MEMORY.md",
-            "memories/memory_summary.md",
-            "memories/phase_two_selection.json",
+        destinations = tuple(
+            str(path)
+            for path in (
+                storage.sessions_dir / "source.jsonl",
+                storage.raw_memories_dir / "source.md",
+                storage.rollout_summaries_dir / "source.md",
+                storage.memories_dir / "raw_memories.md",
+                storage.memories_dir / "MEMORY.md",
+                storage.memories_dir / "memory_summary.md",
+                storage.phase_two_selection_path,
+            )
         )
         for destination in destinations:
             assert (
@@ -591,16 +601,19 @@ async def test_docker_memory_writes_replace_leaves_and_reject_ancestor_links(mon
                 await inner._read_memory_file(Path("victim.txt"), max_bytes=128)
                 == b"unchanged sentinel"
             )
+        hard_link = storage.memories_dir / "hard.md"
         assert (
             await inner.exec(
-                "/bin/ln", "/workspace/victim.txt", "/workspace/memories/hard.md", shell=False
+                "/bin/ln", "/workspace/victim.txt", "/workspace/" + str(hard_link), shell=False
             )
         ).ok()
-        await storage.write_text(Path("memories/hard.md"), generated)
+        await storage.write_text(hard_link, generated)
         assert (
             await inner._read_memory_file(Path("victim.txt"), max_bytes=128)
             == b"unchanged sentinel"
         )
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await storage.write_text(Path("."), generated)
         assert (await inner.exec("/bin/mkdir", "/workspace/other", shell=False)).ok()
         assert (
             await inner.exec("/bin/ln", "-s", "/workspace/other", "/workspace/alias", shell=False)
@@ -726,9 +739,16 @@ async def test_docker_memory_cancellation_waits_for_physical_write(cleanup_error
             _stream_into_exec=stream,
         ),
     )
+    cancellations: list[asyncio.CancelledError] = []
     task = asyncio.create_task(
-        DockerSandboxSession._memory_file_operation(
-            owner, Path("memories/MEMORY.md"), io.BytesIO(b"synthetic payload"), operation="file"
+        capture_cancellation(
+            DockerSandboxSession._memory_file_operation(
+                owner,
+                Path("memories/MEMORY.md"),
+                io.BytesIO(b"synthetic payload"),
+                operation="file",
+            ),
+            cancellations,
         )
     )
     try:
@@ -738,10 +758,11 @@ async def test_docker_memory_cancellation_waits_for_physical_write(cleanup_error
         assert not task.done()
     finally:
         release.set()
-    with pytest.raises(asyncio.CancelledError) as cancelled:
+    with pytest.raises(asyncio.CancelledError):
         await task
     assert finished.is_set()
-    assert cancelled.value.args == ("caller cancellation",)
+    assert len(cancellations) == 1
+    assert cancellations[0].args == ("caller cancellation",)
     if cleanup_error:
-        assert isinstance(cancelled.value.__context__, RuntimeError)
-        assert str(cancelled.value.__context__) == "synthetic write cleanup"
+        assert isinstance(cancellations[0].__context__, RuntimeError)
+        assert str(cancellations[0].__context__) == "synthetic write cleanup"
