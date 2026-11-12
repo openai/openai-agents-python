@@ -2420,7 +2420,8 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_model_producer(request_id)))
     }
 
-    fn _start_model_producer_stream(&self, request_id: u64) -> PyResult<bool> {
+    #[pyo3(signature = (request_id, *, chat_stream=false))]
+    fn _start_model_producer_stream(&self, request_id: u64, chat_stream: bool) -> PyResult<bool> {
         let Some(inner) = self.live()? else {
             return Ok(false);
         };
@@ -2430,14 +2431,18 @@ impl NativeThread {
             .is_some();
         Ok(store
             .get::<python_tools::PythonTools>()
-            .is_some_and(|tools| tools.start_model_producer_stream(request_id, observe_raw)))
+            .is_some_and(|tools| {
+                tools.start_model_producer_stream(request_id, observe_raw, chat_stream)
+            }))
     }
 
+    #[pyo3(signature = (request_id, data_json, *, raw_chat_chunk=false))]
     fn _push_model_producer_event<'py>(
         &self,
         py: Python<'py>,
         request_id: u64,
         data_json: String,
+        raw_chat_chunk: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let tools = self.live()?.and_then(|inner| {
             inner
@@ -2450,7 +2455,7 @@ impl NativeThread {
                 return Ok(false);
             };
             Ok(tools
-                .push_model_producer_event(request_id, &data_json)
+                .push_model_producer_event(request_id, &data_json, raw_chat_chunk)
                 .await)
         })
     }
@@ -2679,8 +2684,8 @@ impl NativeThread {
             return Err(py_error("Conflicting compaction reply"));
         }
         let result = if let Some(window) = window_json {
-            let mut window: codex_extension_api::CompactionWindow = serde_json::from_str(window)
-                .map_err(|_| py_error("Invalid compaction window"))?;
+            let mut window: codex_extension_api::CompactionWindow =
+                serde_json::from_str(window).map_err(|_| py_error("Invalid compaction window"))?;
             window.verified_provider_scope = verified_provider_scope;
             Some(codex_extension_api::CompactionResult::Window(window))
         } else {
