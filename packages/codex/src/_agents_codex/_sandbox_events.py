@@ -90,7 +90,14 @@ class _PhysicalThreadSink(EventSink):
 class _SinkChain(ChainedSink):
     def __init__(self, source: ChainedSink) -> None:
         self.source = source
-        super().__init__(*(_prepare_sink(sink) for sink in source.sinks))
+        prepared = [_prepare_sink(sink) for sink in source.sinks]
+        super().__init__(
+            *(
+                leaf
+                for sink in prepared
+                for leaf in (sink.sinks if isinstance(sink, ChainedSink) else [sink])
+            )
+        )
 
 
 def _prepare_sink(sink: EventSink) -> EventSink:
@@ -119,8 +126,11 @@ class Instrumentation(_Instrumentation):
 
     Provider constructors have been accepting this configuration. Managed
     native environments have also been forwarding builtin exec, stdin and image
-    operation headers from the admitted runtime. Arguments, paths, output and
-    provider exception text have been staying excluded.
+    operation headers from the admitted runtime. Provider output and write lengths
+    have been requiring explicit payload opt-ins. Paths, arguments and provider
+    exception text have been staying excluded. Core operation output has been
+    staying unavailable. Capture has been staying within 64 KiB per stream.
+    Callbacks have been receiving policy-limited text with raw byte fields excluded.
 
     Optional delivery has been dropping events at its finite capacity and
     retaining physical HTTP sends until completion. Resource cleanup has been
@@ -140,9 +150,12 @@ class Instrumentation(_Instrumentation):
     ) -> None:
         if max_pending_events is None or delivery_timeout_s is None:
             raise ValueError("Native lifecycle delivery requires finite limits")
+        native_policy = EventPayloadPolicy(include_write_len=False)
+        if payload_policy is not None:
+            native_policy = native_policy.model_copy(update=self._overrides(payload_policy))
         super().__init__(
             sinks=[_prepare_sink(sink) for sink in sinks or ()],
-            payload_policy=payload_policy,
+            payload_policy=native_policy,
             payload_policy_by_op=payload_policy_by_op,
             max_pending_events=max_pending_events,
             delivery_timeout_s=delivery_timeout_s,
@@ -185,11 +198,29 @@ class Instrumentation(_Instrumentation):
 
     async def emit(self, event: SandboxSessionEvent) -> None:
         if (
-            event.op not in ("start", "stop", "shutdown", "exec", "write_stdin", "view_image")
+            event.op
+            not in (
+                "start",
+                "stop",
+                "shutdown",
+                "exec",
+                "write_stdin",
+                "view_image",
+                "read",
+                "write",
+                "running",
+                "resolve_exposed_port",
+                "persist_workspace",
+                "hydrate_workspace",
+            )
             or not self.sinks
         ):
             return
         safe = event.model_copy(update={"data": {}})
+        if safe.op == "write":
+            length = event.data.get("bytes")
+            if type(length) is int and 0 <= length <= 2**53 - 1:
+                safe.data = {"bytes": length}
         if isinstance(safe, SandboxSessionFinishEvent):
             safe.error_type = "SandboxOperationError" if not safe.ok else None
             safe.error_message = None
@@ -197,7 +228,24 @@ class Instrumentation(_Instrumentation):
             safe.error_retryable = None
             safe.stdout = safe.stderr = None
             safe.stdout_bytes = safe.stderr_bytes = None
+            if safe.op in ("exec", "write_stdin"):
+                for stream in ("stdout", "stderr"):
+                    raw = getattr(event, stream + "_bytes")
+                    text = getattr(event, stream)
+                    if raw is not None:
+                        raw = raw[: 64 * 1024]
+                    elif text is not None:
+                        raw = text[: 64 * 1024].encode("utf-8", errors="replace")[: 64 * 1024]
+                    setattr(safe, stream + "_bytes", raw)
         await super().emit(safe)
+
+    def _apply_policy(
+        self, event: SandboxSessionEvent, policy: EventPayloadPolicy
+    ) -> SandboxSessionEvent:
+        projected = super()._apply_policy(event, policy)
+        if isinstance(projected, SandboxSessionFinishEvent):
+            projected.stdout_bytes = projected.stderr_bytes = None
+        return projected
 
     async def _finish_session(self, session_id: UUID) -> None:
         self._resources.pop(session_id, None)

@@ -6,6 +6,8 @@ import asyncio
 import json
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from pydantic import BaseModel
 
 from agents import (
@@ -21,8 +23,14 @@ from agents import (
     function_tool,
 )
 from agents.observation import TurnFinished, TurnStarted
+from agents.state import SessionState
 from tests._asyncio import timeout
-from tests.native_fixtures import assistant_output, function_call, responses as responses
+from tests.native_fixtures import (
+    ResponsesFixture,
+    assistant_output,
+    function_call,
+    responses as responses,
+)
 from tests.test_native_manual_tools import LookupArgs, next_request, provider
 from tests.test_native_mcp_tools import declarations
 from tests.test_review_ii_steering_tail import ProjectContinuation
@@ -46,6 +54,70 @@ class HeldStart:
             self.entered.set()
             await self.release.wait()
         return await self.native._submit(encoded)
+
+
+async def test_queued_withdrawal_is_owned_by_distinct_session(responses, monkeypatch):
+    peer2 = ResponsesFixture()
+    app2 = web.Application()
+    app2.router.add_post("/v1/responses", peer2.handle)
+    effects = []
+
+    @function_tool
+    def successor(label: str) -> str:
+        effects.append(label)
+        return label
+
+    responses.respond(assistant_output("A1 complete"))
+    peer2.respond(assistant_output("A2 complete"))
+    peer2.respond(function_call("successor", {"label": "B2"}, "b2-successor"))
+    peer2.respond(assistant_output("B2 complete"))
+    async with timeout(20), TestServer(app2) as server2:
+        peer2.url = str(server2.make_url("/v1"))
+        async with (
+            Agent(instructions="Act", provider=provider(responses)).session() as s1,
+            Agent(instructions="Act", tools=[successor], provider=provider(peer2)).session() as s2,
+        ):
+            held1, held2 = HeldStart(s1._native), HeldStart(s2._native)
+            monkeypatch.setattr(s1, "_native", held1)
+            monkeypatch.setattr(s2, "_native", held2)
+            pending2 = None
+            try:
+                a1 = await s1.submit("A1")
+                a2 = await s2.submit("A2")
+                await asyncio.gather(held1.entered.wait(), held2.entered.wait())
+                b1 = await s1.submit("B1 must never run", if_busy="queue")
+                b2 = await s2.submit("B2 successor", if_busy="queue")
+                active2 = s2._active
+                assert active2 is not None and active2.issued is a2
+                pending2 = asyncio.create_task(b2.get_result())
+                await asyncio.sleep(0)
+                await b1.cancel()
+                with pytest.raises(TurnStoppedError):
+                    await b1.get_result()
+                assert b1.turn_id is None
+                assert not pending2.done() and b2.turn_id is None
+                assert s2._active is active2 and active2.issued is a2
+                assert len(held2.requests) == 1 and peer2.requests == []
+                assert effects == []
+
+                held1.release.set()
+                held2.release.set()
+                assert (await a1.get_result()).final_output == "A1 complete"
+                assert (await a2.get_result()).final_output == "A2 complete"
+                result2 = await pending2
+                assert result2.turn is b2 and result2.final_output == "B2 complete"
+                assert b2.turn_id is not None and b2.turn_id != a2.turn_id
+                assert effects == ["B2"]
+                assert len(held1.requests) == 1 and len(responses.requests) == 1
+                assert len(held2.requests) == 2 and len(peer2.requests) == 3
+                assert "B1 must never run" not in json.dumps(responses.requests + peer2.requests)
+            finally:
+                held1.release.set()
+                held2.release.set()
+                await asyncio.gather(s1.cancel_all(), s2.cancel_all(), return_exceptions=True)
+                if pending2 is not None:
+                    pending2.cancel()
+                    await asyncio.gather(pending2, return_exceptions=True)
 
 
 async def test_local_ack_fifo_snapshot_and_no_reader_needed(responses, monkeypatch):
@@ -205,6 +277,70 @@ async def test_queued_entry_never_creates_checkpoint_grants(responses):
         await request.respond("A still owns grant")
         assert (await b.get_result()).final_output == "B"
         assert (await a.get_result()).turn is a
+
+
+async def test_restored_manual_root_owns_queue_until_current_reply(responses):
+    effects = []
+
+    @function_tool
+    def record(label: str) -> str:
+        effects.append(label)
+        return label
+
+    original_tool = FunctionTool(
+        name="lookup", description="Read", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(function_call("lookup", {"key": "A"}, "restored-A"))
+    async with timeout(20):
+        async with Agent(
+            instructions="Act", tools=[original_tool, record], provider=provider(responses)
+        ).session() as source:
+            original = await source.submit("manual A")
+            await next_request(source.interactions(), original_tool)
+            saved = SessionState.from_json((await source.suspend()).to_json())
+        assert saved.run_usage is not None and saved.run_usage.total_tokens == 14
+        assert len(responses.requests) == 1
+
+        current_tool = FunctionTool(
+            name="lookup", description="Read", input_type=LookupArgs, output_type=str
+        )
+        responses.respond(assistant_output("A completed"))
+        responses.respond(function_call("record", {"label": "C"}, "queued-C"))
+        responses.respond(assistant_output("C completed"))
+        async with Agent(
+            instructions="Act", tools=[current_tool, record], provider=provider(responses)
+        ).session(state=saved) as session:
+            restored = session.restored_turn
+            assert restored is not None and restored.turn_id == original.turn_id
+            b = await session.submit("withdrawn-B-must-never-reach-model", if_busy="queue")
+            c = await session.submit("queued C", if_busy="queue")
+            assert session.active_turn is restored
+            assert b.turn_id is c.turn_id is None
+            assert len(responses.requests) == 1 and effects == []
+
+            await b.cancel()
+            with pytest.raises(TurnStoppedError):
+                await b.get_result()
+            waiter = asyncio.create_task(c.get_result())
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert session.active_turn is restored and c.turn_id is None
+
+            current = await next_request(session.interactions(), current_tool)
+            assert current_tool.match(current) is not None
+            assert original_tool.match(current) is None
+            assert current.turn_id == original.turn_id and current.arguments.key == "A"
+            await current.respond("current A answer")
+            result = await restored.get_result()
+            assert result.turn is restored and result.turn.turn_id == original.turn_id
+            assert result.final_output == "A completed" and result.run_usage.total_tokens == 28
+            completed_c = await c.get_result()
+            assert completed_c.turn is c and completed_c.final_output == "C completed"
+            assert completed_c.run_usage.total_tokens == 28
+            assert effects == ["C"] and len(responses.requests) == 4
+            assert "withdrawn-B-must-never-reach-model" not in json.dumps(responses.requests)
 
 
 class Answer(BaseModel):

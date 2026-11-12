@@ -1,5 +1,9 @@
 """Public scripted computer items execute and replay through the native loop."""
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from agents import Agent, ComputerProvider, ComputerSafetyError, computer_tool
@@ -89,3 +93,23 @@ async def test_scripted_computer_safety_still_denies_before_device_acquisition()
         with pytest.raises(ComputerSafetyError):
             await agent.run("Look.")
         assert created == []
+
+
+def test_scripted_computer_result_after_a_fresh_import():
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import asyncio
+from tests.test_testing_computer import (
+    test_scripted_computer_actions_screenshot_and_native_history_replay,
+)
+
+asyncio.run(test_scripted_computer_actions_screenshot_and_native_history_replay())
+""",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        timeout=30,
+    )

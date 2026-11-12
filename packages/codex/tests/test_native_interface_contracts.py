@@ -1,13 +1,13 @@
 """Pure boundary checks for form preparation and complete cleanup ownership."""
 
 import asyncio
-from collections import deque
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
 from _agents_codex._lifecycle import _sync_run, _SyncRun
+from _agents_codex._queued_roots import _QueuedRoots
 from _agents_codex.session import _EnvironmentLease
 from agents import FormRequest, Session, UrlRequest
 from agents.manual import _question
@@ -82,7 +82,7 @@ async def cleanup_session(events, *, managed_environment=True):
     session._resources_retired = False
     session._closed = False
     session._last_turn = None
-    session._pending = deque()
+    session._queued_roots = _QueuedRoots(lambda: None)
     session._observations = SimpleNamespace(notify=lambda: None)
     session._provider_lease = SimpleNamespace(release=lambda: events.append(("provider", None)))
     session._owned_provider = None

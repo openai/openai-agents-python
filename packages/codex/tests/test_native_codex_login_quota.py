@@ -15,7 +15,14 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, NativeError, NativeProvider, TurnNeedsAttention
+from agents import (
+    Agent,
+    ModelRetrySettings,
+    NativeError,
+    NativeProvider,
+    RetryDecision,
+    TurnNeedsAttention,
+)
 from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
@@ -91,6 +98,7 @@ _STREAM_LIMITS = replace(
     ],
     ids=["plan-quota", "request-throttle", "slow-down", "stream-quota", "stream-throttle"],
 )
+@pytest.mark.parametrize("affirmative_policy", [False, True], ids=["default", "affirmative"])
 async def test_saved_login_limit_returns_attention_without_replaying_the_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -98,6 +106,7 @@ async def test_saved_login_limit_returns_attention_without_replaying_the_request
     status: int | None,
     reason: str,
     category: str,
+    affirmative_policy: bool,
 ) -> None:
     peer = ResponsesFixture()
     rejected_headers: list[tuple[str, str]] = []
@@ -155,6 +164,17 @@ async def test_saved_login_limit_returns_attention_without_replaying_the_request
             "_agents_codex.session._CODEX_RESPONSES_BASE_URL", str(server.make_url("/"))
         )
         agent = codex_agent(saved_login(tmp_path / "login"))
+        retry_calls = []
+        if affirmative_policy:
+
+            def approve_retry(_context):
+                retry_calls.append(True)
+                return RetryDecision(True, delay_ms=0)
+
+            agent = replace(
+                agent,
+                model_settings={"retry": ModelRetrySettings(max_retries=1, policy=approve_retry)},
+            )
         async with agent.session() as session:
             turn = await session.submit("Reply.")
             try:
@@ -179,6 +199,7 @@ async def test_saved_login_limit_returns_attention_without_replaying_the_request
             next_turn = await session.submit("Reply again.")
             assert (await next_turn.get_result()).final_output == "done"
             assert len(peer.requests) == 1
+            assert retry_calls == []
 
 
 @pytest.mark.parametrize(

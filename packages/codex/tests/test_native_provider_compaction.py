@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from agents import Agent, ModelSettings, NativeProvider, SessionState, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -14,7 +16,40 @@ def compaction(content: str) -> dict:
     }
 
 
-async def test_provider_compaction_projects_latest_window_across_tool_and_cold_restore(responses):
+@pytest.mark.parametrize(
+    ("settings", "expected_threshold"),
+    [
+        (
+            {
+                "context_management": [{"type": "compaction", "compact_threshold": 1024}],
+                "provider_compaction": {"type": "static", "threshold": 2048},
+            },
+            1024,
+        ),
+        ({"provider_compaction": {"type": "static", "threshold": 1024}}, 1024),
+        (
+            {
+                "provider_compaction": {
+                    "type": "dynamic",
+                    "threshold_ratio": 0.8,
+                    "fallback_threshold": 2048,
+                }
+            },
+            2048,
+        ),
+        (
+            {
+                "context_management": None,
+                "provider_compaction": {"type": "static", "threshold": 1024},
+            },
+            None,
+        ),
+    ],
+    ids=["raw-override", "fixed", "unknown-model-fallback", "explicit-clear"],
+)
+async def test_provider_compaction_projects_latest_window_across_tool_and_cold_restore(
+    responses, settings: ModelSettings, expected_threshold: int | None
+):
     responses.replies.extend(
         [
             [assistant_output("OLD_ASSISTANT_SENTINEL")],
@@ -28,9 +63,6 @@ async def test_provider_compaction_projects_latest_window_across_tool_and_cold_r
     def lookup() -> str:
         return "AFTER_COMPACTION_TOOL_SENTINEL"
 
-    settings: ModelSettings = {
-        "context_management": [{"type": "compaction", "compact_threshold": 1024}]
-    }
     async with NativeProvider(
         base_url=responses.url, api_key="synthetic-compaction", supports_websockets=False
     ) as provider:
@@ -52,6 +84,14 @@ async def test_provider_compaction_projects_latest_window_across_tool_and_cold_r
             ).final_output == "done"
 
     assert len(responses.requests) == 4
+    for request in responses.requests:
+        if expected_threshold is None:
+            assert "context_management" not in request
+        else:
+            assert request["context_management"] == [
+                {"type": "compaction", "compact_threshold": expected_threshold}
+            ]
+        assert "provider_compaction" not in request
     followup = responses.requests[2]
     later = responses.requests[3]
     followup_input = json.dumps(followup["input"])

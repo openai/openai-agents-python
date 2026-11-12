@@ -26,6 +26,7 @@ Dynamic responders select the current default after returning.
 from __future__ import annotations
 
 from _agents_codex.testing import (
+    TYPE_CHECKING as TYPE_CHECKING,
     AbstractAsyncContextManager as AbstractAsyncContextManager,
     BaseHTTPRequestHandler as BaseHTTPRequestHandler,
     JsonValue as JsonValue,
@@ -44,6 +45,7 @@ from _agents_codex.testing import (
     Thread as Thread,
     ThreadingHTTPServer as ThreadingHTTPServer,
     TracebackType as TracebackType,
+    __getattr__ as __getattr__,
     _close_after_error as _close_after_error,
     _Handler as _Handler,
     _join as _join,
@@ -64,7 +66,32 @@ from _agents_codex.testing import (
     uuid4 as uuid4,
 )
 
+if TYPE_CHECKING:
+    from _agents_codex.testing_sandbox import (
+        ExecResult as ExecResult,
+        InvalidSandboxStep as InvalidSandboxStep,
+        SandboxCall as SandboxCall,
+        SandboxCallMatcherError as SandboxCallMatcherError,
+        SandboxScriptError as SandboxScriptError,
+        SandboxStepSpec as SandboxStepSpec,
+        ScriptedSandboxSession as ScriptedSandboxSession,
+        UnconsumedSandboxSteps as UnconsumedSandboxSteps,
+        UnexpectedSandboxCall as UnexpectedSandboxCall,
+        scripted_sandbox_session as scripted_sandbox_session,
+    )
+
+
 __all__ = [
+    "ExecResult",
+    "InvalidSandboxStep",
+    "SandboxCall",
+    "SandboxCallMatcherError",
+    "SandboxScriptError",
+    "SandboxStepSpec",
+    "ScriptedSandboxSession",
+    "UnconsumedSandboxSteps",
+    "UnexpectedSandboxCall",
+    "scripted_sandbox_session",
     "ModelError",
     "ScriptedModel",
     "ScriptedResponse",

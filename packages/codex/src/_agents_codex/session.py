@@ -101,13 +101,17 @@ from ._media import _audio_json, _check_audio_json
 from ._model_retry import _is_model_abort, _ModelFailure, _normalized_error, _resolve_retry
 from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._opening import _capture_opening_agent as _capture_opening_agent
-from ._opening_compatibility import _validate_custom_storage_capabilities
+from ._opening_compatibility import (
+    _validate_custom_storage_capabilities,
+    _validate_storage_opening as _validate_storage_opening,
+)
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
     project_model_output_item,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._queued_roots import _QueuedRoots
 from ._stored_history import (
     StoredItemPage,
     StoredMatchPage,
@@ -408,6 +412,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "truncation",
         "include",
         "context_management",
+        "provider_compaction",
         "extra_body",
     }
     for key, value in copied.items():
@@ -502,6 +507,7 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
             "truncation",
             "include",
             "context_management",
+            "provider_compaction",
             "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (
@@ -2314,6 +2320,37 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
+@dataclass(frozen=True)
+class _OpeningTools:
+    """One classified opening declaration, before context binding."""
+
+    available: Sequence[Tool[Any]]
+    python: tuple[FunctionTool[Any, Any, Any], ...]
+    mcp: tuple[_MCP[Any], ...]
+    native_agents: NativeAgents[Any] | None
+
+    @classmethod
+    def capture(
+        cls, available: Sequence[Tool[Any]], programmatic_tool_calling: bool
+    ) -> _OpeningTools:
+        python, mcp, native_agents = _split_tools(available, programmatic_tool_calling)
+        return cls(available, python, mcp, native_agents)
+
+    def validate_collisions(self, *, project_guidance: bool = False) -> list[dict[str, str]]:
+        mcp_names = _tool_names(self.mcp)
+        _check_namespaced_tool_collisions(
+            self.python,
+            mcp_names,
+            self.available,
+            native_agents=self.native_agents,
+            project_guidance=project_guidance,
+        )
+        return mcp_names
+
+    def bind(self, context: Any, *, generation: int = 0) -> _ToolCatalog:
+        return _capture_tools(generation, self.python, context)
+
+
 def _check_native_agents_provider(
     native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
@@ -2581,11 +2618,16 @@ def _capture_profile_runtimes(
     roster: list[dict[str, Any]] = []
     for index, profile in enumerate(profiles):
         declaration = profile.declaration
-        tools, mcp, roles = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
+        opening_tools = _OpeningTools.capture(
+            declaration.tools, declaration.programmatic_tool_calling
+        )
+        mcp = opening_tools.mcp
         catalog = (
             root_catalog
             if index == 0 and not profile.handoff_callbacks
-            else _capture_tools(root_catalog.generation if index == 0 else 0, tools, context)
+            else opening_tools.bind(
+                context, generation=root_catalog.generation if index == 0 else 0
+            )
         )
         _check_handoff_tool_names(
             (
@@ -2595,12 +2637,7 @@ def _capture_profile_runtimes(
             ),
             profile.handoffs,
         )
-        _check_namespaced_tool_collisions(
-            tools,
-            _tool_names(mcp),
-            declaration.tools,
-            native_agents=roles,
-        )
+        opening_tools.validate_collisions()
         output = _prepare_spec(declaration.output_type)
         instructions = root_instructions if index == 0 else (declaration.instructions or "")
         captured[profile.id] = _ProfileRuntime(profile, catalog, output, instructions)
@@ -3208,29 +3245,6 @@ async def _release_environment(lease: _EnvironmentLease) -> None:
         lease.detach_borrower()
 
 
-def _validate_storage_opening(
-    storage: LocalStorage | CustomStorage | None,
-    state: SessionState | None,
-    resume: str | None,
-    reconciled_calls: Sequence[ReconciledCall],
-) -> tuple[ReconciledCall, ...]:
-    if storage is not None and not isinstance(storage, (LocalStorage, CustomStorage)):
-        raise TypeError("storage must be LocalStorage or CustomStorage")
-    if state is not None and (storage is not None or resume is not None):
-        raise ValueError("Portable state cannot be combined with persistent storage or resume")
-    if resume is not None:
-        if storage is None:
-            raise ValueError("resume requires the original storage backend")
-        if not isinstance(resume, str) or not resume:
-            raise TypeError("resume must be a nonempty native Session ID")
-    reconciliation = tuple(reconciled_calls)
-    if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
-        raise TypeError("reconciled_calls must contain ReconciledCall records")
-    if reconciliation and (resume is None or not isinstance(storage, LocalStorage)):
-        raise ValueError("reconciled_calls requires a LocalStorage resume")
-    return reconciliation
-
-
 def _capture_project_guidance(
     enabled: bool,
 ) -> tuple[dict[str, bool], dict[str, bool], list[dict[str, str]]]:
@@ -3825,7 +3839,12 @@ class Session(Generic[ContextT, OutputT]):
                     "LocalStorage does not support code mode: nested tool identities "
                     "do not yet have durable intent and result receipts"
                 )
-            tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
+            opening_tools = _OpeningTools.capture(agent.tools, programmatic_tool_calling)
+            tools, mcp_tools, native_agents = (
+                opening_tools.python,
+                opening_tools.mcp,
+                opening_tools.native_agents,
+            )
             if restored_resource_servers:
                 assert restored_defaults is not None
                 restored_defaults = (
@@ -3885,16 +3904,9 @@ class Session(Generic[ContextT, OutputT]):
                         "NativeAgents requires an Environment with all three execution tools"
                     )
             output = _prepare_spec(agent.output_type)
-            mcp_names = _tool_names(allowed_mcp)
-            _check_namespaced_tool_collisions(
-                allowed_tools,
-                mcp_names,
-                available,
-                native_agents=native_agents,
-                project_guidance=project_guidance,
-            )
+            mcp_names = opening_tools.validate_collisions(project_guidance=project_guidance)
             model = agent.model
-            catalog = _capture_tools(0, tools, context)
+            catalog = opening_tools.bind(context)
             bound_tools = catalog.tools
             native = importlib.import_module("agents._native")
             native._validate_python_tool_declarations(catalog.native_specs())
@@ -5132,7 +5144,6 @@ class Session(Generic[ContextT, OutputT]):
         self._restored_turn: Turn[OutputT] | None = None
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
         self._child_admissions: set[asyncio.Task[Turn[str]]] = set()
-        self._pending: deque[tuple[_Submission, list[dict[str, Any]]]] = deque()
         self._graph_interrupts: set[asyncio.Task[None]] = set()
         self._root_interrupts: set[asyncio.Task[None]] = set()
         self._mutation: asyncio.Task[Any] | None = None
@@ -5164,6 +5175,7 @@ class Session(Generic[ContextT, OutputT]):
             retention=observation_retention,
             include_model_output_items=include_model_output_items,
         )
+        self._queued_roots = _QueuedRoots(self._observations.notify)
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._plan_usage_reads: set[asyncio.Task[str]] = set()
         self._rate_limit_parent: Session[Any, Any] | None = None
@@ -6630,7 +6642,7 @@ class Session(Generic[ContextT, OutputT]):
             return None
         if self._mutation is not None or self._checkpoint_task is not None:
             raise RuntimeError("Session is changing or saving its state")
-        if expected_turn_id is None and any(state.issued is turn for state, _ in self._pending):
+        if expected_turn_id is None and self._queued_roots.contains(turn):
             raise RuntimeError("Cannot steer queued work")
         parts = _native_input(input)
         while True:
@@ -8520,7 +8532,7 @@ class Session(Generic[ContextT, OutputT]):
         if self._interaction_error is None:
             self._interaction_error = error
         self._broken = True
-        self._discard_pending(error)
+        self._queued_roots.discard(error, cancelled=isinstance(error, TurnStoppedError))
         for state in (self._active, *self._child_callbacks.values()):
             if state is not None and not state.failure.done():
                 state.failure.set_result(error)
@@ -8818,7 +8830,7 @@ class Session(Generic[ContextT, OutputT]):
             self._check_root_admission()
             if (
                 self._mutation is not None
-                or (self._active is not None or self._pending)
+                or (self._active is not None or self._queued_roots)
                 and (not enqueue or input is None)
                 or self._active is not None
                 and self.active_turn is None
@@ -8949,7 +8961,7 @@ class Session(Generic[ContextT, OutputT]):
                     self, None, uuid4().hex, state.completion, -1, state.guardrail_results
                 )
                 state.issued = issued
-                self._pending.append((state, input))
+                self._queued_roots.register(state, input)
                 self._promote()
                 if state.task is None and state.completion.done():
                     state.completion.result()
@@ -9002,15 +9014,6 @@ class Session(Generic[ContextT, OutputT]):
             return error
         return None
 
-    def _discard_pending(self, error: BaseException) -> None:
-        while self._pending:
-            state, _ = self._pending.popleft()
-            if state.tracing is not None:
-                state.tracing.close(error, cancelled=isinstance(error, TurnStoppedError))
-            state.accepted.set_exception(error)
-            state.completion.set_exception(error)
-        self._observations.notify()
-
     def _promote(self) -> None:
         """Claim only on logical release. This is not a second execution driver."""
         if (
@@ -9019,7 +9022,7 @@ class Session(Generic[ContextT, OutputT]):
             or self._closing
             or (self._environment_lease is not None and self._environment_lease.interrupted)
         ):
-            self._discard_pending(NativeError("Session ended before queued work was admitted"))
+            self._queued_roots.discard(NativeError("Session ended before queued work was admitted"))
         while (
             not self._broken
             and not self._closed
@@ -9030,9 +9033,9 @@ class Session(Generic[ContextT, OutputT]):
             and self._checkpoint_task is None
             and not self._graph_interrupts
             and not self._root_interrupts
-            and self._pending
+            and self._queued_roots
         ):
-            state, parts = self._pending.popleft()
+            state, parts = self._queued_roots.select()
             self._active = state
             self._last_turn = state.issued
             self._start_execution(state, parts)
@@ -9044,7 +9047,7 @@ class Session(Generic[ContextT, OutputT]):
         self._check_root_admission()
         if (
             self._active is not None
-            or self._pending
+            or self._queued_roots
             or self._mutation is not None
             or self._checkpoint_task is not None
         ):
@@ -9677,8 +9680,8 @@ class Session(Generic[ContextT, OutputT]):
                     guardrail_results=submission.guardrail_results,
                 ),
             )
-        if self._owned_submission(submission) is not None or any(
-            state.issued is submission for state, _ in self._pending
+        if self._owned_submission(submission) is not None or self._queued_roots.contains(
+            submission
         ):
             self._check_callback_operation("wait on its own turn")
         assert submission._completion is not None
@@ -9699,7 +9702,7 @@ class Session(Generic[ContextT, OutputT]):
         if (
             submission.child_id is None
             and self._owned_submission(submission) is None
-            and not any(state.issued is submission for state, _ in self._pending)
+            and not self._queued_roots.contains(submission)
         ):
             return await self._wait(submission)
         self._check_callback_operation("wait for requests from its own Session")
@@ -9786,7 +9789,9 @@ class Session(Generic[ContextT, OutputT]):
         state = self._active
         if state is not None and state.restored_pending and mode == "graceful":
             raise RuntimeError("Graceful interruption requires a recovered manual turn")
-        self._discard_pending(TurnStoppedError("Queued work stopped by cancel_all"))
+        self._queued_roots.discard(
+            TurnStoppedError("Queued work stopped by cancel_all"), cancelled=True
+        )
         accepted: asyncio.Future[None] = self._loop.create_future()
         # Retrieve failures even if the caller is cancelled before acceptance.
         accepted.add_done_callback(lambda result: result.exception())
@@ -9799,18 +9804,12 @@ class Session(Generic[ContextT, OutputT]):
             raise CapabilityError("Use Subagent.try_cancel for a child Turn")
         if mode not in ("graceful", "force"):
             raise ValueError("mode must be 'graceful' or 'force'")
-        for entry in self._pending:
-            queued, _ = entry
-            if queued.issued is turn:
-                self._check_callback_operation("interrupt its own Session")
-                self._pending.remove(entry)
-                error = TurnStoppedError("Queued work cancelled before admission")
-                if queued.tracing is not None:
-                    queued.tracing.close(error, cancelled=True)
-                queued.accepted.set_exception(error)
-                queued.completion.set_exception(error)
-                self._observations.notify()
-                return
+        if self._queued_roots.contains(turn):
+            self._check_callback_operation("interrupt its own Session")
+            self._queued_roots.withdraw(
+                turn, TurnStoppedError("Queued work cancelled before admission")
+            )
+            return
         state = self._owned_submission(turn)
         # A settled or superseded root owns neither the new turn nor its cells.
         if state is None:
@@ -9860,7 +9859,7 @@ class Session(Generic[ContextT, OutputT]):
                 owners.discard(task)
                 self._promote()
             else:
-                self._discard_pending(
+                self._queued_roots.discard(
                     NativeError("Session interruption failed before queued admission")
                 )
 
@@ -15931,7 +15930,7 @@ class Session(Generic[ContextT, OutputT]):
                 "Cannot checkpoint an operation with prepare_request: "
                 "portable restore cannot recover its callback"
             )
-        if self._pending:
+        if self._queued_roots:
             raise RuntimeError("Cannot checkpoint a Session with queued work")
         if self._storage is not None:
             raise CapabilityError(
@@ -15965,7 +15964,7 @@ class Session(Generic[ContextT, OutputT]):
 
     def _check_checkpoint_admission(self, active: _Submission | None) -> None:
         self._check_open()
-        if self._pending:
+        if self._queued_roots:
             raise RuntimeError("Cannot checkpoint a Session with queued work")
         self._check_graph_admission()
         self._check_root_admission()
@@ -16417,7 +16416,9 @@ class Session(Generic[ContextT, OutputT]):
             and (self._close_task.cancelled() or self._close_task.exception() is not None)
         ):
             self._closing = True
-            self._discard_pending(TurnStoppedError("Session closed before queued admission"))
+            self._queued_roots.discard(
+                TurnStoppedError("Session closed before queued admission"), cancelled=True
+            )
             self._close_task = _create_task(self._close())
         await _join(self._close_task)
 
