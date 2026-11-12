@@ -202,6 +202,7 @@ from .mcp import (
     _tool_names as _tool_names,
 )
 from .model_context import ModelContextSnapshot, ModelRequestContext
+from .models import _capture_model_override
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     ChildInvocation as ChildInvocation,
@@ -426,6 +427,12 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
         ):
             captured = payload.get("thread_settings")
             break
+    if (
+        state.native_continuation is not None
+        and state.native_continuation.model_override is not None
+        and isinstance(captured, dict)
+    ):
+        model = captured.get("model")
     if (
         not isinstance(model, str)
         or not model.strip()
@@ -1062,6 +1069,7 @@ class _Submission:
     preparation_index: int = 0
     step_index: int = 0
     budget: _RunBudget | None = None
+    model_override: str | None = None
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None
@@ -4543,6 +4551,7 @@ class Session(Generic[ContextT, OutputT]):
                     ).hexdigest()
                     active = _Submission(
                         restored_output,
+                        model_override=continuation.model_override,
                         run_usage=_UsageCollector(saved.run_usage),
                         restored_pending=True,
                         observation_after=session._observations.sequence,
@@ -6094,6 +6103,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        model_override: str | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -6111,6 +6121,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        model_override: str | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -6127,6 +6138,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: None = None,
         prepare_request: None = None,
         budget: None = None,
+        model_override: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -6143,6 +6155,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        model_override: str | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -6206,6 +6219,7 @@ class Session(Generic[ContextT, OutputT]):
         """
         try:
             self._check_open()
+            model_override = _capture_model_override(model_override)
             parent_trace = _trace_context(parent_trace)
             self._check_callback_operation("start work in its own Session")
             self._check_graph_admission()
@@ -6219,6 +6233,7 @@ class Session(Generic[ContextT, OutputT]):
                 or writable_roots is not None
                 or prepare_request is not None
                 or budget is not None
+                or model_override is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -6275,6 +6290,7 @@ class Session(Generic[ContextT, OutputT]):
                 writable_roots=roots,
                 prepare_request=prepare_request,
                 budget=_RunBudget(budget) if budget is not None else None,
+                model_override=model_override,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -8234,6 +8250,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: _RunBudget | None = None,
+        model_override: str | None = None,
         run_usage: _UsageCollector | None = None,
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
@@ -8355,6 +8372,7 @@ class Session(Generic[ContextT, OutputT]):
                 before_step=before_step,
                 prepare_request=prepare_request,
                 budget=budget,
+                model_override=model_override,
                 tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
@@ -9944,6 +9962,8 @@ class Session(Generic[ContextT, OutputT]):
                             request["expected_previous_turn_id"] = state.continued_from
                         if state.output.mode == "native" and state.realtime_tool is None:
                             request["start"] = {"final_output_json_schema": state.output.schema}
+                        if state.model_override is not None:
+                            request.setdefault("start", {})["model_override"] = state.model_override
                         if state.writable_roots is not None:
                             request["writable_roots"] = state.writable_roots
                         state.observation_after = self._observations.sequence
@@ -10228,6 +10248,7 @@ class Session(Generic[ContextT, OutputT]):
                     preparation_index=state.preparation_index,
                     step_index=state.step_index,
                     budget=state.budget,
+                    model_override=state.model_override,
                     run_usage=state.run_usage,
                     guardrail_results=state.guardrail_results,
                     operation_slots=state.operation_slots,
@@ -10486,6 +10507,7 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                         _prepare_spec(str),
                         budget=state.budget,
+                        model_override=state.model_override,
                         run_usage=state.run_usage,
                     )
                 except NativeError as error:

@@ -422,6 +422,7 @@ pub fn model_settings(params: Value) -> Result<ThreadSettingsOverrides> {
 #[serde(remote = "TurnStartOptions", default, deny_unknown_fields)]
 pub struct StartOptions {
     turn_trigger: Option<String>,
+    model_override: Option<String>,
     final_output_json_schema: Option<Value>,
     service_tier: Option<String>,
     parent_turn_id: Option<String>,
@@ -505,6 +506,9 @@ fn rejection(reason: NotSubmittedReason) -> Value {
         }
         NotSubmittedReason::ActiveTurnOutputSchemaMismatch => {
             json!({"type": "active_turn_output_schema_mismatch"})
+        }
+        NotSubmittedReason::ActiveTurnModelOverrideMismatch => {
+            json!({"type": "active_turn_model_override_mismatch"})
         }
         NotSubmittedReason::EmptyInput => json!({"type": "empty_input"}),
     };
@@ -820,6 +824,7 @@ pub(crate) async fn interrupt_managed_root(
 }
 
 params!(RecoveryOptions {
+    model_override: Option<String>,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     trace: Option<W3cTraceContext>,
     observation_submission_id: Option<String>,
@@ -857,6 +862,7 @@ pub async fn recover_prepared(
                 thread_settings: Default::default(),
                 trace: p.trace,
                 cyber_access_program: None,
+                model_override: p.model_override,
                 final_output_json_schema: p.output_schema.map(Value::Object),
             },
             init,
@@ -1084,7 +1090,7 @@ params!(RecoverParams {
     #[serde(default, with = "StartOptions")]
     start_options: TurnStartOptions
 });
-params!(RecoverIdleParams { turn_id: String, #[serde(default, alias = "settings", with = "ThreadSettings")] thread_settings: ThreadSettingsOverrides, trace: Option<W3cTraceContext>, cyber_access_program: Option<CyberAccessProgram>, final_output_json_schema: Option<Value> });
+params!(RecoverIdleParams { turn_id: String, model_override: Option<String>, #[serde(default, alias = "settings", with = "ThreadSettings")] thread_settings: ThreadSettingsOverrides, trace: Option<W3cTraceContext>, cyber_access_program: Option<CyberAccessProgram>, final_output_json_schema: Option<Value> });
 params!(CommunicationParams {
     communication: InterAgentCommunication,
     #[serde(default, with = "StartOptions")]
@@ -1220,6 +1226,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                         thread_settings: p.thread_settings,
                         trace: p.trace,
                         cyber_access_program: p.cyber_access_program,
+                        model_override: p.model_override,
                         final_output_json_schema: p.final_output_json_schema,
                     })
                     .await?,

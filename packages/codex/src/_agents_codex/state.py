@@ -192,6 +192,7 @@ class _ManualContinuation(BaseModel):
     pending_manual: list[_PendingManual]
     tool_outcomes: _ToolOutcomes | None = None
     output_schema: dict[str, Any] | None = None
+    model_override: str | None = None
 
 
 class ApplicationToolOutput(BaseModel):

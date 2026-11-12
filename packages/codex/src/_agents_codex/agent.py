@@ -69,7 +69,7 @@ from .guardrails import InputGuardrail, OutputGuardrail
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
 from .model_context import _ContextTransform
-from .models import ModelProvider, NativeModel
+from .models import ModelProvider, NativeModel, _capture_model_override
 from .tools import ToolRef
 from .usage import RunBudget
 
@@ -1684,6 +1684,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -1715,6 +1716,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -1746,6 +1748,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -1776,6 +1779,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -1885,6 +1889,7 @@ class Agent(Generic[ContextT, OutputT]):
             from .state import SessionState
             from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
 
+            model_override = _capture_model_override(model_override)
             if budget is not None and not isinstance(budget, RunBudget):
                 raise TypeError("budget must be a RunBudget or None")
             if prepare_request is not None:
@@ -1916,6 +1921,8 @@ class Agent(Generic[ContextT, OutputT]):
                 raise TypeError("state must be a SessionState")
             resume_manual = state is not None and state.native_continuation is not None
             if resume_manual:
+                if model_override is not None:
+                    raise ValueError("Cannot replace a restored turn's model override")
                 if budget is not None:
                     raise CapabilityError("Cannot set a budget when restoring an active checkpoint")
                 if input is not None:
@@ -2031,16 +2038,20 @@ class Agent(Generic[ContextT, OutputT]):
                 # instruction receipt to the first ordinary submission.
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
-                if not (
-                    return_history or return_raw_usage or return_items
-                ) and _private_text_run_eligible(
-                    self, input, context, return_state, parent_trace, trace_options
+                if (
+                    not (return_history or return_raw_usage or return_items)
+                    and model_override is None
+                    and _private_text_run_eligible(
+                        self, input, context, return_state, parent_trace, trace_options
+                    )
                 ):
                     options["_private_text_run"] = True
-                if not (
-                    return_history or return_raw_usage or return_items
-                ) and _completed_run_eligible(
-                    self, input, context, return_state, parent_trace, trace_options
+                if (
+                    not (return_history or return_raw_usage or return_items)
+                    and model_override is None
+                    and _completed_run_eligible(
+                        self, input, context, return_state, parent_trace, trace_options
+                    )
                 ):
                     options["_completed_input"] = input
             if return_raw_usage and resume_manual:
@@ -2199,6 +2210,8 @@ class Agent(Generic[ContextT, OutputT]):
                 else:
                     assert input is not None
                     submit_options: dict[str, Any] = {}
+                    if model_override is not None:
+                        submit_options["model_override"] = model_override
                     if prepare_request is not None:
                         submit_options["prepare_request"] = prepare_request
                     if budget is not None:
@@ -2247,6 +2260,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -2278,6 +2292,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -2309,6 +2324,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -2339,6 +2355,7 @@ class Agent(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        model_override: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -2377,6 +2394,7 @@ class Agent(Generic[ContextT, OutputT]):
         are not attached to the error.
         """
         initial_messages = _capture_initial_messages(initial_messages, state=state)
+        model_override = _capture_model_override(model_override)
         if budget is not None and not isinstance(budget, RunBudget):
             raise TypeError("budget must be a RunBudget or None")
         options: dict[str, Any] = {}
@@ -2424,6 +2442,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["prepare_request"] = prepare_request
                 if budget is not None:
                     options["budget"] = budget
+                if model_override is not None:
+                    options["model_override"] = model_override
                 return _SyncRun().run(
                     self.run(
                         input,
