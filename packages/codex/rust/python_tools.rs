@@ -5974,9 +5974,18 @@ impl ToolContributor for PythonContributor {
             );
         }
         if let Some(binding) = input.mcp {
+            let discovery = input.retained_execution_data.and_then(|data| {
+                data.get::<crate::native_interception::ProfileMcpSource>()
+                    .and_then(|source| source.result_selection.clone())
+                    .or_else(|| data.get::<crate::mcp_result_control::Selection>())
+            });
             for info in binding.tools() {
                 let native_name = info.canonical_tool_name();
-                if !allows(&native_name) {
+                if !allows(&native_name)
+                    || discovery.as_ref().is_some_and(|selection| {
+                        selection.filters_server_discovery(&info.server_name)
+                    })
+                {
                     continue;
                 }
                 let server = binding
@@ -6361,6 +6370,9 @@ impl ToolContributor for PythonContributor {
                 }
                 (defaults, _) => defaults,
             };
+            let discovery_selection =
+                crate::mcp_result_control::discovery_selection(thread, turn, step)
+                    .map_err(|error| error.to_string())?;
             let mcp_names = step
                 .get::<Arc<codex_mcp::McpBinding>>()
                 .map(|binding| {
@@ -6370,10 +6382,19 @@ impl ToolContributor for PythonContributor {
                         .filter_map(|tool| {
                             let name = tool.canonical_tool_name();
                             candidates.contains(&name).then(|| {
-                                json!({
+                                let mut projected = json!({
                                     "server": tool.server_name, "tool": tool.tool.name,
                                     "namespace": name.namespace, "name": name.name,
-                                })
+                                });
+                                if discovery_selection.as_ref().is_some_and(|selection| {
+                                    selection.filters_discovery(
+                                        &tool.server_name,
+                                        tool.tool.name.as_ref(),
+                                    )
+                                }) {
+                                    projected["definition"] = json!(&tool.tool);
+                                }
+                                projected
                             })
                         })
                         .collect::<Vec<_>>()

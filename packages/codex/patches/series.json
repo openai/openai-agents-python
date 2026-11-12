@@ -885,9 +885,13 @@
       "sha256": "1a3130959a633e67c297f679c7cf9b275ef4f2105ef375ab19eb9370bf531451"
     },
     {
+      "path": "sdk-mcp-discovery-cache.patch",
+      "sha256": "f70e4a2e85f8928eb8f37a1bfe31a62d647ac08a8a2c9ca8d3c2482ba5712c20"
+    },
+    {
       "path": "sdk-independent-websocket-base.patch",
       "sha256": "864ea54c78a044a8850787cb40be4a3411a50972e8806fd4b8e8949659e2cadd"
     }
   ],
-  "result_tree": "7189c909242298eb623c9464d464d0d94a75995d"
+  "result_tree": "472d4dc4f3de17bcf9f5f93ad25d2c541d10001d"
 }
