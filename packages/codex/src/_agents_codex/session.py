@@ -7156,7 +7156,12 @@ class Session(Generic[ContextT, OutputT]):
                     if request.subagent_id is None
                     else None
                 )
-                if restored_decision is not None:
+                # The active instruction policy can change after verified import.
+                if (
+                    restored_decision is not None
+                    and restored_decision.profile
+                    == self._approval_profile(restored_decision.profile_id)
+                ):
                     self._approval_decisions[
                         (
                             message.get("profile_id"),

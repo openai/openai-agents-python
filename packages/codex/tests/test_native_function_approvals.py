@@ -720,8 +720,8 @@ async def test_remembered_decision_uses_updated_effective_instructions(responses
     assert effects == ["first", "later"]
 
 
-@pytest.mark.parametrize("restore", [False, True], ids=["live", "portable"])
-async def test_updated_graph_instructions_require_a_new_remembered_approval(responses, restore):
+@pytest.mark.parametrize("update_at", ["live", "checkpoint", "restored"])
+async def test_updated_graph_instructions_require_a_new_remembered_approval(responses, update_at):
     effects = []
 
     @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
@@ -767,18 +767,25 @@ async def test_updated_graph_instructions_require_a_new_remembered_approval(resp
             before = await source.save_state()
             assert len(before.remembered_approvals) == 1
 
-            await source.update(instructions="Changed policy.")
-            if not restore:
-                await require_approval(source)
-                return
-            saved = await source.save_state()
-            assert saved.remembered_approvals == []
+            if update_at == "restored":
+                saved = before
+            else:
+                await source.update(instructions="Changed policy.")
+                if update_at == "live":
+                    await require_approval(source)
+                    return
+                saved = await source.save_state()
+                assert saved.remembered_approvals == []
+                # An older writer can still supply this decision in a verified checkpoint.
+                saved = saved.model_copy(
+                    update={"remembered_approvals": before.remembered_approvals}
+                )
 
-        # A checkpoint saved by the older writer can still carry this decision.
-        saved = saved.model_copy(update={"remembered_approvals": before.remembered_approvals})
         async with agent.session(
             state=saved, verify_remembered_approvals=lambda _: True
         ) as restored:
+            if update_at == "restored":
+                await restored.update(instructions="Changed policy.")
             await require_approval(restored)
 
 
