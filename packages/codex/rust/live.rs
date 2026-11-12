@@ -51,6 +51,7 @@ pub(crate) fn _connect_live<'py>(
     let provider = Provider {
         name: "Agents SDK Live".into(),
         base_url,
+        websocket_base_url: None,
         query_params: None,
         headers: HeaderMap::new(),
         retry: RetryConfig {

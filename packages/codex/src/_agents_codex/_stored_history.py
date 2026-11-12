@@ -90,6 +90,36 @@ def _options(limit: int, cursor: str | None, direction: str = "asc") -> dict[str
     return {"limit": limit, "cursor": cursor, "descending": direction == "desc"}
 
 
+def _sessions_request(limit: int, cursor: str | None, archived: bool) -> str:
+    options = _options(limit, cursor)
+    options.pop("descending")
+    if type(archived) is not bool:
+        raise TypeError("archived must be a bool")
+    return json.dumps({"kind": "sessions", **options, "archived": archived})
+
+
+def _turns_request(limit: int, cursor: str | None, direction: str, include_summary: bool) -> str:
+    options = _options(limit, cursor, direction)
+    if type(include_summary) is not bool:
+        raise TypeError("include_summary must be a bool")
+    return json.dumps({"kind": "turns", **options, "include_items": include_summary})
+
+
+def _items_request(limit: int, cursor: str | None, direction: str, turn_id: str | None) -> str:
+    options = _options(limit, cursor, direction)
+    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
+        raise ValueError("turn_id must be a nonempty string or None")
+    return json.dumps({"kind": "items", **options, "turn_id": turn_id})
+
+
+def _search_request(limit: int, cursor: str | None, text: str) -> str:
+    options = _options(limit, cursor)
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Stored history search requires nonempty text")
+    options.pop("descending")
+    return json.dumps({"kind": "search", **options, "text": text})
+
+
 def _item(raw: dict[str, Any]) -> StoredItem:
     data = json.loads(raw.pop("data_json"))
     if not isinstance(data, dict):

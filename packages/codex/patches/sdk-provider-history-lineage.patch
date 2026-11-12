@@ -414,18 +414,19 @@ index 6658db68..b6bfd171 100644
                          invocation_timeout_ms: None,
                          tool_choice: None,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index c1a4cce0..5391e8e0 100644
+index 179e58e5..012f75c8 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -34,6 +34,7 @@ use std::sync::atomic::Ordering;
+@@ -34,6 +34,8 @@ use std::sync::atomic::Ordering;
  
  #[path = "client_tool_metadata.rs"]
  mod tool_metadata;
 +pub(crate) mod provider_history;
++pub(crate) use provider_history::McpRewriteAdmission;
  
  use crate::CodexResponsesHeaders;
  use crate::tools::ExecutedToolCalls;
-@@ -279,6 +280,7 @@ pub struct ModelClient {
+@@ -279,6 +281,7 @@ pub struct ModelClient {
      sdk_model_http_pool: Option<Arc<codex_http_client::SdkModelHttpPool>>,
      sdk_websocket_tls_selector: Option<Arc<codex_api::SdkWebsocketTlsSelector>>,
      restored_history: bool,
@@ -433,7 +434,7 @@ index c1a4cce0..5391e8e0 100644
      request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
      executed_tool_calls: Option<ExecutedToolCalls>,
      // Resolved once when the session is created, like other session feature flags.
-@@ -314,6 +316,7 @@ pub struct ModelClientSession {
+@@ -314,6 +317,7 @@ pub struct ModelClientSession {
      /// appends, or continuation requests), and must not send it between different turns.
      /// An auth ownership change clears it so the new owner gets fresh routing state.
      turn_state: Arc<OnceLock<String>>,
@@ -441,7 +442,7 @@ index c1a4cce0..5391e8e0 100644
  }
  
  /// Minted from the native HTTP response collector, never from saved JSON.
-@@ -660,6 +663,7 @@ impl ModelClient {
+@@ -660,6 +664,7 @@ impl ModelClient {
              sdk_model_http_pool: None,
              sdk_websocket_tls_selector: None,
              restored_history: false,
@@ -449,7 +450,7 @@ index c1a4cce0..5391e8e0 100644
              request_contributors,
              executed_tool_calls: None,
              api_key_cyber_access_programs:
-@@ -699,6 +703,69 @@ impl ModelClient {
+@@ -699,6 +704,73 @@ impl ModelClient {
          self
      }
  
@@ -484,7 +485,11 @@ index c1a4cce0..5391e8e0 100644
 +    pub(crate) fn capture_provider_history_input(
 +        &self,
 +        input: &[ResponseItem],
++        step_store: &codex_extension_api::ExtensionData,
 +    ) -> Result<Option<codex_api::ProviderHistoryInputProjection>> {
++        if let Some(cursor) = &self.provider_history {
++            step_store.insert(provider_history::McpRewriteAdmission(Arc::clone(cursor)));
++        }
 +        self.provider_history
 +            .as_ref()
 +            .map(|_| provider_history::canonical_input_projection(input, Vec::new(), 0))
@@ -519,7 +524,7 @@ index c1a4cce0..5391e8e0 100644
      pub(crate) fn with_session_context(
          mut self,
          prompt_cache_key_override: Option<String>,
-@@ -754,6 +821,7 @@ impl ModelClient {
+@@ -754,6 +826,7 @@ impl ModelClient {
              websocket_session,
              pending_http_response: None,
              turn_state: Arc::new(OnceLock::new()),
@@ -527,7 +532,7 @@ index c1a4cce0..5391e8e0 100644
          }
      }
  
-@@ -1136,6 +1204,14 @@ impl ModelClient {
+@@ -1136,6 +1209,14 @@ impl ModelClient {
                  })
              })
              .transpose()?;
@@ -542,7 +547,7 @@ index c1a4cce0..5391e8e0 100644
          controls
              .validate_profile(model_info)
              .map_err(CodexErr::InvalidRequest)?;
-@@ -1183,12 +1259,33 @@ impl ModelClient {
+@@ -1183,12 +1264,33 @@ impl ModelClient {
                  Ok(selected)
              })
              .transpose()?;
@@ -581,7 +586,7 @@ index c1a4cce0..5391e8e0 100644
          let is_openai = self.state.provider.info().is_openai();
          // These prompt-only items are rebuilt on every request. Hash their visible payloads
          // within the thread so retries and resumed sessions preserve their identity.
-@@ -1223,6 +1320,16 @@ impl ModelClient {
+@@ -1223,6 +1325,16 @@ impl ModelClient {
              )));
              prefix.push(instructions);
          }
@@ -598,7 +603,7 @@ index c1a4cce0..5391e8e0 100644
          input.splice(0..0, prefix);
          filter_provider_response_metadata(&mut input, is_openai);
          let reasoning = if prompt_owns_model {
-@@ -1339,6 +1446,8 @@ impl ModelClient {
+@@ -1339,6 +1451,8 @@ impl ModelClient {
              }),
              request_controls: codex_api::ResponsesRequestControls {
                  hosted_tool_choice,
@@ -607,7 +612,7 @@ index c1a4cce0..5391e8e0 100644
                  prompt: prompt_reference,
                  instructions: hosted_prompt
                      .filter(|prompt| !prompt.omit_instructions)
-@@ -1351,8 +1460,7 @@ impl ModelClient {
+@@ -1351,8 +1465,7 @@ impl ModelClient {
                      })
                      .transpose()?,
                  truncation: controls.truncation.clone().flatten(),
@@ -617,7 +622,7 @@ index c1a4cce0..5391e8e0 100644
                  extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
                  max_output_tokens: controls.max_output_tokens.flatten(),
                  temperature: controls.temperature.flatten(),
-@@ -1806,6 +1914,16 @@ impl ModelClientSession {
+@@ -1806,6 +1919,16 @@ impl ModelClientSession {
              .is_some_and(|manager| manager.uses_app_managed_model_oauth())
      }
  
@@ -634,7 +639,7 @@ index c1a4cce0..5391e8e0 100644
      pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
          let source = &self.client.state.session_source;
          // ThreadSpawn children expose the same attention API as root turns.
-@@ -1974,6 +2092,11 @@ impl ModelClientSession {
+@@ -1974,6 +2097,11 @@ impl ModelClientSession {
          if !self.client.responses_websocket_enabled() {
              return Ok(());
          }
@@ -646,7 +651,7 @@ index c1a4cce0..5391e8e0 100644
          let provider = Arc::clone(&self.client.state.provider);
          let auth_manager = provider.auth_manager();
          let mut auth_recovery = auth_manager
-@@ -2258,6 +2381,7 @@ impl ModelClientSession {
+@@ -2268,6 +2396,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -654,7 +659,7 @@ index c1a4cce0..5391e8e0 100644
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2296,16 +2420,6 @@ impl ModelClientSession {
+@@ -2306,16 +2435,6 @@ impl ModelClientSession {
                  prompt.cyber_access_program,
                  self.client.api_key_cyber_access_programs,
              )?;
@@ -671,7 +676,7 @@ index c1a4cce0..5391e8e0 100644
              let observation_is_reviewer = is_guardian_reviewer(&responses_headers);
              options.extra_headers.extend(responses_headers);
              let interceptors = crate::model_request::prepare(
-@@ -2317,6 +2431,31 @@ impl ModelClientSession {
+@@ -2327,6 +2446,34 @@ impl ModelClientSession {
                  &mut request.client_metadata,
                  prompt.tool_admission.clone(),
              );
@@ -680,7 +685,10 @@ index c1a4cce0..5391e8e0 100644
 +                if interceptors.iter().any(|interceptor| interceptor.produces_response()) {
 +                    return Err(CodexErr::InvalidRequest("Provider history requires a supported owning Responses transport".into()));
 +                }
-+                logical_history_input = cursor.prepare(&mut request, &client_setup, transport.clone(), options.extra_headers.clone()).await?;
++                logical_history_input = cursor.prepare(
++                    &mut request, &client_setup, transport.clone(), options.extra_headers.clone(),
++                    prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt()),
++                ).await?;
 +                client_setup.api_provider.retry.max_attempts = 0;
 +                if let Some(attempt) = prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt()) {
 +                    attempt.observe_provider_tools(true);
@@ -703,7 +711,7 @@ index c1a4cce0..5391e8e0 100644
              let inference_trace_attempt = inference_trace.start_attempt();
              inference_trace_attempt.add_request_headers(&mut options.extra_headers);
              if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
-@@ -2325,7 +2464,13 @@ impl ModelClientSession {
+@@ -2335,7 +2482,13 @@ impl ModelClientSession {
                  }
                  request.input = input;
              }
@@ -718,7 +726,7 @@ index c1a4cce0..5391e8e0 100644
              let request_transport = if prompt.prefer_buffered_response {
                  codex_extension_api::ModelRequestTransport::HttpJson
              } else {
-@@ -2419,6 +2564,19 @@ impl ModelClientSession {
+@@ -2429,6 +2582,19 @@ impl ModelClientSession {
  
              match stream_result {
                  Ok((request_id, interrupt, events, producer_task, producer_stop)) => {
@@ -738,7 +746,7 @@ index c1a4cce0..5391e8e0 100644
                      let (mut stream, response) = map_response_events(
                          request_id,
                          crate::model_request::intercept_stream(events, interceptors),
-@@ -2435,8 +2593,13 @@ impl ModelClientSession {
+@@ -2445,8 +2611,13 @@ impl ModelClientSession {
                      stream.producer_task = producer_task;
                      stream.producer_stop = producer_stop;
                      stream.request_observation = request_observation;
@@ -754,7 +762,7 @@ index c1a4cce0..5391e8e0 100644
                      return Ok(stream);
                  }
                  Err(ApiError::Transport(unauthorized_transport))
-@@ -2453,6 +2616,7 @@ impl ModelClientSession {
+@@ -2463,6 +2634,7 @@ impl ModelClientSession {
                          response_debug_context.request_id.as_deref(),
                          /*output_items*/ &[],
                      );
@@ -762,7 +770,7 @@ index c1a4cce0..5391e8e0 100644
                      auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
                          handle_unauthorized(
                              unauthorized_transport,
-@@ -2468,6 +2632,11 @@ impl ModelClientSession {
+@@ -2478,6 +2650,11 @@ impl ModelClientSession {
                      continue;
                  }
                  Err(err) => {
@@ -774,7 +782,7 @@ index c1a4cce0..5391e8e0 100644
                      let response_debug_context =
                          extract_response_debug_context_from_api_error(&err);
                      let err = self.client.state.provider.map_api_error(err);
-@@ -2511,6 +2680,9 @@ impl ModelClientSession {
+@@ -2521,6 +2698,9 @@ impl ModelClientSession {
          inference_trace: &InferenceTraceContext,
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<WebsocketStreamOutcome> {
@@ -784,7 +792,7 @@ index c1a4cce0..5391e8e0 100644
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
-@@ -2543,6 +2715,7 @@ impl ModelClientSession {
+@@ -2553,6 +2733,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -792,7 +800,7 @@ index c1a4cce0..5391e8e0 100644
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2638,7 +2811,11 @@ impl ModelClientSession {
+@@ -2649,7 +2830,11 @@ impl ModelClientSession {
              if let Some(turn_state) = self.turn_state.get() {
                  client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
              }
@@ -805,7 +813,7 @@ index c1a4cce0..5391e8e0 100644
              let (mode, reason) = if continuation.is_some() {
                  ("incremental", "incremental")
              } else {
-@@ -2898,6 +3075,10 @@ impl ModelClientSession {
+@@ -2909,6 +3094,10 @@ impl ModelClientSession {
          service_tier: Option<String>,
          responses_metadata: &CodexResponsesMetadata,
      ) -> Result<()> {
@@ -818,10 +826,10 @@ index c1a4cce0..5391e8e0 100644
          // ordinary request run the awaited context policy before sending input.
 diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
 new file mode 100644
-index 00000000..5f1dd7fd
+index 00000000..f3c5cdd1
 --- /dev/null
 +++ b/codex-rs/core/src/client/provider_history.rs
-@@ -0,0 +1,849 @@
+@@ -0,0 +1,1017 @@
 +use super::*;
 +use codex_protocol::provider_history::{
 +    ProviderHistoryInputBoundary, ProviderHistoryReference, ProviderHistorySelection,
@@ -861,8 +869,11 @@ index 00000000..5f1dd7fd
 +    input_len: usize,
 +    input_sha256: String,
 +    output_sha256: Vec<String>,
-+    admitted_calls: Vec<Option<String>>,
-+    wire_calls: Vec<Option<String>>,
++    admitted_calls: Vec<Option<ProviderCall>>,
++    wire_calls: Vec<Option<ProviderCall>>,
++    wire_output_sha256: Vec<Option<String>>,
++    mcp_rewrites: Vec<(usize, ProviderCall, ProviderCall)>,
++    attempt: Option<Weak<dyn codex_extension_api::ModelAttemptAdmission>>,
 +    stored: bool,
 +    scope: Scope,
 +}
@@ -873,6 +884,8 @@ index 00000000..5f1dd7fd
 +    live_scope: Option<Scope>,
 +    pending: Option<Pending>,
 +}
++
++pub(crate) struct McpRewriteAdmission(pub(crate) std::sync::Arc<Cursor>);
 +
 +#[derive(Debug)]
 +pub(crate) struct Cursor {
@@ -918,7 +931,13 @@ index 00000000..5f1dd7fd
 +    Ok(Sha256::digest(serde_json::to_vec(&value)?).into())
 +}
 +
-+fn provider_call(item: &ResponseItem) -> Option<String> {
++#[derive(Debug, PartialEq, Eq)]
++struct ProviderCall {
++    identity: String,
++    arguments: String,
++}
++
++fn provider_call(item: &ResponseItem) -> Option<ProviderCall> {
 +    let (kind, call_id, name, namespace, input) = match item {
 +        ResponseItem::FunctionCall {
 +            call_id,
@@ -959,11 +978,25 @@ index 00000000..5f1dd7fd
 +        ),
 +        _ => return None,
 +    };
-+    let mut value = serde_json::json!([kind, call_id, name, namespace, input]);
++    // Search controls retain their existing exact argument requirement.
++    let mut identity = serde_json::json!([
++        kind,
++        call_id,
++        name,
++        namespace,
++        (kind == "tool_search_call").then_some(&input)
++    ]);
++    identity.sort_all_objects();
++    let mut value = input;
 +    value.sort_all_objects();
-+    Some(hex(Sha256::digest(
-+        serde_json::to_vec(&value).expect("JSON provider call serialization"),
-+    )))
++    Some(ProviderCall {
++        identity: hex(Sha256::digest(
++            serde_json::to_vec(&identity).expect("JSON call identity"),
++        )),
++        arguments: hex(Sha256::digest(
++            serde_json::to_vec(&value).expect("JSON call input"),
++        )),
++    })
 +}
 +
 +fn hex(digest: impl AsRef<[u8]>) -> String {
@@ -1238,6 +1271,7 @@ index 00000000..5f1dd7fd
 +        setup: &CurrentClientSetup,
 +        transport: ReqwestTransport,
 +        headers: HeaderMap,
++        attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
 +    ) -> Result<Option<Vec<ResponseItem>>> {
 +        let canonical_input = request
 +            .request_controls
@@ -1301,12 +1335,65 @@ index 00000000..5f1dd7fd
 +                .map(input_digest)
 +                .transpose()?
 +                .is_some_and(|digest| digest == window.input_sha256);
-+            if let Some(canonical) = canonical.filter(|_| !unchanged_wire_prefix) {
++            let wire_unsent = (|| -> Result<Vec<usize>> {
++                let prefix = request
++                    .input
++                    .get(..window.input_len)
++                    .ok_or_else(|| invalid("Provider history lost acknowledged input"))?;
++                let tail = request.input[window.input_len..]
++                    .iter()
++                    .map(item_digest)
++                    .map(|digest| digest.map(hex))
++                    .collect::<Result<Vec<_>>>()?;
++                window
++                    .unsent_input_indices(full_len, &input_digest(prefix)?, &tail)
++                    .map_err(CodexErr::InvalidRequest)
++            })();
++            if unchanged_wire_prefix && wire_unsent.is_ok() {
++                Some(wire_unsent?)
++            } else if unchanged_wire_prefix
++                && canonical.is_some()
++                && window.canonical_tail_sha256.is_some()
++            {
++                // The same delivered input can coexist with a locally admitted
++                // MCP output. Prove the input and output projections separately.
++                let mut outputs = canonical.expect("checked canonical receipt");
++                let first = outputs
++                    .output_sha256
++                    .len()
++                    .checked_sub(window.output_sha256.len())
++                    .ok_or_else(|| {
++                        invalid("Provider history has an incomplete canonical output")
++                    })?;
++                outputs.output_sha256 = outputs.output_sha256[first..].to_vec();
++                outputs.input_len = 0;
++                outputs.input_sha256 = canonical_prefix_digest(&[]);
++                let mapped = canonical_input
++                    .wire_input_indices
++                    .iter()
++                    .enumerate()
++                    .map(|(offset, source)| (canonical_input.prefix_len + offset, *source))
++                    .filter(|(wire, _)| *wire >= window.input_len)
++                    .collect::<Vec<_>>();
++                let hashes = mapped
++                    .iter()
++                    .map(|(_, source)| canonical_input.sampling_item_sha256[*source])
++                    .collect::<Vec<_>>();
++                let unsent = unsent_hash_indices(&outputs, &hashes)?;
++                let mut indices =
++                    (window.input_len..canonical_input.prefix_len).collect::<Vec<_>>();
++                indices.extend(unsent.into_iter().map(|index| mapped[index].0));
++                Some(indices)
++            } else if let Some(canonical) = canonical {
 +                let unsent =
 +                    unsent_hash_indices(&canonical, &canonical_input.sampling_item_sha256)?
 +                        .into_iter()
 +                        .collect::<std::collections::HashSet<_>>();
-+                let mut indices = (0..canonical_input.prefix_len).collect::<Vec<_>>();
++                let mut indices = if unchanged_wire_prefix {
++                    Vec::new()
++                } else {
++                    (0..canonical_input.prefix_len).collect::<Vec<_>>()
++                };
 +                indices.extend(
 +                    canonical_input
 +                        .wire_input_indices
@@ -1317,20 +1404,7 @@ index 00000000..5f1dd7fd
 +                );
 +                Some(indices)
 +            } else {
-+                let prefix = request
-+                    .input
-+                    .get(..window.input_len)
-+                    .ok_or_else(|| invalid("Provider history lost acknowledged input"))?;
-+                let tail = request.input[window.input_len..]
-+                    .iter()
-+                    .map(item_digest)
-+                    .map(|digest| digest.map(hex))
-+                    .collect::<Result<Vec<_>>>()?;
-+                Some(
-+                    window
-+                        .unsent_input_indices(full_len, &input_digest(prefix)?, &tail)
-+                        .map_err(CodexErr::InvalidRequest)?,
-+                )
++                Some(wire_unsent?)
 +            }
 +        } else {
 +            None
@@ -1366,6 +1440,9 @@ index 00000000..5f1dd7fd
 +                output_sha256: Vec::new(),
 +                admitted_calls: Vec::new(),
 +                wire_calls: Vec::new(),
++                wire_output_sha256: Vec::new(),
++                mcp_rewrites: Vec::new(),
++                attempt: attempt.as_ref().map(std::sync::Arc::downgrade),
 +                stored: request.store,
 +                scope,
 +            });
@@ -1427,9 +1504,66 @@ index 00000000..5f1dd7fd
 +        Ok(())
 +    }
 +
++    pub(crate) fn admit_mcp_argument_rewrite(
++        &self,
++        original: &ResponseItem,
++        replacement: &ResponseItem,
++        attempt: &std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>,
++    ) -> std::result::Result<(), String> {
++        let before = provider_call(original).ok_or("Missing original MCP call")?;
++        let after = provider_call(replacement).ok_or("Missing replacement MCP call")?;
++        if before.identity != after.identity || before == after {
++            return Err("MCP argument rewrite changed its call identity".into());
++        }
++        let mut state = self.state.lock().unwrap();
++        let pending = state
++            .pending
++            .as_mut()
++            .ok_or("Missing pending provider dispatch")?;
++        if attempt.cancellation().is_cancelled()
++            || !pending
++                .attempt
++                .as_ref()
++                .is_some_and(|pending| pending.ptr_eq(&std::sync::Arc::downgrade(attempt)))
++        {
++            return Err("MCP argument rewrite has no matching live attempt".into());
++        }
++        let digest = hex(item_digest(original).map_err(|error| error.to_string())?);
++        // Interceptors may defer an overlapping item. Its complete raw identity,
++        // not the most recently polled stream item, locates its occurrence.
++        let mut matches = pending
++            .wire_calls
++            .iter()
++            .enumerate()
++            .filter(|(index, call)| {
++                call.as_ref() == Some(&before)
++                    && pending
++                        .wire_output_sha256
++                        .get(*index)
++                        .and_then(Option::as_ref)
++                        == Some(&digest)
++                    && !pending
++                        .mcp_rewrites
++                        .iter()
++                        .any(|(occurrence, _, _)| occurrence == index)
++            })
++            .map(|(index, _)| index);
++        let index = matches
++            .next()
++            .ok_or("Missing original MCP provider occurrence")?;
++        if matches.next().is_some() {
++            return Err("Ambiguous MCP provider occurrence".into());
++        }
++        pending.mcp_rewrites.push((index, before, after));
++        Ok(())
++    }
++
 +    pub(crate) fn observe_wire_output(&self, item: &ResponseItem) {
 +        if let Some(pending) = self.state.lock().unwrap().pending.as_mut() {
 +            pending.wire_calls.push(provider_call(item));
++            pending
++                .wire_output_sha256
++                .push(item_digest(item).ok().map(hex));
 +        }
 +    }
 +
@@ -1463,13 +1597,47 @@ index 00000000..5f1dd7fd
 +                return Err(invalid("Provider history output admission is incomplete"));
 +            }
 +            let pending = state.pending.as_ref().expect("checked pending admission");
-+            if pending.admitted_calls != pending.wire_calls {
-+                // The effect may already have run with corrected input. Keep the
-+                // durable pending fence instead of acknowledging a stale remote call.
-+                return Err(invalid(
-+                    "Provider history cannot acknowledge rewritten tool arguments",
-+                ));
++            let mut rewritten = false;
++            for (index, (admitted, wire)) in pending
++                .admitted_calls
++                .iter()
++                .zip(&pending.wire_calls)
++                .enumerate()
++            {
++                if admitted == wire {
++                    continue;
++                }
++                if !pending
++                    .mcp_rewrites
++                    .iter()
++                    .any(|(occurrence, original, replacement)| {
++                        *occurrence == index
++                            && wire.as_ref() == Some(original)
++                            && admitted.as_ref() == Some(replacement)
++                    })
++                {
++                    return Err(invalid(
++                        "Provider history cannot acknowledge unproven tool arguments",
++                    ));
++                }
++                rewritten = true;
 +            }
++            if pending.admitted_calls.len() != pending.wire_calls.len() {
++                return Err(invalid("Provider history output admission is incomplete"));
++            }
++            let wire_output = if rewritten {
++                pending
++                    .wire_output_sha256
++                    .iter()
++                    .cloned()
++                    .collect::<Option<Vec<_>>>()
++                    .filter(|items| items.len() == pending.output_sha256.len())
++                    .ok_or_else(|| {
++                        invalid("Provider history wire output admission is incomplete")
++                    })?
++            } else {
++                Vec::new()
++            };
 +            let pending = state
 +                .pending
 +                .take()
@@ -1480,6 +1648,9 @@ index 00000000..5f1dd7fd
 +                *id = Some(response.response_id);
 +            }
 +            let mut canonical_tail_sha256 = pending.canonical_tail_sha256;
++            if rewritten && canonical_tail_sha256.is_none() {
++                canonical_tail_sha256 = Some(Vec::new());
++            }
 +            if let Some(tail) = &mut canonical_tail_sha256 {
 +                tail.extend(pending.output_sha256.iter().cloned());
 +            }
@@ -1488,7 +1659,12 @@ index 00000000..5f1dd7fd
 +                canonical_tail_sha256,
 +                input_len: pending.input_len,
 +                input_sha256: pending.input_sha256,
-+                output_sha256: pending.output_sha256,
++                // Keep remote output distinct from the approved local view.
++                output_sha256: if rewritten {
++                    wire_output
++                } else {
++                    pending.output_sha256
++                },
 +            });
 +            state.reference.stored_response = Some(pending.stored);
 +            state.reference.pending = false;
@@ -1795,6 +1971,46 @@ index 74dcc9a2..abd83501 100644
              review_model,
              model_context_window: cfg.model_context_window,
              model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index aa55d51e..50c792fa 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -171,6 +171,35 @@ impl ModelToolAdmission for StepToolAdmission {
+             .as_ref()
+             .is_some_and(|router| router.admits_response_item(item))
+     }
++    fn admit_mcp_argument_rewrite(
++        &self,
++        original: &ResponseItem,
++        replacement: &ResponseItem,
++    ) -> Result<(), String> {
++        let Some(admission) = self.step.as_ref().and_then(|step| {
++            step.extension_data
++                .get::<crate::client::McpRewriteAdmission>()
++        }) else {
++            return Ok(());
++        };
++        let call = self.router.as_ref().and_then(|router| {
++            router
++                .build_model_tool_call(original.clone())
++                .ok()
++                .flatten()
++                .and_then(|call| router.tool_runtime(&call.tool_name))
++        });
++        if !call.is_some_and(|runtime| {
++            runtime.as_ref().type_id()
++                == std::any::TypeId::of::<crate::tools::handlers::McpHandler>()
++        }) {
++            return Err("Provider history rewrite requires its captured MCP handler".into());
++        }
++        let attempt = self.attempt.as_ref().ok_or("Missing MCP model attempt")?;
++        admission
++            .0
++            .admit_mcp_argument_rewrite(original, replacement, attempt)
++    }
+ }
+ #[cfg(test)]
+ pub(crate) fn tool_admission(
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
 index cb0334d8..dc17c2f1 100644
 --- a/codex-rs/core/src/session/inject.rs
@@ -1817,7 +2033,7 @@ index cb0334d8..dc17c2f1 100644
          let checkpoint = codex_history::CompactedItem {
              sdk_originals: Some(originals.clone().into()),
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 82d26e0b..0f962223 100644
+index cc6ae7e0..5135706f 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -691,6 +691,11 @@ impl Session {
@@ -1958,10 +2174,10 @@ index abc8b35f..2fc0fa0f 100644
          thread_id: Some(session.thread_id()),
          thread_settings: snapshot,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 536e1f8e..1f947647 100644
+index d3838142..13297026 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -824,6 +824,11 @@ pub(crate) async fn run_turn(
+@@ -882,6 +882,11 @@ pub(crate) async fn run_turn(
                  }
  
                  let should_roll_over = needs_follow_up
@@ -1973,7 +2189,7 @@ index 536e1f8e..1f947647 100644
                      && (sess.take_new_context_window_request().await || token_limit_reached);
                  let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                  super::token_budget::maybe_record(
-@@ -1608,6 +1613,15 @@ async fn run_pre_sampling_compact(
+@@ -1666,6 +1671,15 @@ async fn run_pre_sampling_compact(
      cancellation_token: &CancellationToken,
      prepared_current_step: Option<Arc<StepContext>>,
  ) -> CodexResult<()> {
@@ -1989,7 +2205,7 @@ index 536e1f8e..1f947647 100644
      maybe_run_previous_model_inline_compact(
          sess,
          turn_context,
-@@ -1768,6 +1782,15 @@ async fn run_post_turn_compaction(
+@@ -1826,6 +1840,15 @@ async fn run_post_turn_compaction(
      cancellation_token: &CancellationToken,
      native_model_threshold: bool,
  ) -> CodexResult<()> {
@@ -2005,7 +2221,7 @@ index 536e1f8e..1f947647 100644
      let turn_context = &step_context.turn;
      if turn_context.config.features.enabled(Feature::TokenBudget) {
          return Ok(());
-@@ -2014,6 +2037,7 @@ pub(crate) fn build_prompt(
+@@ -2072,6 +2095,7 @@ pub(crate) fn build_prompt(
          tool_admission: None,
          sampling_stop: None,
          prepared_request_admission: None,
@@ -2013,19 +2229,19 @@ index 536e1f8e..1f947647 100644
          base_instructions,
          output_schema: turn_context.final_output_json_schema.clone(),
          output_schema_strict: !crate::guardian::is_basic_session_source(
-@@ -2155,6 +2179,11 @@ async fn run_sampling_request(
+@@ -2213,6 +2237,11 @@ async fn run_sampling_request(
                  step_context.as_ref(),
                  base_instructions.clone(),
              );
 +            prompt.canonical_history_input = sess
 +                .services
 +                .model_client
-+                .capture_provider_history_input(&prompt.input)?
++                .capture_provider_history_input(&prompt.input, &step_context.extension_data)?
 +                .map(Arc::new);
              prompt.request_controls = step_context.settings.request_controls().clone();
              if prompt.tool_choice == codex_protocol::config_types::ToolChoice::Required
                  && tool_choice_reset_applies(&step_context.settings, &turn_context.extension_data)
-@@ -4449,6 +4478,7 @@ async fn try_run_sampling_request(
+@@ -4535,6 +4564,7 @@ async fn try_run_sampling_request(
                      }
  
                      assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
@@ -2033,7 +2249,7 @@ index 536e1f8e..1f947647 100644
                      sess.reserve_assistant_message_order(&turn_context, &item)
                          .await;
                      if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
-@@ -5097,6 +5127,18 @@ async fn try_run_sampling_request(
+@@ -5183,6 +5213,18 @@ async fn try_run_sampling_request(
      if timeout_ms.is_some() || model_attempt.is_some() {
          deadline_cleanup_errors.extend(deadline.retire_tasks().await);
      }
@@ -2052,7 +2268,7 @@ index 536e1f8e..1f947647 100644
      let mut tool_cleanup = if !in_flight.is_empty() {
          let _tool_blocking_timing_guard = turn_context.turn_timing_state.begin_tool_blocking();
          let _tool_blocking_span = trace_span!(
-@@ -5183,6 +5225,8 @@ async fn try_run_sampling_request(
+@@ -5269,6 +5311,8 @@ async fn try_run_sampling_request(
          release_failed_tool_candidates(&sess, &step_context).await;
      }
      tool_cleanup?;
@@ -2610,6 +2826,26 @@ index 36cb86a8..5202e11b 100644
          tool_choice: None,
          model: PROTECTED_MODEL.to_string(),
          collaboration_mode: initial.collaboration_mode.with_updates(
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 546ffbee..8c13e69e 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -416,6 +416,15 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+     }
+     /// Whether the exact selected runtime accepts this model item's payload kind.
+     fn admits(&self, item: &ResponseItem) -> bool;
++    /// Record an SDK-admitted MCP argument policy against this exact request.
++    /// Ordinary admissions carry no provider-history receipt.
++    fn admit_mcp_argument_rewrite(
++        &self,
++        _original: &ResponseItem,
++        _replacement: &ResponseItem,
++    ) -> Result<(), String> {
++        Ok(())
++    }
+ }
+ 
+ /// Measurement can settle during joined cleanup after executable reply authority expires.
 diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
 index 4b9c7f15..5ee35fc0 100644
 --- a/codex-rs/protocol/src/lib.rs

@@ -2,6 +2,8 @@
 
 import importlib as importlib
 import json as json
+from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass as dataclass
 from pathlib import Path as Path
 from typing import Any as Any, Literal as Literal
@@ -12,11 +14,13 @@ from pydantic import (
     Field as Field,
     JsonValue,
     TypeAdapter as TypeAdapter,
+    field_validator as _field_validator,
     model_validator as model_validator,
 )
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
 from ._events import RequiredAction as RequiredAction, SessionItem as SessionItem
+from ._media import _check_audio_json
 from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .input import UserInput, _native_input
@@ -232,6 +236,27 @@ class _ManualContinuation(BaseModel):
     tool_outcomes: _ToolOutcomes | None = None
     output_schema: dict[str, Any] | None = None
     model_override: str | None = None
+    pending_input: list[dict[str, JsonValue]] = Field(default_factory=list, repr=False)
+    staged_retry: bool = False
+
+    @_field_validator("pending_input", mode="before")
+    @classmethod
+    def _validate_pending_input(cls, value: object) -> list[dict[str, JsonValue]]:
+        items = _PENDING_INPUT.validate_python(value)
+        _check_audio_json(items)
+        return items
+
+    @model_validator(mode="after")
+    def validate_manual_boundary(self) -> "_ManualContinuation":
+        if self.staged_retry and self.pending_manual:
+            raise ValueError("A staged retry cannot have pending manual replies")
+        return self
+
+
+_PENDING_INPUT: TypeAdapter[list[dict[str, JsonValue]]] = TypeAdapter(
+    list[dict[str, JsonValue]],
+    config=ConfigDict(strict=True, allow_inf_nan=False, hide_input_in_errors=True),
+)
 
 
 class ApplicationToolOutput(BaseModel):
@@ -420,6 +445,8 @@ class SessionState(BaseModel):
             raise ValueError("Request budget requires a version 8 or 9 manual checkpoint")
         if (self.format_version in (3, 5, 7, 8, 9)) != (self.native_continuation is not None):
             raise ValueError("Settled manual continuation requires format_version 3, 5, 7, 8 or 9")
+        if self.native_continuation is not None and self.native_continuation.pending_input:
+            self._check_pending_input_budget()
         if self.operation_tools is not None:
             if self.format_version not in (5, 7, 8, 9):
                 raise ValueError("Operation tools require an SDK manual checkpoint")
@@ -476,6 +503,58 @@ class SessionState(BaseModel):
         if self.native_continuation is not None:
             for reply in self.native_continuation.accepted_replies.values():
                 _check_saved_prompt_envelope(reply)
+
+    def _check_pending_input_budget(self) -> None:
+        budget = self.run_budget
+        if budget is None:
+            return
+        if (
+            budget.max_requests is not None
+            and budget.admitted_requests is not None
+            and budget.admitted_requests >= budget.max_requests
+        ):
+            raise ValueError("The checkpoint has no remaining model requests")
+        if isinstance(budget, _TokenRunBudgetCheckpoint) and (
+            budget.consumed_tokens >= budget.max_tokens
+            or (budget.usage_missing and budget.missing_usage == "stop")
+        ):
+            raise ValueError("The checkpoint has no remaining token budget")
+
+    @property
+    def pending_input(self) -> list[dict[str, JsonValue]]:
+        """Return detached model input staged for the next resumed request."""
+        if self.native_continuation is None:
+            return []
+        return deepcopy(self.native_continuation.pending_input)
+
+    def with_pending_input(self, input: str | Sequence[dict[str, JsonValue]]) -> "SessionState":
+        """Return a manual checkpoint with additional ordered input for its next request."""
+        continuation = self.native_continuation
+        if continuation is None:
+            raise ValueError("Staging input requires a manual continuation")
+        self._check_pending_input_budget()
+        if isinstance(input, str):
+            items: list[dict[str, JsonValue]] = [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": input}],
+                }
+            ]
+        else:
+            items = _PENDING_INPUT.validate_python(list(input))
+        pending = [*continuation.pending_input, *items]
+        _check_audio_json(pending)
+        staged = continuation.model_copy(update={"pending_input": deepcopy(pending)})
+        return self.model_copy(update={"native_continuation": staged})
+
+    def without_pending_input(self) -> "SessionState":
+        """Return a checkpoint with the staged input cleared."""
+        continuation = self.native_continuation
+        if continuation is None or not continuation.pending_input:
+            return self
+        cleared = continuation.model_copy(update={"pending_input": []})
+        return self.model_copy(update={"native_continuation": cleared})
 
     @property
     def instructions(self) -> str:

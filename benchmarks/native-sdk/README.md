@@ -155,6 +155,20 @@ Select only final-result workloads for a buffered comparison, for example:
 
 Omit `--v1-response-mode buffered` and use a fresh output directory for the default caller-owned loopback SSE control. Keep the same source, wheel, dependencies, interpreter, CA and host conditions. The three 64 KiB cases are final-only `Agent.run` calls in independent fresh conversations, with one prefill and 20 measured calls by default. Their chunk setting controls the SSE reference workload; a JSON response has zero SSE chunks. This removes peer framing work too, so wall-time differences do not isolate client processing. Client process CPU and peer CPU remain separate.
 
+For a paired comparison of two native modes, `--reference-engine v1 --reference-response-mode streaming --v1-response-mode buffered` has been selecting SSE for the reference and JSON for the target. Without `--reference-response-mode`, both native arms have been inheriting `--v1-response-mode`. The following command has been using the same installed native wheel on both sides, with one caller-owned Provider per Adapter and fresh conversations per call:
+
+```sh
+"$PEER_PY" "$BENCH/compare.py" \
+  --reference-engine v1 --reference-response-mode streaming --v1-response-mode buffered \
+  --native-provider-mode caller-owned --native-transport http \
+  --v0-python "$NATIVE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version "$NATIVE_VERSION" --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/native-response-modes-new" \
+  --samples 5 --iterations 20 --cases oneshot_tool_output_16k_128
+```
+
+This loopback comparison has been excluding default-host TLS and implicit-provider cache behavior. The controller has been recording each arm's response mode in metadata and summaries, and checking it against that arm's worker and peer receipts. Buffered mode has been remaining restricted to final-result workloads outside the default-host profile.
+
 Rows record the native response mode and expected wire transport, checked against all actual request receipts, per-response chunk counts and total emitted chunks. Both modes retain the same final output, input/history and tool-result checks. Buffered comparisons reject live-observation workloads. They report no first-delta metric or token-live claim; buffered progress arrives after the complete body. Existing live streaming cursor, gap and exact chunk checks remain unchanged.
 
 `elapsed_ms`, `cpu_ms` and latency p50/p95 have been covering measured operations after prefill. For oneshot cases, these have been measuring warmed, fresh conversations. `full_owner_wall_ms` and `full_owner_cpu_ms` have been measuring Adapter lifetime from construction through exit, including prefill, ordinary client scheduling, prompt work, in-scope peer-stat requests, caller-owned Provider close when present, and telemetry shutdown. The `full_owner_scope: "adapter-lifetime"` label has been excluding SDK import, peer startup, final correctness validation, and process-final cache cleanup. These overlapping spans have been supplying separate measurements, without addition to the existing metrics. Failed runs have not been qualifying.

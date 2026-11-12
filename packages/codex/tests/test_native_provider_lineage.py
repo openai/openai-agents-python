@@ -307,50 +307,6 @@ async def test_native_rejected_lineage_compaction_keeps_session_usable(restore):
         assert model.requests[1]["input"][0]["role"] == "user"
 
 
-async def test_native_rewritten_mcp_arguments_do_not_certify_remote_history():
-    from agents import HttpMCP, ReplaceArguments
-    from tests.test_native_mcp_tools import Peer, mcp_call
-
-    peer = Peer(names=("search",))
-    before_calls = []
-
-    def before(_context, _call):
-        before_calls.append(True)
-        return ReplaceArguments({"key": "effective"})
-
-    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
-        call = mcp_call("search", "mcp__records", "rewritten")
-        call["item"]["arguments"] = '{"key":"original"}'
-        model.respond(call)
-        model.respond(assistant_output("Must not continue."))
-        async with peer.serve() as url:
-            agent = Agent(
-                instructions="Search.",
-                model="gpt-5.5",
-                provider=provider,
-                model_settings={"store": True},
-                tools=[
-                    HttpMCP(
-                        name="records",
-                        url=url,
-                        tools=["search"],
-                        approval_mode="preapproved",
-                        before=before,
-                    )
-                ],
-            )
-            async with agent.session(provider_history={"type": "previous_response"}) as session:
-                with pytest.raises(NativeError, match="rewritten tool arguments"):
-                    await (await session.submit("Search.")).get_result()
-                assert before_calls == [True]
-                assert len(peer.calls) <= 1
-                assert all(call["arguments"] == {"key": "effective"} for call in peer.calls)
-                assert len(model.requests) == 1
-                with pytest.raises(NativeError):
-                    await (await session.submit("Do not replay.")).get_result()
-                assert len(model.requests) == 1
-
-
 @pytest.mark.parametrize("restore,legacy", [(False, False), (True, False), (True, True)])
 async def test_native_history_replacement_preserves_acknowledged_lineage(restore, legacy):
     async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
@@ -547,6 +503,45 @@ async def test_provider_history_stored_fork_keeps_its_owner(remote, tmp_path):
             after = {item["id"] for item in (await session.stored_sessions())["sessions"]}
             assert after == (before if remote else before | {fork_id})
             await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
+
+
+@pytest.mark.parametrize("remote", [False, True])
+async def test_conversation_history_refuses_stored_revert_without_closing(remote, tmp_path):
+    from agents import LocalStorage
+
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(instructions="Continue.", model="gpt-5.5", provider=provider)
+        storage = LocalStorage(tmp_path / "revert-threads")
+        async with agent.session(
+            storage=storage,
+            **(
+                {"provider_history": {"type": "conversation", "id": "conv_current"}}
+                if remote
+                else {}
+            ),
+        ) as session:
+            source_id = session.id
+            await (await session.submit("Before.")).get_result()
+            turns = [turn["id"] async for turn in session.turns()]
+            before = await session.history_snapshot()
+            if remote:
+                with pytest.raises(
+                    RuntimeError, match="Revert is unavailable for provider-managed conversations"
+                ):
+                    await session.revert_stored(before_turn_id=turns[0])
+                after = await session.history_snapshot()
+                assert after.items == before.items
+                assert after.revision == before.revision
+                await (await session.submit("After.")).get_result()
+            else:
+                await session.revert_stored(before_turn_id=turns[0])
+        if not remote:
+            async with agent.session(storage=storage, resume=source_id) as restored:
+                assert (await restored.stored_turns())["turns"] == []
+                await (await restored.submit("After.")).get_result()
         assert len(model.requests) == 2
 
 

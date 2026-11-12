@@ -261,6 +261,7 @@ pub(crate) struct Frame {
     fresh: Option<crate::python_tools::FreshTerminalReceipts>,
     terminal_calls: HashSet<String>,
     batch_completion: bool,
+    staged_input: Vec<ResponseItem>,
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
@@ -303,7 +304,9 @@ pub(crate) fn validate_for_opening(
         return Ok(frame);
     };
     let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
-    let pending = state["native_continuation"]["pending_manual"]
+    let continuation = &state["native_continuation"];
+    let staged_retry = continuation["staged_retry"].as_bool() == Some(true);
+    let pending = continuation["pending_manual"]
         .as_array()
         .context("Missing pending manual calls")?;
     let ids = pending
@@ -315,7 +318,7 @@ pub(crate) fn validate_for_opening(
         })
         .collect::<Result<HashSet<_>>>()?;
     ensure!(
-        !ids.is_empty() && ids.len() == pending.len(),
+        (!ids.is_empty() || staged_retry) && ids.len() == pending.len(),
         "Invalid pending call identities"
     );
     let mut current = None;
@@ -399,11 +402,15 @@ pub(crate) fn validate_for_opening(
         found.len() == ids.len(),
         "Pending source does not cover every call"
     );
-    let source = source.context("Missing pending Agent source")?;
+    let (active, graph) = current.as_ref().context("Missing pending Agent source")?;
+    let source = if staged_retry && ids.is_empty() {
+        // A settled retry has no pending calls. The captured active profile owns it.
+        active.clone()
+    } else {
+        source.context("Missing pending Agent source")?
+    };
     ensure!(
-        current
-            .as_ref()
-            .is_some_and(|(receipt, _)| receipt == &source),
+        active == &source && *graph == opening.fingerprint,
         "Pending calls differ from the active Agent source"
     );
     opening.validate_pending_source(&source)?;
@@ -520,7 +527,7 @@ fn validate_frame(
         .as_object()
         .context("Missing native manual continuation")?;
     ensure!(
-        (6..=9).contains(&frame.len())
+        (6..=11).contains(&frame.len())
             && frame.keys().all(|key| matches!(
                 key.as_str(),
                 "turn_id"
@@ -532,6 +539,8 @@ fn validate_frame(
                     | "output_schema"
                     | "model_override"
                     | "tool_outcomes"
+                    | "pending_input"
+                    | "staged_retry"
             ))
             && frame.get("output_schema").is_none_or(Value::is_object),
         "Invalid native continuation fields"
@@ -557,9 +566,13 @@ fn validate_frame(
     let pending = frame["pending_manual"]
         .as_array()
         .context("Invalid pending manual list")?;
+    let staged_retry = frame
+        .get("staged_retry")
+        .map_or(Some(false), Value::as_bool)
+        .context("Invalid staged retry status")?;
     ensure!(
-        !pending.is_empty(),
-        "Manual continuation has no pending action"
+        pending.is_empty() == staged_retry && (!staged_retry || !order.is_empty()),
+        "Manual continuation has no pending action or settled staged retry"
     );
     let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
     let restored_override: Option<String> =
@@ -584,7 +597,12 @@ fn validate_frame(
         }
     }));
     ensure!(
-        portable_manual_actions(&history, &retained_manual),
+        portable_manual_actions(&history, &retained_manual, |call| {
+            accepted.get(call).is_some_and(|envelope| {
+                matches!(&envelope.item,
+                    ResponseItem::CustomToolCallOutput { call_id, .. } if call_id == call)
+            })
+        }),
         "Manual continuation contains nonportable native work"
     );
     ensure!(
@@ -910,6 +928,25 @@ fn validate_frame(
         }
         None => ToolOutcomes::capture(&history, source_id, &turn)?,
     };
+    let mut staged_input = Vec::new();
+    if let Some(items) = frame.get("pending_input") {
+        for item in items.as_array().context("Staged input must be an array")? {
+            ensure!(
+                item.get("call_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| !seen_calls.contains(id)),
+                "Staged input cannot reuse a call from the saved turn"
+            );
+            let item: ResponseItem = serde_json::from_value(item.clone())
+                .map_err(|_| anyhow::anyhow!("Staged input is not a supported Responses item"))?;
+            ensure!(
+                !matches!(item, ResponseItem::Other),
+                "Staged input is not a supported Responses item"
+            );
+            crate::checkpoint::validate_external_response_item(&item)?;
+            staged_input.push(item);
+        }
+    }
     Ok(Frame {
         profile_source: None,
         handoffs,
@@ -917,6 +954,7 @@ fn validate_frame(
         fresh: None,
         terminal_calls: HashSet::new(),
         batch_completion: false,
+        staged_input,
         turn,
         pending: admitted,
         order,
@@ -991,9 +1029,13 @@ fn receipt_matches(call: &Value, receipt: &Value) -> bool {
 pub(crate) type Owner = Arc<Mutex<Option<Frame>>>;
 pub(crate) type WeakOwner = Weak<Mutex<Option<Frame>>>;
 
-// Pending typed patches require the application's canonical ownership marker
-// and an exact manual waiter. Restore still binds a fresh current declaration.
-fn portable_manual_actions(history: &[RolloutItem], retained: &HashSet<&str>) -> bool {
+// Pending typed Shell and ApplyPatch calls require exact application ownership
+// and a manual waiter. Custom calls need a completed native result.
+fn portable_manual_actions(
+    history: &[RolloutItem],
+    retained: &HashSet<&str>,
+    custom_completed: impl Fn(&str) -> bool,
+) -> bool {
     // Search only reads the admitted catalog. Carry a completed client search
     // as history, never as a pending effect or a destination grant.
     let mut search_receipts = HashSet::new();
@@ -1001,6 +1043,7 @@ fn portable_manual_actions(history: &[RolloutItem], retained: &HashSet<&str>) ->
     let mut patch_calls = HashSet::new();
     let mut shell_calls = HashSet::new();
     let mut shell_receipts = HashSet::new();
+    let mut custom_receipts = HashSet::new();
     for item in history.iter().rev() {
         if matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))) {
             break;
@@ -1064,7 +1107,12 @@ fn portable_manual_actions(history: &[RolloutItem], retained: &HashSet<&str>) ->
                 }
             }
             ResponseItem::CustomToolCall { name, .. } if name == "apply_patch" => {}
-            ResponseItem::CustomToolCallOutput { .. } => {}
+            ResponseItem::CustomToolCall { call_id, .. }
+                if !call_id.is_empty()
+                    && (custom_receipts.remove(call_id) || custom_completed(call_id)) => {}
+            ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                custom_receipts.insert(call_id);
+            }
             ResponseItem::ToolSearchOutput {
                 call_id: Some(call_id),
                 execution,
@@ -1190,28 +1238,54 @@ impl Frame {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> Result<Value> {
-        let mut value = self.state.clone();
-        value["native_continuation"]["accepted_replies"] = encode_accepted_replies(&self.accepted)?;
+    fn continuation_snapshot(&self, staged_retry: bool) -> Result<Value> {
+        let mut value = self.state["native_continuation"].clone();
+        value["accepted_replies"] = encode_accepted_replies(&self.accepted)?;
         if let Some(outcomes) = &self.tool_outcomes {
-            value["native_continuation"]["tool_outcomes"] = serde_json::to_value(outcomes)?;
+            value["tool_outcomes"] = serde_json::to_value(outcomes)?;
         }
-        value["native_continuation"]["pending_manual"]
+        let pending = value["pending_manual"]
             .as_array_mut()
-            .context("Missing pending manual calls")?
-            .retain(|call| {
-                call["call_id"]
-                    .as_str()
-                    .is_some_and(|id| !self.accepted.contains_key(id))
-            });
+            .context("Missing pending manual calls")?;
+        pending.retain(|call| {
+            call["call_id"]
+                .as_str()
+                .is_some_and(|id| !self.accepted.contains_key(id))
+        });
         ensure!(
-            value["native_continuation"]["pending_manual"]
-                .as_array()
-                .is_some_and(|pending| !pending.is_empty()),
-            "No pending manual replies remain"
+            pending.is_empty() == staged_retry,
+            "Manual checkpoint boundary changed"
         );
+        if staged_retry {
+            value["staged_retry"] = Value::Bool(true);
+        }
         Ok(value)
     }
+}
+
+struct StagedRetry {
+    turn: String,
+    continuation: Value,
+    batch: codex_extension_api::StagedInputBatch,
+}
+
+pub(crate) fn staged_retry(
+    thread: &crate::engine::ThreadState,
+    checkpoint: &Value,
+) -> Option<Value> {
+    let retry = thread.thread.thread_extension_data().get::<StagedRetry>()?;
+    if !retry.batch.is_pending() {
+        return None;
+    }
+    let last_turn = checkpoint["history"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|record| {
+            record["type"] == "event_msg" && record["payload"]["type"] == "task_started"
+        })?["payload"]["turn_id"]
+        .as_str()?;
+    (last_turn == retry.turn.as_str()).then(|| retry.continuation.clone())
 }
 
 pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Result<()> {
@@ -1289,6 +1363,11 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
         .map_or(tools.tool_batch_completion_enabled, |catalog| {
             catalog.tool_batch_completion
         });
+    ensure!(
+        frame.staged_input.is_empty()
+            || (!frame.batch_completion && frame.terminal_calls.is_empty()),
+        "Staged input requires a model continuation after the manual replies"
+    );
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
     let admitted_override = model_override(&history, &frame.turn);
     let model = admitted_override.as_deref().or_else(|| {
@@ -1459,6 +1538,21 @@ pub(crate) async fn continue_if_ready(
         .reset_tool_choice
         .flatten()
         == Some(true);
+    let staged_input = if frame.staged_input.is_empty() {
+        None
+    } else {
+        let continuation = frame.continuation_snapshot(true)?;
+        let batch = codex_extension_api::StagedInputBatch::new(
+            frame.turn.clone(),
+            std::mem::take(&mut frame.staged_input),
+        );
+        thread.thread.thread_extension_data().insert(StagedRetry {
+            turn: frame.turn.clone(),
+            continuation,
+            batch: batch.clone(),
+        });
+        Some(batch)
+    };
     let terminal = match frame.tool_outcomes.take() {
         Some(outcomes)
             if frame.fresh.is_some() || !held_outputs.is_empty() || reset_tool_choice =>
@@ -1478,6 +1572,7 @@ pub(crate) async fn continue_if_ready(
         frame.seen.into_iter().collect(),
         recovery_options,
         terminal,
+        staged_input,
     )
     .await?;
     ensure!(
@@ -1520,6 +1615,7 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
             check_unused_code_state(thread, thread.id, &history)?;
         }
     }
+    let completed = tools.completed_calls(&pending[0].turn);
     if !restored {
         let store = thread
             .engine
@@ -1528,11 +1624,7 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
             .downcast_ref::<crate::storage::MemoryThreadStore>()
             .context("Manual continuation requires the in-memory store")?;
         if !store
-            .manual_suspension_ready(
-                thread.id,
-                &pending,
-                &tools.completed_calls(&pending[0].turn),
-            )
+            .manual_suspension_ready(thread.id, &pending, &completed)
             .await?
         {
             return Ok(false);
@@ -1548,7 +1640,12 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
         check_unused_code_state(thread, thread.id, &history)?;
     }
     ensure!(
-        restored || portable_manual_actions(&history, &pending.iter().map(|key| key.call.as_str()).collect()),
+        restored
+            || portable_manual_actions(
+                &history,
+                &pending.iter().map(|key| key.call.as_str()).collect(),
+                |call| completed.contains(call),
+            ),
         UnsupportedManualState::NativeWork
     );
     // Finished calls may have registered a child or background terminal.
@@ -1630,7 +1727,7 @@ pub(crate) async fn capture(
         } else {
             3
         });
-        snapshot["native_continuation"] = frame.snapshot()?["native_continuation"].clone();
+        snapshot["native_continuation"] = frame.continuation_snapshot(false)?;
         frame.sealed = true;
         frame.receivers.clear();
         return Ok(Some(snapshot));
@@ -1711,11 +1808,25 @@ pub(crate) async fn capture(
         .finish_manual_suspension(thread.id, suspended_turn)
         .await;
     let suspended = suspended_turn.is_some();
+    let held_outputs = tools.held_tool_outputs(&turn);
     let mut tool_outcomes = None;
     let snapshot = match preserved {
         Ok(true) if suspended_turn == Some(turn.as_str()) => {
             async {
                 let final_history = thread.engine.load_checkpoint_history(thread.id).await?;
+                ensure!(
+                    portable_manual_actions(
+                        &final_history,
+                        &pending.iter().map(|key| key.call.as_str()).collect(),
+                        |call| {
+                            held_outputs.iter().any(|(envelope, _)| {
+                                matches!(&envelope.item,
+                                    ResponseItem::CustomToolCallOutput { call_id, .. } if call_id == call)
+                            })
+                        },
+                    ),
+                    UnsupportedManualState::NativeWork
+                );
                 tool_outcomes = ToolOutcomes::capture(&final_history, thread.id, &turn)?;
                 crate::checkpoint::export_suspended(thread, &code_states, &managed_specs).await
             }
@@ -1794,14 +1905,14 @@ pub(crate) async fn capture(
         }
     }
     let start = active_start.context("Core lost the pending turn history")?;
-    let held_outputs = tools.held_tool_outputs(&turn);
     let mut held_ids = HashSet::new();
     for (output, succeeded) in held_outputs {
-        let ResponseItem::FunctionCallOutput {
-            call_id: Some(id), ..
-        } = &output.item
-        else {
-            anyhow::bail!("Invalid held terminal output");
+        let id = match &output.item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(id), ..
+            }
+            | ResponseItem::CustomToolCallOutput { call_id: id, .. } => id,
+            _ => anyhow::bail!("Invalid held terminal output"),
         };
         ensure!(
             held_ids.insert(id.clone()) && !outputs.contains_key(id),
@@ -1923,25 +2034,25 @@ mod apply_patch_portability_tests {
 
     #[test]
     fn settled_application_patch_is_portable_without_another_execution_grant() {
-        assert!(portable_manual_actions(&records(true), &HashSet::new()));
-        assert!(!portable_manual_actions(&records(false), &HashSet::new()));
+        assert!(portable_manual_actions(&records(true), &HashSet::new(), |_| false));
+        assert!(!portable_manual_actions(&records(false), &HashSet::new(), |_| false));
     }
 
     #[test]
     fn missing_duplicate_or_cross_kind_patch_receipts_remain_nonportable() {
         let mut history = records(true);
         let output = history.pop().unwrap();
-        assert!(!portable_manual_actions(&history, &HashSet::new()));
+        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| false));
         history.push(serde_json::from_value(serde_json::json!({
             "type":"response_item","payload":{"type":"function_call_output","call_id":"patch","output":"done"}
         })).unwrap());
-        assert!(!portable_manual_actions(&history, &HashSet::new()));
+        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| false));
         history.pop();
         history.push(output.clone());
         history.push(output);
-        assert!(!portable_manual_actions(&history, &HashSet::new()));
+        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| false));
         let mut duplicate_pairs = records(true);
         duplicate_pairs.extend(records(true));
-        assert!(!portable_manual_actions(&duplicate_pairs, &HashSet::new()));
+        assert!(!portable_manual_actions(&duplicate_pairs, &HashSet::new(), |_| false));
     }
 }
