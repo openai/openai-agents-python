@@ -1724,6 +1724,7 @@
           "@dataclass(frozen=True, kw_only=True)\nclass FlushResult:\n    status: Literal['success', 'partial', 'timeout', 'failure']\n    dropped_records: int\n    failed_deliveries: int\n    barrier: int",
           "def add_trace_processor(processor: TraceProcessor) -> None:\n    pass",
           "def set_trace_processors(processors: Sequence[TraceProcessor]) -> None:\n    pass",
+          "async def dispatch_trace_event(event: TraceLifecycleEvent) -> None:\n    pass",
           "async def force_flush(*, timeout_ms: int=10000) -> FlushResult:\n    pass"
         ],
         "exports": {
@@ -1745,6 +1746,7 @@
           "add_trace_processor": "agents.telemetry.add_trace_processor",
           "configure": "agents.telemetry.configure",
           "current_context": "agents.telemetry.current_context",
+          "dispatch_trace_event": "agents.telemetry.dispatch_trace_event",
           "force_flush": "agents.telemetry.force_flush",
           "generate_group_id": "agents.telemetry.generate_group_id",
           "set_sensitive_data_logging_enabled": "agents.telemetry.set_sensitive_data_logging_enabled",
