@@ -709,6 +709,10 @@
       "sha256": "7ad94085ca25e835088fa60efc140869944e889aa02fdd3689b9560b2b300c8c"
     },
     {
+      "path": "0177-sdk-fresh-websocket-tls.patch",
+      "sha256": "1427787a523977fc0bc6523ce7ef92a046f94fc5978b16c7dd3690dccd1ec23f"
+    },
+    {
       "path": "sdk-trace-context-binding.patch",
       "sha256": "28b476d55f92c8b7eb619eedb3ee34d80eaccb512f23e3a6b084668f8b15ebad"
     },
@@ -741,5 +745,5 @@
       "sha256": "371cb44ea7cefae92bc273fef58d6ca8a0d47d2c7df49eb8acb2ef1701708378"
     }
   ],
-  "result_tree": "bbdcc7f7095c8b6968d814062feacda4c4b7f566"
+  "result_tree": "a947c4bd562c60a819930d50607eec0317075fd8"
 }

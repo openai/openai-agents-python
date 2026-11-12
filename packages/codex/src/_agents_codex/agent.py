@@ -1284,6 +1284,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1318,6 +1319,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1352,6 +1354,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1386,6 +1389,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1511,6 +1515,12 @@ class Agent(Generic[ContextT, OutputT]):
         enabling it on restore requires ``programmatic_tool_calling=True`` again.
         Load checkpoints only from trusted application storage: their history
         includes instructions. Unverifiable histories are rejected.
+        Remembered approval policy has been remaining disabled unless
+        verify_remembered_approvals has been returning literal True after
+        checking the detached SessionState against trusted application storage
+        or a signature for the current principal. Missing or false verification
+        has been restoring normally with fresh approval requests. Callback errors
+        and cancellation have been aborting the opening.
 
         With ``storage=CustomStorage(backend)``, use an application-owned
         canonical native backend. See SessionStore for its exclusive
@@ -1553,6 +1563,7 @@ class Agent(Generic[ContextT, OutputT]):
             async with self._session_context(
                 context=context,
                 state=state,
+                verify_remembered_approvals=verify_remembered_approvals,
                 restored_output_type=restored_output_type,
                 resume_budget=resume_budget,
                 initial_messages=initial_messages,
@@ -1583,9 +1594,10 @@ class Agent(Generic[ContextT, OutputT]):
                 from .session import Session
 
                 assert isinstance(session, Session)
+                verify_remembered_approvals = None
                 yield session
         finally:
-            del trace_options, environment
+            del trace_options, environment, verify_remembered_approvals
 
     @asynccontextmanager
     async def _session_context(
@@ -1593,6 +1605,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
@@ -1641,6 +1654,7 @@ class Agent(Generic[ContextT, OutputT]):
                 self,
                 context=context,
                 state=state,
+                verify_remembered_approvals=verify_remembered_approvals,
                 restored_output_type=restored_output_type,
                 resume_budget=resume_budget,
                 initial_messages_json=_initial_messages_json(initial_messages),
@@ -1673,6 +1687,7 @@ class Agent(Generic[ContextT, OutputT]):
                     {"_tracing_context": captured.context} if captured.context is not None else {},
                 ),
             )
+            verify_remembered_approvals = None
             if isinstance(session, Completed):
                 yield session
                 return
@@ -1702,7 +1717,7 @@ class Agent(Generic[ContextT, OutputT]):
             trace_error = error
             raise
         finally:
-            del environment
+            del environment, verify_remembered_approvals
             captured.close(trace_error)
 
     @overload
@@ -1721,6 +1736,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1753,6 +1769,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1785,6 +1802,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -1821,6 +1839,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2054,6 +2073,8 @@ class Agent(Generic[ContextT, OutputT]):
                 options["state"] = state
                 if resume_manual:
                     options["resume_budget"] = budget
+            if verify_remembered_approvals is not None:
+                options["verify_remembered_approvals"] = verify_remembered_approvals
             if provider is not None:
                 options["provider"] = provider
             if model is not None:
@@ -2315,7 +2336,8 @@ class Agent(Generic[ContextT, OutputT]):
             if produced_items_token is not None:
                 _produced_items_restore.reset(produced_items_token)
             options.pop("trace_options", None)
-            del trace_options
+            options.pop("verify_remembered_approvals", None)
+            del trace_options, verify_remembered_approvals
 
     @overload
     def run_sync(
@@ -2333,6 +2355,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2365,6 +2388,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2397,6 +2421,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2433,6 +2458,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
@@ -2474,6 +2500,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["trace_options"] = trace_options
                 if state is not None:
                     options["state"] = state
+                if verify_remembered_approvals is not None:
+                    options["verify_remembered_approvals"] = verify_remembered_approvals
                 if initial_messages is not None:
                     options["initial_messages"] = initial_messages
                 if return_items:
@@ -2522,7 +2550,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise RuntimeError("run_sync cannot run inside an event loop; await agent.run()")
         finally:
             options.pop("trace_options", None)
-            del trace_options
+            options.pop("verify_remembered_approvals", None)
+            del trace_options, verify_remembered_approvals
 
 
 _protect_mcp_methods(Agent, lambda owner: (owner, *owner.tools))
