@@ -910,6 +910,20 @@ class NativeProvider:
 _PROVIDER_LOCK = RLock()
 
 
+# dataclasses.replace forwards the public fields. Empty markers retain omission
+# while keeping their normal string and tuple behavior.
+class _OmittedInstructions(str):
+    __slots__ = ()
+
+
+class _OmittedTools(tuple[()]):
+    __slots__ = ()
+
+
+_OMITTED_INSTRUCTIONS = _OmittedInstructions()
+_OMITTED_TOOLS = _OmittedTools()
+
+
 @dataclass(init=False, eq=False, repr=False)
 class Agent(Generic[ContextT, OutputT]):
     """Declare a native agent without starting a runtime or connection.
@@ -1199,6 +1213,10 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
     ) -> None:
+        if isinstance(instructions, _OmittedInstructions):
+            instructions = None
+        if isinstance(tools, _OmittedTools):
+            tools = None
         captured_prompt = _capture_hosted_prompt_source(hosted_prompt)
         if not isinstance(instructions, str) and not (
             instructions is None and captured_prompt is not None
@@ -1235,9 +1253,13 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "hosted_prompt", captured_prompt)
         object.__setattr__(self, "_hosted_tools_provided", tools is not None)
         object.__setattr__(self, "_hosted_instructions_provided", instructions is not None)
-        object.__setattr__(self, "instructions", instructions if instructions is not None else "")
+        object.__setattr__(
+            self,
+            "instructions",
+            instructions if instructions is not None else _OMITTED_INSTRUCTIONS,
+        )
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "tools", tuple(tools or ()))
+        object.__setattr__(self, "tools", tuple(tools) if tools is not None else _OMITTED_TOOLS)
         object.__setattr__(self, "handoffs", captured_handoffs)
         object.__setattr__(self, "model", model)
         if decisions is not None:
