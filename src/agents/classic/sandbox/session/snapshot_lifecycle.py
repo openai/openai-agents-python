@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 from ..errors import ExecNonZeroError
 from ..files import EntryKind
 from ..snapshot import NoopSnapshot
+from ..util.blocking_io import run_blocking_workspace_io
+from ..util.checksums import sha256_io
 from ..workspace_paths import coerce_posix_path, posix_path_as_path
 from .runtime_helpers import WORKSPACE_FINGERPRINT_HELPER
 
@@ -30,7 +32,11 @@ async def persist_snapshot(session: BaseSandboxSession) -> None:
             fingerprint_record = None
 
     workspace_archive = await session.persist_workspace()
+    budget = session._skill_copy_budget()
+    snapshot_digest = None
     try:
+        if budget.trusted and workspace_archive.seekable():
+            snapshot_digest = await run_blocking_workspace_io(sha256_io, workspace_archive)
         await session.state.snapshot.persist(workspace_archive, dependencies=session.dependencies)
     except Exception:
         if fingerprint_record is not None:
@@ -38,6 +44,9 @@ async def persist_snapshot(session: BaseSandboxSession) -> None:
         raise
     finally:
         _close_best_effort(workspace_archive)
+
+    budget.snapshot_digest = snapshot_digest
+    budget.restore_candidate = None
 
     if fingerprint_record is None:
         session.state.snapshot_fingerprint = None
@@ -52,7 +61,10 @@ async def restore_snapshot_into_workspace_on_resume(session: BaseSandboxSession)
     await session._clear_workspace_root_on_resume()
     workspace_archive = await session.state.snapshot.restore(dependencies=session.dependencies)
     try:
+        charge = await session._skill_snapshot_charge(workspace_archive)
         await session.hydrate_workspace(workspace_archive)
+        if charge is not None:
+            session._skill_copy_budget()._accept_snapshot(charge)
     finally:
         _close_best_effort(workspace_archive)
 

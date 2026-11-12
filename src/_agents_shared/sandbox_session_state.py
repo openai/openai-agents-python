@@ -21,6 +21,7 @@ from agents.classic.sandbox._mount_security import (
     redact_mount_error_data_sync,
 )
 from agents.classic.sandbox.manifest import Manifest
+from agents.classic.sandbox.materialization import _SkillCopyBudget
 from agents.classic.sandbox.snapshot import SnapshotBase
 
 from ._identity import _preserve_legacy_module
@@ -41,6 +42,7 @@ class SandboxSessionState(BaseModel):
     snapshot_fingerprint_version: str | None = None
     workspace_root_ready: bool = False
 
+    _native_skill_copy_budget: _SkillCopyBudget = PrivateAttr(default_factory=_SkillCopyBudget)
     _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}
     _native_memory_flush_lock: _MemoryFlushLock = PrivateAttr(default_factory=_MemoryFlushLock)
     _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())
@@ -245,6 +247,7 @@ class SandboxSessionState(BaseModel):
             update={"extra_path_grants": persistent_grants},
         )
         marked = state.model_copy(update={"manifest": sanitized_manifest})
+        marked._native_skill_copy_budget = _SkillCopyBudget(trusted=False)
         marked._path_grants_require_rebind = tuple(
             dict.fromkeys(
                 (

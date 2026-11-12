@@ -9,6 +9,7 @@ import re
 import stat
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
@@ -23,10 +24,11 @@ from ..errors import (
     LocalChecksumError,
     LocalDirReadError,
     LocalFileReadError,
+    WorkspaceReadNotFoundError,
     _InvalidGitHostError,
     _redact_git_host_error_data,
 )
-from ..materialization import MaterializedFile, gather_in_order
+from ..materialization import MaterializedFile, _SkillCopyBudget, gather_in_order
 from ..types import ExecResult, User
 from ..workspace_paths import SandboxPathGrant, sandbox_path_grant_host_path, sandbox_path_str
 from .base import BaseEntry
@@ -97,7 +99,7 @@ def _absolute_without_symlink_resolution(path: Path) -> Path:
     return Path(os.path.abspath(path))
 
 
-def _sha256_handle(handle: io.BufferedReader) -> str:
+def _sha256_handle(handle: io.BufferedIOBase) -> str:
     digest = hashlib.sha256()
     while True:
         chunk = handle.read(1024 * 1024)
@@ -240,6 +242,43 @@ class LocalFile(BaseEntry):
         return [MaterializedFile(path=dest, sha256=checksum)]
 
 
+class _LocalDirBudget:
+    def __init__(self) -> None:
+        self.members = 0
+        self.scanned_bytes = 0
+        self.copied_bytes = 0
+        self.sandbox: _SkillCopyBudget | None = None
+        self.reserved_bytes = 0
+
+    def admit(self, sandbox: _SkillCopyBudget) -> None:
+        sandbox.reserve(members=self.members + 1, bytes=self.scanned_bytes)
+        self.sandbox = sandbox
+        self.reserved_bytes = self.scanned_bytes
+
+    def observe(self, path: Path, info: os.stat_result) -> None:
+        self.members += 1
+        if self.members > 4096:
+            raise ValueError("Skill materialization exceeds the member limit")
+        if len(path.parts) > 32:
+            raise ValueError("Skill materialization exceeds the depth limit")
+        if stat.S_ISREG(info.st_mode):
+            self.scanned_bytes += info.st_size
+            if self.scanned_bytes > 64 * 1024 * 1024:
+                raise ValueError("Skill materialization exceeds the byte limit")
+
+    def snapshot(self, handle: io.BufferedReader) -> io.BytesIO:
+        remaining = 64 * 1024 * 1024 - self.copied_bytes
+        content = handle.read(remaining + 1)
+        if len(content) > remaining:
+            raise ValueError("Skill materialization exceeds the byte limit")
+        copied_bytes = self.copied_bytes + len(content)
+        if self.sandbox is not None and copied_bytes > self.reserved_bytes:
+            self.sandbox.reserve(bytes=copied_bytes - self.reserved_bytes)
+            self.reserved_bytes = copied_bytes
+        self.copied_bytes = copied_bytes
+        return io.BytesIO(content)
+
+
 class LocalDir(BaseEntry):
     type: Literal["local_dir"] = "local_dir"
     is_dir: bool = True
@@ -257,6 +296,39 @@ class LocalDir(BaseEntry):
         *,
         user: str | User | None = None,
     ) -> list[MaterializedFile]:
+        return await self._apply(session, dest, base_dir, user=user)
+
+    async def _apply_bounded(
+        self,
+        session: BaseSandboxSession,
+        dest: Path,
+        base_dir: Path,
+        *,
+        user: str | User | None = None,
+        existing_marker: Path | None = None,
+    ) -> list[MaterializedFile] | None:
+        sandbox = session._skill_copy_budget()
+        async with sandbox.lock:
+            if existing_marker is not None:
+                try:
+                    await session.read_bounded(existing_marker, max_bytes=1)
+                except (FileNotFoundError, WorkspaceReadNotFoundError):
+                    pass
+                else:
+                    return None
+            await session._prepare_skill_copy_budget()
+            sandbox.reserve()
+            return await self._apply(session, dest, base_dir, user=user, budget=_LocalDirBudget())
+
+    async def _apply(
+        self,
+        session: BaseSandboxSession,
+        dest: Path,
+        base_dir: Path,
+        *,
+        user: str | User | None,
+        budget: _LocalDirBudget | None = None,
+    ) -> list[MaterializedFile]:
         files: list[MaterializedFile] = []
         if self.src:
             source_grants = session.state.manifest.extra_path_grants
@@ -266,13 +338,18 @@ class LocalDir(BaseEntry):
             )
             # Minimal v1: copy all files recursively.
             try:
-                await session.mkdir(dest, parents=True, user=user)
+                if budget is None:
+                    await session.mkdir(dest, parents=True, user=user)
                 files = []
                 local_files = self._list_local_dir_files(
                     base_dir=base_dir,
                     src_root=src_root,
                     source_grants=source_grants,
+                    budget=budget,
                 )
+                if budget is not None:
+                    budget.admit(session._skill_copy_budget())
+                    await session.mkdir(dest, parents=True, user=user)
 
                 def _make_copy_task(child: Path) -> Callable[[], Awaitable[MaterializedFile]]:
                     async def _copy() -> MaterializedFile:
@@ -284,6 +361,7 @@ class LocalDir(BaseEntry):
                             dest_root=dest,
                             user=user,
                             source_grants=source_grants,
+                            budget=budget,
                         )
 
                     return _copy
@@ -403,13 +481,18 @@ class LocalDir(BaseEntry):
         base_dir: Path,
         src_root: Path,
         source_grants: tuple[SandboxPathGrant, ...] = (),
+        budget: _LocalDirBudget | None = None,
     ) -> list[Path]:
         if _OPEN_SUPPORTS_DIR_FD and _HAS_O_DIRECTORY:
             return self._list_local_dir_files_pinned(
                 base_dir=base_dir,
                 src_root=src_root,
                 source_grants=source_grants,
+                budget=budget,
             )
+
+        if budget is not None:
+            return self._list_bounded_local_dir_files(src_root, Path(), budget)
 
         local_files: list[Path] = []
         for child in src_root.rglob("*"):
@@ -426,12 +509,33 @@ class LocalDir(BaseEntry):
                 local_files.append(child.relative_to(src_root))
         return local_files
 
+    def _list_bounded_local_dir_files(
+        self, src_root: Path, relative: Path, budget: _LocalDirBudget
+    ) -> list[Path]:
+        files: list[Path] = []
+        with os.scandir(src_root / relative) as entries:
+            for entry in entries:
+                child = relative / entry.name
+                info = entry.stat(follow_symlinks=False)
+                budget.observe(child, info)
+                if stat.S_ISLNK(info.st_mode):
+                    raise LocalDirReadError(
+                        src=src_root,
+                        context={"reason": "symlink_not_supported", "child": child.as_posix()},
+                    )
+                if stat.S_ISREG(info.st_mode):
+                    files.append(child)
+                elif stat.S_ISDIR(info.st_mode):
+                    files.extend(self._list_bounded_local_dir_files(src_root, child, budget))
+        return files
+
     def _list_local_dir_files_pinned(
         self,
         *,
         base_dir: Path,
         src_root: Path,
         source_grants: tuple[SandboxPathGrant, ...] = (),
+        budget: _LocalDirBudget | None = None,
     ) -> list[Path]:
         root_fd: int | None = None
         try:
@@ -440,7 +544,9 @@ class LocalDir(BaseEntry):
                 src_root=src_root,
                 source_grants=source_grants,
             )
-            return self._list_local_dir_files_from_dir_fd(src_root=src_root, dir_fd=root_fd)
+            return self._list_local_dir_files_from_dir_fd(
+                src_root=src_root, dir_fd=root_fd, budget=budget
+            )
         finally:
             if root_fd is not None:
                 os.close(root_fd)
@@ -451,6 +557,7 @@ class LocalDir(BaseEntry):
         src_root: Path,
         dir_fd: int,
         rel_dir: Path = Path(),
+        budget: _LocalDirBudget | None = None,
     ) -> list[Path]:
         dir_flags = (
             os.O_RDONLY
@@ -470,6 +577,8 @@ class LocalDir(BaseEntry):
                 ) from None
             except OSError as e:
                 raise LocalDirReadError(src=src_root, cause=e) from e
+            if budget is not None:
+                budget.observe(rel_child, entry_stat)
             if stat.S_ISLNK(entry_stat.st_mode):
                 raise LocalDirReadError(
                     src=src_root,
@@ -498,6 +607,7 @@ class LocalDir(BaseEntry):
                         src_root=src_root,
                         dir_fd=child_fd,
                         rel_dir=rel_child,
+                        budget=budget,
                     )
                 )
             except FileNotFoundError:
@@ -529,6 +639,7 @@ class LocalDir(BaseEntry):
         dest_root: Path,
         user: str | User | None = None,
         source_grants: tuple[SandboxPathGrant, ...] = (),
+        budget: _LocalDirBudget | None = None,
     ) -> MaterializedFile:
         rel_child = src.relative_to(src_root)
         child_dest = dest_root / rel_child
@@ -539,9 +650,12 @@ class LocalDir(BaseEntry):
                 src_root=src_root,
                 rel_child=rel_child,
                 source_grants=source_grants,
+                nonblocking=budget is not None,
             )
-            with os.fdopen(fd, "rb") as f:
+            with ExitStack() as stack:
+                original = stack.enter_context(os.fdopen(fd, "rb"))
                 fd = None
+                f = original if budget is None else stack.enter_context(budget.snapshot(original))
                 checksum = _sha256_handle(f)
                 f.seek(0)
                 await session.mkdir(child_dest.parent, parents=True, user=user)
@@ -560,6 +674,7 @@ class LocalDir(BaseEntry):
         src_root: Path,
         rel_child: Path,
         source_grants: tuple[SandboxPathGrant, ...] = (),
+        nonblocking: bool = False,
     ) -> int:
         if not _OPEN_SUPPORTS_DIR_FD or not _HAS_O_DIRECTORY:
             return self._open_local_dir_file_for_copy_fallback(
@@ -567,6 +682,7 @@ class LocalDir(BaseEntry):
                 src_root=src_root,
                 rel_child=rel_child,
                 source_grants=source_grants,
+                nonblocking=nonblocking,
             )
 
         dir_flags = (
@@ -576,6 +692,8 @@ class LocalDir(BaseEntry):
             | getattr(os, "O_NOFOLLOW", 0)
         )
         file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        if nonblocking:
+            file_flags |= getattr(os, "O_NONBLOCK", 0)
         dir_fds: list[int] = []
         current_rel = Path()
         try:
@@ -757,6 +875,7 @@ class LocalDir(BaseEntry):
         src_root: Path,
         rel_child: Path,
         source_grants: tuple[SandboxPathGrant, ...] = (),
+        nonblocking: bool = False,
     ) -> int:
         assert self.src is not None
         src = src_root / rel_child
@@ -782,6 +901,8 @@ class LocalDir(BaseEntry):
             )
 
         file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        if nonblocking:
+            file_flags |= getattr(os, "O_NONBLOCK", 0)
         try:
             leaf_fd = os.open(src, file_flags)
             try:

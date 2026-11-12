@@ -315,8 +315,19 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
+
+        def prepare() -> bool:
+            try:
+                workspace.mkdir(parents=True)
+            except FileExistsError:
+                workspace.mkdir(parents=True, exist_ok=True)
+                return False
+            return True
+
         try:
-            await run_blocking_workspace_io(partial(workspace.mkdir, parents=True, exist_ok=True))
+            created = await run_blocking_workspace_io(prepare)
+            if created:
+                self._reset_skill_copy_budget_for_fresh_workspace()
         except OSError as e:
             raise WorkspaceStartError(path=workspace, cause=e) from e
 
@@ -1607,8 +1618,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             # Older snapshots may contain unsupported members. Reject them before discarding
             # the live files; keep hydrate_workspace's own validation for direct callers too.
             await run_blocking_workspace_io(validate_archive)
+            charge = await self._skill_snapshot_charge(archive)
             await self._clear_workspace_root_on_resume()
             await self.hydrate_workspace(archive)
+            if charge is not None:
+                self._skill_copy_budget()._accept_snapshot(charge)
         finally:
             with suppress(Exception):
                 archive.close()
@@ -1706,6 +1720,8 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             exposed_ports=resolved_options.exposed_ports,
         )
         inner = UnixLocalSandboxSession.from_state(state)
+        if workspace_root_owned:
+            inner._reset_skill_copy_budget_for_fresh_workspace()
         # Keep host inheritance policy under trusted runtime control. Session state and manifests
         # must not be able to change it when a session is resumed by another client.
         inner._host_environment_allowlist = self._host_environment_allowlist

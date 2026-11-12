@@ -3131,6 +3131,7 @@ class _EnvironmentLease:
         loop = asyncio.get_running_loop()
         self._ready: asyncio.Future[Environment[Any]] = loop.create_future()
         self._retired: asyncio.Future[None] = loop.create_future()
+        self.source = source
         self._borrower = asyncio.current_task()
         self._sync_run: _SyncRun | None = None
         self._woke_borrower = False
@@ -7333,6 +7334,12 @@ class Session(Generic[ContextT, OutputT]):
                 realtime_usage=self.realtime_usage,
             )
 
+            object.__setattr__(context, "_environment", self._executor)
+            object.__setattr__(
+                context,
+                "_sandbox_source",
+                self._environment_lease.source if self._environment_lease is not None else None,
+            )
             object.__setattr__(context, "_usage_reporter", self._tool_usage_reporter(state, admit))
 
             if not admit():
@@ -7366,6 +7373,14 @@ class Session(Generic[ContextT, OutputT]):
                     )
                     object.__setattr__(
                         context, "_usage_reporter", self._tool_usage_reporter(state, admit)
+                    )
+                    object.__setattr__(context, "_environment", self._executor)
+                    object.__setattr__(
+                        context,
+                        "_sandbox_source",
+                        self._environment_lease.source
+                        if self._environment_lease is not None
+                        else None,
                     )
                     object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
                 elif not isinstance(decision, Allow):
@@ -15377,6 +15392,12 @@ class Session(Generic[ContextT, OutputT]):
                     realtime_usage=self.realtime_usage,
                     call=call,
                 )
+                object.__setattr__(tool_context, "_environment", self._executor)
+                object.__setattr__(
+                    tool_context,
+                    "_sandbox_source",
+                    self._environment_lease.source if self._environment_lease is not None else None,
+                )
                 object.__setattr__(
                     tool_context,
                     "_usage_reporter",
@@ -15438,6 +15459,13 @@ class Session(Generic[ContextT, OutputT]):
                     context = replace(
                         context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
                     )
+            if context is not None:
+                object.__setattr__(context, "_environment", self._executor)
+                object.__setattr__(
+                    context,
+                    "_sandbox_source",
+                    self._environment_lease.source if self._environment_lease is not None else None,
+                )
             if context is not None and context._usage_reporter is None:
                 object.__setattr__(
                     context,

@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "40527c409d212d9dac708b45c0b74c6c8e842f44",
+  "baseline_commit": "2a960c337eda1434711fb77add7c73df5d1adc4f",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1404,7 +1404,7 @@
         "declarations": [
           "_OptionsT = TypeVar('_OptionsT')",
           "_ContextT = TypeVar('_ContextT')",
-          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]], snapshot: SnapshotSpec | SnapshotBase | None=None, session: SandboxSession | None=None, authorized_resume_state: SandboxSessionState | None=None, concurrency_limits: SandboxConcurrencyLimits | None=None, archive_limits: SandboxArchiveLimits | None=None, managed_workspace: bool=False, authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None=None, memory: SandboxMemoryOptions | None=None) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
+          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]], skills: Skills | None=None, snapshot: SnapshotSpec | SnapshotBase | None=None, session: SandboxSession | None=None, authorized_resume_state: SandboxSessionState | None=None, concurrency_limits: SandboxConcurrencyLimits | None=None, archive_limits: SandboxArchiveLimits | None=None, managed_workspace: bool=False, authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None=None, memory: SandboxMemoryOptions | None=None) -> SandboxEnvironmentSource[_ContextT]:\n    pass",
           "@redact_mount_error_data_sync\ndef render_storage_layout(manifest: Manifest) -> str:\n    pass"
         ],
         "exports": {
@@ -1424,7 +1424,9 @@
           "InContainerMountStrategy": "agents.classic.sandbox.entries.mounts.base.InContainerMountStrategy",
           "Instrumentation": "_agents_codex._sandbox_events.Instrumentation",
           "JsonlOutboxSink": "agents.classic.sandbox.session.sinks.JsonlOutboxSink",
+          "LazySkillSource": "_agents_shared.sandbox_skills.LazySkillSource",
           "LocalDir": "agents.classic.sandbox.entries.artifacts.LocalDir",
+          "LocalDirLazySkillSource": "_agents_shared.sandbox_skills.LocalDirLazySkillSource",
           "LocalFile": "agents.classic.sandbox.entries.artifacts.LocalFile",
           "LocalSnapshot": "agents.classic.sandbox.snapshot.LocalSnapshot",
           "LocalSnapshotSpec": "agents.classic.sandbox.snapshot.LocalSnapshotSpec",
@@ -1444,12 +1446,16 @@
           "S3Mount": "agents.classic.sandbox.entries.mounts.providers.s3.S3Mount",
           "SandboxArchiveLimits": "agents.classic.run_config.SandboxArchiveLimits",
           "SandboxConcurrencyLimits": "agents.classic.run_config.SandboxConcurrencyLimits",
+          "SandboxEnvironmentSource": "_agents_codex.sandbox_skills.SandboxEnvironmentSource",
           "SandboxMemoryOptions": "agents.sandbox.SandboxMemoryOptions",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
           "SandboxSessionEvent": "typing.Annotated",
           "SandboxSessionFinishEvent": "agents.classic.sandbox.session.events.SandboxSessionFinishEvent",
           "SandboxSessionStartEvent": "agents.classic.sandbox.session.events.SandboxSessionStartEvent",
           "SandboxSessionState": "agents.classic.sandbox.session.sandbox_session_state.SandboxSessionState",
+          "Skill": "_agents_shared.sandbox_skills.Skill",
+          "SkillMetadata": "_agents_shared.sandbox_skills.SkillMetadata",
+          "Skills": "_agents_codex.sandbox_skills.Skills",
           "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
           "SnapshotSpec": "agents.classic.sandbox.snapshot.SnapshotSpec",
           "TruncationPolicy": "agents.classic.sandbox.util.token_truncation.TruncationPolicy",
@@ -1488,7 +1494,8 @@
           "from .classic.sandbox.session.sandbox_session import SandboxSession",
           "from .classic.sandbox.session.sinks import CallbackSink as CallbackSink, ChainedSink as ChainedSink, EventSink as EventSink, HttpProxySink as HttpProxySink, JsonlOutboxSink as JsonlOutboxSink, WorkspaceJsonlSink as WorkspaceJsonlSink",
           "from .executor import Environment",
-          "from .sandbox_memory import MemoryLayoutConfig as MemoryLayoutConfig, SandboxMemoryOptions as SandboxMemoryOptions"
+          "from .sandbox_memory import MemoryLayoutConfig as MemoryLayoutConfig, SandboxMemoryOptions as SandboxMemoryOptions",
+          "from .sandbox_skills import LazySkillSource as LazySkillSource, LocalDirLazySkillSource as LocalDirLazySkillSource, SandboxEnvironmentSource as SandboxEnvironmentSource, Skill as Skill, SkillMetadata as SkillMetadata, Skills as Skills"
         ],
         "references": {
           "AzureBlobMount": "agents.classic.sandbox.entries.mounts.AzureBlobMount",
@@ -1508,7 +1515,9 @@
           "InContainerMountStrategy": "agents.classic.sandbox.entries.mounts.InContainerMountStrategy",
           "Instrumentation": "_agents_codex._sandbox_events.Instrumentation",
           "JsonlOutboxSink": "agents.classic.sandbox.session.sinks.JsonlOutboxSink",
+          "LazySkillSource": "_agents_codex.sandbox_skills.LazySkillSource",
           "LocalDir": "agents.classic.sandbox.entries.LocalDir",
+          "LocalDirLazySkillSource": "_agents_codex.sandbox_skills.LocalDirLazySkillSource",
           "LocalFile": "agents.classic.sandbox.entries.LocalFile",
           "LocalSnapshot": "_agents_shared.snapshot.LocalSnapshot",
           "LocalSnapshotSpec": "_agents_shared.snapshot.LocalSnapshotSpec",
@@ -1528,12 +1537,16 @@
           "S3Mount": "agents.classic.sandbox.entries.mounts.S3Mount",
           "SandboxArchiveLimits": "_agents_shared.sandbox_limits.SandboxArchiveLimits",
           "SandboxConcurrencyLimits": "_agents_shared.sandbox_limits.SandboxConcurrencyLimits",
+          "SandboxEnvironmentSource": "_agents_codex.sandbox_skills.SandboxEnvironmentSource",
           "SandboxMemoryOptions": "_agents_codex.sandbox_memory.SandboxMemoryOptions",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
           "SandboxSessionEvent": "agents.classic.sandbox.session.events.SandboxSessionEvent",
           "SandboxSessionFinishEvent": "agents.classic.sandbox.session.events.SandboxSessionFinishEvent",
           "SandboxSessionStartEvent": "agents.classic.sandbox.session.events.SandboxSessionStartEvent",
           "SandboxSessionState": "_agents_shared.sandbox_session_state.SandboxSessionState",
+          "Skill": "_agents_codex.sandbox_skills.Skill",
+          "SkillMetadata": "_agents_codex.sandbox_skills.SkillMetadata",
+          "Skills": "_agents_codex.sandbox_skills.Skills",
           "SnapshotBase": "_agents_shared.snapshot.SnapshotBase",
           "SnapshotSpec": "_agents_shared.snapshot.SnapshotSpec",
           "TruncationPolicy": "_agents_shared.token_truncation.TruncationPolicy",
@@ -2737,6 +2750,30 @@
           "MemoryLayoutConfig": "_agents_shared.sandbox_memory_artifacts.MemoryLayoutConfig"
         }
       },
+      "_agents_codex.sandbox_skills": {
+        "declarations": [
+          "_ContextT_contra = TypeVar('_ContextT_contra', contravariant=True)",
+          "class Skills(SkillSet):\n    _bounded_metadata = True",
+          "class SandboxEnvironmentSource(Protocol[_ContextT_contra]):\n\n    @property\n    def skill_tools(self) -> tuple[FunctionTool[Any, Any, Any], ...]:\n        pass\n\n    async def __aenter__(self) -> Environment[_ContextT_contra]:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> bool | None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from types import TracebackType",
+          "from typing import Any, Protocol, TypeVar",
+          "from _agents_shared.sandbox_skills import LazySkillSource as LazySkillSource, LocalDirLazySkillSource as LocalDirLazySkillSource, Skill as Skill, SkillMetadata as SkillMetadata, SkillSet",
+          "from ._function_tools import FunctionTool",
+          "from .executor import Environment"
+        ],
+        "references": {
+          "Environment": "agents.executor.Environment",
+          "FunctionTool": "agents._function_tools.FunctionTool",
+          "LazySkillSource": "_agents_shared.sandbox_skills.LazySkillSource",
+          "LocalDirLazySkillSource": "_agents_shared.sandbox_skills.LocalDirLazySkillSource",
+          "Skill": "_agents_shared.sandbox_skills.Skill",
+          "SkillMetadata": "_agents_shared.sandbox_skills.SkillMetadata",
+          "SkillSet": "_agents_shared.sandbox_skills.SkillSet"
+        }
+      },
       "_agents_codex.testing_model": {
         "declarations": [
           "@dataclass(frozen=True)\nclass ModelError:\n    error: Exception\n    retry_advice: RetryAdvice | None = None",
@@ -3052,7 +3089,7 @@
       "_agents_shared.sandbox_session_state": {
         "declarations": [
           "SessionStateClass = type['SandboxSessionState']",
-          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _native_memory_flush_lock: _MemoryFlushLock = PrivateAttr(default_factory=_MemoryFlushLock)\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
+          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _native_skill_copy_budget: _SkillCopyBudget = PrivateAttr(default_factory=_SkillCopyBudget)\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _native_memory_flush_lock: _MemoryFlushLock = PrivateAttr(default_factory=_MemoryFlushLock)\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -3062,6 +3099,7 @@
           "from typing_extensions import Self",
           "from agents.classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from agents.classic.sandbox.manifest import Manifest",
+          "from agents.classic.sandbox.materialization import _SkillCopyBudget",
           "from agents.classic.sandbox.snapshot import SnapshotBase",
           "from .sandbox_memory_artifacts import _MemoryFlushLock"
         ],
@@ -3069,7 +3107,40 @@
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
           "_MemoryFlushLock": "_agents_shared.sandbox_memory_artifacts._MemoryFlushLock",
+          "_SkillCopyBudget": "agents.classic.sandbox.materialization._SkillCopyBudget",
           "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync"
+        }
+      },
+      "_agents_shared.sandbox_skills": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass SkillMetadata:\n    name: str\n    description: str\n    path: Path",
+          "class LazySkillSource(BaseModel, abc.ABC):\n\n    @abc.abstractmethod\n    def list_skill_metadata(self, *, skills_path: str, source_grants: tuple[SandboxPathGrant, ...]=()) -> list[SkillMetadata]:\n        pass\n\n    @abc.abstractmethod\n    async def load_skill(self, *, skill_name: str, session: BaseSandboxSession, skills_path: str, user: str | User | None=None) -> dict[str, str]:\n        pass",
+          "class LocalDirLazySkillSource(LazySkillSource):\n    source: LocalDir\n\n    def list_skill_metadata(self, *, skills_path: str, source_grants: tuple[SandboxPathGrant, ...]=()) -> list[SkillMetadata]:\n        pass\n\n    async def load_skill(self, *, skill_name: str, session: BaseSandboxSession, skills_path: str, user: str | User | None=None) -> dict[str, str]:\n        pass",
+          "class Skill(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True)\n    name: str\n    description: str\n    content: str | bytes | BaseEntry\n    compatibility: str | None = Field(default=None)\n    scripts: dict[str | Path, BaseEntry] = Field(default_factory=dict)\n    references: dict[str | Path, BaseEntry] = Field(default_factory=dict)\n    assets: dict[str | Path, BaseEntry] = Field(default_factory=dict)\n    deferred: bool = Field(default=False)\n\n    def model_post_init(self, context: Any, /) -> None:\n        pass\n\n    def content_artifact(self) -> BaseEntry:\n        pass\n\n    def as_dir_entry(self) -> Dir:\n        pass",
+          "class SkillSet(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True)\n    session: BaseSandboxSession | None = Field(default=None, exclude=True)\n    run_as: User | None = Field(default=None, exclude=True)\n    workspace_scope: SandboxWorkspaceScope = Field(default_factory=SandboxWorkspaceScope, exclude=True, repr=False)\n    type: Literal['skills'] = 'skills'\n    skills: list[Skill] = Field(default_factory=list)\n    from_: BaseEntry | None = Field(default=None)\n    lazy_from: LazySkillSource | None = Field(default=None)\n    skills_path: str = Field(default='.agents')\n    _skills_metadata: list[SkillMetadata] | None = PrivateAttr(default=None)\n    _bounded_metadata: ClassVar[bool] = False\n    _skills_metadata_cache_key: tuple[tuple[str, bool, str | None], ...] | None = PrivateAttr(default=None)\n\n    def model_post_init(self, context: Any, /) -> None:\n        pass\n\n    def process_manifest(self, manifest: Manifest) -> Manifest:\n        pass\n\n    def bind(self, session: BaseSandboxSession) -> None:\n        pass\n\n    async def load_skill(self, skill_name: str) -> dict[str, str]:\n        pass\n\n    async def instructions(self, manifest: Manifest) -> str | None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "import abc",
+          "from dataclasses import dataclass",
+          "from pathlib import Path",
+          "from typing import Any, ClassVar, Literal",
+          "from pydantic import BaseModel, ConfigDict, Field, PrivateAttr",
+          "from agents.classic.sandbox.entries import BaseEntry, Dir as Dir, LocalDir as LocalDir",
+          "from agents.classic.sandbox.manifest import Manifest as Manifest",
+          "from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession",
+          "from agents.classic.sandbox.types import User",
+          "from agents.classic.sandbox.workspace_paths import SandboxPathGrant, SandboxWorkspaceScope as SandboxWorkspaceScope"
+        ],
+        "references": {
+          "BaseEntry": "agents.classic.sandbox.entries.BaseEntry",
+          "BaseSandboxSession": "agents.classic.sandbox.session.base_sandbox_session.BaseSandboxSession",
+          "Dir": "agents.classic.sandbox.entries.Dir",
+          "LocalDir": "agents.classic.sandbox.entries.LocalDir",
+          "Manifest": "agents.classic.sandbox.manifest.Manifest",
+          "SandboxPathGrant": "agents.classic.sandbox.workspace_paths.SandboxPathGrant",
+          "SandboxWorkspaceScope": "agents.classic.sandbox.workspace_paths.SandboxWorkspaceScope",
+          "User": "agents.classic.sandbox.types.User"
         }
       },
       "_agents_shared.snapshot": {
@@ -3256,7 +3327,7 @@
           "ToolTimeoutBehavior: TypeAlias = Literal['raise_exception', 'error_as_result']",
           "class ToolTimeoutError(TimeoutError):\n\n    def __init__(self, tool_name: str, timeout_seconds: float):\n        pass",
           "@dataclass(frozen=True)\nclass ToolInputErrorContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    call: ToolCallInfo = field(kw_only=True)\n    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)\n    realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)",
-          "@dataclass(frozen=True)\nclass ToolContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    call: ToolCallInfo = field(kw_only=True)\n    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)\n    realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)\n    _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(default=None, init=False, repr=False, compare=False)\n\n    def report_usage(self, usage: TokenUsage | None, *, requests: int=1) -> None:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass",
+          "@dataclass(frozen=True)\nclass ToolContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    call: ToolCallInfo = field(kw_only=True)\n    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)\n    realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)\n    _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(default=None, init=False, repr=False, compare=False)\n    _environment: Environment[Any] | None = field(default=None, init=False, repr=False, compare=False)\n    _sandbox_source: object | None = field(default=None, init=False, repr=False, compare=False)\n\n    def report_usage(self, usage: TokenUsage | None, *, requests: int=1) -> None:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass",
           "_UNSET_ERROR_FUNCTION = cast(Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None, object())",
           "@dataclass(frozen=True)\nclass _RunErrorFormatterInheritance:\n    allowed: bool\n    has_function: bool",
           "@dataclass(frozen=True, kw_only=True)\nclass FunctionTool(Generic[InputT, ResultT, BinderT_co]):\n    name: str\n    description: str\n    input_type: type[InputT]\n    output_type: type[ResultT]\n    _bind: BinderT_co | None = field(default=None, repr=False)\n    _requires_context: bool = field(default=False, repr=False)\n    callback_timeout: float | None = None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None = field(default=None, repr=False)\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | BackgroundResult[ToolOutput] | Awaitable[ToolOutput | BackgroundResult[ToolOutput]]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n    strict: bool = False\n    output_schema: dict[str, Any] | None = None\n    timeout_behavior: ToolTimeoutBehavior = 'raise_exception'\n    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None = field(default=None, repr=False)\n    input_error_function: Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None = field(default=None, repr=False)\n    namespace: str | None = None\n    namespace_description: str | None = None\n    finish_turn: bool = False\n    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False\n    run_before_approval: bool = False\n    approval_key: str | None = None\n    is_enabled: bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True\n    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(default=None, repr=False)\n    _allow_run_error_formatter: bool | _RunErrorFormatterInheritance = field(default=True, repr=False)\n\n    def __init__(self, *, name: str, description: str, input_type: type[InputT], output_type: type[ResultT], _bind: BinderT_co | None=None, _requires_context: bool=False, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | BackgroundResult[ToolOutput] | Awaitable[ToolOutput | BackgroundResult[ToolOutput]]] | None=None, defer_loading: bool=False, strict: bool=False, output_schema: dict[str, Any] | None=None, timeout_behavior: ToolTimeoutBehavior='raise_exception', timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None=None, input_error_function: Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None=None, namespace: str | None=None, namespace_description: str | None=None, finish_turn: bool=False, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False, run_before_approval: bool=False, approval_key: str | None=None, is_enabled: bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]=True, error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None=_UNSET_ERROR_FUNCTION, _allow_run_error_formatter: bool | _RunErrorFormatterInheritance | None=None) -> None:\n        pass\n\n    def match(self, event: object) -> ActionRequested[InputT, ResultT] | None:\n        pass\n\n    @property\n    def ref(self) -> ToolRef:\n        pass",
@@ -3299,6 +3370,7 @@
           "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, HostedShell as HostedShell, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolRef as ToolRef, ToolSearch, WebSearch as WebSearch, _CapturedFunction as _CapturedFunction",
           "from .turn import Turn as Turn",
           "from .decisions import DecisionInput, DecisionProvider",
+          "from .executor import Environment",
           "from .usage import TokenUsage"
         ],
         "references": {
@@ -3312,6 +3384,7 @@
           "DecisionInput": "agents.decisions.DecisionInput",
           "DecisionProvider": "agents.decisions.DecisionProvider",
           "Deny": "agents.native_interception.Deny",
+          "Environment": "agents.executor.Environment",
           "FileSearch": "agents.tools.FileSearch",
           "HostedMCP": "agents.hosted_mcp.HostedMCP",
           "HostedShell": "agents.tools.HostedShell",
@@ -4680,7 +4753,8 @@
       "agents.classic.sandbox.materialization": {
         "declarations": [
           "@dataclass(frozen=True)\nclass MaterializedFile:\n    path: Path\n    sha256: str",
-          "@dataclass(frozen=True)\nclass MaterializationResult:\n    files: list[MaterializedFile]"
+          "@dataclass(frozen=True)\nclass MaterializationResult:\n    files: list[MaterializedFile]",
+          "class _SkillCopyBudget:\n\n    def __init__(self, *, trusted: bool=False) -> None:\n        pass\n\n    def reserve(self, *, members: int=0, bytes: int=0) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -4877,7 +4951,7 @@
       "agents.classic.sandbox.session.sandbox_session_state": {
         "declarations": [
           "SessionStateClass = type['SandboxSessionState']",
-          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _native_memory_flush_lock: _MemoryFlushLock = PrivateAttr(default_factory=_MemoryFlushLock)\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
+          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _native_skill_copy_budget: _SkillCopyBudget = PrivateAttr(default_factory=_SkillCopyBudget)\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _native_memory_flush_lock: _MemoryFlushLock = PrivateAttr(default_factory=_MemoryFlushLock)\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -4887,6 +4961,7 @@
           "from typing_extensions import Self",
           "from agents.classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from agents.classic.sandbox.manifest import Manifest",
+          "from agents.classic.sandbox.materialization import _SkillCopyBudget",
           "from agents.classic.sandbox.snapshot import SnapshotBase",
           "from .sandbox_memory_artifacts import _MemoryFlushLock"
         ],
@@ -4894,6 +4969,7 @@
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
           "_MemoryFlushLock": "_agents_shared.sandbox_memory_artifacts._MemoryFlushLock",
+          "_SkillCopyBudget": "agents.classic.sandbox.materialization._SkillCopyBudget",
           "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync"
         }
       },
@@ -4961,11 +5037,13 @@
       },
       "agents.classic.sandbox.workspace_paths": {
         "declarations": [
+          "@dataclass(frozen=True)\nclass SandboxWorkspaceScope:\n    cwd: PurePosixPath | None = None\n\n    @classmethod\n    def from_cwd(cls, cwd: str | PurePath | None) -> SandboxWorkspaceScope:\n        pass\n\n    def anchor(self, path: str | PurePath) -> str | PurePath:\n        pass\n\n    def model_path(self, workspace_relative_path: str | PurePath) -> PurePosixPath:\n        pass\n\n    def model_resource_path(self, *, workspace_root: str | PurePath, workspace_relative_path: str | PurePath) -> PurePosixPath:\n        pass\n\n    def display_path(self, *, original_path: str | PurePath, workspace_relative_path: str | PurePath) -> PurePosixPath:\n        pass",
           "class SandboxPathGrant(BaseModel):\n    path: str\n    read_only: bool = False\n    description: str | None = None\n    host_path: str | None = Field(default=None, exclude_if=lambda value: value is None)",
           "class WorkspacePathPolicy:\n\n    def __init__(self, *, root: str | PurePath, extra_path_grants: tuple[SandboxPathGrant, ...]=()) -> None:\n        pass\n\n    def absolute_workspace_path(self, path: str | PurePath) -> Path:\n        pass\n\n    def relative_path(self, path: str | PurePath) -> Path:\n        pass\n\n    def normalize_path(self, path: str | PurePath, *, for_write: bool=False, resolve_symlinks: bool=False) -> Path:\n        pass\n\n    def normalize_sandbox_path(self, path: str | PurePath, *, for_write: bool=False) -> PurePosixPath:\n        pass\n\n    def sandbox_root(self) -> PurePosixPath:\n        pass\n\n    def validate_recursive_remove(self, path: str | PurePath) -> None:\n        pass\n\n    def root_is_existing_host_path(self) -> bool:\n        pass\n\n    def extra_path_grant_rules(self) -> tuple[tuple[PurePosixPath, bool], ...]:\n        pass"
         ],
         "exports": {},
         "imports": [
+          "from dataclasses import dataclass",
           "from pathlib import Path, PurePath, PurePosixPath",
           "from pydantic import BaseModel, Field"
         ],
