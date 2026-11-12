@@ -944,6 +944,18 @@ impl EngineState {
                         .await?;
                 }
                 crate::checkpoint::validate_imported_history(&history.history)?;
+                if self.local_checklist_store.is_none()
+                    && let Some(opening) = startup
+                        .thread_extension_init
+                        .get::<crate::agent_profiles::OpeningProfiles>()
+                    && history.history.iter().any(|item| {
+                        matches!(item, codex_history::RolloutItem::ResponseItem(envelope)
+                            if envelope.metadata.as_ref().is_some_and(|metadata|
+                                metadata.sdk_agent_profile.is_some()))
+                    })
+                {
+                    crate::agent_profiles::restore_source(&opening, &history.history)?;
+                }
                 Some(history.conversation_id)
             }
             InitialHistory::Forked(history) => {
@@ -2035,6 +2047,7 @@ impl EngineState {
             "Codex engine is closed"
         );
         let finish_slots = options.terminal_tool_slots.clone();
+        let input_error_slots = options.input_error_tool_slots.clone();
         let (mut startup, instructions) = options
             .build(
                 &self.config_json,
@@ -2048,6 +2061,9 @@ impl EngineState {
         startup
             .thread_extension_init
             .insert(crate::python_tools::FinishToolSlots(finish_slots));
+        startup
+            .thread_extension_init
+            .insert(crate::python_tools::InputErrorToolSlots(input_error_slots));
         self.apply_deferred_environment(&mut startup)?;
         if startup.environments.is_none()
             && startup
@@ -2365,9 +2381,12 @@ async fn read_child(children: &mut VecDeque<(ThreadId, ChildReader)>) -> (ChildE
     ((id, reader.instance, reader.incarnation.clone()), event)
 }
 
-fn retired_realtime_output(event: &Event) -> bool {
-    matches!(&event.msg, EventMsg::RealtimeConversationRealtime(realtime)
-        if realtime.payload.is_output_retired())
+fn skip_native_session_event(event: &Event) -> bool {
+    // Attempt facts arrive through the reliable family FIFO. Persisted typed
+    // Core events remain in rollout history, never as a second live delivery.
+    matches!(&event.msg, EventMsg::SdkModelAttempt(_))
+        || matches!(&event.msg, EventMsg::RealtimeConversationRealtime(realtime)
+            if realtime.payload.is_output_retired())
 }
 
 fn native_event(
@@ -2704,7 +2723,7 @@ impl ThreadState {
                 return graph_event(event);
             }
             if let Some((source, event)) = events.pending.pop_front() {
-                if retired_realtime_output(&event) {
+                if skip_native_session_event(&event) {
                     continue;
                 }
                 return self.child_event(source, event, admission_ready).await;
@@ -2774,7 +2793,7 @@ impl ThreadState {
                     },
                     event = async { native.as_mut().expect("guarded native reader").await }, if native.is_some() => event,
                     (source, event) = read_child(children) => {
-                        if retired_realtime_output(&event) { continue; }
+                        if skip_native_session_event(&event) { continue; }
                         return self.child_event(source, event, admission_ready).await;
                     },
                     Some(event) = graph.recv() => {
@@ -2792,7 +2811,7 @@ impl ThreadState {
                     }
                     event = extensions.recv() => {
                         let (target, event) = event?;
-                    if retired_realtime_output(&event) { continue; }
+                    if skip_native_session_event(&event) { continue; }
                         if target.is_empty() || target == self.id.to_string() {
                             return native_event(None, event, admission_ready, false);
                         }
@@ -2814,7 +2833,7 @@ impl ThreadState {
             if matches!(event.msg, EventMsg::ShutdownComplete) {
                 events.native = None;
             }
-            if retired_realtime_output(&event) {
+            if skip_native_session_event(&event) {
                 continue;
             }
             if admission_ready && let EventMsg::TurnComplete(done) = &event.msg {

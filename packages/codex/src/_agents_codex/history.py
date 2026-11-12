@@ -129,6 +129,9 @@ class RecordedTurn(TypedDict):
     completed_at: int | None
     error: Failure | None
     usage: TokenUsage | None
+    # Retained native attempt measurements; absent without native facts.
+    # JSON fields match RunUsage. Child owners and external reports stay separate.
+    run_usage: NotRequired[dict[str, int]]
     # Present only on separate native output-correction attempts.
     parent_session_id: NotRequired[str]
     parent_turn_id: NotRequired[str]

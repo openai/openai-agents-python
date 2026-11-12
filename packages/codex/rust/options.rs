@@ -77,6 +77,8 @@ pub struct ThreadOptions {
     pub(crate) manual_tool_slots: Vec<usize>,
     #[serde(rename = "_terminal_tool_slots")]
     pub(crate) terminal_tool_slots: Vec<usize>,
+    #[serde(rename = "_input_error_tool_slots")]
+    pub(crate) input_error_tool_slots: Vec<usize>,
     #[serde(rename = "_native_agent_tools")]
     native_agent_tools: Vec<codex_core::ManagedAgentToolSpec>,
     #[serde(rename = "_transform_context")]

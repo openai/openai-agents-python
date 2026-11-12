@@ -745,6 +745,62 @@
       "sha256": "bb38997bdffe09280acb438f7e31ae6e7b0a609f85c2ac072340b8a8dc7cb729"
     },
     {
+      "path": "sdk-trace-credential-destination.patch",
+      "sha256": "487a2e788517874133ef1d0aef8366cbcbd885fdb57783c1d569d374aed14220"
+    },
+    {
+      "path": "sdk-native-hosted-prompts-request-ownership.patch",
+      "sha256": "7f1eeaa83bbdf79c1b152f85af4dbee7af8f942de7ca62a39d92407f1d547a0f"
+    },
+    {
+      "path": "sdk-model-response-omission-admission.patch",
+      "sha256": "fe7d2654319d946066a9730661cf267ed7b28d3d69c2e910049a8523421ddd74"
+    },
+    {
+      "path": "sdk-native-model-attempt-retry.patch",
+      "sha256": "6c200a67f90681f5bdb77df080ecd85524e92598f9d1d21d7c6c7b3db3b8d207"
+    },
+    {
+      "path": "sdk-realtime-incarnation-ownership.patch",
+      "sha256": "dce764365e8b640621b6507285d8d213119a215d43b0d8c34987a717aafae2dd"
+    },
+    {
+      "path": "sdk-preserved-speech-tool-continuation.patch",
+      "sha256": "3cdb9146f7f0f4bc3985dedfc9eb435a350863b38cf75659b6bfb29fe2a3f8bd"
+    },
+    {
+      "path": "sdk-model-invocation-terminal-clock.patch",
+      "sha256": "8095460fd1722245c0f4001a83b60e1e5878ab3e30c1cc4ddfc6b2285c78133e"
+    },
+    {
+      "path": "sdk-model-attempt-settlement.patch",
+      "sha256": "95a58b27e498cc24388058dc4d32ece76652f45e6efc2e318ae283700537fd87"
+    },
+    {
+      "path": "sdk-model-cohort-core-test-fixtures.patch",
+      "sha256": "30c218b88cfd15417c664024c6a2039e18c6d4ab8cd65bd9cd8440de9d38b4c5"
+    },
+    {
+      "path": "sdk-model-deadline-admission-compile.patch",
+      "sha256": "4a2fcdee2635a88dcfb17c3d060ccee894a5a2adae5f12bc6cccdf82401e5c8c"
+    },
+    {
+      "path": "sdk-provider-hosted-replay-fence.patch",
+      "sha256": "cc46a7a1c697e833784f9f5ffa7245b0e2354e5bbc5a0a8bb892fae7ae55c53e"
+    },
+    {
+      "path": "sdk-hosted-shell-replay-fence.patch",
+      "sha256": "229d1b046d446c88120df807bf4793f4836394ee03a61ca38ee9649d1e571ff5"
+    },
+    {
+      "path": "sdk-native-model-stream-completion-usage.patch",
+      "sha256": "d89d2ed9176b3a4a163a890d2d9cf2be51cf6029d13d25aa895f876eb2770609"
+    },
+    {
+      "path": "sdk-trace-delivery-controls.patch",
+      "sha256": "6c5e3c6cc3c9106c85b6e740f2ef76e1a18f5f89f48bdaeda91fb4b6f21c979b"
+    },
+    {
       "path": "sdk-managed-agent-tools.patch",
       "sha256": "ad8d845a6da5485d0010f95d2afa19b10139c9cd05ba3bb5c0b8790491a13fb6"
     },
@@ -757,5 +813,5 @@
       "sha256": "aa9744156b870e194d6dc7e6244e311a290332c7b453747a7440682e69cf674a"
     }
   ],
-  "result_tree": "80f81ddf8c4600788917f1002eb3a9e0a4b1c290"
+  "result_tree": "3c17334065d06a7648b89c7d9a44da5ceda22138"
 }

@@ -245,6 +245,46 @@ class ApplicationToolOutput(BaseModel):
     application_data: dict[str, JsonValue] = Field(repr=False)
 
 
+def _check_saved_prompt_model(model: object) -> None:
+    if not isinstance(model, dict):
+        return
+    controls = model.get("request_controls")
+    prompt = controls.get("hosted_prompt") if isinstance(controls, dict) else None
+    if isinstance(prompt, dict) and prompt.get("reference") is not None:
+        raise ValueError("Saved prompt references are not restore authority")
+
+
+def _check_saved_prompt_metadata(metadata: object) -> None:
+    profile = metadata.get("sdk_agent_profile") if isinstance(metadata, dict) else None
+    if isinstance(profile, dict):
+        _check_saved_prompt_model(profile.get("model"))
+
+
+def _check_saved_prompt_envelope(envelope: object) -> None:
+    if isinstance(envelope, dict):
+        _check_saved_prompt_metadata(envelope.get("metadata"))
+
+
+def _check_saved_prompt_history(history: list[dict[str, Any]]) -> None:
+    for row in history:
+        _check_saved_prompt_envelope(row)
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if row.get("type") == "response_item":
+            _check_saved_prompt_envelope(payload)
+        elif row.get("type") == "event_msg" and payload.get("type") == "thread_settings_applied":
+            _check_saved_prompt_model(payload.get("thread_settings"))
+        elif row.get("type") == "compacted":
+            for metadata in payload.get("replacement_history_metadata") or ():
+                _check_saved_prompt_metadata(metadata)
+            originals = payload.get("sdk_originals")
+            if isinstance(originals, dict):
+                for item in originals.get("items") or ():
+                    if isinstance(item, dict):
+                        _check_saved_prompt_envelope(item.get("projection"))
+
+
 class _RememberedApproval(BaseModel):
     """An application-keyed future policy, never a native invocation grant."""
 
@@ -324,6 +364,7 @@ class SessionState(BaseModel):
 
     @model_validator(mode="after")
     def validate_tree(self) -> "SessionState":
+        self._check_prompt_references()
         approvals = [
             (item.profile_id, item.key, item.signature) for item in self.remembered_approvals
         ]
@@ -387,6 +428,14 @@ class SessionState(BaseModel):
                 seen.add(current)
                 current = parents[current]
         return self
+
+    def _check_prompt_references(self) -> None:
+        _check_saved_prompt_history(self.history)
+        for child in self.descendants:
+            _check_saved_prompt_history(child.history)
+        if self.native_continuation is not None:
+            for reply in self.native_continuation.accepted_replies.values():
+                _check_saved_prompt_envelope(reply)
 
     @property
     def instructions(self) -> str:

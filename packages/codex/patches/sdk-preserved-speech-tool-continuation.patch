@@ -1,0 +1,548 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 76faa8da..edfa351c 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -221,6 +221,7 @@ enum WsCommand {
+         response_id: String,
+         require_hosted: bool,
+         native_call: Option<String>,
++        preserve_after_interrupt: bool,
+         expected: Option<Arc<super::readiness::RealtimeAcceptedConfiguration>>,
+         tx_result: oneshot::Sender<Result<bool, WsError>>,
+     },
+@@ -364,14 +365,12 @@ impl WsStream {
+                                     Err(error)=>{report_write_policy_error(&error);let _=tx_result.send(Err(error));break;}
+                                 }
+                             }
+-                            WsCommand::CreateAfterTools {response_id,require_hosted,native_call,expected,tx_result} => {
++                            WsCommand::CreateAfterTools {response_id,require_hosted,native_call,expected,preserve_after_interrupt,tx_result} => {
+                                 let Some(observer) = &readiness_observer else { let _ = tx_result.send(Ok(false)); continue; };
+                                 let configuration = observer.configuration();
+-                                let permitted = if let Some(call_id) = native_call.as_deref() {
+-                                    configuration.function_response_create(&response_id, call_id)
+-                                } else {
+-                                    configuration.tools_response_create(&response_id, require_hosted, expected.as_ref())
+-                                };
++                                let permitted = configuration.tools_response_create_inner(
++                                    &response_id, require_hosted, expected.as_ref(), native_call.as_deref(), preserve_after_interrupt,
++                                );
+                                 if !permitted {let _=tx_result.send(Ok(false));continue;}
+                                 let mut event = configuration.pending_tools_response_create_event();
+                                 configuration.identify_response_create(&mut event);
+@@ -919,14 +918,14 @@ impl RealtimeWebsocketWriter {
+         &self,
+         response_id: &str,
+     ) -> Result<bool, ApiError> {
+-        self.send_response_create_after_tools_inner(response_id, true, None, None)
++        self.send_response_create_after_tools_inner(response_id, true, None, None, false)
+             .await
+     }
+     pub async fn send_response_create_after_tools(
+         &self,
+         response_id: &str,
+     ) -> Result<bool, ApiError> {
+-        self.send_response_create_after_tools_inner(response_id, false, None, None)
++        self.send_response_create_after_tools_inner(response_id, false, None, None, false)
+             .await
+     }
+     pub async fn send_response_create_after_tools_at_configuration(
+@@ -939,6 +938,7 @@ impl RealtimeWebsocketWriter {
+             false,
+             Some(Arc::clone(expected)),
+             None,
++            false,
+         )
+         .await
+     }
+@@ -953,6 +953,25 @@ impl RealtimeWebsocketWriter {
+             false,
+             None,
+             Some(call_id.to_owned()),
++            false,
++        )
++        .await
++    }
++    /// Continue an SDK-owned call after checking its live native ownership.
++    /// Accepted handoff configurations retain the whole-batch terminal barrier.
++    pub async fn send_response_create_after_native_tools(
++        &self,
++        response_id: &str,
++        call_id: &str,
++        expected: Option<&Arc<super::readiness::RealtimeAcceptedConfiguration>>,
++        preserve_after_interrupt: bool,
++    ) -> Result<bool, ApiError> {
++        self.send_response_create_after_tools_inner(
++            response_id,
++            false,
++            expected.cloned(),
++            expected.is_none().then(|| call_id.to_owned()),
++            preserve_after_interrupt,
+         )
+         .await
+     }
+@@ -962,12 +981,14 @@ impl RealtimeWebsocketWriter {
+         require_hosted: bool,
+         expected: Option<Arc<super::readiness::RealtimeAcceptedConfiguration>>,
+         native_call: Option<String>,
++        preserve_after_interrupt: bool,
+     ) -> Result<bool, ApiError> {
+         self.stream
+             .request(|tx_result| WsCommand::CreateAfterTools {
+                 response_id: response_id.to_owned(),
+                 require_hosted,
+                 native_call,
++                preserve_after_interrupt,
+                 expected,
+                 tx_result,
+             })
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+index 07025b62..a9f020c8 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+@@ -925,23 +925,26 @@ impl RealtimeConfiguration {
+             .hosted_mcp
+             .function_output_sent(call_id);
+     }
++    #[cfg(test)]
+     pub(super) fn tools_response_create(
+         &self,
+         response_id: &str,
+         require_hosted: bool,
+         expected: Option<&Arc<RealtimeAcceptedConfiguration>>,
+     ) -> bool {
+-        self.tools_response_create_inner(response_id, require_hosted, expected, None)
++        self.tools_response_create_inner(response_id, require_hosted, expected, None, false)
+     }
++    #[cfg(test)]
+     pub(super) fn function_response_create(&self, response_id: &str, call_id: &str) -> bool {
+-        self.tools_response_create_inner(response_id, false, None, Some(call_id))
++        self.tools_response_create_inner(response_id, false, None, Some(call_id), false)
+     }
+-    fn tools_response_create_inner(
++    pub(super) fn tools_response_create_inner(
+         &self,
+         response_id: &str,
+         require_hosted: bool,
+         expected: Option<&Arc<RealtimeAcceptedConfiguration>>,
+         native_call: Option<&str>,
++        preserve_after_interrupt: bool,
+     ) -> bool {
+         let mut state = self.inner.state.lock().unwrap();
+         let request_owner = state
+@@ -983,7 +986,7 @@ impl RealtimeConfiguration {
+             && state.response_contexts.iter().any(|r| {
+                 r.id.as_ref() == response_id
+                     && (!require_hosted || r.configuration.hosted_owned)
+-                    && !r.output_guard.is_retired()
++                    && (preserve_after_interrupt || !r.output_guard.is_retired())
+             })
+             && (if require_hosted {
+                 state.hosted_mcp.has_calls(response_id)
+@@ -4802,6 +4805,27 @@ mod tests {
+             );
+         }
+     }
++    #[test]
++    fn preserved_native_continuation_outlives_media_but_not_new_user_input() {
++        for (preserve, user_input) in [(false, false), (true, false), (true, true)] {
++            let observer = native_pair_observer();
++            let config = observer.configuration();
++            config.function_output_sent("one");
++            config
++                .prepare_interrupt(Some("a"), None, None, false)
++                .unwrap();
++            if user_input {
++                config.observe_user_input();
++            }
++            assert_eq!(
++                config.tools_response_create_inner("a", false, None, Some("one"), preserve),
++                preserve && !user_input,
++            );
++            assert!(config.response_output_guard("a").unwrap().is_retired());
++            assert!(!config.tools_response_create_inner("a", false, None, Some("one"), preserve));
++        }
++    }
++
+     #[test]
+     fn native_function_continuation_preserves_per_call_timing_but_waits_for_hosted_approval() {
+         for mixed in [false, true] {
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 94c628d0..2abbd62a 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -767,7 +767,7 @@ impl SdkRealtimeState {
+             self.active.store(false, Ordering::Release);
+         }
+         let mut calls = self.function_calls.lock().await;
+-        let seen = self.seen.lock().await;
++        let mut seen = self.seen.lock().await;
+         let mut pending = self.pending.lock().await;
+         let protected: std::collections::HashSet<_> = seen
+             .iter()
+@@ -775,10 +775,17 @@ impl SdkRealtimeState {
+                 preserve_media_calls
+                     && !retire_generation
+                     && call.preserve_on_response_cancel
+-                    && pending.contains_key(*id)
++                    && (pending.contains_key(*id) || call.output_published)
+             })
+             .map(|(id, _)| id.clone())
+             .collect();
++        for (id, call) in seen.iter_mut() {
++            if response_id.is_none_or(|target| call.response_id.as_deref() == Some(target))
++                && !protected.contains(id)
++            {
++                call.preserve_on_response_cancel = false;
++            }
++        }
+         let protected_batches: Vec<_> = calls
+             .iter()
+             .filter(|(id, _)| protected.contains(*id))
+@@ -1247,6 +1254,8 @@ struct NativeResponseRequest {
+     response_id: String,
+     call_id: String,
+     accepted: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
++    ownership_id: Option<String>,
++    origin: Option<Arc<RealtimeFunctionBatch>>,
+ }
+ 
+ #[derive(Debug)]
+@@ -1322,6 +1331,7 @@ impl RealtimeResponseCreateQueue {
+         &mut self,
+         writer: &RealtimeWebsocketWriter,
+         reason: &str,
++        sdk: Option<&SdkRealtimeState>,
+     ) -> anyhow::Result<()> {
+         self.active_default_response = false;
+         if !self.pending_create || response_create_pending(writer) {
+@@ -1333,7 +1343,8 @@ impl RealtimeResponseCreateQueue {
+         if explicit.is_none()
+             && let Some(native) = native
+         {
+-            self.active_default_response = send_native_response_request(writer, &native).await?;
++            self.active_default_response =
++                send_native_response_request(writer, &native, sdk).await?;
+             if !self.active_default_response
+                 && writer.configuration().is_some_and(|configuration| {
+                     configuration.response_tools_pending(&native.response_id)
+@@ -5444,31 +5455,94 @@ async fn request_sdk_response_create(
+ async fn send_native_response_request(
+     writer: &RealtimeWebsocketWriter,
+     request: &NativeResponseRequest,
++    sdk: Option<&SdkRealtimeState>,
+ ) -> Result<bool, ApiError> {
+-    match &request.accepted {
+-        Some(accepted) => {
+-            writer
+-                .send_response_create_after_tools_at_configuration(&request.response_id, accepted)
+-                .await
+-        }
+-        None => {
+-            writer
+-                .send_response_create_after_function(&request.response_id, &request.call_id)
+-                .await
+-        }
++    let Some(sdk) = sdk else {
++        return Ok(false);
++    };
++    let calls = sdk.function_calls.lock().await;
++    let seen = sdk.seen.lock().await;
++    if !sdk.active.load(Ordering::Acquire)
++        || request
++            .origin
++            .as_ref()
++            .is_some_and(|batch| batch.automatic_retired.load(Ordering::Acquire))
++    {
++        return Ok(false);
+     }
++    let preserve_after_interrupt = if request.call_id.is_empty() {
++        let Some(origin) = &request.origin else {
++            return Ok(false);
++        };
++        let mut owned = origin
++            .call_ids
++            .iter()
++            .filter_map(|id| {
++                let call = calls.get(id)?;
++                if !call
++                    .batch
++                    .as_ref()
++                    .is_some_and(|batch| Arc::ptr_eq(batch, origin))
++                {
++                    return None;
++                }
++                seen.get(id).filter(|known| {
++                    known.response_id.as_deref() == Some(request.response_id.as_str())
++                        && known.output_published
++                })
++            })
++            .peekable();
++        if owned.peek().is_none() {
++            return Ok(false);
++        }
++        owned.any(|known| known.preserve_on_response_cancel)
++    } else {
++        let Some(known) = seen.get(&request.call_id).filter(|known| {
++            request.ownership_id.as_deref() == Some(known.ownership_id.as_str())
++                && known.response_id.as_deref() == Some(request.response_id.as_str())
++                && known.output_published
++        }) else {
++            return Ok(false);
++        };
++        known.preserve_on_response_cancel
++    };
++    drop(seen);
++    drop(calls);
++    writer
++        .send_response_create_after_native_tools(
++            &request.response_id,
++            &request.call_id,
++            request.accepted.as_ref(),
++            preserve_after_interrupt,
++        )
++        .await
+ }
+ 
+ async fn request_sdk_native_response(
+     sdk: &SdkRealtimeState,
+     writer: &RealtimeWebsocketWriter,
+     responses: &mut RealtimeResponseCreateQueue,
+-    request: NativeResponseRequest,
+-    origin: Option<&RealtimeFunctionBatch>,
++    mut request: NativeResponseRequest,
++    origin: Option<&Arc<RealtimeFunctionBatch>>,
+ ) -> anyhow::Result<()> {
+     if origin.is_some_and(|batch| batch.automatic_retired.load(Ordering::Acquire)) {
+         return Ok(());
+     }
++    if request.origin.is_none() {
++        request.origin = origin.cloned();
++    }
++    if !request.call_id.is_empty() && request.ownership_id.is_none() {
++        request.ownership_id = sdk
++            .seen
++            .lock()
++            .await
++            .get(&request.call_id)
++            .filter(|known| known.response_id.as_deref() == Some(request.response_id.as_str()))
++            .map(|known| known.ownership_id.clone());
++        if request.ownership_id.is_none() {
++            return Ok(());
++        }
++    }
+     let held = sdk
+         .function_calls
+         .lock()
+@@ -5505,7 +5579,7 @@ async fn request_sdk_native_response(
+         }
+         return Ok(());
+     }
+-    if send_native_response_request(writer, &request).await? {
++    if send_native_response_request(writer, &request, Some(sdk)).await? {
+         responses.active_default_response = true;
+         responses.pending_create = false;
+         responses.pending_native_create = None;
+@@ -5824,6 +5898,8 @@ async fn handle_sdk_realtime_command(
+                             response_id: intent.batch.response_id.clone(),
+                             call_id: String::new(),
+                             accepted: Some(Arc::clone(&accepted)),
++                            ownership_id: None,
++                            origin: None,
+                         },
+                         Some(&intent.batch),
+                     )
+@@ -5953,6 +6029,8 @@ async fn handle_sdk_realtime_command(
+                         response_id,
+                         call_id: handoff_id,
+                         accepted,
++                        ownership_id: None,
++                        origin: None,
+                     },
+                     None,
+                 )
+@@ -6016,8 +6094,10 @@ async fn handle_sdk_realtime_command(
+                             response_id,
+                             call_id,
+                             accepted: None,
++                            ownership_id: None,
++                            origin: None,
+                         },
+-                        origin.as_deref(),
++                        origin.as_ref(),
+                     )
+                     .await?;
+                 }
+@@ -6075,8 +6155,10 @@ async fn handle_sdk_realtime_command(
+                         response_id,
+                         call_id: handoff_id,
+                         accepted: None,
++                        ownership_id: None,
++                        origin: None,
+                     },
+-                    origin.as_deref(),
++                    origin.as_ref(),
+                 )
+                 .await?;
+             }
+@@ -6147,6 +6229,21 @@ async fn handle_sdk_realtime_command(
+                 responses.pending_native_create = None;
+                 responses.pending_guardrail_response = None;
+                 responses.pending_hosted_response = None;
++            } else if cancel_tools
++                && responses
++                    .pending_native_create
++                    .as_ref()
++                    .is_some_and(|request| {
++                        Some(request.response_id.as_str()) == requested.as_deref()
++                    })
++            {
++                responses.pending_native_create = None;
++                if responses.pending_user_create.is_none()
++                    && responses.pending_guardrail_response.is_none()
++                    && responses.pending_hosted_response.is_none()
++                {
++                    responses.pending_create = false;
++                }
+             }
+             let calls = sdk.function_calls.lock().await;
+             let seen = sdk.seen.lock().await;
+@@ -6319,7 +6416,7 @@ async fn maybe_continue_hosted_mcp(
+         return Ok(());
+     }
+     let created = if let Some(request) = &responses.pending_native_create {
+-        send_native_response_request(writer, request).await?
++        send_native_response_request(writer, request, Some(sdk)).await?
+     } else if responses.pending_create {
+         writer.send_response_create_after_tools(response_id).await?
+     } else {
+@@ -6672,7 +6769,7 @@ async fn handle_realtime_server_event_with_configuration(
+                 RealtimeSessionKind::V1 => {}
+                 RealtimeSessionKind::V2 => {
+                     response_create_queue
+-                        .mark_finished(writer, "deferred")
++                        .mark_finished(writer, "deferred", handoff_state.sdk.as_deref())
+                         .await?;
+                 }
+             }
+@@ -6782,7 +6879,7 @@ async fn handle_realtime_server_event_with_configuration(
+                 RealtimeSessionKind::V1 => {}
+                 RealtimeSessionKind::V2 => {
+                     response_create_queue
+-                        .mark_finished(writer, "deferred")
++                        .mark_finished(writer, "deferred", handoff_state.sdk.as_deref())
+                         .await?;
+                 }
+             }
+@@ -7129,7 +7226,11 @@ async fn handle_realtime_server_event_with_configuration(
+                 && response_create_queue.sdk_response_id.is_none()
+             {
+                 response_create_queue
+-                    .mark_finished(writer, "provider rejected response creation")
++                    .mark_finished(
++                        writer,
++                        "provider rejected response creation",
++                        handoff_state.sdk.as_deref(),
++                    )
+                     .await?;
+             }
+             false
+@@ -7191,7 +7292,7 @@ async fn handle_realtime_server_event_with_configuration(
+     if advances_response_queue && !response_create_pending(writer) {
+         if !response_create_queue.active_default_response {
+             response_create_queue
+-                .mark_finished(writer, "deferred")
++                .mark_finished(writer, "deferred", handoff_state.sdk.as_deref())
+                 .await?;
+             if let (Some(sdk), Some(id)) = (
+                 &handoff_state.sdk,
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index c3a955ae..55c5a443 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -5193,6 +5193,86 @@ async fn media_interrupt_protects_only_admitted_unresolved_calls_in_its_response
+     );
+ }
+ 
++#[tokio::test]
++async fn deferred_native_continuation_keeps_original_call_ownership() {
++    let (connection, _, server) = sdk_wire_connection().await;
++    let writer = connection.writer();
++    let sdk = super::SdkRealtimeState::new("deferred-owner".into());
++    assert!(sdk.register_for_response("owned", Some("a")).await.unwrap());
++    let original = sdk.seen.lock().await["owned"].ownership_id.clone();
++    sdk.seen.lock().await.shift_remove("owned");
++    sdk.pending.lock().await.remove("owned");
++    assert!(sdk.register_for_response("owned", Some("a")).await.unwrap());
++    {
++        let mut seen = sdk.seen.lock().await;
++        let replacement = seen.get_mut("owned").unwrap();
++        assert_ne!(replacement.ownership_id, original);
++        replacement.output_published = true;
++        replacement.preserve_on_response_cancel = true;
++    }
++    let mut responses = super::RealtimeResponseCreateQueue::default();
++    responses.active_default_response = true;
++    super::request_sdk_native_response(
++        &sdk,
++        &writer,
++        &mut responses,
++        super::NativeResponseRequest {
++            response_id: "a".into(),
++            call_id: "owned".into(),
++            accepted: None,
++            ownership_id: Some(original.clone()),
++            origin: None,
++        },
++        None,
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        responses
++            .pending_native_create
++            .as_ref()
++            .unwrap()
++            .ownership_id
++            .as_ref(),
++        Some(&original)
++    );
++    responses
++        .mark_finished(&writer, "retired owner", Some(&sdk))
++        .await
++        .unwrap();
++    assert!(!responses.active_default_response);
++    assert!(responses.pending_native_create.is_none());
++    server.abort();
++}
++
++#[tokio::test]
++async fn media_preservation_keeps_published_continuation_until_tool_retirement() {
++    let sdk = super::SdkRealtimeState::new("media-published".into());
++    register_media_interrupt_test_call(&sdk, "owned", "a", true, Some("root"), None).await;
++    sdk.preserve_admitted_tools(Some("a"), &[]).await;
++    sdk.pending.lock().await.remove("owned");
++    sdk.seen
++        .lock()
++        .await
++        .get_mut("owned")
++        .unwrap()
++        .output_published = true;
++    sdk.retire_tool_work(false, Some("a"), true).await;
++    assert!(sdk.seen.lock().await["owned"].preserve_on_response_cancel);
++    assert!(
++        !sdk.function_calls.lock().await["owned"]
++            .cancel
++            .is_cancelled()
++    );
++    sdk.retire_tool_work(false, Some("a"), false).await;
++    assert!(!sdk.seen.lock().await["owned"].preserve_on_response_cancel);
++    assert!(
++        sdk.function_calls.lock().await["owned"]
++            .cancel
++            .is_cancelled()
++    );
++}
++
+ #[tokio::test]
+ async fn media_interrupt_rejection_rolls_back_only_new_protection() {
+     let sdk = super::SdkRealtimeState::new("media-rollback".into());
