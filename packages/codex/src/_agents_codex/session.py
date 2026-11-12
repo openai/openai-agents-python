@@ -60,7 +60,10 @@ from ._agent_profiles import (
     _python_tool_slot,
 )
 from ._compat import cancel_once as cancel_once, cancellation_requested
-from ._environment_lifetime import _EnvironmentLease, _release_environment
+from ._environment_lifetime import (
+    _EnvironmentLease as _EnvironmentLease,
+    _release_environment as _release_environment,
+)
 from ._events import (
     CodeInterpreterCallItem,
     FileSearchCallItem,

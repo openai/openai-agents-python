@@ -13,7 +13,6 @@ from ._managed_workspace import _SANDBOX_EVENTS_ATTRIBUTE, _WORKSPACE_INSTRUCTIO
 from .executor import Environment
 from .telemetry import _create_task
 
-
 if TYPE_CHECKING:
     from ._sandbox_events import _OperationObserver
 
