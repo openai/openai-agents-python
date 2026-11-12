@@ -451,3 +451,75 @@ async def test_native_builtin_dispatch_retains_resource_identity_and_measured_fi
     assert all(event.data == {} for event in operations)
     assert "native-private" not in "".join(event.model_dump_json() for event in operations)
     assert peer.synthetic_process_starts
+
+
+@unix
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_native_inline_operation_sink_rejects_same_session_close(
+    mode, responses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from tests.native_fixtures import assistant_output, function_call
+    from tests.test_native_agent import provider
+
+    current = None
+    close_tasks = []
+    attempts = []
+
+    async def observe(event, resource):
+        if event.op != "exec" or event.phase != "finish":
+            return
+        assert current is not None
+        task = asyncio.create_task(current.aclose())
+        close_tasks.append(task)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), 0.2)
+        except TimeoutError:
+            # Release the reader after witnessing the cycle so cleanup can join.
+            attempts.append("close waited for its own event reader")
+        except RuntimeError as error:
+            attempts.append(str(error))
+        else:
+            attempts.append("close was admitted")
+
+    instrumentation = Instrumentation(sinks=[CallbackSink(observe, mode=mode, on_error="raise")])
+    client = UnixLocalSandboxClient(instrumentation=instrumentation, inherit_host_environment=False)
+    responses.respond(function_call("exec_command", {"cmd": "echo private-value"}, "self-close"))
+    responses.respond(assistant_output("done"))
+    responses.respond(assistant_output("still-open"))
+    output = None
+    async with (
+        timeout(30),
+        ExecutorPeer(
+            tmp_path / "executor", synthetic_process_output="private-output"
+        ).serve() as peer,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+
+        @asynccontextmanager
+        async def connect(resource):
+            yield Environment(
+                url=peer.url,
+                cwd=resource.state.manifest.root,
+                headers={"Authorization": "Bearer " + peer.token},
+                tools=["exec_command", "write_stdin", "apply_patch"],
+            )
+
+        environment = sandbox_environment(
+            client, manifest=Manifest(), options=None, connect=connect
+        )
+        async with Agent(
+            instructions="Use the requested operation.", provider=provider(responses)
+        ).session(environment=environment) as session:
+            current = session
+            try:
+                output = (await (await session.submit("once")).get_result()).final_output
+            except (Exception, asyncio.CancelledError):
+                pass
+            if attempts == ["A tool callback cannot close its own Session"]:
+                assert (
+                    await (await session.submit("again")).get_result()
+                ).final_output == "still-open"
+    await asyncio.gather(*close_tasks, return_exceptions=True)
+    assert attempts == ["A tool callback cannot close its own Session"]
+    assert output == "done"

@@ -12956,7 +12956,13 @@ class Session(Generic[ContextT, OutputT]):
                 message = event.get("msg", {})
                 if message.get("type") == "_sdk_sandbox_operation":
                     if self._sandbox_events is not None:
-                        await self._sandbox_events.emit(message)
+                        sandbox_invocation = _Invocation(self)
+                        sandbox_token = _invocation.set(sandbox_invocation)
+                        try:
+                            await self._sandbox_events.emit(message)
+                        finally:
+                            sandbox_invocation.active = False
+                            _invocation.reset(sandbox_token)
                     continue
                 if (
                     message.get("type") == "shutdown_complete"
