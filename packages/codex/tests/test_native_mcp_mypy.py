@@ -83,9 +83,12 @@ assert_type(approved.approval_mode, Literal["native", "preapproved"])
 
 def discovery(ctx: MCPDiscoveryContext[Application], definition: MCPToolDefinition) -> bool:
     assert_type(ctx.context, Application)
-    assert_type(definition["outputSchema"], dict[str, Any])
-    assert_type(definition["icons"], list[dict[str, Any]])
-    assert_type(definition["_meta"], dict[str, Any])
+    if "outputSchema" in definition:
+        assert_type(definition["outputSchema"], dict[str, Any])
+    if "icons" in definition:
+        assert_type(definition["icons"], list[dict[str, Any]])
+    if "_meta" in definition:
+        assert_type(definition["_meta"], dict[str, Any])
     return definition["name"] == "search"
 
 

@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from ._function_tools import FunctionTool
 from .agent import Agent
+from .decision_handoff import DecisionHandoff, _decision_handoff_tool
 from .handoffs import Handoff
 from .hosted_mcp import HostedMCP
 from .mcp import _MCP
@@ -28,6 +29,7 @@ class _AgentProfile:
     handoffs: Mapping[str, str]
     handoff_callbacks: Mapping[str, int] = field(default_factory=dict)
     handoff_options: Mapping[str, RealtimeHandoff] = field(default_factory=dict)
+    decision_handoffs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def _handoff_name(agent: Agent[Any, Any]) -> str:
@@ -130,8 +132,29 @@ def _capture_agent_graph(
         callbacks: dict[str, int] = {}
         options: dict[str, RealtimeHandoff] = {}
         callback_tools: list[FunctionTool[Any, Any, Any]] = []
+        decision_handoffs: dict[str, Mapping[str, Any]] = {}
         python_slots = sum(_python_tool_slot(tool) is not None for tool in declaration.tools)
         for reference in declaration.handoffs:
+            if isinstance(reference, DecisionHandoff):
+                if opening.realtime is not None or declaration.realtime is not None:
+                    raise ValueError("DecisionHandoff does not support Realtime")
+                name = reference.name
+                if name in targets or name in decision_handoffs:
+                    raise ValueError(f"Duplicate handoff name in Agent {agent.name!r}: {name}")
+                selected_targets = {}
+                for key, target in reference.targets.items():
+                    index = indices.get(id(target))
+                    if index is None:
+                        index = len(agents)
+                        indices[id(target)] = index
+                        agents.append(target)
+                    selected_targets[key] = f"{id_prefix}{index}"
+                decision_handoffs[name] = {
+                    "slot": python_slots + len(callback_tools),
+                    "targets": tuple(dict.fromkeys(selected_targets.values())),
+                }
+                callback_tools.append(_decision_handoff_tool(reference, selected_targets))
+                continue
             if isinstance(reference, Handoff):
                 target = reference.target
             elif isinstance(reference, RealtimeHandoff):
@@ -167,6 +190,8 @@ def _capture_agent_graph(
                 indices[id(target)] = index
                 agents.append(target)
             target_id = f"{id_prefix}{index}"
+            if name in decision_handoffs:
+                raise ValueError(f"Duplicate handoff name in Agent {agent.name!r}: {name}")
             previous = targets.get(name)
             if previous is not None and isinstance(reference, Handoff):
                 slot = callbacks.get(name)
@@ -194,7 +219,8 @@ def _capture_agent_graph(
                     else _handoff_tool(reference, agent, name)
                 )
         _check_handoff_tool_names(
-            (tool.ref for tool in declaration.tools if isinstance(tool, FunctionTool)), targets
+            (tool.ref for tool in declaration.tools if isinstance(tool, FunctionTool)),
+            {**targets, **dict.fromkeys(decision_handoffs, "")},
         )
         if callback_tools:
             declaration = replace(
@@ -210,6 +236,7 @@ def _capture_agent_graph(
                 MappingProxyType(targets),
                 MappingProxyType(callbacks),
                 MappingProxyType(options),
+                MappingProxyType(decision_handoffs),
             )
         )
     return tuple(profiles)

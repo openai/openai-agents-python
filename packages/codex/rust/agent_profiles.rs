@@ -53,6 +53,8 @@ pub(crate) struct ProfileSpec {
     handoffs: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     handoff_callbacks: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    decision_handoffs: BTreeMap<String, DecisionHandoffSpec>,
     #[serde(default)]
     transform_context: bool,
     #[serde(default)]
@@ -76,6 +78,62 @@ pub(crate) struct ProfileSpec {
     mcp_discovery_tools: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     mcp_tools: BTreeMap<String, McpToolDeclaration>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DecisionHandoffSpec {
+    slot: usize,
+    targets: Vec<String>,
+}
+
+/// Selection authority exists only for one admitted callback executor.
+pub(crate) struct DecisionHandoffSelection {
+    targets: HashSet<String>,
+    selected: Mutex<BTreeMap<(String, String), String>>,
+}
+
+impl DecisionHandoffSelection {
+    pub(crate) fn record(&self, turn: &str, call: &str, target: &str) -> Result<()> {
+        ensure!(
+            self.targets.contains(target),
+            "Decision handoff target is outside its captured roster"
+        );
+        self.selected
+            .lock()
+            .expect("Decision selection poisoned")
+            .insert((turn.into(), call.into()), target.into());
+        Ok(())
+    }
+
+    fn take(&self, turn: &str, call: &str) -> Option<String> {
+        self.selected
+            .lock()
+            .expect("Decision selection poisoned")
+            .remove(&(turn.into(), call.into()))
+    }
+}
+
+pub(crate) fn decision_handoff_selection(
+    thread: &ExtensionData,
+    source: Option<&AgentProfileReceipt>,
+    name: &ToolName,
+) -> Option<Arc<DecisionHandoffSelection>> {
+    let profiles = thread.get::<Arc<AgentProfiles>>()?;
+    let profile = profiles.profiles.get(&source?.profile_id)?;
+    let declaration = profile
+        .declaration
+        .decision_handoffs
+        .iter()
+        .find(|(declared, _)| {
+            ToolName::new(None, declared.to_string()).with_default_namespace()
+                == name.clone().with_default_namespace()
+        })?
+        .1;
+    Some(Arc::new(DecisionHandoffSelection {
+        targets: declaration.targets.iter().cloned().collect(),
+        selected: Mutex::new(BTreeMap::new()),
+    }))
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -161,12 +219,18 @@ impl OpeningProfiles {
                 ToolName::new(None, name.clone()).with_default_namespace()
                     == tool_name.clone().with_default_namespace()
                     && target == &receipt.target_profile_id
+            }) || source.decision_handoffs.iter().any(|(name, declaration)| {
+                ToolName::new(None, name.clone()).with_default_namespace()
+                    == tool_name.clone().with_default_namespace()
+                    && declaration.targets.contains(&receipt.target_profile_id)
             }),
             "Restored handoff is outside its source declaration"
         );
         // Checkpoints cannot authorize a callback for the current turn.
         ensure!(
-            !pending || !source.handoff_callbacks.contains_key(&tool_name.name),
+            !pending
+                || (!source.handoff_callbacks.contains_key(&tool_name.name)
+                    && !source.decision_handoffs.contains_key(&tool_name.name)),
             "Pending callback-backed Agent handoffs require live acceptance"
         );
         Ok(())
@@ -273,6 +337,19 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
                     && !profile.manual_slots.contains(slot)
                     && !profile.terminal_slots.contains(slot),
                 "Handoff callback must name its exact automatic catalog slot"
+            );
+        }
+        for (name, declaration) in &profile.decision_handoffs {
+            let targets = declaration.targets.iter().collect::<HashSet<_>>();
+            ensure!(
+                !profile.handoffs.contains_key(name)
+                    && !declaration.targets.is_empty()
+                    && targets.len() == declaration.targets.len()
+                    && targets.iter().all(|target| ids.contains(target.as_str()))
+                    && matches!(profile.tools.get(declaration.slot), Some(DynamicToolSpec::Function(spec)) if spec.name == *name)
+                    && !profile.manual_slots.contains(&declaration.slot)
+                    && !profile.terminal_slots.contains(&declaration.slot),
+                "Decision handoff must name an automatic catalog slot and distinct captured targets"
             );
         }
         for (name, target) in &profile.handoffs {
@@ -902,6 +979,19 @@ impl AgentProfiles {
         data.insert(accepted);
         data.insert(prepared.catalog.clone());
         data.insert(prepared.plugins.clone());
+        data.insert(codex_extension_api::AgentProfileDecisionHandoffTools {
+            targets: prepared
+                .declaration
+                .decision_handoffs
+                .iter()
+                .map(|(name, declaration)| {
+                    (
+                        ToolName::new(None, name.clone()).with_default_namespace(),
+                        declaration.targets.clone(),
+                    )
+                })
+                .collect(),
+        });
         data.insert(codex_extension_api::AgentProfileHandoffTools {
             targets: prepared
                 .declaration
@@ -1138,6 +1228,19 @@ pub(crate) async fn configure(
         });
         data.insert(accepted);
         data.insert(catalog);
+        data.insert(codex_extension_api::AgentProfileDecisionHandoffTools {
+            targets: prepared
+                .declaration
+                .decision_handoffs
+                .iter()
+                .map(|(name, declaration)| {
+                    (
+                        ToolName::new(None, name.clone()).with_default_namespace(),
+                        declaration.targets.clone(),
+                    )
+                })
+                .collect(),
+        });
         data.insert(codex_extension_api::AgentProfileHandoffTools {
             targets: prepared
                 .declaration
@@ -1412,18 +1515,28 @@ pub(crate) fn restore_handoff(
         .data
         .get::<codex_extension_api::AgentProfileHandoffTools>()
         .context("Restored handoff has no admitted source declarations")?;
-    ensure!(
-        declarations
-            .targets
-            .get(&tool_name.clone().with_default_namespace())
-            == Some(&receipt.target_profile_id),
-        "Restored handoff is outside its source declaration"
-    );
+    let static_target = declarations
+        .targets
+        .get(&tool_name.clone().with_default_namespace())
+        == Some(&receipt.target_profile_id);
     let profiles = state
         .thread
         .thread_extension_data()
         .get::<Arc<AgentProfiles>>()
         .context("Restored handoff graph is absent")?;
+    ensure!(
+        static_target
+            || captured
+                .profile
+                .data
+                .get::<codex_extension_api::AgentProfileDecisionHandoffTools>()
+                .and_then(|declarations| declarations
+                    .targets
+                    .get(&tool_name.clone().with_default_namespace())
+                    .cloned())
+                .is_some_and(|targets| targets.contains(&receipt.target_profile_id)),
+        "Restored handoff is outside its source declaration"
+    );
     let mut pending = profiles
         .reservation
         .lock()
@@ -1518,6 +1631,11 @@ impl TurnLifecycleContributor for Contributor {
                 .handoffs
                 .values()
                 .any(|target| target == &target_id)
+                && !source
+                    .declaration
+                    .decision_handoffs
+                    .values()
+                    .any(|declaration| declaration.targets.contains(&target_id))
             {
                 return Err("Accepted handoff target is outside its source declaration".into());
             }
@@ -1537,7 +1655,8 @@ struct HandoffExecutor {
     profiles: Arc<AgentProfiles>,
     source: AgentProfileReceipt,
     name: String,
-    target: String,
+    target: Option<String>,
+    decision_selection: Option<Arc<DecisionHandoffSelection>>,
     spec: ToolSpec,
     callback: Option<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>>,
 }
@@ -1548,6 +1667,7 @@ struct ProvisionalHandoff<'a> {
     executor: &'a HandoffExecutor,
     turn: String,
     call: String,
+    target: String,
     keep: bool,
 }
 
@@ -1565,7 +1685,7 @@ impl Drop for ProvisionalHandoff<'_> {
         if let Some(reservation) = pending.as_mut() {
             if reservation.turn == self.turn
                 && reservation.expected == self.executor.source
-                && reservation.target == self.executor.target
+                && reservation.target == self.target
             {
                 reservation.calls.remove(&self.call);
                 if reservation.calls.is_empty() && !reservation.accepted {
@@ -1573,6 +1693,51 @@ impl Drop for ProvisionalHandoff<'_> {
                 }
             }
         }
+    }
+}
+
+impl HandoffExecutor {
+    fn reserve<'a>(
+        &'a self,
+        turn: &str,
+        call: &str,
+        target: &str,
+    ) -> std::result::Result<ProvisionalHandoff<'a>, FunctionCallError> {
+        let mut pending = self
+            .profiles
+            .reservation
+            .lock()
+            .expect("Agent reservation poisoned");
+        if pending
+            .as_ref()
+            .is_some_and(|previous| previous.turn != turn)
+        {
+            *pending = None;
+        }
+        if let Some(previous) = pending.as_mut() {
+            if previous.expected != self.source || previous.target != target {
+                return Err(FunctionCallError::RespondToModel(
+                    "Conflicting Agent handoffs in one tool batch".into(),
+                ));
+            }
+            previous.calls.insert(call.to_owned());
+        } else {
+            *pending = Some(Reservation {
+                turn: turn.to_owned(),
+                expected: self.source.clone(),
+                target: target.to_owned(),
+                calls: HashSet::from([call.to_owned()]),
+                accepted: false,
+                restored: false,
+            });
+        }
+        Ok(ProvisionalHandoff {
+            executor: self,
+            turn: turn.to_owned(),
+            call: call.to_owned(),
+            target: target.to_owned(),
+            keep: false,
+        })
     }
 }
 
@@ -1613,7 +1778,14 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
             let pending = pending.as_mut()?;
             if pending.turn != turn_id
                 || pending.expected != self.source
-                || pending.target != self.target
+                || self
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| &pending.target != target)
+                || self
+                    .decision_selection
+                    .as_ref()
+                    .is_some_and(|selection| !selection.targets.contains(&pending.target))
                 || !pending.calls.contains(call_id)
             {
                 return None;
@@ -1621,7 +1793,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
             pending.accepted = true;
             Some(codex_protocol::agent_profile::AgentProfileHandoff {
                 source: self.source.clone(),
-                target_profile_id: self.target.clone(),
+                target_profile_id: pending.target.clone(),
                 call_id: call_id.into(),
             })
         })();
@@ -1634,6 +1806,8 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
         ToolCall<'call>: 'a,
     {
         Box::pin(async move {
+            let turn_id = call.turn_id.to_owned();
+            let call_id = call.call_id.clone();
             if self.callback.is_none() {
                 let arguments: Value =
                     serde_json::from_str(call.function_arguments()?).map_err(|_| {
@@ -1648,45 +1822,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                     ));
                 }
             }
-            {
-                let mut pending = self
-                    .profiles
-                    .reservation
-                    .lock()
-                    .expect("Agent reservation poisoned");
-                if pending
-                    .as_ref()
-                    .is_some_and(|previous| previous.turn != call.turn_id)
-                {
-                    *pending = None;
-                }
-                if let Some(previous) = pending.as_mut() {
-                    if previous.turn != call.turn_id
-                        || previous.expected != self.source
-                        || previous.target != self.target
-                    {
-                        return Err(FunctionCallError::RespondToModel(
-                            "Conflicting Agent handoffs in one tool batch".into(),
-                        ));
-                    }
-                    previous.calls.insert(call.call_id.clone());
-                } else {
-                    *pending = Some(Reservation {
-                        turn: call.turn_id.to_owned(),
-                        expected: self.source.clone(),
-                        target: self.target.clone(),
-                        calls: HashSet::from([call.call_id.clone()]),
-                        accepted: false,
-                        restored: false,
-                    });
-                }
-            }
-            let mut reservation = ProvisionalHandoff {
-                executor: self,
-                turn: call.turn_id.to_owned(),
-                call: call.call_id.clone(),
-                keep: false,
-            };
+            // Static targets reserve before the callback, as ordinary handoffs do.
+            let mut reservation = self
+                .target
+                .as_deref()
+                .map(|target| self.reserve(&turn_id, &call_id, target))
+                .transpose()?;
             let output = if let Some(callback) = &self.callback {
                 callback.handle(call).await?
             } else {
@@ -1697,7 +1838,20 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                 },
                 )) as Box<dyn ToolOutput>
             };
-            reservation.keep = output.success_for_logging();
+            if !output.success_for_logging() {
+                return Ok(output);
+            }
+            if let Some(selection) = &self.decision_selection {
+                let target = selection.take(&turn_id, &call_id).ok_or_else(|| {
+                    FunctionCallError::RespondToModel(
+                        "Decision handoff requires a live authorized selection".into(),
+                    )
+                })?;
+                reservation = Some(self.reserve(&turn_id, &call_id, &target)?);
+            }
+            if let Some(reservation) = &mut reservation {
+                reservation.keep = true;
+            }
             Ok(output)
         })
     }
@@ -1708,6 +1862,7 @@ pub(crate) fn wrap_handoff_callback(
     thread: &ExtensionData,
     source: Option<&AgentProfileReceipt>,
     callback: Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>,
+    decision_selection: Option<Arc<DecisionHandoffSelection>>,
 ) -> Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>> {
     let Some(source) = source else {
         return callback;
@@ -1719,6 +1874,27 @@ pub(crate) fn wrap_handoff_callback(
         return callback;
     };
     let callback_name = callback.tool_name().with_default_namespace();
+    if let Some(selection) = decision_selection {
+        let Some((name, _)) = profile
+            .declaration
+            .decision_handoffs
+            .iter()
+            .find(|(name, _)| {
+                ToolName::new(None, name.to_string()).with_default_namespace() == callback_name
+            })
+        else {
+            return callback;
+        };
+        return Arc::new(HandoffExecutor {
+            profiles: profiles.as_ref().clone(),
+            source: source.clone(),
+            name: name.clone(),
+            target: None,
+            decision_selection: Some(selection),
+            spec: callback.spec(),
+            callback: Some(callback),
+        });
+    }
     let Some((name, _)) = profile
         .declaration
         .handoff_callbacks
@@ -1736,7 +1912,8 @@ pub(crate) fn wrap_handoff_callback(
         profiles: profiles.as_ref().clone(),
         source: source.clone(),
         name: name.clone(),
-        target: target.clone(),
+        target: Some(target.clone()),
+        decision_selection: None,
         spec: callback.spec(),
         callback: Some(callback),
     })
@@ -1839,7 +2016,8 @@ impl ToolContributor for Contributor {
                     profiles: profiles.as_ref().clone(),
                     source: source.receipt.clone(),
                     name: name.clone(),
-                    target: target.clone(),
+                    target: Some(target.clone()),
+                    decision_selection: None,
                     spec,
                     callback: None,
                 })
@@ -1937,6 +2115,86 @@ mod tests {
             .validate_restored_handoff(&name, &saved, true)
             .unwrap_err();
         assert!(error.to_string().contains("live acceptance"));
+    }
+
+    #[test]
+    fn decision_handoff_roster_requires_exact_slot_and_captured_targets() {
+        let original = roster();
+        let mut raw = original.clone();
+        raw[0]["decision_handoffs"] = json!({});
+        assert_eq!(
+            fingerprint(&original.to_string(), "a").unwrap(),
+            fingerprint(&raw.to_string(), "a").unwrap()
+        );
+        raw[0]["decision_handoffs"] = json!({"lookup":{"slot":0,"targets":["b"]}});
+        let hash = fingerprint(&raw.to_string(), "a").unwrap();
+        assert_ne!(hash, fingerprint(&original.to_string(), "a").unwrap());
+        for declaration in [
+            json!({"slot":1,"targets":["b"]}),
+            json!({"slot":0,"targets":[]}),
+            json!({"slot":0,"targets":["missing"]}),
+            json!({"slot":0,"targets":["b","b"]}),
+        ] {
+            raw[0]["decision_handoffs"]["lookup"] = declaration;
+            assert!(fingerprint(&raw.to_string(), "a").is_err());
+        }
+    }
+
+    #[test]
+    fn decision_handoff_selection_is_call_scoped_and_rejects_unknown_targets() {
+        let selection = DecisionHandoffSelection {
+            targets: HashSet::from(["b".into()]),
+            selected: Mutex::new(BTreeMap::new()),
+        };
+        assert!(selection.record("turn", "call", "missing").is_err());
+        selection.record("turn", "call", "b").unwrap();
+        assert!(selection.take("other", "call").is_none());
+        assert!(selection.take("turn", "other").is_none());
+        assert_eq!(selection.take("turn", "call").as_deref(), Some("b"));
+        assert!(selection.take("turn", "call").is_none());
+    }
+
+    #[test]
+    fn decision_handoff_checkpoint_cannot_authorize_pending_transfer() {
+        let mut raw = roster();
+        raw[0]["handoffs"] = json!({});
+        raw[0]["decision_handoffs"] = json!({"lookup":{"slot":0,"targets":["b"]}});
+        let opening = OpeningProfiles {
+            root_id: "a".into(),
+            roster: serde_json::from_value(raw.clone()).unwrap(),
+            fingerprint: fingerprint(&raw.to_string(), "a").unwrap(),
+        };
+        let mut saved = codex_protocol::agent_profile::AgentProfileHandoff {
+            source: AgentProfileReceipt {
+                profile_id: "a".into(),
+                epoch: 0,
+            },
+            target_profile_id: "b".into(),
+            call_id: "call".into(),
+        };
+        let name = ToolName::new(None, "lookup");
+        opening
+            .validate_restored_handoff(&name, &saved, false)
+            .unwrap();
+        assert!(
+            opening
+                .validate_restored_handoff(&name, &saved, true)
+                .is_err()
+        );
+        assert!(
+            opening
+                .validate_pending_source(&AgentProfileReceipt {
+                    profile_id: "b".into(),
+                    epoch: 1
+                })
+                .is_err()
+        );
+        saved.target_profile_id = "a".into();
+        assert!(
+            opening
+                .validate_restored_handoff(&name, &saved, false)
+                .is_err()
+        );
     }
 
     #[test]

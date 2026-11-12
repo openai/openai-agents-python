@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         ConversationsHistory as ConversationsHistory,
         ConversationsWriteError as ConversationsWriteError,
     )
+    from .decision_handoff import DecisionHandoff as DecisionHandoff
     from .decisions import (
         DecisionError as DecisionError,
         DecisionInput as DecisionInput,
@@ -283,6 +284,7 @@ if TYPE_CHECKING:
         WebSearch as WebSearch,
     )
     from .turn import (
+        AcceptedTextChunk as AcceptedTextChunk,
         ChildTurn as ChildTurn,
         PendingRequests as PendingRequests,
         RequestAttemptCount as RequestAttemptCount,
@@ -530,7 +532,9 @@ _MODULES = {
     "ChildTurn": ".turn",
     "PendingRequests": ".turn",
     "RequestAttemptCount": ".turn",
+    "DecisionHandoff": ".decision_handoff",
     "RequestAttempts": ".turn",
+    "AcceptedTextChunk": ".turn",
     "SteeringReceipt": ".turn",
     "TurnNeedsAttention": ".turn",
     "ExecutorNetworkReceipt": ".turn_receipt",

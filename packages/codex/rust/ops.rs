@@ -655,7 +655,7 @@ pub async fn submit_replaceable_with_attempts(
         }
         if let Some(capture) = model_attempts {
             ensure!(
-                matches!(p.mode, Mode::StartIfIdle),
+                matches!(p.mode, Mode::StartIfIdle | Mode::ContinueIfIdle),
                 "Model attempt capture requires a new managed turn"
             );
             capture.seed(&mut init);
