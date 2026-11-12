@@ -4,6 +4,10 @@ import json
 import re
 from pathlib import Path
 
+from _agents_shared.sandbox_memory_artifacts import (
+    validate_rollout_artifacts as validate_rollout_artifacts,
+)
+
 from ...run_config import RunConfig
 from ..config import MemoryGenerateConfig
 from ..sandbox_agent import SandboxAgent
@@ -81,22 +85,6 @@ def render_phase_one_prompt(*, rollout_contents: str) -> str:
         terminal_metadata_json=terminal_metadata_json,
         rollout_contents=truncated_rollout_contents,
     )
-
-
-def validate_rollout_artifacts(artifacts: RolloutExtractionArtifacts) -> bool:
-    if (
-        artifacts.rollout_slug.strip() == ""
-        and artifacts.rollout_summary.strip() == ""
-        and artifacts.raw_memory.strip() == ""
-    ):
-        return False
-    if (
-        not artifacts.rollout_slug.strip()
-        or not artifacts.rollout_summary.strip()
-        or not artifacts.raw_memory.strip()
-    ):
-        raise ValueError("Phase 1 returned partially-empty memory artifacts.")
-    return True
 
 
 async def run_phase_one(

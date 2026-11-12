@@ -14,6 +14,7 @@ from agents import (
     InputGuardrail,
     Interaction,
     InteractionRequired,
+    LocalStorage,
     NativeError,
     NativeProvider,
     ProducedItem,
@@ -24,6 +25,57 @@ from agents import (
 )
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_manual_tools import LookupArgs
+
+
+async def test_produced_items_preserve_historical_local_shell(responses, tmp_path):
+    action = {
+        "type": "exec",
+        "command": ["printf", "historical"],
+        "working_directory": str(tmp_path),
+        "env": {"FIXTURE": "accepted"},
+        "timeout_ms": 4000,
+    }
+    call_id = "historical-shell-call"
+    item_id = "historical-shell-item"
+    event = {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "local_shell_call",
+            "id": item_id,
+            "call_id": call_id,
+            "status": "completed",
+            "action": action,
+        },
+    }
+    responses.respond(event, assistant_output("finished"))
+    responses.respond(event, assistant_output("finished"))
+    storage = LocalStorage(tmp_path / "legacy-shell-profile")
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-historical-shell"
+    ) as provider:
+        agent = Agent(instructions="Return the recorded result.", provider=provider)
+        result = await agent.run("finish", return_items=True)
+        async with agent.session(storage=storage) as session:
+            thread_id = session.id
+            await (await session.submit("finish")).get_result()
+        async with agent.session(storage=storage, resume=thread_id) as restored:
+            history = [record async for record in restored.items()]
+
+    assert result.final_output == "finished"
+    assert result.items is not None
+    assert [entry.item["type"] for entry in result.items] == ["local_shell_call", "message"]
+    assert result.items[0].agent is agent
+    item = result.items[0].item
+    assert item["type"] == "local_shell_call"
+    assert item["id"] == item_id
+    assert item["call_id"] == call_id
+    assert item["status"] == "completed"
+    assert {key: item["action"][key] for key in action} == action
+    restored_item = next(record for record in history if record["type"] == "local_shell_call")
+    assert {key: restored_item[key] for key in ("id", "call_id", "status", "action")} == {
+        key: item[key] for key in ("id", "call_id", "status", "action")
+    }
+    assert len(responses.requests) == 2
 
 
 async def test_produced_items_preserve_native_tool_failure_after_successful_turn(responses):

@@ -2644,6 +2644,26 @@ impl NativeThread {
             .map_err(py_error)
     }
 
+    #[pyo3(signature = (id, output, thread=None, instance=None, *, error=false))]
+    fn _reply_managed_agent_result(
+        &self,
+        id: u64,
+        output: Option<String>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Managed result callbacks require Python tools"))?;
+        tools
+            .reply_managed_agent_result(id, output, error, thread, instance)
+            .map_err(py_error)
+    }
+
     #[pyo3(signature = (id, summary, thread=None, instance=None, *, error=false, window_json=None, verified_provider_scope=false))]
     fn _reply_compaction(
         &self,

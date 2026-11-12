@@ -28,7 +28,7 @@ from contextlib import (
     contextmanager as contextmanager,
     suppress as suppress,
 )
-from contextvars import ContextVar as ContextVar, copy_context as copy_context
+from contextvars import Context as Context, ContextVar as ContextVar, copy_context as copy_context
 from copy import deepcopy as deepcopy
 from dataclasses import asdict as asdict, dataclass as dataclass, field as field, replace as replace
 from functools import partial as partial
@@ -58,6 +58,13 @@ from ._agent_profiles import (
     _capture_agent_graph,
     _check_handoff_tool_names,
     _python_tool_slot,
+)
+from ._callback_execution import (
+    _call_callback as _call_callback,
+    _call_callback_body as _call_callback_body,
+    _call_callback_entered as _call_callback_entered,
+    _FunctionBodyFailure as _FunctionBodyFailure,
+    _RecoverableFunctionCallback as _RecoverableFunctionCallback,
 )
 from ._compat import cancel_once as cancel_once, cancellation_requested
 from ._events import (
@@ -91,6 +98,7 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
+from ._managed_tool_stream import _ManagedToolPrefix, _ManagedToolStream
 from ._managed_workspace import (
     _SANDBOX_EVENTS_ATTRIBUTE,
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
@@ -224,6 +232,9 @@ from .native_agents import (
     ChildInvocation as ChildInvocation,
     ChildStepContext as ChildStepContext,
     NativeAgents as NativeAgents,
+    NativeRoleToolInvocation,
+    NativeRoleToolResult,
+    _native_agent_options,
 )
 from .native_interception import (
     Allow as Allow,
@@ -243,6 +254,7 @@ from .observation import (
     ExecutionItemCompleted as ExecutionItemCompleted,
     HostedToolCallProgress,
     ModelOutputItemCompleted,
+    Observation,
     OutputAccepted as OutputAccepted,
     OutputTextDelta as OutputTextDelta,
     RawProviderEvent as RawProviderEvent,
@@ -279,6 +291,12 @@ from .recovery import (
 )
 from .response_facts import _response_fact_record
 from .retry import _CombinedRetryPolicy
+from .sandbox_memory import (
+    _MAX_RECORDS as _MAX_MEMORY_RECORDS,
+    _MEMORY_OWNER_ATTRIBUTE,
+    _current_memory_owner,
+    _SandboxMemoryOwner,
+)
 from .schema import (
     OutputSpec as OutputSpec,
     OutputValidationError as OutputValidationError,
@@ -1212,6 +1230,7 @@ class _ChildCallbacks:
     run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     model_run_usage: _UsageCollector = field(default_factory=_UsageCollector, repr=False)
     observation_after: int = 0
+    managed_stream_prefix: _ManagedToolPrefix | None = field(default=None, repr=False)
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
@@ -1887,136 +1906,6 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
         if loop.time() >= deadline:
             raise first_error
         await asyncio.sleep(0.01)
-
-
-class _FunctionBodyFailure(Exception):
-    def __init__(self, original: Exception) -> None:
-        super().__init__("Function callback failed")
-        self.original = original
-
-
-@dataclass(frozen=True)
-class _RecoverableFunctionCallback:
-    callback: Callable[..., Any]
-
-
-async def _call_callback(
-    callback: Callable[..., Any] | _RecoverableFunctionCallback,
-    admit: Callable[[], bool],
-    /,
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    try:
-        return await _call_callback_entered(callback, admit, args, kwargs)
-    finally:
-        del callback, admit, args, kwargs
-
-
-async def _call_callback_entered(
-    callback: Callable[..., Any] | _RecoverableFunctionCallback,
-    admit: Callable[[], bool],
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    enter: Callable[[], None] | None = None,
-) -> Any:
-    try:
-        with _owned_span("callback", "callback"):
-            return await _call_callback_body(callback, admit, args, kwargs, enter)
-    finally:
-        # Release SDK-owned callback arguments only after the admitted body exits.
-        del callback, admit, args, kwargs, enter
-
-
-async def _call_callback_body(
-    callback: Callable[..., Any] | _RecoverableFunctionCallback,
-    admit: Callable[[], bool],
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    enter: Callable[[], None] | None = None,
-) -> Any:
-    """Run Python in its appropriate executor and retain ownership until exit."""
-    if isinstance(callback, _RecoverableFunctionCallback):
-        function = callback.callback
-        capture_error = True
-    else:
-        function = callback
-        capture_error = False
-    worker: asyncio.Future[Any] | None = None
-    value: Any = None
-    try:
-        if inspect.iscoroutinefunction(function):
-            if enter is not None:
-                if not admit():
-                    return None
-                enter()
-            try:
-                return await function(*args, **kwargs)
-            except Exception as error:
-                if capture_error:
-                    raise _FunctionBodyFailure(error) from error
-                raise
-        loop = asyncio.get_running_loop()
-
-        async def admission() -> bool:
-            # The asyncio and native ownership check belongs to the application's loop.
-            allowed = admit()
-            if allowed and enter is not None:
-                enter()
-            return allowed
-
-        def invoke_if_admitted() -> Any:
-            if asyncio.run_coroutine_threadsafe(admission(), loop).result():
-                try:
-                    return function(*args, **kwargs)
-                except Exception as error:
-                    if capture_error:
-                        raise _FunctionBodyFailure(error) from error
-                    raise
-            return None
-
-        worker = loop.run_in_executor(None, copy_context().run, invoke_if_admitted)
-        cancelled = None
-        while not worker.done():
-            try:
-                # Waiting must not cancel a running worker. A cancelled shield can
-                # also log the raw callback exception before its owner sanitizes it.
-                await asyncio.wait((worker,))
-            except asyncio.CancelledError as error:
-                cancelled = cancelled or error
-        value = worker.result()
-        if cancelled is not None:
-            # A synchronous wrapper may return a coroutine. Cancellation must
-            # not start that body after the callback's authority has expired.
-            if inspect.iscoroutine(value):
-                value.close()
-            raise cancelled
-        if inspect.isawaitable(value):
-            try:
-                allowed = admit()
-            except BaseException:
-                if inspect.iscoroutine(value):
-                    value.close()
-                raise
-            if not allowed:
-                # Declined work must not start the coroutine's body on the way out.
-                if inspect.iscoroutine(value):
-                    value.close()
-                return None
-            try:
-                return await value
-            except Exception as error:
-                if capture_error:
-                    raise _FunctionBodyFailure(error) from error
-                raise
-        return value
-    finally:
-        # Release SDK-owned callback arguments only after the admitted body exits.
-        args = ()
-        kwargs = {}
-        enter = None
-        callback = function = admit = cast(Any, None)
-        del worker, value
 
 
 _PROJECT_GUIDANCE_TOOL_NAMES = ("read_text_file", "view_image")
@@ -3250,6 +3139,8 @@ class _EnvironmentLease:
         self.interrupted = False
         self._workspace_instructions: str | None = None
         self._sandbox_events: _OperationObserver | None = None
+        self._sandbox_memory: _SandboxMemoryOwner | None = None
+        self._sandbox_memory_scope: Context | None = None
         self._owner = _create_task(self._hold(source))
 
     async def _hold(self, source: AbstractAsyncContextManager[Environment[Any]]) -> None:
@@ -3271,6 +3162,12 @@ class _EnvironmentLease:
                         "Native sandbox observations require a sandbox_environment source"
                     )
             self._sandbox_events = observer
+            memory = getattr(source, _MEMORY_OWNER_ATTRIBUTE, None)
+            if memory is not None:
+                if not isinstance(memory, _SandboxMemoryOwner):
+                    raise TypeError("Sandbox memory requires a native sandbox acquisition")
+                self._sandbox_memory = memory
+                self._sandbox_memory_scope = copy_context()
             self._ready.set_result(environment)
             try:
                 await asyncio.shield(self._retired)
@@ -4477,30 +4374,7 @@ class Session(Generic[ContextT, OutputT]):
                     "_input_error_tool_slots": restored_catalog.input_error_slots(
                         run_formatter=tool_error_formatter is not None
                     ),
-                    **(
-                        {
-                            "_native_agent_roles": [
-                                role.name for role in native_agents.additional_roles
-                            ],
-                            "_native_agent_max_depth": native_agents.max_depth,
-                            **(
-                                {
-                                    "_native_agent_tools": [
-                                        {
-                                            "name": tool.name,
-                                            "role": tool.role,
-                                            "description": tool.description,
-                                        }
-                                        for tool in native_agents.managed_tools
-                                    ],
-                                }
-                                if native_agents.managed_tools
-                                else {}
-                            ),
-                        }
-                        if native_agents is not None
-                        else {}
-                    ),
+                    **_native_agent_options(native_agents),
                     "tool_policy": {
                         "allowed_mcp_tools": [
                             [server.name, raw, ref]
@@ -4786,7 +4660,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._project_guidance = project_guidance
                 if executor is not None and executor.writable_roots is not None:
                     session._writable_roots = _writable_roots(executor.writable_roots)
-                session._native_agents = native_agents
+                session._bind_native_agents(native_agents)
                 session._storage = storage
                 if checkpoint is not None:
                     await session._restore_opening_checkpoint(
@@ -4930,7 +4804,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._restore_remembered_approvals(remembered_approvals)
                 session._start_readers()
                 opening.disown(session)
-                session._environment_lease = lease
+                session._attach_environment_lease(lease, state=state, resume=resume)
                 return session
             except BaseException as error:
                 _normalize_opening_error(error, opening.api_key)
@@ -5130,6 +5004,8 @@ class Session(Generic[ContextT, OutputT]):
         self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
         self._sandbox_events: _OperationObserver | None = None
+        self._memory_flush: asyncio.Task[None] | None = None
+        self._memory_restored = False
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
@@ -5207,6 +5083,7 @@ class Session(Generic[ContextT, OutputT]):
         self._writable_roots: tuple[str, ...] | None = None
         self._executor_termination_attempted = False
         self._native_agents: NativeAgents[Any] | None = None
+        self._managed_tool_streams: dict[str, _ManagedToolStream] = {}
         self._interception: _NativeInterception | None = None
         self._input_guardrails: tuple[InputGuardrail[Any], ...] = ()
         self._output_guardrails: tuple[OutputGuardrail[Any], ...] = ()
@@ -6472,6 +6349,11 @@ class Session(Generic[ContextT, OutputT]):
             if invocation.active and invocation.session is self:
                 raise RuntimeError(f"A tool callback cannot {operation}")
             invocation = invocation.parent
+        memory = _current_memory_owner()
+        if memory is not None:
+            lease = self._environment_lease
+            if lease is not None and lease._sandbox_memory is memory:
+                raise RuntimeError(f"A sandbox memory phase cannot {operation}")
 
     def _check_graph_admission(self) -> None:
         if self._graph_interrupts:
@@ -8182,6 +8064,60 @@ class Session(Generic[ContextT, OutputT]):
             )
         return tuple(produced)
 
+    def _attach_environment_lease(
+        self,
+        lease: _EnvironmentLease | None,
+        *,
+        state: SessionState | ManagedWorkspaceCheckpoint | None,
+        resume: str | None,
+    ) -> None:
+        self._environment_lease = lease
+        self._memory_restored = state is not None or resume is not None
+
+    async def flush_memory(self) -> None:
+        """Generate memory for the acquired sandbox from a successful settled text turn.
+
+        Configure memory on sandbox_environment. Concurrent callers share the same
+        flush, and the same history revision generates once. Restored Sessions and
+        non-text histories are outside this generation path.
+        """
+        self._check_callback_operation("flush sandbox memory on its source Session")
+        lease = self._environment_lease
+        memory = lease._sandbox_memory if lease is not None else None
+        active_memory = _current_memory_owner()
+        if (
+            memory is not None
+            and active_memory is not None
+            and active_memory._flush_lock is memory._flush_lock
+        ):
+            raise NativeError("A memory phase cannot flush another Session in the same sandbox")
+        pending = self._memory_flush
+        if pending is not None:
+            await asyncio.shield(pending)
+            return
+        self._check_idle_update()
+        if lease is None or memory is None:
+            raise TypeError("Configure memory on sandbox_environment before flushing")
+        if self._memory_restored:
+            raise NativeError("Native sandbox memory is unavailable on restored Sessions")
+        turn = self._last_turn
+        if turn is None:
+            raise NativeError("Native sandbox memory requires a successful source turn")
+        scope = lease._sandbox_memory_scope
+        assert scope is not None
+
+        async def flush() -> None:
+            await turn.get_result()
+            snapshot = await self._read_canonical_history(_MAX_MEMORY_RECORDS, for_replay=True)
+            await memory.flush(self.id, snapshot)
+
+        pending = scope.copy().run(_create_task, flush())
+        self._memory_flush = pending
+        try:
+            await self._join_mutation(pending)
+        finally:
+            self._memory_flush = None
+
     async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
         """Original JSON object records from an idle Session.
 
@@ -8202,15 +8138,19 @@ class Session(Generic[ContextT, OutputT]):
         ):
             raise ValueError("limit must be a nonnegative integer or None")
 
-        async def capture() -> CanonicalHistorySnapshot:
-            value = json.loads(await self._native._canonical_history(limit, for_replay))
-            return CanonicalHistorySnapshot(
-                value["revision"],
-                value["total"],
-                tuple(json.loads(item) for item in value["items"]),
-            )
+        return await self._join_mutation(
+            asyncio.create_task(self._read_canonical_history(limit, for_replay=for_replay))
+        )
 
-        return await self._join_mutation(asyncio.create_task(capture()))
+    async def _read_canonical_history(
+        self, limit: int | None, *, for_replay: bool
+    ) -> CanonicalHistorySnapshot:
+        value = json.loads(await self._native._canonical_history(limit, for_replay))
+        return CanonicalHistorySnapshot(
+            value["revision"],
+            value["total"],
+            tuple(json.loads(item) for item in value["items"]),
+        )
 
     def _start_raw_usage_on_restore(
         self, agent: Agent[Any, Any] | None, state: SessionState | None
@@ -10105,6 +10045,7 @@ class Session(Generic[ContextT, OutputT]):
             state.stopping = True
             for callback in state.callbacks:
                 cancel_once(callback)
+            await self._join_managed_child_stream(state)
             await asyncio.shield(state.completion)
             if state.cleanup_error is None and confirmed is True:
                 return True
@@ -11584,6 +11525,18 @@ class Session(Generic[ContextT, OutputT]):
                 ChildInvocation(self.id, child_id, instance, turn_id),
                 observation_after=self._observations.sequence,
             )
+            if turn_id not in self._managed_tool_streams:
+                limits = [
+                    tool.on_stream_max_pending_events
+                    for tool in self._native_agents.managed_tools
+                    if tool.on_stream is not None
+                ]
+                if limits:
+                    state.managed_stream_prefix = _ManagedToolPrefix(
+                        None
+                        if None in limits
+                        else max(limit for limit in limits if limit is not None)
+                    )
             self._child_callbacks[key] = state
             self._observations.append(
                 TurnStarted(
@@ -11604,6 +11557,13 @@ class Session(Generic[ContextT, OutputT]):
             )
             state.request_keys.append(json.dumps({name: request[name] for name in fields}))
         return state
+
+    async def _join_managed_child_stream(self, state: _ChildCallbacks) -> None:
+        state.managed_stream_prefix = None
+        stream = self._managed_tool_streams.get(state.handle.turn_id)
+        if stream is not None and stream.submission_id == state.handle.submission_id:
+            stream.abort()
+            await asyncio.gather(stream.task, return_exceptions=True)
 
     async def _stop_child_callback_owner(self, state: _ChildCallbacks) -> None:
         state.stopping = True
@@ -11636,6 +11596,7 @@ class Session(Generic[ContextT, OutputT]):
                 if await self._native._cancel_child_turn(native) is None:
                     raise NativeError("Child cancellation cleanup failed")
         finally:
+            await self._join_managed_child_stream(state)
             if state.policy_stop and not self._closing:
                 if state.native_instance is None:
                     raise NativeError("Stopped child has no native incarnation receipt")
@@ -11782,6 +11743,270 @@ class Session(Generic[ContextT, OutputT]):
                 else None,
             )
         )
+
+    def _bind_native_agents(self, declaration: NativeAgents[Any] | None) -> None:
+        self._native_agents = declaration
+        if declaration is not None and any(
+            tool.on_stream is not None for tool in declaration.managed_tools
+        ):
+            self._observations.on_record = weakref.WeakMethod(self._observe_managed_tool)
+
+    def _observe_managed_tool(self, event: Observation) -> None:
+        stream = self._managed_tool_streams.get(getattr(event, "turn_id", ""))
+        if stream is None:
+            for child in self._child_callbacks.values():
+                if (
+                    child.handle.turn_id == getattr(event, "turn_id", None)
+                    and child.handle.submission_id == getattr(event, "submission_id", None)
+                    and child.managed_stream_prefix is not None
+                ):
+                    if isinstance(event, TurnFinished):
+                        child.managed_stream_prefix = None
+                    else:
+                        child.managed_stream_prefix.append(event)
+                    break
+            return
+        if getattr(event, "submission_id", None) != stream.submission_id:
+            return
+        stream.append(event)
+        if isinstance(event, TurnFinished):
+            stream.finish()
+
+    def _register_managed_tool_stream(self, event: dict[str, Any]) -> None:
+        message = event["msg"]
+        if self._closing or self._native_agents is None:
+            return
+        child_id, instance = event.get("subagent_id"), event.get("subagent_incarnation")
+        child_turn = message["child_turn_id"]
+        if (
+            not child_id
+            or not instance
+            or child_id != message["child_thread_id"]
+            or child_turn != event["id"]
+            or child_turn in self._managed_tool_streams
+        ):
+            return
+        tool = next(
+            (
+                tool
+                for tool in self._native_agents.managed_tools
+                if tool.name == message["tool_name"] and tool.role == message["role"]
+            ),
+            None,
+        )
+        if tool is None or tool.on_stream is None:
+            return
+        parent_thread, parent_turn = message["parent_thread_id"], message["parent_turn_id"]
+        parent = (
+            self._active
+            if parent_thread == self.id
+            else next(
+                (
+                    owner
+                    for owner in self._child_callbacks.values()
+                    if owner.handle.child_id == parent_thread
+                    and owner.handle.turn_id == parent_turn
+                    and not owner.stopping
+                ),
+                None,
+            )
+        )
+        if (
+            parent is None
+            or parent.handle is None
+            or parent.handle.turn_id != parent_turn
+            or parent.stopping
+            or parent.failure.done()
+        ):
+            return
+        invocation: NativeRoleToolInvocation = {
+            "tool_name": tool.name,
+            "role": tool.role,
+            "input": message["input"],
+            "native_call_id": message["native_call_id"],
+            "parent_thread_id": parent_thread,
+            "parent_turn_id": parent_turn,
+            "child_thread_id": child_id,
+            "child_turn_id": child_turn,
+            "cell_id": message["cell_id"],
+            "runtime_tool_call_id": message["runtime_tool_call_id"],
+        }
+        callback = tool.on_stream
+        tracing_owner = parent if isinstance(parent, _Submission) else self._active
+        if isinstance(parent, _ChildCallbacks) and (
+            tracing_owner is None
+            or parent.root_turn_id is None
+            or self._usage_roots.get(parent.root_turn_id) is not tracing_owner.run_usage
+        ):
+            tracing_owner = None
+        tracing_context = (
+            tracing_owner.tracing.context
+            if tracing_owner is not None and tracing_owner.tracing is not None
+            else None
+        )
+
+        def admitted() -> bool:
+            return not (
+                self._closing
+                or self._closed
+                or parent.stopping
+                or parent.failure.done()
+                or parent.completion.done()
+            )
+
+        async def observe(value: Any) -> None:
+            guard = _Invocation(self)
+            token = _invocation.set(guard)
+            try:
+                if admitted():
+                    with _owned_span("managed stream callback", "callback", tracing_context):
+                        await _call_callback(callback, admitted, value)
+            finally:
+                guard.active = False
+                _invocation.reset(token)
+
+        def overflow() -> None:
+            child = self._child_callbacks.get((child_id, instance, child_turn))
+            if child is not None:
+                parent.add_callback(asyncio.create_task(self._stop_child_callback_owner(child)))
+
+        stream = _ManagedToolStream(
+            invocation,
+            ChildInvocation(self.id, child_id, instance, child_turn).submission_id,
+            observe,
+            tool.on_stream_max_pending_events,
+            overflow,
+            admit=admitted,
+        )
+        self._managed_tool_streams[child_turn] = stream
+        parent.add_callback(stream.task)
+
+        def retired(task: asyncio.Task[None]) -> None:
+            if (parent.stopping or parent.failure.done()) and self._managed_tool_streams.get(
+                child_turn
+            ) is stream:
+                self._managed_tool_streams.pop(child_turn)
+
+        stream.task.add_done_callback(retired)
+        child = self._child_callbacks.get((child_id, instance, child_turn))
+        if child is not None and child.managed_stream_prefix is not None:
+            prefix, child.managed_stream_prefix = child.managed_stream_prefix, None
+            prefix.replay(stream)
+        self._child_callback_state(child_id, instance, child_turn)
+        self._observations.notify()
+
+    async def _managed_agent_result(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        output = None
+        failed = True
+        stream = None
+        guard = _Invocation(self)
+        token = _invocation.set(guard)
+
+        def admitted() -> bool:
+            return not (
+                self._closing
+                or self._closed
+                or state.stopping
+                or state.failure.done()
+                or state.completion.done()
+                or _native_callback_cancelled(state)
+            )
+
+        try:
+            self._native._check_step(message["step_id"], message["thread"], message["instance"])
+            if not admitted() or self._native_agents is None:
+                return
+            self._catalog_for_message(message, message["generation"])
+            tool = next(
+                (
+                    tool
+                    for tool in self._native_agents.managed_tools
+                    if tool.name == message["tool_name"]["name"] and tool.role == message["role"]
+                ),
+                None,
+            )
+            if tool is None or (tool.on_stream is None and tool.extract_result is None):
+                raise NativeError("Managed role result callback is unavailable")
+            if tool.on_stream is not None:
+                while stream is None:
+                    changed = self._observations.changed
+                    stream = self._managed_tool_streams.get(message["child_turn_id"])
+                    if stream is not None:
+                        break
+                    if not admitted():
+                        raise asyncio.CancelledError()
+                    # The native result and child FIFO use separate delivery channels.
+                    # Keep reading events while this owned callback awaits its marker.
+                    await changed.wait()
+                origin = stream.invocation
+                source = message["source"]
+                if (
+                    origin["parent_thread_id"] != message["thread"]
+                    or origin["parent_turn_id"] != message["turn_id"]
+                    or origin["native_call_id"] != message["call_id"]
+                    or origin["child_thread_id"] != message["child_thread_id"]
+                    or origin["cell_id"] != source.get("cell_id")
+                    or origin["runtime_tool_call_id"] != source.get("runtime_tool_call_id")
+                ):
+                    raise NativeError("Managed child stream does not match its native owner")
+                await stream.drain()
+            if not admitted():
+                raise asyncio.CancelledError()
+            status = message["child_status"]
+            if (
+                tool.extract_result is not None
+                and isinstance(status, dict)
+                and "completed" in status
+            ):
+                if message["items"] is None or message["items_error"] is not None:
+                    raise NativeError("Managed child items are unavailable")
+                _, items = project_history(
+                    [
+                        {"type": "turn_context", "payload": {"turn_id": message["child_turn_id"]}},
+                        *(entry["record"] for entry in message["items"]),
+                    ],
+                    message["child_thread_id"],
+                    tool_success_by_record={
+                        index + 1: entry["tool_success"]
+                        for index, entry in enumerate(message["items"])
+                        if isinstance(entry.get("tool_success"), bool)
+                    },
+                )
+                completion = message["tool_completion"]
+                result: NativeRoleToolResult = {
+                    "role": tool.role,
+                    "thread_id": message["child_thread_id"],
+                    "turn_id": message["child_turn_id"],
+                    "items": tuple(items),
+                    "final_output": completion["final_output"]
+                    if completion is not None
+                    else status["completed"] or "",
+                }
+                with _owned_span(
+                    "managed result callback", "callback", message.get("tracing_context")
+                ):
+                    output = await _call_callback(tool.extract_result, admitted, result)
+                if not isinstance(output, str):
+                    raise TypeError("extract_result must return a string")
+            failed = False
+        except Exception:
+            # Native returns a sanitized tool-local failure and keeps the parent usable.
+            output = None
+        finally:
+            guard.active = False
+            _invocation.reset(token)
+            if (
+                stream is not None
+                and self._managed_tool_streams.get(message["child_turn_id"]) is stream
+            ):
+                self._managed_tool_streams.pop(message["child_turn_id"])
+            try:
+                self._native._reply_managed_agent_result(
+                    message["step_id"], output, message["thread"], message["instance"], error=failed
+                )
+            except RuntimeError:
+                # The original native invocation can retire before its queued reply.
+                pass
 
     async def _read_child_event(self, event: dict[str, Any]) -> None:
         if self._closing:
@@ -13766,6 +13991,7 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_before_complete": self._before_complete,
             "_sdk_tool_completion": self._propose_tool_completion,
             "_sdk_tool_batch_completion": self._propose_tool_completion,
+            "_sdk_managed_agent_result": self._managed_agent_result,
         }
         reader_failure: BaseException | None = None
         manual_shutdown = False
@@ -13879,6 +14105,9 @@ class Session(Generic[ContextT, OutputT]):
                         failed.terminal.set_result(message)
                     self._broken = True
                     self._observations.notify()
+                    continue
+                if message.get("type") == "sdk_managed_tool_started":
+                    self._register_managed_tool_stream(event)
                     continue
                 if message.get("type") == "sdk_subagent_lifecycle":
                     self._observations.append(
@@ -15948,7 +16177,11 @@ class Session(Generic[ContextT, OutputT]):
         return await self._join_mutation(asyncio.create_task(write()))
 
     async def suspend_workspace(self) -> ManagedWorkspaceCheckpoint:
-        """Retire this owned sandbox Session and capture its paired workspace."""
+        """Retire this owned sandbox Session and capture its paired workspace.
+
+        Configured memory finishes generating for a successful settled turn
+        before workspace capture begins.
+        """
         self._check_loop()
         self._check_callback_operation("suspend its managed workspace")
         managed = self._managed_workspace
@@ -15969,10 +16202,33 @@ class Session(Generic[ContextT, OutputT]):
             for child in self._child_callbacks.values()
         ):
             raise SessionBusyError("Managed capture requires settled child continuations")
+        lease = self._environment_lease
+        memory_turn = (
+            self._last_turn
+            if active is None
+            and not self._memory_restored
+            and lease is not None
+            and lease._sandbox_memory is not None
+            else None
+        )
         # Intent precedes export, so racing close cannot skip provider serialization.
-        managed.capture_requested = True
+        managed.capture_requested = memory_turn is None
 
         async def retire() -> ManagedWorkspaceCheckpoint:
+            if memory_turn is not None:
+                try:
+                    try:
+                        await memory_turn.get_result()
+                    except Exception:
+                        # A failed source turn has no completed memory to generate.
+                        pass
+                    else:
+                        await self.flush_memory()
+                    self._check_open()
+                except BaseException:
+                    managed.capture_task = None
+                    raise
+                managed.capture_requested = True
             try:
                 state = await self._checkpoint(active, managed_retire=True)
             except BaseException as error:
@@ -16650,6 +16906,10 @@ class Session(Generic[ContextT, OutputT]):
             self._owned_provider = None
         self._model_api_key = None
         self._native_options = None
+        for stream in self._managed_tool_streams.values():
+            stream.abort()
+        self._managed_tool_streams.clear()
+        self._observations.on_record = None
         self._model_context_snapshots.clear()
         self._profile_catalogs.clear()
         self._catalog_bindings.clear()
@@ -16694,7 +16954,7 @@ class Session(Generic[ContextT, OutputT]):
             engine_closed = False
             try:
                 if self._mutation is not None:
-                    if self._mutation_cancellable:
+                    if self._mutation_cancellable or self._mutation is self._memory_flush:
                         cancel_once(self._mutation)
                     await asyncio.gather(self._mutation, return_exceptions=True)
                 if self._checkpoint_task is not None:

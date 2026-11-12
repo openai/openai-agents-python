@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import MemoryLayoutConfig
-from ..errors import WorkspaceReadNotFoundError
+from ..errors import WorkspaceArchiveReadError, WorkspaceReadNotFoundError
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..workspace_paths import sandbox_path_str
 
@@ -64,9 +64,18 @@ class PhaseTwoInputSelection:
 class SandboxMemoryStorage:
     """Read and write sandbox memory files using a configured layout."""
 
-    def __init__(self, *, session: BaseSandboxSession, layout: MemoryLayoutConfig) -> None:
+    def __init__(
+        self,
+        *,
+        session: BaseSandboxSession,
+        layout: MemoryLayoutConfig,
+        bounded: bool = False,
+    ) -> None:
+        if bounded:
+            session._check_memory_write_support()
         self._session = session
         self._layout = layout
+        self._bounded = bounded
         self._layout_lock = asyncio.Lock()
 
     @property
@@ -95,17 +104,27 @@ class SandboxMemoryStorage:
 
     async def ensure_layout(self) -> None:
         async with self._layout_lock:
-            await asyncio.gather(
-                self._session.mkdir(self.sessions_dir, parents=True),
-                self._session.mkdir(self.memories_dir, parents=True),
-                self._session.mkdir(self.memories_dir / "raw_memories", parents=True),
-                self._session.mkdir(self.memories_dir / "rollout_summaries", parents=True),
-                self._session.mkdir(self.memories_dir / "skills", parents=True),
+            directories = (
+                self.sessions_dir,
+                self.memories_dir,
+                self.memories_dir / "raw_memories",
+                self.memories_dir / "rollout_summaries",
+                self.memories_dir / "skills",
             )
+            if self._bounded:
+                for directory in directories:
+                    await self._session._mkdir_memory_directory(directory)
+            else:
+                await asyncio.gather(
+                    *(self._session.mkdir(directory, parents=True) for directory in directories)
+                )
             await self.ensure_text_file(self.memories_dir / "MEMORY.md")
             await self.ensure_text_file(self.memories_dir / "memory_summary.md")
 
     async def ensure_text_file(self, path: Path) -> None:
+        if self._bounded:
+            await self._session._ensure_memory_file(path)
+            return
         absolute = self._session.normalize_path(path)
         exists = await self._session.exec("test", "-f", sandbox_path_str(absolute), shell=False)
         if exists.ok():
@@ -113,6 +132,11 @@ class SandboxMemoryStorage:
         await self._session.write(path, io.BytesIO(b""))
 
     async def read_text(self, path: Path) -> str:
+        if self._bounded:
+            payload = await self._session._read_memory_file(path, max_bytes=1_000_001)
+            if len(payload) > 1_000_000:
+                raise ValueError("Sandbox memory file exceeds 1000000 bytes")
+            return decode_payload(payload)
         handle = await self._session.read(path)
         try:
             return decode_payload(handle.read())
@@ -120,7 +144,11 @@ class SandboxMemoryStorage:
             handle.close()
 
     async def write_text(self, path: Path, text: str) -> None:
-        await self._session.write(path, io.BytesIO(text.encode("utf-8")))
+        payload = io.BytesIO(text.encode("utf-8"))
+        if self._bounded:
+            await self._session._write_memory_file(path, payload)
+        else:
+            await self._session.write(path, payload)
 
     async def build_phase_two_input_selection(
         self,
@@ -200,11 +228,15 @@ class SandboxMemoryStorage:
         await self.write_text(self.phase_two_selection_path, json.dumps(payload, indent=2) + "\n")
 
     async def _list_current_selection_items(self) -> list[PhaseTwoSelectionItem]:
-        try:
-            entries = await self._session.ls(self.raw_memories_dir)
-        except Exception:
-            return []
-
+        if self._bounded:
+            entries = await self._session._ls_bounded(self.raw_memories_dir, max_entries=1025)
+            if len(entries) > 1024:
+                raise ValueError("Sandbox memory directory exceeds 1024 entries")
+        else:
+            try:
+                entries = await self._session.ls(self.raw_memories_dir)
+            except Exception:
+                return []
         items: list[tuple[tuple[int, str], str, PhaseTwoSelectionItem]] = []
         for entry in entries:
             if entry.is_dir():
@@ -213,11 +245,20 @@ class SandboxMemoryStorage:
             if path.suffix != ".md":
                 continue
             try:
-                raw_memory = (await self.read_text(self.raw_memories_dir / path.name)).rstrip("\n")
+                candidate = self.raw_memories_dir / path.name
+                if self._bounded:
+                    header = await self._session._read_memory_file(candidate, max_bytes=8192)
+                    raw_memory = decode_payload(header)
+                else:
+                    raw_memory = (await self.read_text(candidate)).rstrip("\n")
             except (FileNotFoundError, WorkspaceReadNotFoundError):
                 continue
+            except WorkspaceArchiveReadError:
+                if self._bounded:
+                    continue
+                raise
             item = _extract_selection_item(raw_memory)
-            if item is None:
+            if item is None or (self._bounded and item.rollout_id != path.stem):
                 continue
             items.append((_updated_at_sort_key(raw_memory), item.rollout_id, item))
         items.sort(key=lambda item: (item[0], item[1]), reverse=True)

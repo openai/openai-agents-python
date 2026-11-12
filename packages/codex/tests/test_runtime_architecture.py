@@ -261,6 +261,14 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     "agents.classic.sandbox.session.sinks",
                 }:
                     continue
+                # Native memory shares provider storage and paths while its phases run in Core.
+                if relative.as_posix() == "sandbox_memory" and target in {
+                    "agents.classic.sandbox.errors",
+                    "agents.classic.sandbox.memory.storage",
+                    "agents.classic.sandbox.session.sandbox_session",
+                    "agents.classic.sandbox.workspace_paths",
+                }:
+                    continue
                 if target and (target == "agents" or target.startswith("agents.")):
                     if (target.endswith("._native") and target != "agents._native") or not (
                         target == "_agents_codex"

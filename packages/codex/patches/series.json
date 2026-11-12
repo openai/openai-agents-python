@@ -867,7 +867,11 @@
     {
       "path": "sdk-hosted-mcp-request-risk.patch",
       "sha256": "97969b9079517f3ec4fc6e3ecfcb158d8d994384de19b646801174d1c9d050bc"
+    },
+    {
+      "path": "sdk-native-managed-agent-result.patch",
+      "sha256": "c4a96bdf440d6796107f96fd57b48d5b9648751ad287740c846dfced2a60341e"
     }
   ],
-  "result_tree": "1967c8622e507da5635c96306f199b45fcae67cf"
+  "result_tree": "ca48b11a1af84cb5c6a4b99cf4cf44207904d116"
 }

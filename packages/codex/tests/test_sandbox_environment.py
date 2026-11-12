@@ -1267,3 +1267,26 @@ async def test_cancelled_gateway_cannot_publish_late_workspace_guidance() -> Non
         await opening
     assert lease._workspace_instructions is None
     assert client.events == ["create", "start", "close", "delete"]
+
+
+def test_sandbox_state_equality_ignores_memory_lock_identity() -> None:
+    original = scripted_sandbox_session(manifest=Manifest(root="/workspace")).state
+    state_type = type(original)
+    reconstructed = state_type.model_validate(original.model_dump())
+    restored = state_type.model_validate_json(original.model_dump_json())
+    assert reconstructed == original
+    assert restored == original
+    assert reconstructed._native_memory_flush_lock is not original._native_memory_flush_lock
+    for deep in (False, True):
+        copied = original.model_copy(deep=deep)
+        assert copied == original
+        assert copied._native_memory_flush_lock is original._native_memory_flush_lock
+    assert original.model_copy(update={"workspace_root_ready": True}) != original
+    for name, value in (
+        ("_path_grants_require_rebind", ("data",)),
+        ("_mount_authority_redacted", True),
+        ("_mount_authority_rebound", True),
+    ):
+        changed = original.model_copy()
+        setattr(changed, name, value)
+        assert changed != original

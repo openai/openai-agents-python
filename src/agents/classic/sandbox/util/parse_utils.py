@@ -1,10 +1,15 @@
+import io
+
 from ..files import EntryKind, FileEntry
 from ..types import Permissions
 
 
-def parse_ls_la(output: str, *, base: str) -> list[FileEntry]:
+def parse_ls_la(output: str, *, base: str, max_entries: int | None = None) -> list[FileEntry]:
     entries: list[FileEntry] = []
-    for raw_line in output.splitlines():
+    lines = output.splitlines() if max_entries is None else io.StringIO(output)
+    for raw_line in lines:
+        if max_entries is not None and len(entries) >= max_entries:
+            break
         line = raw_line.strip("\n")
         if not line or line.startswith("total"):
             continue
