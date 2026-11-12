@@ -681,6 +681,57 @@ class _ToolCatalog:
         return json.dumps([json.loads(tool.spec_json) for tool in self.tools])
 
 
+def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
+    kind = spec.get("type")
+    if kind == "applyPatch":
+        return ToolRef("apply_patch")
+    if kind in ("computer", "shell"):
+        return ToolRef(kind)
+    if kind == "toolSearch":
+        return ToolRef("tool_search")
+    if kind == "namespace":
+        tools = spec.get("tools")
+        if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
+            return None
+        namespace = spec.get("name")
+        name = tools[0].get("name")
+        if isinstance(namespace, str) and isinstance(name, str):
+            return ToolRef(name, namespace)
+    else:
+        name = spec.get("name")
+        if isinstance(name, str):
+            return ToolRef(name)
+    return None
+
+
+def _restore_python_catalog(
+    catalog: _ToolCatalog, specs: Sequence[Mapping[str, Any]]
+) -> _ToolCatalog:
+    # Use saved order with current bindings. Native rejects unknown or duplicate
+    # specs when comparing the complete catalogs.
+    by_ref = {tool._ref: tool for tool in catalog.tools}
+    refs = dict.fromkeys(map(_saved_python_ref, specs))
+    return _ToolCatalog(
+        catalog.generation, tuple(by_ref[ref] for ref in refs if ref is not None and ref in by_ref)
+    )
+
+
+def _restore_operation_slots(
+    catalog: _ToolCatalog,
+    selected: Sequence[FunctionTool[Any, Any, Any]],
+    pending_names: Sequence[str],
+) -> tuple[int, ...]:
+    available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
+    if any(tool.ref not in available for tool in selected):
+        raise ValueError("Saved operation names tools outside its native generation")
+    manual_names = {
+        tool.name for tool in selected if tool._bind is None or tool.needs_approval is not False
+    }
+    if any(name not in manual_names for name in pending_names):
+        raise ValueError("Saved operation does not admit its pending manual tools")
+    return tuple(available[tool.ref] for tool in selected)
+
+
 def _capture_tools(
     generation: int,
     tools: tuple[FunctionTool[Any, Any, Any], ...],
@@ -692,6 +743,9 @@ def _capture_tools(
     )
 
 
+_saved_python_ref.__module__ = "agents.session"
+_restore_python_catalog.__module__ = "agents.session"
+_restore_operation_slots.__module__ = "agents.session"
 _capture_tools.__module__ = "agents.session"
 
 
