@@ -56,6 +56,38 @@ _PtyEntryT = TypeVar("_PtyEntryT")
 _RUNTIME_HELPER_CACHE_KEY_UNSET = object()
 _WORKSPACE_ROOT_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_TIMEOUT_S = 10.0
+_READ_MEMORY_FILE_SCRIPT = """
+import os
+import stat
+import sys
+
+root, path, max_bytes = sys.argv[1:]
+parts = path.split("/")
+if any(part in ("", ".", "..") for part in parts):
+    sys.exit(45)
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+try:
+    parent = os.open(root, directory_flags)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, directory_flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        fd = os.open(
+            parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+        )
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                sys.exit(45)
+            payload = stream.read(int(max_bytes))
+    finally:
+        os.close(parent)
+except FileNotFoundError:
+    sys.exit(44)
+except OSError:
+    sys.exit(45)
+sys.stdout.buffer.write(payload)
+"""
 _READ_PATH_PROBE_SCRIPT = """
 # READ_PATH_PROBE_V3
 LC_ALL=C
@@ -1005,6 +1037,36 @@ class BaseSandboxSession(abc.ABC):
             return bytes(result)
         finally:
             stream.close()
+
+    async def _read_memory_file(self, path: Path, *, max_bytes: int) -> bytes:
+        """Read a bounded regular file beneath the workspace without following links."""
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        policy = self._workspace_path_policy()
+        relative = policy.relative_path(path)
+        result = None
+        try:
+            # Use image-owned Python and disable workspace and environment import paths.
+            result = await self.exec(
+                "/bin/sh",
+                "-c",
+                'PATH=/usr/bin:/bin; export PATH; exec python3 -I -S -c "$@"',
+                "sh",
+                _READ_MEMORY_FILE_SCRIPT,
+                policy.sandbox_root().as_posix(),
+                relative.as_posix(),
+                str(max_bytes),
+                shell=False,
+                timeout=30.0,
+            )
+        except Exception:
+            # Provider exceptions can retain output. Use the payload-free error below.
+            pass
+        if result is not None and result.exit_code == 44:
+            raise WorkspaceReadNotFoundError(path=path)
+        if result is None or not result.ok() or len(result.stdout) > max_bytes:
+            raise WorkspaceArchiveReadError(path=path)
+        return result.stdout
 
     @abc.abstractmethod
     async def write(

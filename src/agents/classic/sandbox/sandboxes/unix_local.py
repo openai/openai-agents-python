@@ -1215,6 +1215,20 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
         return self._files.read_bounded(self.normalize_path(path), max_bytes)
 
+    async def _read_memory_file(self, path: Path, *, max_bytes: int) -> bytes:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        relative = self._workspace_path_policy().relative_path(path)
+        # Resolve the configured workspace root only. The reader opens every descendant
+        # component without following links.
+        workspace_path = self.normalize_path(Path(".")) / relative
+        try:
+            return self._files.read_bounded(workspace_path, max_bytes)
+        except FileNotFoundError:
+            raise WorkspaceReadNotFoundError(path=path) from None
+        except OSError:
+            raise WorkspaceArchiveReadError(path=path) from None
+
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:
             await self._check_read_with_exec(path, user=user)

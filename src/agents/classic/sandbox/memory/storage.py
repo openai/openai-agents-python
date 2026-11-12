@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import MemoryLayoutConfig
-from ..errors import WorkspaceReadNotFoundError
+from ..errors import WorkspaceArchiveReadError, WorkspaceReadNotFoundError
 from ..session.base_sandbox_session import BaseSandboxSession
 from ..workspace_paths import sandbox_path_str
 
@@ -121,7 +121,7 @@ class SandboxMemoryStorage:
 
     async def read_text(self, path: Path) -> str:
         if self._bounded:
-            payload = await self._session.read_bounded(path, max_bytes=1_000_001)
+            payload = await self._session._read_memory_file(path, max_bytes=1_000_001)
             if len(payload) > 1_000_000:
                 raise ValueError("Sandbox memory file exceeds 1000000 bytes")
             return decode_payload(payload)
@@ -231,14 +231,18 @@ class SandboxMemoryStorage:
             try:
                 candidate = self.raw_memories_dir / path.name
                 if self._bounded:
-                    header = await self._session.read_bounded(candidate, max_bytes=8192)
+                    header = await self._session._read_memory_file(candidate, max_bytes=8192)
                     raw_memory = decode_payload(header)
                 else:
                     raw_memory = (await self.read_text(candidate)).rstrip("\n")
             except (FileNotFoundError, WorkspaceReadNotFoundError):
                 continue
+            except WorkspaceArchiveReadError:
+                if self._bounded:
+                    continue
+                raise
             item = _extract_selection_item(raw_memory)
-            if item is None:
+            if item is None or (self._bounded and item.rollout_id != path.stem):
                 continue
             items.append((_updated_at_sort_key(raw_memory), item.rollout_id, item))
         items.sort(key=lambda item: (item[0], item[1]), reverse=True)

@@ -54,7 +54,10 @@ def _current_memory_owner() -> _SandboxMemoryOwner | None:
 
 @dataclass(frozen=True)
 class SandboxMemoryOptions:
-    """Configure the two native Agents that extract and consolidate memory."""
+    """Configure the two native Agents that extract and consolidate memory.
+
+    Remote workspaces need image-owned Python 3 for bounded, no-follow file reads.
+    """
 
     phase_one: Agent[None, Any]
     phase_two: Agent[None, Any]
@@ -187,7 +190,7 @@ class _SandboxMemoryOwner:
         from agents.classic.sandbox.errors import WorkspaceReadNotFoundError
 
         try:
-            prior = await self._resource.read_bounded(path, max_bytes=_MAX_ROLLOUT_BYTES + 1)
+            prior = await self._resource._read_memory_file(path, max_bytes=_MAX_ROLLOUT_BYTES + 1)
         except (FileNotFoundError, WorkspaceReadNotFoundError):
             prior = b""
         next_line = line.encode("utf-8") + b"\n"

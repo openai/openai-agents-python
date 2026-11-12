@@ -1,0 +1,748 @@
+diff --git a/codex-rs/core/src/tools/builtin_result_policy.rs b/codex-rs/core/src/tools/builtin_result_policy.rs
+index d6c64b6b..66316e2a 100644
+--- a/codex-rs/core/src/tools/builtin_result_policy.rs
++++ b/codex-rs/core/src/tools/builtin_result_policy.rs
+@@ -98,6 +98,7 @@ struct AcceptedOutput {
+     hook_id: String,
+     hook_response: bool,
+     token_limit: Option<usize>,
++    process_exit_code: Option<i32>,
+ }
+ impl ToolOutput for AcceptedOutput {
+     fn log_output(&self) -> String {
+@@ -106,6 +107,9 @@ impl ToolOutput for AcceptedOutput {
+     fn success_for_logging(&self) -> bool {
+         self.inner.success_for_logging()
+     }
++    fn process_exit_code(&self) -> Option<i32> {
++        self.process_exit_code
++    }
+     fn contains_external_context(&self) -> bool {
+         self.inner.contains_external_context()
+     }
+@@ -172,6 +176,7 @@ pub(crate) async fn accept(
+     owner: &dyn ToolLifecycleContributor,
+     raw: Box<dyn ToolOutput>,
+ ) -> Result<(Box<dyn ToolOutput>, Option<PendingLocalExec>), FunctionCallError> {
++    let process_exit_code = raw.process_exit_code();
+     let hook_input = raw.post_tool_use_input(&invocation.payload);
+     let hook_id = raw.post_tool_use_id(&invocation.call_id);
+     let hook_response = raw
+@@ -228,6 +233,7 @@ pub(crate) async fn accept(
+             hook_id,
+             hook_response,
+             token_limit,
++            process_exit_code,
+         }),
+         pending_exec,
+     ))
+@@ -263,6 +269,7 @@ mod tests {
+             hook_id: "original-exec".into(),
+             hook_response: true,
+             token_limit: Some(42),
++            process_exit_code: Some(17),
+         };
+         for payload in [
+             ToolPayload::Function {
+@@ -292,6 +299,7 @@ mod tests {
+         }
+         assert_eq!(output.log_output(), "{\"output\":\"accepted\"}");
+         assert!(!output.success_for_logging());
++        assert_eq!(output.process_exit_code(), Some(17));
+         assert!(output.contains_external_context());
+         assert_eq!(output.post_tool_use_id("call"), "original-exec");
+         assert_eq!(output.fallback_token_limit_override(), Some(42));
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index b6cd6ff2..b6e4baea 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -48,6 +48,8 @@ pub type SharedTurnDiffTracker = Arc<Mutex<TurnDiffTracker>>;
+ #[derive(Default)]
+ pub(crate) struct ToolCallState {
+     pub(crate) terminal_outcome_reached: AtomicBool,
++    pub(crate) dispatch_started_at: OnceLock<std::time::Instant>,
++    pub(crate) builtin_sandbox_operation: OnceLock<codex_extension_api::BuiltinSandboxOperation>,
+     pub(crate) delivered_assistant_message: OnceLock<String>,
+ }
+ 
+@@ -384,6 +386,10 @@ impl ToolOutput for ExecCommandToolOutput {
+         true
+     }
+ 
++    fn process_exit_code(&self) -> Option<i32> {
++        self.exit_code
++    }
++
+     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
+         function_tool_response(
+             call_id,
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+index 19d836bc..67bc1a2b 100644
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -247,7 +247,12 @@ impl McpHandler {
+                 },
+             )
+         });
+-        notify_tool_start(&invocation, mcp_tool.as_ref()).await;
++        notify_tool_start(
++            &invocation,
++            mcp_tool.as_ref(),
++            /*builtin_sandbox_operation*/ None,
++        )
++        .await;
+ 
+         let originating_call = invocation.originating_call().await;
+         let ToolInvocation {
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index 33deee58..971e5a09 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -515,6 +515,10 @@ fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
+ }
+ 
+ impl CoreToolRuntime for ExecCommandHandler {
++    fn builtin_sandbox_operation(&self) -> Option<codex_extension_api::BuiltinSandboxOperation> {
++        Some(codex_extension_api::BuiltinSandboxOperation::Exec)
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
+index 3a6aa8d9..715366e7 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
+@@ -137,6 +137,10 @@ impl WriteStdinHandler {
+ }
+ 
+ impl CoreToolRuntime for WriteStdinHandler {
++    fn builtin_sandbox_operation(&self) -> Option<codex_extension_api::BuiltinSandboxOperation> {
++        Some(codex_extension_api::BuiltinSandboxOperation::WriteStdin)
++    }
++
+     fn matches_kind(&self, payload: &ToolPayload) -> bool {
+         matches!(payload, ToolPayload::Function { .. })
+     }
+diff --git a/codex-rs/core/src/tools/handlers/view_image.rs b/codex-rs/core/src/tools/handlers/view_image.rs
+index 74bab9b5..96f578c2 100644
+--- a/codex-rs/core/src/tools/handlers/view_image.rs
++++ b/codex-rs/core/src/tools/handlers/view_image.rs
+@@ -225,6 +225,10 @@ impl ViewImageHandler {
+ }
+ 
+ impl CoreToolRuntime for ViewImageHandler {
++    fn builtin_sandbox_operation(&self) -> Option<codex_extension_api::BuiltinSandboxOperation> {
++        Some(codex_extension_api::BuiltinSandboxOperation::ViewImage)
++    }
++
+     fn is_builtin_control_tool(&self) -> bool {
+         true
+     }
+diff --git a/codex-rs/core/src/tools/lifecycle.rs b/codex-rs/core/src/tools/lifecycle.rs
+index 12ff3232..7e850fac 100644
+--- a/codex-rs/core/src/tools/lifecycle.rs
++++ b/codex-rs/core/src/tools/lifecycle.rs
+@@ -21,6 +21,7 @@ use crate::tools::context::ToolInvocation;
+ pub(crate) async fn notify_tool_start(
+     invocation: &ToolInvocation,
+     mcp_tool: Option<&McpToolContext>,
++    builtin_sandbox_operation: Option<codex_extension_api::BuiltinSandboxOperation>,
+ ) {
+     let contributors = invocation
+         .session
+@@ -50,6 +51,7 @@ pub(crate) async fn notify_tool_start(
+                 call_id: invocation.call_id.as_str(),
+                 originating_item_id: originating_item_id.as_ref(),
+                 tool_name: &invocation.tool_name,
++                builtin_sandbox_operation,
+                 mcp_tool,
+                 permissions: Box::pin(async { tool_permission_context(invocation).await.ok() }),
+                 payload: &invocation.payload,
+@@ -110,7 +112,15 @@ pub(crate) async fn process_mcp_tool_result(
+     }
+ }
+ 
+-pub(crate) async fn notify_tool_finish(invocation: &ToolInvocation, outcome: ToolCallOutcome) {
++pub(crate) async fn notify_tool_finish(
++    invocation: &ToolInvocation,
++    outcome: ToolCallOutcome,
++    builtin_sandbox_operation: (
++        Option<codex_extension_api::BuiltinSandboxOperation>,
++        Option<std::time::Duration>,
++        Option<i32>,
++    ),
++) {
+     notify_tool_finish_parts(
+         invocation.session.as_ref(),
+         invocation.turn.as_ref(),
+@@ -118,6 +128,7 @@ pub(crate) async fn notify_tool_finish(invocation: &ToolInvocation, outcome: Too
+         &invocation.tool_name,
+         invocation.source.clone(),
+         outcome,
++        builtin_sandbox_operation,
+     )
+     .await;
+ }
+@@ -128,6 +139,11 @@ pub(crate) async fn notify_tool_aborted(
+     call_id: &str,
+     tool_name: &ToolName,
+     source: ToolCallSource,
++    builtin_sandbox_operation: (
++        Option<codex_extension_api::BuiltinSandboxOperation>,
++        Option<std::time::Duration>,
++        Option<i32>,
++    ),
+ ) {
+     notify_tool_finish_parts(
+         session,
+@@ -136,6 +152,7 @@ pub(crate) async fn notify_tool_aborted(
+         tool_name,
+         source,
+         ToolCallOutcome::Aborted,
++        builtin_sandbox_operation,
+     )
+     .await;
+ }
+@@ -147,6 +164,11 @@ async fn notify_tool_finish_parts(
+     tool_name: &ToolName,
+     source: ToolCallSource,
+     outcome: ToolCallOutcome,
++    builtin_sandbox_operation: (
++        Option<codex_extension_api::BuiltinSandboxOperation>,
++        Option<std::time::Duration>,
++        Option<i32>,
++    ),
+ ) {
+     for contributor in session.services.extensions.tool_lifecycle_contributors() {
+         contributor
+@@ -157,6 +179,13 @@ async fn notify_tool_finish_parts(
+                 turn_id: turn.sub_id.as_str(),
+                 call_id,
+                 tool_name,
++                builtin_sandbox_operation: builtin_sandbox_operation.0,
++                builtin_sandbox_duration: builtin_sandbox_operation
++                    .0
++                    .and(builtin_sandbox_operation.1),
++                builtin_sandbox_exit_code: builtin_sandbox_operation
++                    .0
++                    .and(builtin_sandbox_operation.2),
+                 source: extension_tool_call_source(source.clone()),
+                 outcome,
+             })
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index b0e52ee5..446c41a1 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -315,6 +315,7 @@ impl ToolCallRuntime {
+         let lock = Arc::clone(&self.parallel_execution);
+         let invocation_cancellation_token = cancellation_token.clone();
+         let started = Instant::now();
++        let _ = call_state.dispatch_started_at.set(started);
+         let mut tool_call_timing_guard = ToolCallTimingGuard::capture(
+             started,
+             &session.thread_id,
+@@ -455,6 +456,7 @@ impl ToolCallRuntime {
+                                     call.call_id.as_str(),
+                                     &call.tool_name,
+                                     abort_source,
++                                    (call_state.builtin_sandbox_operation.get().copied(), call_state.dispatch_started_at.get().map(Instant::elapsed), None),
+                                 )
+                                 .await;
+                                 Ok(response)
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index a593164d..b7e908a2 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -55,6 +55,11 @@ pub use codex_tools::ToolExposure;
+ /// Implementers provide the shared `ToolExecutor` behavior plus optional
+ /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
+ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> + std::any::Any {
++    /// Trusted operation identity, supplied only by actual Core sandbox runtimes.
++    fn builtin_sandbox_operation(&self) -> Option<codex_extension_api::BuiltinSandboxOperation> {
++        None
++    }
++
+     /// Whether this built-in control tool needs a structured tool-call event.
+     fn is_builtin_control_tool(&self) -> bool {
+         false
+@@ -276,6 +281,10 @@ impl ToolOutput for PostToolUseFeedbackOutput {
+         self.original.mark_accepted();
+     }
+ 
++    fn process_exit_code(&self) -> Option<i32> {
++        self.original.process_exit_code()
++    }
++
+     fn realtime_response_requested(&self) -> bool {
+         self.original.realtime_response_requested()
+     }
+@@ -726,8 +735,19 @@ impl ToolRegistry {
+             }
+         }
+ 
++        let builtin_sandbox_operation = tool.builtin_sandbox_operation();
+         if tool.mcp_server_name().is_none() {
+-            notify_tool_start(&invocation, /*mcp_tool*/ None).await;
++            if let (Some(state), Some(operation)) =
++                (call_state.as_deref(), builtin_sandbox_operation)
++            {
++                let _ = state.builtin_sandbox_operation.set(operation);
++            }
++            notify_tool_start(
++                &invocation,
++                /*mcp_tool*/ None,
++                builtin_sandbox_operation,
++            )
++            .await;
+         }
+         let mut control_tool_analytics = tool
+             .is_builtin_control_tool()
+@@ -783,6 +803,12 @@ impl ToolRegistry {
+             Ok(result) => result.result.success_for_logging(),
+             Err(_) => false,
+         };
++        let builtin_sandbox_exit_code = builtin_sandbox_operation.and_then(|_| {
++            result
++                .as_ref()
++                .ok()
++                .and_then(|result| result.result.process_exit_code())
++        });
+         if let Some(analytics) = control_tool_analytics.as_mut() {
+             analytics.finish(if success {
+                 ControlToolCallStatus::Completed
+@@ -923,7 +949,19 @@ impl ToolRegistry {
+             }
+         })();
+         if notify_finish {
+-            notify_tool_finish(&invocation, lifecycle_outcome).await;
++            notify_tool_finish(
++                &invocation,
++                lifecycle_outcome,
++                (
++                    builtin_sandbox_operation,
++                    call_state
++                        .as_deref()
++                        .and_then(|state| state.dispatch_started_at.get())
++                        .map(std::time::Instant::elapsed),
++                    builtin_sandbox_exit_code,
++                ),
++            )
++            .await;
+         }
+         result
+     }
+@@ -938,7 +976,15 @@ async fn notify_tool_finish_if_unclaimed(
+         return false;
+     }
+ 
+-    notify_tool_finish(invocation, outcome).await;
++    notify_tool_finish(
++        invocation,
++        outcome,
++        (
++            /*builtin_sandbox_operation*/ None, /*duration*/ None,
++            /*exit_code*/ None,
++        ),
++    )
++    .await;
+     true
+ }
+ 
+diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
+index 0c0cdc32..f34f66f6 100644
+--- a/codex-rs/core/src/tools/registry_tests.rs
++++ b/codex-rs/core/src/tools/registry_tests.rs
+@@ -139,11 +139,14 @@ enum RecordedToolLifecycle {
+         call_id: String,
+         tool_name: codex_tools::ToolName,
+         root_turn_id: Option<String>,
++        builtin_sandbox_operation: Option<codex_extension_api::BuiltinSandboxOperation>,
+     },
+     Finish {
+         call_id: String,
+         tool_name: codex_tools::ToolName,
+         outcome: codex_extension_api::ToolCallOutcome,
++        builtin_sandbox_operation: Option<codex_extension_api::BuiltinSandboxOperation>,
++        timed: bool,
+     },
+ }
+ 
+@@ -161,6 +164,7 @@ impl codex_extension_api::ToolLifecycleContributor for ToolLifecycleRecorder {
+             call_id: input.call_id.to_string(),
+             tool_name: input.tool_name.clone(),
+             root_turn_id: input.root_turn_id.map(str::to_owned),
++            builtin_sandbox_operation: input.builtin_sandbox_operation,
+         };
+         Box::pin(async move {
+             records
+@@ -179,6 +183,8 @@ impl codex_extension_api::ToolLifecycleContributor for ToolLifecycleRecorder {
+             call_id: input.call_id.to_string(),
+             tool_name: input.tool_name.clone(),
+             outcome: input.outcome,
++            builtin_sandbox_operation: input.builtin_sandbox_operation,
++            timed: input.builtin_sandbox_duration.is_some(),
+         };
+         Box::pin(async move {
+             records
+@@ -796,16 +802,20 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
+             call_id: "ok-call".to_string(),
+             tool_name: ok_tool.clone().with_default_namespace(),
+             root_turn_id: Some("root-turn".to_string()),
++            builtin_sandbox_operation: None,
+         },
+         RecordedToolLifecycle::Finish {
+             call_id: "ok-call".to_string(),
+             tool_name: ok_tool.with_default_namespace(),
+             outcome: codex_extension_api::ToolCallOutcome::Completed { success: false },
++            builtin_sandbox_operation: None,
++            timed: false,
+         },
+         RecordedToolLifecycle::Start {
+             call_id: "failing-call".to_string(),
+             tool_name: failing_tool.clone(),
+             root_turn_id: Some("root-turn".to_string()),
++            builtin_sandbox_operation: None,
+         },
+         RecordedToolLifecycle::Finish {
+             call_id: "failing-call".to_string(),
+@@ -813,6 +823,8 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
+             outcome: codex_extension_api::ToolCallOutcome::Failed {
+                 handler_executed: true,
+             },
++            builtin_sandbox_operation: None,
++            timed: false,
+         },
+     ];
+     let actual = records
+@@ -825,6 +837,117 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn sandbox_lifecycle_marks_only_builtin_runtimes() -> anyhow::Result<()> {
++    use codex_extension_api::BuiltinSandboxOperation;
++
++    let (mut session, turn) = crate::session::tests::make_session_and_context().await;
++    let records = Arc::new(std::sync::Mutex::new(Vec::new()));
++    let mut builder = codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
++    builder.tool_lifecycle_contributor(Arc::new(ToolLifecycleRecorder {
++        records: Arc::clone(&records),
++    }));
++    session.services.extensions = Arc::new(builder.build());
++    let session = Arc::new(session);
++    let turn = Arc::new(turn);
++    let handlers: [(Arc<dyn CoreToolRuntime>, BuiltinSandboxOperation); 3] = [
++        (
++            Arc::new(crate::tools::handlers::ExecCommandHandler::default()),
++            BuiltinSandboxOperation::Exec,
++        ),
++        (
++            Arc::new(crate::tools::handlers::WriteStdinHandler),
++            BuiltinSandboxOperation::WriteStdin,
++        ),
++        (
++            Arc::new(crate::tools::handlers::ViewImageHandler::default()),
++            BuiltinSandboxOperation::ViewImage,
++        ),
++    ];
++
++    for (index, (handler, operation)) in handlers.into_iter().enumerate() {
++        let tool_name = handler.tool_name().with_default_namespace();
++        let native_call = format!("native-{index}");
++        let registry = ToolRegistry::from_tools([handler]);
++        let mut invocation = test_invocation(
++            Arc::clone(&session),
++            Arc::clone(&turn),
++            &native_call,
++            tool_name.clone(),
++        );
++        // Actual native handlers fail before any executor or file side effect.
++        // The lifecycle must still pair the start and its exact failed owner.
++        invocation.payload = ToolPayload::Function {
++            arguments: "{".into(),
++        };
++        let state = Arc::new(ToolCallState::default());
++        let _ = state.dispatch_started_at.set(std::time::Instant::now());
++        assert!(
++            registry
++                .dispatch_any_with_state(invocation, Some(state))
++                .await
++                .is_err()
++        );
++
++        let application_call = format!("application-{index}");
++        let registry = ToolRegistry::from_tools([Arc::new(LifecycleTestHandler {
++            tool_name: tool_name.clone(),
++            result: LifecycleTestResult::Ok { success: true },
++        }) as Arc<dyn CoreToolRuntime>]);
++        registry
++            .dispatch_any_with_state(
++                test_invocation(
++                    Arc::clone(&session),
++                    Arc::clone(&turn),
++                    &application_call,
++                    tool_name.clone(),
++                ),
++                None,
++            )
++            .await?;
++
++        let actual = records
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .drain(..)
++            .collect::<Vec<_>>();
++        assert_eq!(
++            actual,
++            vec![
++                RecordedToolLifecycle::Start {
++                    call_id: native_call.clone(),
++                    tool_name: tool_name.clone().with_default_namespace(),
++                    root_turn_id: None,
++                    builtin_sandbox_operation: Some(operation),
++                },
++                RecordedToolLifecycle::Finish {
++                    call_id: native_call,
++                    tool_name: tool_name.clone().with_default_namespace(),
++                    outcome: codex_extension_api::ToolCallOutcome::Failed {
++                        handler_executed: true
++                    },
++                    builtin_sandbox_operation: Some(operation),
++                    timed: true,
++                },
++                RecordedToolLifecycle::Start {
++                    call_id: application_call.clone(),
++                    tool_name: tool_name.clone().with_default_namespace(),
++                    root_turn_id: None,
++                    builtin_sandbox_operation: None,
++                },
++                RecordedToolLifecycle::Finish {
++                    call_id: application_call,
++                    tool_name: tool_name.with_default_namespace(),
++                    outcome: codex_extension_api::ToolCallOutcome::Completed { success: true },
++                    builtin_sandbox_operation: None,
++                    timed: false,
++                },
++            ]
++        );
++    }
++    Ok(())
++}
++
+ fn test_invocation(
+     session: Arc<crate::session::session::Session>,
+     turn: Arc<crate::session::turn_context::TurnContext>,
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 450d526a..98bb561d 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -46,6 +46,7 @@ pub use thread_lifecycle::ThreadReadyInput;
+ pub use thread_lifecycle::ThreadResumeInput;
+ pub use thread_lifecycle::ThreadStartInput;
+ pub use thread_lifecycle::ThreadStopInput;
++pub use tool_lifecycle::BuiltinSandboxOperation;
+ pub use tool_lifecycle::BuiltinToolResultInput;
+ pub use tool_lifecycle::CommandStartInput;
+ pub use tool_lifecycle::McpToolContext;
+diff --git a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+index 8954675a..17fac947 100644
+--- a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+@@ -114,6 +114,17 @@ impl McpToolContext {
+     }
+ }
+ 
++/// Identity issued only by an actual Core sandbox tool runtime.
++///
++/// Tool names, arguments and persisted records cannot establish this identity.
++/// This fact carries no operation payload and does not identify a provider resource.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum BuiltinSandboxOperation {
++    Exec,
++    WriteStdin,
++    ViewImage,
++}
++
+ /// Input supplied when the host starts executing one tool call.
+ pub struct ToolStartInput<'a> {
+     /// Immutable actual producing step, including captured SDK policy source.
+@@ -135,6 +146,8 @@ pub struct ToolStartInput<'a> {
+     pub originating_item_id: Option<&'a codex_protocol::ResponseItemId>,
+     /// Tool name as routed by the host.
+     pub tool_name: &'a ToolName,
++    /// Trusted builtin identity from the selected runtime, absent for application/MCP tools.
++    pub builtin_sandbox_operation: Option<BuiltinSandboxOperation>,
+     /// Read-only metadata and provenance from the exact MCP call that will execute.
+     pub mcp_tool: Option<&'a McpToolContext>,
+     /// Resolves evidence from the issuing step only when awaited; `None` prevents cached approval.
+@@ -255,6 +268,12 @@ pub struct ToolFinishInput<'a> {
+     pub call_id: &'a str,
+     /// Tool name as routed by the host.
+     pub tool_name: &'a ToolName,
++    /// Builtin identity retained by the exact native dispatch, absent before admission.
++    pub builtin_sandbox_operation: Option<BuiltinSandboxOperation>,
++    /// Monotonic elapsed time for the owning native dispatch.
++    pub builtin_sandbox_duration: Option<std::time::Duration>,
++    /// Typed process status from the actual builtin, never parsed from tool text.
++    pub builtin_sandbox_exit_code: Option<i32>,
+     /// Source that issued the tool call.
+     pub source: ToolCallSource,
+     /// Host-observed result of the tool call.
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index c88a52fe..86036901 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -57,6 +57,7 @@ pub use contributors::AgentProfileReceipt;
+ pub use contributors::ApprovalDecision;
+ pub use contributors::ApprovalDecisionInput;
+ pub use contributors::ApprovalReviewContributor;
++pub use contributors::BuiltinSandboxOperation;
+ pub use contributors::BuiltinToolResultInput;
+ pub use contributors::CapturedAgentProfile;
+ pub use contributors::CommandStartInput;
+diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
+index c054f5c0..bf3292db 100644
+--- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
++++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
+@@ -1914,6 +1914,9 @@ impl GoalExtensionHarness {
+         for contributor in self.registry.tool_lifecycle_contributors() {
+             contributor
+                 .on_tool_finish(ToolFinishInput {
++                    builtin_sandbox_operation: None,
++                    builtin_sandbox_duration: None,
++                    builtin_sandbox_exit_code: None,
+                     session_store: &self.session_store,
+                     thread_store: &self.thread_store,
+                     turn_store: &turn_store,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/budget_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/budget_tests.rs
+index 11510337..b7f5739b 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/budget_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/budget_tests.rs
+@@ -224,6 +224,7 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
+         };
+         fixture.registry.tool_lifecycle_contributors()[0]
+             .on_tool_start(ToolStartInput {
++                builtin_sandbox_operation: None,
+                 step_store: None,
+                 permissions: Box::pin(async { Some(Default::default()) }),
+                 session_store: &fixture.session_store,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+index 9f69c656..27a36f51 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+@@ -293,6 +293,7 @@ async fn installed_extension_uses_http_after_warm_socket_auth_expires() -> Resul
+         }
+         registry.tool_lifecycle_contributors()[0]
+             .on_tool_start(ToolStartInput {
++                builtin_sandbox_operation: None,
+                 step_store: None,
+                 permissions: Box::pin(async { Some(Default::default()) }),
+                 session_store: &session_store,
+@@ -570,6 +571,7 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
+     ] {
+         fixture.registry.tool_lifecycle_contributors()[0]
+             .on_tool_start(ToolStartInput {
++                builtin_sandbox_operation: None,
+                 step_store: None,
+                 permissions: Box::pin(async { panic!("unexpected permission resolution") }),
+                 session_store: &fixture.session_store,
+@@ -670,6 +672,7 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
+     };
+     fixture.registry.tool_lifecycle_contributors()[0]
+         .on_tool_start(ToolStartInput {
++            builtin_sandbox_operation: None,
+             step_store: None,
+             permissions: Box::pin(async { Some(Default::default()) }),
+             session_store: &fixture.session_store,
+@@ -1042,6 +1045,7 @@ async fn sample_configured_conversation_history_with_delivery(
+ 
+     registry.tool_lifecycle_contributors()[0]
+         .on_tool_start(ToolStartInput {
++            builtin_sandbox_operation: None,
+             step_store: None,
+             permissions: Box::pin(async { Some(Default::default()) }),
+             session_store: &session_store,
+@@ -1163,6 +1167,7 @@ impl GuardianFailureFixture {
+         };
+         self.registry.tool_lifecycle_contributors()[0]
+             .on_tool_start(ToolStartInput {
++                builtin_sandbox_operation: None,
+                 step_store: None,
+                 permissions: Box::pin(async { Some(Default::default()) }),
+                 session_store: &self.session_store,
+@@ -2418,6 +2423,7 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
+     };
+     registry.tool_lifecycle_contributors()[0]
+         .on_tool_start(ToolStartInput {
++            builtin_sandbox_operation: None,
+             step_store: None,
+             permissions: Box::pin(async { panic!("unexpected permission resolution") }),
+             session_store: &session_store,
+@@ -2722,6 +2728,7 @@ async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<(
+     };
+     registry.tool_lifecycle_contributors()[0]
+         .on_tool_start(ToolStartInput {
++            builtin_sandbox_operation: None,
+             step_store: None,
+             permissions: Box::pin(async { Some(Default::default()) }),
+             session_store: &session_store,
+@@ -3241,6 +3248,7 @@ async fn assert_parent_compaction_reuse(parent_context_for_review: bool) -> Resu
+ 
+     registry.tool_lifecycle_contributors()[0]
+         .on_tool_start(ToolStartInput {
++            builtin_sandbox_operation: None,
+             step_store: None,
+             permissions: Box::pin(async { Some(Default::default()) }),
+             session_store: &session_store,
+@@ -3320,6 +3328,7 @@ async fn assert_parent_compaction_reuse(parent_context_for_review: bool) -> Resu
+     };
+     registry.tool_lifecycle_contributors()[0]
+         .on_tool_start(ToolStartInput {
++            builtin_sandbox_operation: None,
+             step_store: None,
+             permissions: Box::pin(async { Some(Default::default()) }),
+             session_store: &session_store,
+@@ -3418,6 +3427,7 @@ async fn cached_approval_discounts_only_its_own_unscored_wrapper() -> Result<()>
+             },
+         };
+         progress.observe(&ToolStartInput {
++            builtin_sandbox_operation: None,
+             step_store: None,
+             permissions: Box::pin(async { Some(Default::default()) }),
+             session_store: &fixture.session_store,
+@@ -3583,6 +3593,7 @@ fn seed_cached_score(
+ 
+ fn observe_unscored_call(progress: &GuardianV2ScoreProgress, store: &ExtensionData) -> usize {
+     progress.observe(&ToolStartInput {
++        builtin_sandbox_operation: None,
+         step_store: None,
+         permissions: Box::pin(async { Some(Default::default()) }),
+         session_store: store,
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index 62191e72..30b3235b 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -22,6 +22,11 @@ pub trait ToolOutput: Send {
+ 
+     fn success_for_logging(&self) -> bool;
+ 
++    /// Typed process status, independent of logging success and rendered output.
++    fn process_exit_code(&self) -> Option<i32> {
++        None
++    }
++
+     /// Trusted SDK result disposition, consumed only after output policy acceptance.
+     /// Tool JSON and MCP metadata do not set this value.
+     fn realtime_response_requested(&self) -> bool {
+@@ -100,6 +105,10 @@ where
+         (**self).success_for_logging()
+     }
+ 
++    fn process_exit_code(&self) -> Option<i32> {
++        (**self).process_exit_code()
++    }
++
+     fn realtime_response_requested(&self) -> bool {
+         (**self).realtime_response_requested()
+     }

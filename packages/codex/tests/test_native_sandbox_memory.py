@@ -300,3 +300,77 @@ async def test_native_sandbox_memory_serializes_across_trusted_workspace_aliases
                 (workspace / "memories" / "phase_two_selection.json").read_text()
             )
             assert {item["rollout_id"] for item in selection["selected"]} == {a.id, b.id}
+
+
+@pytest.mark.parametrize("process_backed", [False, True], ids=["local", "process-backed"])
+async def test_native_sandbox_memory_only_consolidates_regular_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_backed: bool
+):
+    from agents.classic.sandbox.errors import WorkspaceArchiveReadError
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+        UnixLocalSandboxSession,
+    )
+    from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
+
+    if process_backed:
+        monkeypatch.setattr(
+            UnixLocalSandboxSession, "_read_memory_file", BaseSandboxSession._read_memory_file
+        )
+
+    workspace = tmp_path / "workspace"
+
+    async with (
+        timeout(30),
+        _workspace_gateway(workspace, monkeypatch) as connect,
+        ScriptedResponses(
+            [text("Source reply.")],
+            [text('{"rollout_slug":"new","rollout_summary":"new","raw_memory":"New memory."}')],
+            [text('{"memory":"combined","summary":"combined"}')],
+        ) as peer,
+    ):
+
+        @asynccontextmanager
+        async def checked_connect(resource: SandboxSession):
+            raw = workspace / "memories" / "raw_memories"
+            raw.mkdir(parents=True)
+            private = workspace / "private.txt"
+            private.write_text("private sentinel")
+            (raw / "linked.md").symlink_to(private)
+            (workspace / "linked-directory").symlink_to(raw, target_is_directory=True)
+            (raw / "forged.md").write_text("rollout_id: linked\nrollout_summary_file: linked.md\n")
+            (raw / "kept.md").write_text(
+                "rollout_id: kept\nrollout_summary_file: kept.md\n\nPreviously retained memory."
+            )
+            for path in ("memories/raw_memories/linked.md", "linked-directory/kept.md"):
+                with pytest.raises(WorkspaceArchiveReadError):
+                    await resource._inner._read_memory_file(Path(path), max_bytes=64)
+            assert (
+                await resource._inner._read_memory_file(
+                    Path("memories/raw_memories/kept.md"), max_bytes=4
+                )
+                == b"roll"
+            )
+            async with connect(resource) as environment:
+                yield environment
+
+        agent = Agent(instructions="Source.", provider=peer.provider)
+        environment = sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(workspace)),
+            options=UnixLocalSandboxClientOptions(),
+            connect=checked_connect,
+            memory=SandboxMemoryOptions(
+                phase_one=Agent(instructions="Extract.", provider=peer.provider),
+                phase_two=Agent(instructions="Consolidate.", provider=peer.provider),
+            ),
+        )
+        async with agent.session(environment=environment) as session:
+            await (await session.submit("Remember this.")).get_result()
+            await session.flush_memory()
+        request = json.dumps(peer.requests[-1]["input"])
+        assert "Previously retained memory." in request
+        assert "New memory." in request
+        assert "private sentinel" not in request
+        assert "forged" not in request
