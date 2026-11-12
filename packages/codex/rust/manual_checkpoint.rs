@@ -515,7 +515,12 @@ fn validate_frame(
     );
 
     ensure!(
-        portable_manual_actions(&history),
+        portable_manual_actions(&history, |call| {
+            accepted.get(call).is_some_and(|envelope| {
+                matches!(&envelope.item,
+                    ResponseItem::CustomToolCallOutput { call_id, .. } if call_id == call)
+            })
+        }),
         "Manual continuation contains nonportable native work"
     );
     ensure!(
@@ -804,15 +809,19 @@ fn receipt_matches(call: &Value, receipt: &Value) -> bool {
 pub(crate) type Owner = Arc<Mutex<Option<Frame>>>;
 pub(crate) type WeakOwner = Weak<Mutex<Option<Frame>>>;
 
-// v3 carries completed typed function and apply_patch receipts. The native
-// completed-ID set establishes settlement before capture. Pending grants stay
-// manual FunctionCalls; no native call acquires a new grant from saved data.
-fn portable_manual_actions(history: &[RolloutItem]) -> bool {
+// Completed typed calls retain their recorded outputs. The native completed-ID
+// set establishes settlement before capture. Pending grants stay manual
+// FunctionCalls; no native call acquires a new grant from saved data.
+fn portable_manual_actions(
+    history: &[RolloutItem],
+    custom_completed: impl Fn(&str) -> bool,
+) -> bool {
     // Search only reads the admitted catalog. Carry a completed client search
     // as history, never as a pending effect or a destination grant.
     let mut search_receipts = HashSet::new();
     let mut patch_receipts = HashSet::new();
     let mut patch_calls = HashSet::new();
+    let mut custom_receipts = HashSet::new();
     for item in history.iter().rev() {
         if matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))) {
             break;
@@ -846,7 +855,12 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
                 }
             }
             ResponseItem::CustomToolCall { name, .. } if name == "apply_patch" => {}
-            ResponseItem::CustomToolCallOutput { .. } => {}
+            ResponseItem::CustomToolCall { call_id, .. }
+                if !call_id.is_empty()
+                    && (custom_receipts.remove(call_id) || custom_completed(call_id)) => {}
+            ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                custom_receipts.insert(call_id);
+            }
             ResponseItem::ToolSearchOutput {
                 call_id: Some(call_id),
                 execution,
@@ -1306,6 +1320,7 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
             check_unused_code_state(thread, thread.id, &history)?;
         }
     }
+    let completed = tools.completed_calls(&pending[0].turn);
     if !restored {
         let store = thread
             .engine
@@ -1314,11 +1329,7 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
             .downcast_ref::<crate::storage::MemoryThreadStore>()
             .context("Manual continuation requires the in-memory store")?;
         if !store
-            .manual_suspension_ready(
-                thread.id,
-                &pending,
-                &tools.completed_calls(&pending[0].turn),
-            )
+            .manual_suspension_ready(thread.id, &pending, &completed)
             .await?
         {
             return Ok(false);
@@ -1334,7 +1345,7 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
         check_unused_code_state(thread, thread.id, &history)?;
     }
     ensure!(
-        restored || portable_manual_actions(&history),
+        restored || portable_manual_actions(&history, |call| completed.contains(call)),
         UnsupportedManualState::NativeWork
     );
     // Finished calls may have registered a child or background terminal.
@@ -1502,6 +1513,10 @@ pub(crate) async fn capture(
         Ok(true) if suspended_turn == Some(turn.as_str()) => {
             async {
                 let final_history = thread.engine.load_checkpoint_history(thread.id).await?;
+                ensure!(
+                    portable_manual_actions(&final_history, |_| false),
+                    UnsupportedManualState::NativeWork
+                );
                 tool_outcomes = ToolOutcomes::capture(&final_history, thread.id, &turn)?;
                 crate::checkpoint::export_suspended(thread, &code_states, &managed_specs).await
             }
@@ -1697,25 +1712,25 @@ mod apply_patch_portability_tests {
 
     #[test]
     fn settled_application_patch_is_portable_without_another_execution_grant() {
-        assert!(portable_manual_actions(&records(true)));
-        assert!(!portable_manual_actions(&records(false)));
+        assert!(portable_manual_actions(&records(true), |_| false));
+        assert!(!portable_manual_actions(&records(false), |_| false));
     }
 
     #[test]
     fn missing_duplicate_or_cross_kind_patch_receipts_remain_nonportable() {
         let mut history = records(true);
         let output = history.pop().unwrap();
-        assert!(!portable_manual_actions(&history));
+        assert!(!portable_manual_actions(&history, |_| false));
         history.push(serde_json::from_value(serde_json::json!({
             "type":"response_item","payload":{"type":"function_call_output","call_id":"patch","output":"done"}
         })).unwrap());
-        assert!(!portable_manual_actions(&history));
+        assert!(!portable_manual_actions(&history, |_| false));
         history.pop();
         history.push(output.clone());
         history.push(output);
-        assert!(!portable_manual_actions(&history));
+        assert!(!portable_manual_actions(&history, |_| false));
         let mut duplicate_pairs = records(true);
         duplicate_pairs.extend(records(true));
-        assert!(!portable_manual_actions(&duplicate_pairs));
+        assert!(!portable_manual_actions(&duplicate_pairs, |_| false));
     }
 }

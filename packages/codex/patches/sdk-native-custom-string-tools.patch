@@ -127,3 +127,97 @@ index ad3cd7626d73f3cf3aad7b620f1f072005e6dbd5..ba2429b2a7d85f8f7c15d3a419773a63
                  | DynamicToolSpec::ToolSearch(_) => continue,
                  DynamicToolSpec::Function(function) => vec![function],
                  DynamicToolSpec::Namespace(namespace) => namespace
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index c85b747b..89aabda9 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3220,6 +3220,25 @@ async fn try_complete_tool_turn(
+ }
+ 
+ /// Ask captured host policy about settled direct calls in original model order.
++fn matches_terminal_tool_receipt(call: &ResponseItem, output: &ResponseItem) -> bool {
++    match (call, output) {
++        (
++            ResponseItem::FunctionCall { call_id, .. },
++            ResponseItem::FunctionCallOutput {
++                call_id: Some(output_id),
++                ..
++            },
++        )
++        | (
++            ResponseItem::CustomToolCall { call_id, .. },
++            ResponseItem::CustomToolCallOutput {
++                call_id: output_id, ..
++            },
++        ) => call_id == output_id,
++        _ => false,
++    }
++}
++
+ async fn propose_tool_completion(
+     sess: &Session,
+     step: &StepContext,
+@@ -3236,21 +3255,24 @@ async fn propose_tool_completion(
+         ));
+     }
+     for (call, output) in tools.calls.iter().zip(&tools.outputs) {
+-        let ResponseItem::FunctionCall {
+-            call_id,
+-            name,
+-            namespace,
+-            ..
+-        } = call
+-        else {
+-            continue;
++        let (call_id, name, namespace) = match call {
++            ResponseItem::FunctionCall {
++                call_id,
++                name,
++                namespace,
++                ..
++            } => {
++                if !matches_terminal_tool_receipt(call, output) {
++                    return Err(CodexErr::Fatal(
++                        "Settled tool receipt identity mismatch".into(),
++                    ));
++                }
++                (call_id, name, namespace.as_ref())
++            }
++            ResponseItem::CustomToolCall { call_id, name, .. }
++                if matches_terminal_tool_receipt(call, output) => (call_id, name, None),
++            _ => continue,
+         };
+-        if !matches!(output, ResponseItem::FunctionCallOutput { call_id: Some(output_id), .. } if output_id == call_id)
+-        {
+-            return Err(CodexErr::Fatal(
+-                "Settled tool receipt identity mismatch".into(),
+-            ));
+-        }
+         for contributor in sess.services.extensions.turn_lifecycle_contributors() {
+             let decision = contributor
+                 .propose_tool_completion(codex_extension_api::ToolCompletionInput {
+@@ -3284,7 +3306,7 @@ async fn propose_tool_completion(
+                     return Ok(Some(codex_protocol::protocol::ToolTurnCompletion {
+                         call_id: call_id.clone(),
+                         name: name.clone(),
+-                        namespace: namespace.clone(),
++                        namespace: namespace.cloned(),
+                         final_output,
+                         batch_call_ids: None,
+                     }));
+@@ -4043,11 +4065,10 @@ async fn drain_in_flight(
+                     &result.envelope.item,
+                 )
+                 .await;
+-                let call = settled_tools.calls.iter().find(|call| matches!(
+-                    (call, &result.envelope.item),
+-                    (ResponseItem::FunctionCall { call_id, .. },
+-                     ResponseItem::FunctionCallOutput { call_id: Some(output_id), .. }) if call_id == output_id
+-                ));
++                let call = settled_tools
++                    .calls
++                    .iter()
++                    .find(|call| matches_terminal_tool_receipt(call, &result.envelope.item));
+                 let held = result.pending_exec.is_none()
+                     && call.is_some_and(|call| {
+                         sess.services

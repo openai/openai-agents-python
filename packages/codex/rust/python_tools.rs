@@ -4870,6 +4870,19 @@ impl ToolLifecycleContributor for PythonContributor {
     }
 }
 
+fn terminal_tool_call(item: &ResponseItem) -> Option<(&str, &str, Option<&str>)> {
+    match item {
+        ResponseItem::FunctionCall {
+            call_id,
+            name,
+            namespace,
+            ..
+        } => Some((call_id, name, namespace.as_deref())),
+        ResponseItem::CustomToolCall { call_id, name, .. } => Some((call_id, name, None)),
+        _ => None,
+    }
+}
+
 impl TurnLifecycleContributor for PythonContributor {
     fn hold_tool_completion(&self, input: codex_extension_api::ToolCompletionInput<'_>) -> bool {
         let Some(tools) = input.thread_store.get::<PythonTools>() else {
@@ -4878,25 +4891,19 @@ impl TurnLifecycleContributor for PythonContributor {
         let Some(step) = input.step_store.get::<StepCatalog>() else {
             return false;
         };
-        let ResponseItem::FunctionCall {
-            call_id,
-            name,
-            namespace,
-            ..
-        } = input.call
-        else {
+        let Some((call_id, name, namespace)) = terminal_tool_call(input.call) else {
             return false;
         };
         if !tools.admits_generation(&step.generation) {
             return false;
         }
-        let qualified = ToolName::new(namespace.clone(), name.clone());
+        let qualified = ToolName::new(namespace.map(str::to_owned), name.to_owned());
         step.accepted
             .lock()
             .expect("Terminal receipts poisoned")
             .keys()
             .any(|key| {
-                key.call == *call_id
+                key.call == call_id
                     && key.turn == input.turn_id
                     && key.reply.thread == input.thread_store.level_id()
                     && key.reply.generation == step.generation.id
@@ -4923,13 +4930,7 @@ impl TurnLifecycleContributor for PythonContributor {
             let Some(step) = input.step_store.get::<StepCatalog>() else {
                 return Ok(None);
             };
-            let ResponseItem::FunctionCall {
-                call_id,
-                name,
-                namespace,
-                ..
-            } = input.call
-            else {
+            let Some((call_id, name, namespace)) = terminal_tool_call(input.call) else {
                 return Ok(None);
             };
             if let Some(fresh) = input.turn_store.get::<FreshTerminalReceipts>() {
@@ -4937,14 +4938,14 @@ impl TurnLifecycleContributor for PythonContributor {
                     .adopt(&tools, &step)
                     .map_err(|error| error.to_string())?;
             }
-            let qualified_name = ToolName::new(namespace.clone(), name.clone());
+            let qualified_name = ToolName::new(namespace.map(str::to_owned), name.to_owned());
             let receipt = step
                 .accepted
                 .lock()
                 .expect("Terminal receipts poisoned")
                 .iter()
                 .find(|(key, _)| {
-                    key.call == *call_id
+                    key.call == call_id
                         && step
                             .generation
                             .entries
@@ -5003,7 +5004,7 @@ impl TurnLifecycleContributor for PythonContributor {
                     ensure!(
                         key.reply.thread == input.thread_store.level_id()
                             && key.turn == input.turn_id
-                            && key.call == *call_id
+                            && key.call == call_id
                             && key.reply.generation == step.generation.id
                             && key.reply.instance == tools.instance,
                         "Invalid terminal tool receipt identity"
@@ -5022,8 +5023,24 @@ impl TurnLifecycleContributor for PythonContributor {
                 Ok(())
             };
             verify().map_err(|e| e.to_string())?;
-            let ResponseItem::FunctionCallOutput { output, .. } = input.output else {
-                return Err("Invalid terminal tool output".into());
+            let output = match (input.call, input.output) {
+                (
+                    ResponseItem::FunctionCall { .. },
+                    ResponseItem::FunctionCallOutput {
+                        call_id: Some(output_id),
+                        output,
+                        ..
+                    },
+                )
+                | (
+                    ResponseItem::CustomToolCall { .. },
+                    ResponseItem::CustomToolCallOutput {
+                        call_id: output_id,
+                        output,
+                        ..
+                    },
+                ) if output_id == call_id => output,
+                _ => return Err("Invalid terminal tool output".into()),
             };
             let text = match &output.body {
                 FunctionCallOutputBody::Text(text) => Some(text.clone()),
