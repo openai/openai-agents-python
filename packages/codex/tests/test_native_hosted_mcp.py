@@ -229,6 +229,37 @@ async def test_native_hosted_mcp_operation_exposes_only_its_selected_server(
 
 
 @pytest.mark.asyncio
+async def test_native_hosted_mcp_operation_keeps_selected_server_with_handoffs(
+    responses: ResponsesFixture,
+) -> None:
+    docs = declaration(require_approval="never")
+    other = declaration("other", require_approval="never")
+    fixture = Path(__file__).with_name("fixtures") / "request-control-models.json"
+    catalog = json.loads(fixture.read_text())
+    model = next(
+        entry["slug"] for entry in catalog["models"] if not entry.get("use_responses_lite")
+    )
+    target = Agent(name="specialist", instructions="Respond.", model=model)
+    responses.respond(assistant_output("Selected."))
+
+    async with timeout(30), provider(responses) as native:
+        agent = Agent(
+            instructions="Respond.",
+            provider=native,
+            model=model,
+            tools=[docs, other],
+            handoffs=[target],
+        )
+        async with agent.session() as session:
+            turn = await session.submit("Select docs.", tools=[docs.ref])
+            assert (await turn.get_result()).final_output == "Selected."
+
+    assert [tool for tool in responses.requests[0].get("tools", []) if tool["type"] == "mcp"] == [
+        dict(docs.tool_config)
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("approve", [True, False])
 @pytest.mark.parametrize(
     "mode",

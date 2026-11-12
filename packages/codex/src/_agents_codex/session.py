@@ -5526,6 +5526,8 @@ class Session(Generic[ContextT, OutputT]):
     ) -> set[ToolRef] | None:
         if not self._profiles or state.operation_refs is None:
             return None
+        from .hosted_mcp import HostedMCP
+
         declared = state.operation_declarations or ()
         allowed = _fixed_tool_refs(
             source.tools,
@@ -5539,7 +5541,7 @@ class Session(Generic[ContextT, OutputT]):
         for tool in bindings:
             if not any(tool is grant for grant in declared):
                 continue
-            if isinstance(tool, FunctionTool):
+            if isinstance(tool, (FunctionTool, HostedMCP)):
                 allowed.add(tool.ref)
             elif isinstance(tool, _MCP):
                 allowed.update(tool.tool(raw) for raw in tool.tools)
@@ -8454,12 +8456,14 @@ class Session(Generic[ContextT, OutputT]):
                         project_guidance=self._project_guidance,
                     )
                 if tools is not None:
+                    from .hosted_mcp import HostedMCP
+
                     chosen = {tool.ref for tool in python}
                     server_names = {server.name for server in mcp}
                     operation_declarations = tuple(
                         tool
                         for tool in self._bindings
-                        if isinstance(tool, FunctionTool)
+                        if isinstance(tool, (FunctionTool, HostedMCP))
                         and tool.ref in chosen
                         or isinstance(tool, _MCP)
                         and tool.name in server_names
