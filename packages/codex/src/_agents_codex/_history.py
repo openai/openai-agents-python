@@ -617,6 +617,7 @@ def project_history(
             # that its received count is unknown.
             if (
                 kind == "response_observation_record"
+                and response["response_id"] is not None
                 and (response["thread_id"], response["turn_id"], observation_id)
                 in accounted_observations
                 and (response.get("usage") or {})
