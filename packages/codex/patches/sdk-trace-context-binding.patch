@@ -1,6 +1,8 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index 1a2e2a6dd724d543fe16dcad5b7577b5eac7a09e..d8c2f4a900142b388250d648bd89b45ef94d7f28 100644
 --- a/codex-rs/otel/src/sdk_trace.rs
 +++ b/codex-rs/otel/src/sdk_trace.rs
-@@ -543,6 +543,51 @@
+@@ -612,6 +612,52 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
  pub fn trace_span_context(key: &str) -> Result<String, String> {
      readback(key, resolve(key)?.as_ref())
  }
@@ -32,6 +34,7 @@
 +                .is_none_or(|policy| policy.include_sensitive_data),
 +        credential: captured.credential.clone(),
 +        root_descriptor: captured.root_descriptor.clone(),
++        restriction_only: captured.restriction_only,
 +    });
 +    let handle = Arc::new(Handle {
 +        // A context-local policy restricts this lease without changing the
