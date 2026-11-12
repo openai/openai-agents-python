@@ -70,7 +70,9 @@ Root inside the disposable container: required for CA installation and port 443.
 cleanup_container() {
   docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
 }
-trap cleanup_container EXIT INT TERM
+trap cleanup_container EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 timeout --signal=TERM --kill-after=15s 180s \
   docker run --rm --init --name "$CONTAINER" --network none \
     --add-host api.openai.com:127.0.0.1 \
