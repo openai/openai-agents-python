@@ -1,4 +1,4 @@
-#![cfg_attr(test, recursion_limit = "256")]
+#![recursion_limit = "256"]
 
 //! Python ownership and asyncio boundaries for the unchanged Codex runtime.
 
