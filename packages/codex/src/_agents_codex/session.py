@@ -303,6 +303,7 @@ from .tools import (
     WebSearch as WebSearch,
     _capture_application_data,
     _capture_hosted_tools,
+    _capture_web_search_config as _capture_web_search_config,
     _CapturedFunction as _CapturedFunction,
     _hosted_tool_name,
     _ToolCatalog as _ToolCatalog,
@@ -3390,35 +3391,6 @@ def _configure_storage_runtime(
             runtime["_sdk_resume_thread_id"] = resume
         if goals:
             runtime["native_goal_store"] = str(storage.path)
-
-
-def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
-    config: dict[str, Any] = {}
-    if search is not None:
-        if search.search_context_size is not None:
-            config["tools.web_search.context_size"] = search.search_context_size
-        if search.allowed_domains is not None:
-            config["tools.web_search.allowed_domains"] = list(search.allowed_domains)
-        if search.blocked_domains is not None:
-            config["tools.web_search.blocked_domains"] = list(search.blocked_domains)
-        if search.location is not None:
-            config["tools.web_search.location"] = dict(search.location)
-        if search.search_content_types is not None:
-            config["tools.web_search.search_content_types"] = list(search.search_content_types)
-        if search.image_settings is not None:
-            image_settings = search.image_settings.copy()
-            # Native configuration uses signed 64-bit TOML integers.
-            max_results = image_settings.get("max_results")
-            if max_results is not None and (
-                isinstance(max_results, bool)
-                or not isinstance(max_results, int)
-                or not 0 <= max_results < 2**63
-            ):
-                raise ValueError(
-                    "WebSearch image max_results must be a non-negative integer below 2**63"
-                )
-            config["tools.web_search.image_settings"] = dict(image_settings)
-    return config
 
 
 def _validate_siwc_opening_tools(
