@@ -195,7 +195,8 @@ async def test_cancelled_chat_client_cleanup_without_late_raw_json():
             ]
 
 
-async def test_litellm_refusal_retains_original_client_json():
+@pytest.mark.parametrize("capture", [False, True])
+async def test_litellm_refusal_retains_original_client_json(capture):
     response = chat_reply()
     response["choices"][0]["message"] = {
         "role": "assistant",
@@ -215,7 +216,7 @@ async def test_litellm_refusal_retains_original_client_json():
         ) as provider,
     ):
         async with Agent(instructions="Reply briefly.", model="fixture", provider=provider).session(
-            include_raw_provider_events=True, observation_retention="all"
+            include_raw_provider_events=capture, observation_retention="all"
         ) as session:
             turn = await session.submit("Reply.")
             with pytest.raises(NativeError) as refused:
@@ -226,7 +227,7 @@ async def test_litellm_refusal_retains_original_client_json():
                 async for event in turn.events(include_execution_details=True)
                 if isinstance(event, RawProviderEvent)
             ]
-    assert frames == [original]
+    assert frames == ([original] if capture else [])
     assert response == original
 
 
@@ -242,7 +243,9 @@ async def test_litellm_refusal_adapter_keeps_client_projection_separate():
         async def acompletion(self, **_body):
             return SimpleNamespace(model_dump=lambda: deepcopy(response))
 
-    request = ModelRequest({"model": "fixture", "input": []}, None, "fixture-session", "fixture-turn")
+    request = ModelRequest(
+        {"model": "fixture", "input": []}, None, "fixture-session", "fixture-turn"
+    )
     object.__setattr__(request, "_observe_raw_provider_events", True)
     result = await LitellmModel(Client()).complete(request)
     assert result.output[0]["content"] == [{"type": "refusal", "refusal": "synthetic refusal"}]
