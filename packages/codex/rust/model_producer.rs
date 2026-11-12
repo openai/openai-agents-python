@@ -26,6 +26,7 @@ pub(super) enum Delivery {
         events: mpsc::Sender<ResponseEvent>,
         finish: oneshot::Sender<StreamResult>,
         projection: ApplicationModelStream,
+        observe_raw_chat: bool,
     },
 }
 impl Delivery {
@@ -212,7 +213,12 @@ impl PythonTools {
                     && matches!(slot.reply, Some(PreparationReply::ModelProducer { .. }))
             })
     }
-    pub(crate) fn start_model_producer_stream(&self, id: u64, observe_raw: bool) -> bool {
+    pub(crate) fn start_model_producer_stream(
+        &self,
+        id: u64,
+        observe_raw: bool,
+        chat_stream: bool,
+    ) -> bool {
         let mut replies = self
             .preparation_replies
             .lock()
@@ -239,7 +245,8 @@ impl PythonTools {
             Delivery::Streaming {
                 events,
                 finish,
-                projection: ApplicationModelStream::new(observe_raw),
+                projection: ApplicationModelStream::new(observe_raw && !chat_stream),
+                observe_raw_chat: observe_raw && chat_stream,
             },
         ) else {
             unreachable!()
@@ -251,7 +258,12 @@ impl PythonTools {
             }))
             .is_ok()
     }
-    pub(crate) async fn push_model_producer_event(&self, id: u64, data: &str) -> bool {
+    pub(crate) async fn push_model_producer_event(
+        &self,
+        id: u64,
+        data: &str,
+        raw_chat_chunk: bool,
+    ) -> bool {
         let (projected, sender, continue_stream) = {
             let mut replies = self
                 .preparation_replies
@@ -267,21 +279,45 @@ impl PythonTools {
             let Some(PreparationReply::ModelProducer {
                 reply:
                     Delivery::Streaming {
-                        events, projection, ..
+                        events,
+                        projection,
+                        observe_raw_chat,
+                        ..
                     },
                 ..
             }) = slot.reply.as_mut()
             else {
                 return false;
             };
-            let had_usage = projection.completed_usage().is_some();
-            let (projected, continue_stream) = projection.push(data);
-            // Retirement can discard the reply before the iterator settles.
-            if !had_usage
-                && let (Some(attempt), Some(usage)) = (attempt, projection.completed_usage())
-            {
-                let _ = attempt.report_usage(usage.clone());
-            }
+            let (projected, continue_stream) = if raw_chat_chunk {
+                if !*observe_raw_chat || data.len() > 8 * 1024 * 1024 {
+                    return false;
+                }
+                let Ok(payload) = serde_json::from_str::<serde_json::Map<String, Value>>(data)
+                else {
+                    return false;
+                };
+                (
+                    vec![ResponseEvent::RawProvider(
+                        codex_protocol::protocol::SdkRawProviderEvent {
+                            source: codex_protocol::protocol::SdkRawProviderSource::ChatCompletions,
+                            transport: codex_protocol::protocol::ResponsesEventTransport::Json,
+                            payload: Value::Object(payload),
+                        },
+                    )],
+                    true,
+                )
+            } else {
+                let had_usage = projection.completed_usage().is_some();
+                let (projected, continue_stream) = projection.push(data);
+                // Retirement can discard the reply before the iterator settles.
+                if !had_usage
+                    && let (Some(attempt), Some(usage)) = (attempt, projection.completed_usage())
+                {
+                    let _ = attempt.report_usage(usage.clone());
+                }
+                (projected, continue_stream)
+            };
             (projected, events.clone(), continue_stream)
         };
         for event in projected {
