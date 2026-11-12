@@ -11648,13 +11648,21 @@ class Session(Generic[ContextT, OutputT]):
         }
         callback = tool.on_stream
 
+        def admitted() -> bool:
+            return not (
+                self._closing
+                or self._closed
+                or parent.stopping
+                or parent.failure.done()
+                or parent.completion.done()
+            )
+
         async def observe(value: Any) -> None:
             guard = _Invocation(self)
             token = _invocation.set(guard)
             try:
-                result = callback(value)
-                if inspect.isawaitable(result):
-                    await result
+                if admitted():
+                    await _call_callback(callback, admitted, value)
             finally:
                 guard.active = False
                 _invocation.reset(token)
@@ -11670,6 +11678,7 @@ class Session(Generic[ContextT, OutputT]):
             observe,
             tool.on_stream_max_pending_events,
             overflow,
+            admit=admitted,
         )
         self._managed_tool_streams[child_turn] = stream
         parent.add_callback(stream.task)
@@ -11690,9 +11699,20 @@ class Session(Generic[ContextT, OutputT]):
         stream = None
         guard = _Invocation(self)
         token = _invocation.set(guard)
+
+        def admitted() -> bool:
+            return not (
+                self._closing
+                or self._closed
+                or state.stopping
+                or state.failure.done()
+                or state.completion.done()
+                or _native_callback_cancelled(state)
+            )
+
         try:
             self._native._check_step(message["step_id"], message["thread"], message["instance"])
-            if state.stopping or state.failure.done() or self._native_agents is None:
+            if not admitted() or self._native_agents is None:
                 return
             self._catalog_for_message(message, message["generation"])
             tool = next(
@@ -11721,6 +11741,8 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     raise NativeError("Managed child stream does not match its native owner")
                 await stream.drain()
+            if not admitted():
+                raise asyncio.CancelledError()
             status = message["child_status"]
             if (
                 tool.extract_result is not None
@@ -11735,6 +11757,11 @@ class Session(Generic[ContextT, OutputT]):
                         *(entry["record"] for entry in message["items"]),
                     ],
                     message["child_thread_id"],
+                    tool_success_by_record={
+                        index + 1: entry["tool_success"]
+                        for index, entry in enumerate(message["items"])
+                        if isinstance(entry.get("tool_success"), bool)
+                    },
                 )
                 completion = message["tool_completion"]
                 result: NativeRoleToolResult = {
@@ -11746,8 +11773,7 @@ class Session(Generic[ContextT, OutputT]):
                     if completion is not None
                     else status["completed"] or "",
                 }
-                value = tool.extract_result(result)
-                output = await value if inspect.isawaitable(value) else value
+                output = await _call_callback(tool.extract_result, admitted, result)
                 if not isinstance(output, str):
                     raise TypeError("extract_result must return a string")
             failed = False

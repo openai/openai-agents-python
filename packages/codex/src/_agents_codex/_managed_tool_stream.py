@@ -23,12 +23,15 @@ class _ManagedToolStream:
         callback: Callable[[NativeRoleToolStreamEvent], None | Awaitable[None]],
         limit: int | None,
         overflow: Callable[[], None],
+        *,
+        admit: Callable[[], bool] | None = None,
     ) -> None:
         self.invocation = invocation
         self.submission_id = submission_id
         self._callback = callback
         self._limit = limit
         self._overflow = overflow
+        self._admit = admit if admit is not None else lambda: True
         self._pending: deque[Observation] = deque()
         self._next: asyncio.Future[Observation | None] | None = (
             asyncio.get_running_loop().create_future()
@@ -80,6 +83,9 @@ class _ManagedToolStream:
         try:
             event = await first
             while event is not None:
+                if not self._admit():
+                    self._pending.clear()
+                    return
                 try:
                     result = self._callback({"event": event, "invocation": self.invocation.copy()})
                     if inspect.isawaitable(result):
