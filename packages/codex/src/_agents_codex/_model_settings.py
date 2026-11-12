@@ -6,13 +6,59 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
+
+from typing_extensions import Required, TypedDict
 
 from .retry import ModelRetrySettings
 from .tools import ToolRef
 
 if TYPE_CHECKING:
     from .agent import ModelSettings
+
+
+class _StaticProviderCompaction(TypedDict, closed=True):
+    type: Literal["static"]
+    threshold: int
+
+
+class _DynamicProviderCompaction(TypedDict, total=False, closed=True):
+    type: Required[Literal["dynamic"]]
+    threshold_ratio: float
+    fallback_threshold: int
+
+
+ProviderCompactionPolicy: TypeAlias = _StaticProviderCompaction | _DynamicProviderCompaction
+_MAX_TOKEN_THRESHOLD = 9_007_199_254_740_991
+
+
+def _capture_provider_compaction(value: Any) -> ProviderCompactionPolicy:
+    if not isinstance(value, Mapping):
+        raise TypeError("provider_compaction must be a policy mapping")
+    if value.get("type") == "static" and value.keys() == {"type", "threshold"}:
+        threshold = value["threshold"]
+        if type(threshold) is not int or not 0 <= threshold <= _MAX_TOKEN_THRESHOLD:
+            raise ValueError("provider_compaction threshold must be a nonnegative safe integer")
+        return {"type": "static", "threshold": threshold}
+    if value.get("type") == "dynamic" and not value.keys() - {
+        "type",
+        "threshold_ratio",
+        "fallback_threshold",
+    }:
+        ratio = value.get("threshold_ratio", 0.9)
+        fallback = value.get("fallback_threshold", 240_000)
+        if type(ratio) not in (int, float) or not 0 <= ratio <= 1:
+            raise ValueError("provider_compaction threshold_ratio must be between 0 and 1")
+        if type(fallback) is not int or not 0 <= fallback <= _MAX_TOKEN_THRESHOLD:
+            raise ValueError(
+                "provider_compaction fallback_threshold must be a nonnegative safe integer"
+            )
+        return {
+            "type": "dynamic",
+            "threshold_ratio": ratio,
+            "fallback_threshold": fallback,
+        }
+    raise ValueError("Unsupported provider_compaction policy")
 
 
 def _capture_model_settings(
@@ -79,6 +125,8 @@ def _capture_model_settings(
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise TypeError("include must be a list of strings")
             captured[key] = list(value)
+        elif key == "provider_compaction":
+            captured[key] = _capture_provider_compaction(value)
         elif key in ("context_management", "extra_body"):
             if key == "context_management":
                 if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):

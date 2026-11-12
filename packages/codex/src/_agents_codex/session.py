@@ -113,6 +113,7 @@ from ._projection import (
     project_model_output_item,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._queued_roots import _QueuedRoots
 from ._stored_history import (
     StoredItemPage,
     StoredMatchPage,
@@ -415,6 +416,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "truncation",
         "include",
         "context_management",
+        "provider_compaction",
         "extra_body",
     }
     for key, value in copied.items():
@@ -520,6 +522,7 @@ def _manual_restore_model_settings(
             "truncation",
             "include",
             "context_management",
+            "provider_compaction",
             "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (
@@ -5224,7 +5227,6 @@ class Session(Generic[ContextT, OutputT]):
         self._restored_turn: Turn[OutputT] | None = None
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
         self._child_admissions: set[asyncio.Task[Turn[str]]] = set()
-        self._pending: deque[tuple[_Submission, list[dict[str, Any]]]] = deque()
         self._graph_interrupts: set[asyncio.Task[None]] = set()
         self._root_interrupts: set[asyncio.Task[None]] = set()
         self._mutation: asyncio.Task[Any] | None = None
@@ -5256,6 +5258,7 @@ class Session(Generic[ContextT, OutputT]):
             retention=observation_retention,
             include_model_output_items=include_model_output_items,
         )
+        self._queued_roots = _QueuedRoots(self._observations.notify)
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._plan_usage_reads: set[asyncio.Task[str]] = set()
         self._rate_limit_parent: Session[Any, Any] | None = None
@@ -6799,7 +6802,7 @@ class Session(Generic[ContextT, OutputT]):
             return None
         if self._mutation is not None or self._checkpoint_task is not None:
             raise RuntimeError("Session is changing or saving its state")
-        if expected_turn_id is None and any(state.issued is turn for state, _ in self._pending):
+        if expected_turn_id is None and self._queued_roots.contains(turn):
             raise RuntimeError("Cannot steer queued work")
         parts = _native_input(input)
         while True:
@@ -8683,7 +8686,7 @@ class Session(Generic[ContextT, OutputT]):
         if self._interaction_error is None:
             self._interaction_error = error
         self._broken = True
-        self._discard_pending(error)
+        self._queued_roots.discard(error, cancelled=isinstance(error, TurnStoppedError))
         for state in (self._active, *self._child_callbacks.values()):
             if state is not None and not state.failure.done():
                 state.failure.set_result(error)
@@ -8990,7 +8993,7 @@ class Session(Generic[ContextT, OutputT]):
             self._check_root_admission()
             if (
                 self._mutation is not None
-                or (self._active is not None or self._pending)
+                or (self._active is not None or self._queued_roots)
                 and (not enqueue or input is None)
                 or self._active is not None
                 and self.active_turn is None
@@ -9124,7 +9127,7 @@ class Session(Generic[ContextT, OutputT]):
                     self, None, uuid4().hex, state.completion, -1, state.guardrail_results
                 )
                 state.issued = issued
-                self._pending.append((state, input))
+                self._queued_roots.register(state, input)
                 self._promote()
                 if state.task is None and state.completion.done():
                     state.completion.result()
@@ -9177,15 +9180,6 @@ class Session(Generic[ContextT, OutputT]):
             return error
         return None
 
-    def _discard_pending(self, error: BaseException) -> None:
-        while self._pending:
-            state, _ = self._pending.popleft()
-            if state.tracing is not None:
-                state.tracing.close(error, cancelled=isinstance(error, TurnStoppedError))
-            state.accepted.set_exception(error)
-            state.completion.set_exception(error)
-        self._observations.notify()
-
     def _promote(self) -> None:
         """Claim only on logical release. This is not a second execution driver."""
         if (
@@ -9194,7 +9188,7 @@ class Session(Generic[ContextT, OutputT]):
             or self._closing
             or (self._environment_lease is not None and self._environment_lease.interrupted)
         ):
-            self._discard_pending(NativeError("Session ended before queued work was admitted"))
+            self._queued_roots.discard(NativeError("Session ended before queued work was admitted"))
         while (
             not self._broken
             and not self._closed
@@ -9205,9 +9199,9 @@ class Session(Generic[ContextT, OutputT]):
             and self._checkpoint_task is None
             and not self._graph_interrupts
             and not self._root_interrupts
-            and self._pending
+            and self._queued_roots
         ):
-            state, parts = self._pending.popleft()
+            state, parts = self._queued_roots.select()
             self._active = state
             self._last_turn = state.issued
             self._start_execution(state, parts)
@@ -9219,7 +9213,7 @@ class Session(Generic[ContextT, OutputT]):
         self._check_root_admission()
         if (
             self._active is not None
-            or self._pending
+            or self._queued_roots
             or self._mutation is not None
             or self._checkpoint_task is not None
         ):
@@ -9870,8 +9864,8 @@ class Session(Generic[ContextT, OutputT]):
                     guardrail_results=submission.guardrail_results,
                 ),
             )
-        if self._owned_submission(submission) is not None or any(
-            state.issued is submission for state, _ in self._pending
+        if self._owned_submission(submission) is not None or self._queued_roots.contains(
+            submission
         ):
             self._check_callback_operation("wait on its own turn")
         assert submission._completion is not None
@@ -9892,7 +9886,7 @@ class Session(Generic[ContextT, OutputT]):
         if (
             submission.child_id is None
             and self._owned_submission(submission) is None
-            and not any(state.issued is submission for state, _ in self._pending)
+            and not self._queued_roots.contains(submission)
         ):
             return await self._wait(submission)
         self._check_callback_operation("wait for requests from its own Session")
@@ -9979,7 +9973,9 @@ class Session(Generic[ContextT, OutputT]):
         state = self._active
         if state is not None and state.restored_pending and mode == "graceful":
             raise RuntimeError("Graceful interruption requires a recovered manual turn")
-        self._discard_pending(TurnStoppedError("Queued work stopped by cancel_all"))
+        self._queued_roots.discard(
+            TurnStoppedError("Queued work stopped by cancel_all"), cancelled=True
+        )
         accepted: asyncio.Future[None] = self._loop.create_future()
         # Retrieve failures even if the caller is cancelled before acceptance.
         accepted.add_done_callback(lambda result: result.exception())
@@ -9992,18 +9988,12 @@ class Session(Generic[ContextT, OutputT]):
             raise CapabilityError("Use Subagent.try_cancel for a child Turn")
         if mode not in ("graceful", "force"):
             raise ValueError("mode must be 'graceful' or 'force'")
-        for entry in self._pending:
-            queued, _ = entry
-            if queued.issued is turn:
-                self._check_callback_operation("interrupt its own Session")
-                self._pending.remove(entry)
-                error = TurnStoppedError("Queued work cancelled before admission")
-                if queued.tracing is not None:
-                    queued.tracing.close(error, cancelled=True)
-                queued.accepted.set_exception(error)
-                queued.completion.set_exception(error)
-                self._observations.notify()
-                return
+        if self._queued_roots.contains(turn):
+            self._check_callback_operation("interrupt its own Session")
+            self._queued_roots.withdraw(
+                turn, TurnStoppedError("Queued work cancelled before admission")
+            )
+            return
         state = self._owned_submission(turn)
         # A settled or superseded root owns neither the new turn nor its cells.
         if state is None:
@@ -10053,7 +10043,7 @@ class Session(Generic[ContextT, OutputT]):
                 owners.discard(task)
                 self._promote()
             else:
-                self._discard_pending(
+                self._queued_roots.discard(
                     NativeError("Session interruption failed before queued admission")
                 )
 
@@ -16127,7 +16117,7 @@ class Session(Generic[ContextT, OutputT]):
                 "Cannot checkpoint an operation with prepare_request: "
                 "portable restore cannot recover its callback"
             )
-        if self._pending:
+        if self._queued_roots:
             raise RuntimeError("Cannot checkpoint a Session with queued work")
         if self._storage is not None:
             raise CapabilityError(
@@ -16163,7 +16153,7 @@ class Session(Generic[ContextT, OutputT]):
 
     def _check_checkpoint_admission(self, active: _Submission | None) -> None:
         self._check_open()
-        if self._pending:
+        if self._queued_roots:
             raise RuntimeError("Cannot checkpoint a Session with queued work")
         self._check_graph_admission()
         self._check_root_admission()
@@ -16615,7 +16605,9 @@ class Session(Generic[ContextT, OutputT]):
             and (self._close_task.cancelled() or self._close_task.exception() is not None)
         ):
             self._closing = True
-            self._discard_pending(TurnStoppedError("Session closed before queued admission"))
+            self._queued_roots.discard(
+                TurnStoppedError("Session closed before queued admission"), cancelled=True
+            )
             self._close_task = _create_task(self._close())
         await _join(self._close_task)
 
