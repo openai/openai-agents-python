@@ -22,16 +22,25 @@ async def test_transact_history_replays_portable_parts_of_foreign_items(
     }
     foreign_reasoning = {
         "type": "reasoning",
-        "id": "rs_foreign",
+        "id": "__fake_id__",
         "summary": [{"type": "summary_text", "text": "SYNTHETIC_FOREIGN_REASONING"}],
         "encrypted_content": "synthetic-foreign-provider-state",
-        "provider_data": {"foreign_reasoning": True},
+        "provider_data": {
+            "thinking_blocks": [
+                {
+                    "type": "thinking",
+                    "thinking": "SYNTHETIC_FOREIGN_REASONING",
+                    "signature": "synthetic-foreign-provider-state",
+                }
+            ]
+        },
     }
     portable_reasoning = {
         "type": "reasoning",
         "id": "rs_portable",
         "summary": [{"type": "summary_text", "text": "Portable provider summary."}],
         "encrypted_content": "synthetic-current-provider-state",
+        "provider_data": {"fixture_note": "SYNTHETIC_CURRENT_PROVIDER_METADATA"},
     }
 
     responses.respond(assistant_output("Continued."))
@@ -62,6 +71,8 @@ async def test_transact_history_replays_portable_parts_of_foreign_items(
         "foreign_reasoning": "SYNTHETIC_FOREIGN_REASONING" in encoded,
         "foreign_encrypted_state": "synthetic-foreign-provider-state" in encoded,
         "portable_reasoning": "Portable provider summary." in encoded,
+        "portable_encrypted_state": "synthetic-current-provider-state" in encoded,
+        "portable_item_metadata": "SYNTHETIC_CURRENT_PROVIDER_METADATA" in encoded,
     }
     assert observed == {
         "portable_text": True,
@@ -70,6 +81,8 @@ async def test_transact_history_replays_portable_parts_of_foreign_items(
         "foreign_reasoning": False,
         "foreign_encrypted_state": False,
         "portable_reasoning": True,
+        "portable_encrypted_state": True,
+        "portable_item_metadata": False,
     }
 
 

@@ -714,8 +714,8 @@
     },
     {
       "path": "sdk-imported-provider-item-cleanup.patch",
-      "sha256": "f9fdb44ab64204713c513f081228fe99fe30e254b343822589cbcfbffb01cd5e"
+      "sha256": "08b0c51af6002bdcdede8bc07ef7dcff9f83a34e774a70d5d3d65c7a52959cd3"
     }
   ],
-  "result_tree": "06303d4206c6282b3a4dd067e1a4439b7748771a"
+  "result_tree": "d4c9b1592f7ecf96886ee69cf54fe93d334e79f1"
 }

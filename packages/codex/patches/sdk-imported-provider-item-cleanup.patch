@@ -1,44 +1,49 @@
 diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
-index d77c9401..7fe98880 100644
+index d77c9401..9e87075f 100644
 --- a/codex-rs/history/src/sdk_originals.rs
 +++ b/codex-rs/history/src/sdk_originals.rs
-@@ -70,8 +70,23 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
+@@ -70,8 +70,21 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
      if matches!(kind.as_str(), "configuration_update" | "compaction_trigger") {
          return Ok(None);
      }
 -    let item: ResponseItem =
-+    // Keep foreign reasoning in the original history for inspection. Its provider
-+    // state is unsuitable for replay as a native Responses item.
-+    if kind == "reasoning"
-+        && fields.get("provider_data").is_some_and(|data| {
-+            serde_json::from_str::<BTreeMap<String, &RawValue>>(data.get())
-+                .is_ok_and(|data| !data.is_empty())
-+        })
-+    {
-+        return Ok(None);
-+    }
 +    let mut item: ResponseItem =
          serde_json::from_str(value).map_err(|_| "Invalid canonical history item".to_string())?;
-+    // The classic Chat Completions adapter can reuse this placeholder on every
-+    // item. Core assigns an independent native ID after admission.
++    // Classic Chat Completions uses this placeholder for its response items.
++    // Keep its provider-specific reasoning in the original history.
 +    if item.id().is_some_and(|id| id.as_str() == "__fake_id__") {
++        if matches!(item, ResponseItem::Reasoning { .. })
++            && fields.get("provider_data").is_some_and(|data| {
++                serde_json::from_str::<BTreeMap<String, &RawValue>>(data.get())
++                    .is_ok_and(|data| !data.is_empty())
++            })
++        {
++            return Ok(None);
++        }
 +        item.set_id(None);
 +    }
      Ok(match item {
          ResponseItem::Other
          | ResponseItem::ConfigurationUpdate { .. }
-@@ -917,6 +932,25 @@ mod tests {
+@@ -917,6 +930,32 @@ mod tests {
          }
      }
  
 +    #[test]
 +    fn imports_portable_provider_items_without_foreign_reasoning_or_placeholder_ids() {
-+        let foreign = r#"{"type":"reasoning","id":"rs_foreign","summary":[],"encrypted_content":"foreign","provider_data":{"origin":"fixture"}}"#;
++        let foreign = r#"{"type":"reasoning","id":"__fake_id__","summary":[],"encrypted_content":"foreign","provider_data":{"thinking_blocks":[{"type":"thinking","thinking":"fixture","signature":"foreign"}]}}"#;
 +        assert!(input_projection(foreign).unwrap().is_none());
 +
-+        let native = r#"{"type":"reasoning","id":"rs_native","summary":[],"encrypted_content":"native","provider_data":{}}"#;
++        let native = r#"{"type":"reasoning","id":"rs_native","summary":[],"encrypted_content":"native","provider_data":{"fixture_note":"unrelated"}}"#;
 +        let native = input_projection(native).unwrap().unwrap();
 +        assert_eq!(native.id().unwrap().as_str(), "rs_native");
++        assert!(matches!(
++            native,
++            ResponseItem::Reasoning {
++                encrypted_content: Some(content),
++                ..
++            } if content == "native"
++        ));
 +
 +        let placeholder = r#"{"type":"message","id":"__fake_id__","role":"assistant","content":[{"type":"output_text","text":"portable"}]}"#;
 +        assert!(
