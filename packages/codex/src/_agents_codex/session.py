@@ -9896,6 +9896,7 @@ class Session(Generic[ContextT, OutputT]):
             state.stopping = True
             for callback in state.callbacks:
                 cancel_once(callback)
+            await self._join_managed_child_stream(state)
             await asyncio.shield(state.completion)
             if state.cleanup_error is None and confirmed is True:
                 return True
@@ -11392,6 +11393,12 @@ class Session(Generic[ContextT, OutputT]):
             state.request_keys.append(json.dumps({name: request[name] for name in fields}))
         return state
 
+    async def _join_managed_child_stream(self, state: _ChildCallbacks) -> None:
+        stream = self._managed_tool_streams.get(state.handle.turn_id)
+        if stream is not None and stream.submission_id == state.handle.submission_id:
+            stream.abort()
+            await asyncio.gather(stream.task, return_exceptions=True)
+
     async def _stop_child_callback_owner(self, state: _ChildCallbacks) -> None:
         state.stopping = True
         if self._closing:
@@ -11423,6 +11430,7 @@ class Session(Generic[ContextT, OutputT]):
                 if await self._native._cancel_child_turn(native) is None:
                     raise NativeError("Child cancellation cleanup failed")
         finally:
+            await self._join_managed_child_stream(state)
             if state.policy_stop and not self._closing:
                 if state.native_instance is None:
                     raise NativeError("Stopped child has no native incarnation receipt")
@@ -11692,6 +11700,7 @@ class Session(Generic[ContextT, OutputT]):
         stream.task.add_done_callback(retired)
         # Registration precedes the synthetic public TurnStarted observation.
         self._child_callback_state(child_id, instance, child_turn)
+        self._observations.notify()
 
     async def _managed_agent_result(self, state: _CallbackState, message: dict[str, Any]) -> None:
         output = None
@@ -11726,9 +11735,16 @@ class Session(Generic[ContextT, OutputT]):
             if tool is None or (tool.on_stream is None and tool.extract_result is None):
                 raise NativeError("Managed role result callback is unavailable")
             if tool.on_stream is not None:
-                stream = self._managed_tool_streams.get(message["child_turn_id"])
-                if stream is None:
-                    raise NativeError("Managed child stream has no admitted owner")
+                while stream is None:
+                    changed = self._observations.changed
+                    stream = self._managed_tool_streams.get(message["child_turn_id"])
+                    if stream is not None:
+                        break
+                    if not admitted():
+                        raise asyncio.CancelledError()
+                    # The native result and child FIFO use separate delivery channels.
+                    # Keep reading events while this owned callback awaits its marker.
+                    await changed.wait()
                 origin = stream.invocation
                 source = message["source"]
                 if (
@@ -11773,7 +11789,10 @@ class Session(Generic[ContextT, OutputT]):
                     if completion is not None
                     else status["completed"] or "",
                 }
-                output = await _call_callback(tool.extract_result, admitted, result)
+                with _owned_span(
+                    "managed result callback", "callback", message.get("tracing_context")
+                ):
+                    output = await _call_callback(tool.extract_result, admitted, result)
                 if not isinstance(output, str):
                     raise TypeError("extract_result must return a string")
             failed = False

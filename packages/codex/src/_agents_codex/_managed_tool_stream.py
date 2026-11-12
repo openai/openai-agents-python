@@ -10,9 +10,10 @@ from collections.abc import Awaitable, Callable
 from copy import deepcopy
 
 from .native_agents import NativeRoleToolInvocation, NativeRoleToolStreamEvent
-from .observation import Observation
+from .observation import Observation, _observation_sizes
 
 _logger = logging.getLogger("agents.native.managed_tool")
+_MAX_RETAINED_BYTES = 32 * 1024 * 1024
 
 
 class _ManagedToolStream:
@@ -32,8 +33,9 @@ class _ManagedToolStream:
         self._limit = limit
         self._overflow = overflow
         self._admit = admit if admit is not None else lambda: True
-        self._pending: deque[Observation] = deque()
-        self._next: asyncio.Future[Observation | None] | None = (
+        self._pending: deque[tuple[Observation, int]] = deque()
+        self._retained_bytes = 0
+        self._next: asyncio.Future[tuple[Observation, int] | None] | None = (
             asyncio.get_running_loop().create_future()
         )
         self._finished = False
@@ -44,10 +46,17 @@ class _ManagedToolStream:
     def _retired(self, task: asyncio.Task[None]) -> None:
         self._finished = True
         self._pending.clear()
+        self._retained_bytes = 0
         self._next = None
 
     def append(self, event: Observation) -> None:
         if self._finished:
+            return
+        size = sum(_observation_sizes(event, utf8=True))
+        if size > _MAX_RETAINED_BYTES - self._retained_bytes:
+            self.error = RuntimeError("Managed role stream retained byte limit exceeded")
+            self.abort()
+            self._overflow()
             return
         event = deepcopy(event)
         # A waiting worker claims this event immediately. Its handler does not
@@ -56,14 +65,16 @@ class _ManagedToolStream:
             if self._next.done():
                 self.abort()
                 return
-            self._next.set_result(event)
+            self._retained_bytes += size
+            self._next.set_result((event, size))
             self._next = None
         elif self._limit is not None and len(self._pending) >= self._limit:
             self.error = RuntimeError("Managed role stream pending event limit exceeded")
             self.abort()
             self._overflow()
         else:
-            self._pending.append(event)
+            self._retained_bytes += size
+            self._pending.append((event, size))
 
     def finish(self) -> None:
         if self._finished:
@@ -79,10 +90,11 @@ class _ManagedToolStream:
         self._pending.clear()
         self.task.cancel()
 
-    async def _run(self, first: asyncio.Future[Observation | None]) -> None:
+    async def _run(self, first: asyncio.Future[tuple[Observation, int] | None]) -> None:
         try:
-            event = await first
-            while event is not None:
+            entry = await first
+            while entry is not None:
+                event, size = entry
                 if not self._admit():
                     self._pending.clear()
                     return
@@ -91,18 +103,25 @@ class _ManagedToolStream:
                     if inspect.isawaitable(result):
                         await result
                 except Exception:
-                    _logger.exception("Managed child stream callback failed")
+                    _logger.error("Managed child stream callback failed")
+                finally:
+                    self._retained_bytes -= size
                 if self._pending:
-                    event = self._pending.popleft()
+                    entry = self._pending.popleft()
                 elif self._finished:
                     return
                 else:
                     self._next = asyncio.get_running_loop().create_future()
-                    event = await self._next
+                    entry = await self._next
         except asyncio.CancelledError:
             return
 
     async def drain(self) -> None:
-        await asyncio.shield(self.task)
+        try:
+            await asyncio.shield(self.task)
+        except asyncio.CancelledError:
+            # Overflow can retire the task before its coroutine starts.
+            if not self.task.cancelled() or self.error is None:
+                raise
         if self.error is not None:
             raise self.error
