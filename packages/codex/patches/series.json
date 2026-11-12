@@ -841,9 +841,37 @@
       "sha256": "bf3cc2302fb84ae70b68546b5bd0994f3a9d0c0023a59fa25688501d2e062157"
     },
     {
+      "path": "sdk-imported-provider-item-cleanup.patch",
+      "sha256": "08b0c51af6002bdcdede8bc07ef7dcff9f83a34e774a70d5d3d65c7a52959cd3"
+    },
+    {
+      "path": "sdk-managed-agent-tool-origin.patch",
+      "sha256": "7b5aef03f468271b27a162ec9151ee52eb6406dabde4b7a27e5e72b427052f94"
+    },
+    {
+      "path": "sdk-hosted-mcp-approvals.patch",
+      "sha256": "66e6a32185083e7accc830456d76eee5a04aaf341cbbe6ab8ffdf0046b910f84"
+    },
+    {
+      "path": "sdk-run-model-override.patch",
+      "sha256": "50381199f8e50375fc0477ffe597ba229ec6ade39708779fc14ecd92565e1d69"
+    },
+    {
+      "path": "sdk-trace-provider-restart.patch",
+      "sha256": "93e8fc471464e573b070b5a972db1861527e94f86de0b64633893786ded2095f"
+    },
+    {
+      "path": "sdk-hosted-mcp-typed-effect-fence.patch",
+      "sha256": "fabd814cbbf3ad51225dd294bcf7b4ef3fbc447f3799ed09a801f32554732e6f"
+    },
+    {
+      "path": "sdk-hosted-mcp-request-risk.patch",
+      "sha256": "97969b9079517f3ec4fc6e3ecfcb158d8d994384de19b646801174d1c9d050bc"
+    },
+    {
       "path": "sdk-tracing-annotation-shapes.patch",
       "sha256": "8bf39a08c0d4efc2d1dee396983f0ae305a05ff4ecc24e77fb60bdd4ecf2f1b0"
     }
   ],
-  "result_tree": "59ce0a345f1f9f84cbe2c9db14d98014d3a35fa5"
+  "result_tree": "d67ce8589bfd65e11d11db7a3a964c33bb307bf9"
 }

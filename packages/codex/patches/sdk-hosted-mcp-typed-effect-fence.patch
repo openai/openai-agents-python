@@ -1,0 +1,12 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index f78beef6..3db9f67a 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4124,6 +4124,7 @@ fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::
+             }
+             ResponseItem::CodeInterpreterCall { .. }
+             | ResponseItem::ImageGenerationCall { .. }
++            | ResponseItem::McpCall { .. }
+             | ResponseItem::ShellCallOutput { .. }
+             | ResponseItem::Other => true,
+             _ => false,

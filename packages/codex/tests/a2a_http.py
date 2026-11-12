@@ -119,7 +119,11 @@ async def serve(factory):
     sock.listen(128)
     sock.setblocking(False)
     base_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
-    server = uvicorn.Server(uvicorn.Config(factory(base_url), log_level="error", lifespan="on"))
+    server = uvicorn.Server(
+        uvicorn.Config(
+            factory(base_url), log_level="error", lifespan="on", timeout_graceful_shutdown=2
+        )
+    )
     running = asyncio.create_task(server.serve(sockets=[sock]))
     try:
         for _ in range(1000):

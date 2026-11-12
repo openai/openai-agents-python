@@ -452,6 +452,7 @@ pub(crate) struct TurnAdmission {
     model_attempt: Mutex<Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>>>,
     thread_id: String,
     pub(crate) tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
+    pub(crate) model_override: Option<String>,
     turn_id: String,
     owner: Weak<PythonTools>,
     use_deferred_specs: bool,
@@ -795,7 +796,7 @@ pub(crate) enum Reply {
 fn functions(
     specs: &[DynamicToolSpec],
 ) -> Vec<(
-    Option<&DynamicToolNamespaceSpec>,
+    Option<Cow<'_, DynamicToolNamespaceSpec>>,
     Cow<'_, DynamicToolFunctionSpec>,
 )> {
     let mut functions = Vec::new();
@@ -816,6 +817,14 @@ fn functions(
             DynamicToolSpec::Computer(tool) => {
                 functions.push((None, Cow::Owned(tool.callback_spec())))
             }
+            DynamicToolSpec::HostedMcp(tool) => functions.push((
+                Some(Cow::Owned(DynamicToolNamespaceSpec {
+                    name: "hosted_mcp".into(),
+                    description: String::new(),
+                    tools: Vec::new(),
+                })),
+                Cow::Owned(tool.callback_spec()),
+            )),
             DynamicToolSpec::ToolSearch(tool) => {
                 functions.push((None, Cow::Owned(tool.callback_spec())))
             }
@@ -824,7 +833,7 @@ fn functions(
             }
             DynamicToolSpec::Namespace(namespace) => {
                 for DynamicToolNamespaceTool::Function(tool) in &namespace.tools {
-                    functions.push((Some(namespace), Cow::Borrowed(tool)));
+                    functions.push((Some(Cow::Borrowed(namespace)), Cow::Borrowed(tool)));
                 }
             }
         }
@@ -838,6 +847,7 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
             DynamicToolSpec::ApplyPatch
             | DynamicToolSpec::Function(_)
             | DynamicToolSpec::Computer(_)
+            | DynamicToolSpec::HostedMcp(_)
             | DynamicToolSpec::ToolSearch(_)
             | DynamicToolSpec::Shell(_) => true,
             DynamicToolSpec::Namespace(ns) => ns.tools.len() == 1,
@@ -864,8 +874,11 @@ pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
     }
     let mut seen = HashSet::new();
     for (declaration, (namespace, tool)) in specs.iter().zip(functions(specs)) {
-        let key = ToolName::new(namespace.map(|ns| ns.name.clone()), tool.name.clone())
-            .with_default_namespace();
+        let key = ToolName::new(
+            namespace.as_ref().map(|ns| ns.name.clone()),
+            tool.name.clone(),
+        )
+        .with_default_namespace();
         ensure!(seen.insert(key.clone()), "Duplicate Python tool: {key}");
         ensure!(
             !(key.is_default_namespace()
@@ -909,8 +922,11 @@ fn tool_names(specs: &[DynamicToolSpec]) -> HashSet<ToolName> {
     functions(specs)
         .into_iter()
         .map(|(namespace, tool)| {
-            ToolName::new(namespace.map(|ns| ns.name.clone()), tool.name.clone())
-                .with_default_namespace()
+            ToolName::new(
+                namespace.as_ref().map(|ns| ns.name.clone()),
+                tool.name.clone(),
+            )
+            .with_default_namespace()
         })
         .collect()
 }
@@ -2402,6 +2418,7 @@ impl PythonTools {
                 codex_tools::ComputerToolOutput::from_dynamic_response(arguments, response)
                     .map_err(|_| anyhow::anyhow!("Invalid native computer response"))?,
             ),
+            ToolPayload::HostedMcpApproval { .. } => Box::new(hosted_mcp_output(response)?),
             ToolPayload::Shell { arguments } => {
                 return crate::local_reconciliation::shell_receipt(
                     arguments, response, &key.turn, &key.call,
@@ -2440,7 +2457,10 @@ impl PythonTools {
         validate_declarations(&specs)?;
         let mut entries = Vec::new();
         for (declaration, (namespace, tool)) in specs.iter().zip(functions(&specs)) {
-            let name = ToolName::new(namespace.map(|ns| ns.name.clone()), tool.name.clone());
+            let name = ToolName::new(
+                namespace.as_ref().map(|ns| ns.name.clone()),
+                tool.name.clone(),
+            );
             let key = name.clone().with_default_namespace();
             ensure!(
                 !self.fixed.contains(&key) || matches!(declaration, DynamicToolSpec::ApplyPatch),
@@ -2452,6 +2472,10 @@ impl PythonTools {
             );
             let spec = match declaration {
                 DynamicToolSpec::ApplyPatch => ToolSpec::ApplyPatch {},
+                DynamicToolSpec::HostedMcp(hosted) => ToolSpec::Mcp(codex_tools::HostedMcpTool {
+                    server_label: hosted.server_label.clone(),
+                    provider_data: Default::default(),
+                }),
                 DynamicToolSpec::Computer(computer) => {
                     codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?
                 }
@@ -2482,7 +2506,9 @@ impl PythonTools {
                 input_error_recovery: false,
                 name,
                 spec,
-                exposure: if matches!(
+                exposure: if matches!(declaration, DynamicToolSpec::HostedMcp(_)) {
+                    ToolExposure::Hidden
+                } else if matches!(
                     declaration,
                     DynamicToolSpec::ApplyPatch
                         | DynamicToolSpec::Computer(_)
@@ -4390,6 +4416,9 @@ impl PythonTools {
                         ToolSpec::ApplyPatch {} => Some(ToolPayload::ApplyPatch {
                             arguments: request["msg"]["arguments"].to_string(),
                         }),
+                        ToolSpec::Mcp(_) => Some(ToolPayload::HostedMcpApproval {
+                            request: serde_json::from_value(request["msg"]["arguments"].clone())?,
+                        }),
                         ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
                             Some(ToolPayload::Computer {
                                 arguments: request["msg"]["arguments"].to_string(),
@@ -5182,10 +5211,17 @@ impl TurnLifecycleContributor for PythonContributor {
                 // This is presentation, not a grant. Resolve the actual native
                 // model; the SDK must never hide selected tools from a model
                 // which cannot request Core's search surface.
+                let run_model = input
+                    .turn_store
+                    .get::<codex_extension_api::CapturedRunModelOverride>();
+                let model_name = run_model.as_ref().map_or_else(
+                    || input.collaboration_mode.model(),
+                    |model| model.0.as_str(),
+                );
                 let use_deferred_specs = if let Some(manager) = self.manager.upgrade() {
                     let model = manager
                         .get_models_manager()
-                        .get_model_info(input.collaboration_mode.model(), &self.models_config)
+                        .get_model_info(model_name, &self.models_config)
                         .await;
                     // Core adds tool_search after its direct-namespace
                     // overrides. In CodeModeOnly it is hidden unless the
@@ -5209,6 +5245,7 @@ impl TurnLifecycleContributor for PythonContributor {
                     model_attempt: Mutex::new(None),
                     thread_id: input.thread_store.level_id().to_owned(),
                     tracing: tracing.context.clone(),
+                    model_override: run_model.as_ref().map(|model| model.0.clone()),
                     turn_id: input.turn_id.to_owned(),
                     owner: Arc::downgrade(&tools),
                     use_deferred_specs,
@@ -6462,6 +6499,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
             }
 
             let (arguments, argument_error) = match &call.payload {
+                ToolPayload::HostedMcpApproval { request } => (
+                    serde_json::to_value(request).map_err(|_| {
+                        FunctionCallError::Fatal("Invalid hosted MCP request".into())
+                    })?,
+                    None,
+                ),
                 ToolPayload::ClientToolSearch(search) => (search.arguments.clone(), None),
                 _ => {
                     let raw = call.function_arguments()?;
@@ -6532,7 +6575,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 key: key.clone(),
             };
             let response = receiver.await.map_err(|_| {
-                if matches!(
+                if matches!(call.payload, ToolPayload::HostedMcpApproval { .. }) {
+                    FunctionCallError::Fatal("Hosted MCP approval cancelled before reply".into())
+                } else if matches!(
                     call.payload,
                     ToolPayload::ApplyPatch { .. } | ToolPayload::Computer { .. }
                 ) {
@@ -6575,6 +6620,16 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                         response.response,
                     )?) as Box<dyn ToolOutput>,
                 );
+            }
+            if matches!(call.payload, ToolPayload::HostedMcpApproval { .. }) {
+                let output = hosted_mcp_output(response.response).map_err(|_| {
+                    FunctionCallError::Fatal("Invalid hosted MCP approval response".into())
+                })?;
+                return Ok(Box::new(ReplyOutput {
+                    output,
+                    start_response: response.start_response,
+                    acceptance: response.acceptance,
+                }) as Box<dyn ToolOutput>);
             }
             if let ToolPayload::Computer { arguments } = &call.payload {
                 return Ok(Box::new(ReplyOutput {
@@ -6645,6 +6700,18 @@ impl<T: ToolOutput> ToolOutput for ReplyOutput<T> {
             let _ = acceptance.send(());
         }
     }
+}
+
+fn hosted_mcp_output(
+    response: DynamicToolResponse,
+) -> Result<codex_tools::HostedMcpApprovalDecision> {
+    ensure!(response.success, "Invalid hosted MCP approval response");
+    let [codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText { text }] =
+        response.content_items.as_slice()
+    else {
+        anyhow::bail!("Invalid hosted MCP approval response");
+    };
+    serde_json::from_str(text).map_err(|_| anyhow::anyhow!("Invalid hosted MCP approval response"))
 }
 
 pub(crate) struct PythonOutput(pub(crate) DynamicToolResponse);
@@ -8618,7 +8685,7 @@ pub(crate) mod managed_tests {
             payload.as_object_mut().unwrap().remove("native_continuation");
             let restored = checkpoint::restore(
                 &restored_engine, serde_json::from_value(payload).unwrap(),
-                restored_options, Some(restored_specs),
+                restored_options, Some(restored_specs), None,
             ).await.unwrap();
             *restored.manual.lock().unwrap() = Some(frame);
             let resumed = restored.current().unwrap();
