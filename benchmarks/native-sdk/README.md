@@ -225,7 +225,7 @@ In omitted mode, `Agent.run` has been owning each call's Provider creation and c
 
 Their `identity_family` has been keeping inputs and outputs identical while chunk count or public observation has been changing. Each worker has been using one prefill and 20 measured calls by default. The peer has been checking every tool result and keeping continuation history on the same fresh WSS connection. Connection counts have been counting conversations; generating-request counts have been including the tool round and final response. Warmups have been receiving separate counters.
 
-In omitted-provider tool mode, the native adapter has been requiring a real `ToolContext[None]`, its actual call ID and `context.submission is result.turn`. Worker rows have been recording distinct native Session IDs and those checks. The active case has been creating its reader outside the callback, then attaching it to the callback's real Turn. Readiness has been following the first public non-text event. The reader has been draining an unread suffix only when its first stream missed the terminal event. Every cursor drain, reader join and release of callback references has been remaining inside `Adapter.run`. Native wheels without these public APIs have been failing explicitly. Existing caller-owned cases have been retaining their original callbacks.
+In omitted-provider tool mode, the native adapter has been requiring a real `ToolContext[None]`, its actual call ID and `context.submission is result.turn`. Worker rows have been recording distinct native Session IDs and those checks. The active case has been creating its reader outside the callback, then attaching it to the callback's real Turn. Readiness has been following the first public non-text event. The reader has been draining an unread suffix only after a first stream without its terminal event. Every cursor drain, reader join and release of callback references has been remaining inside `Adapter.run`. Native wheels without these public APIs have been failing explicitly. Existing caller-owned cases have been retaining their original callbacks.
 
 The v0 adapter has been remaining unchanged: final-only cases have been using `Runner.run` with JSON, while active cases have been using `Runner.run_streamed` with SSE. Native transport declarations have been checking the wheel's actual HTTP/SSE or WSS route. These have been comparing public application paths; JSON, SSE and WSS costs have not been receiving separate causal attribution.
 
@@ -237,8 +237,8 @@ LAB=/out
 PEER_PY=/opt/peer/bin/python
 REFERENCE_NATIVE_PY=/opt/reference/bin/python
 NATIVE_PY=/opt/sdk/bin/python
-REFERENCE_NATIVE_VERSION="$(uv pip show --python "$REFERENCE_NATIVE_PY" openai-agents | sed -n "s/^Version: //p")"
-NATIVE_VERSION="$(uv pip show --python "$NATIVE_PY" openai-agents | sed -n "s/^Version: //p")"
+REFERENCE_NATIVE_VERSION="$("$REFERENCE_NATIVE_PY" -B -c "from importlib.metadata import version; print(version(\"openai-agents\"))")"
+NATIVE_VERSION="$("$NATIVE_PY" -B -c "from importlib.metadata import version; print(version(\"openai-agents\"))")"
 "$PEER_PY" -B "$BENCH/container-default-host/setup.py" \
   --directory /run/sdk-benchmark \
   --python "$REFERENCE_NATIVE_PY" --python "$NATIVE_PY" --python "$PEER_PY"
