@@ -56,7 +56,9 @@ async def test_request_override_stays_on_independent_websocket_endpoint():
         assert not http.request_paths
         admitted = [
             (urlsplit(target), headers["x-operation"])
-            for (_, target), headers in zip(websocket.request_paths, websocket.request_headers)
+            for (_, target), headers in zip(
+                websocket.request_paths, websocket.request_headers, strict=True
+            )
             if "x-operation" in headers
         ]
         assert [label for _, label in admitted] == ["first", "second"]

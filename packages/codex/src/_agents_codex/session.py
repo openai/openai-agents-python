@@ -4033,7 +4033,9 @@ class Session(Generic[ContextT, OutputT]):
                 continuation.model_settings_override
             ):
                 retry_owner = (
-                    operation_profile.profile.declaration if operation_profile is not None else agent
+                    operation_profile.profile.declaration
+                    if operation_profile is not None
+                    else agent
                 )
                 retry = retry_owner.model_settings.get("retry")
                 if retry is None or retry.policy is None:
