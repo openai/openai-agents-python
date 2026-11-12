@@ -30,6 +30,54 @@ from tests.test_native_agent import provider as fixture_provider
 from tests.test_native_provider_websockets import peer as websocket_peer
 
 
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("failure", ["validation", "rejected", "uncertain"])
+async def test_issued_admission_failure_retains_opted_in_logical_report(
+    responses, monkeypatch, capture, failure
+):
+    import _agents_codex.session as session_module
+
+    async with timeout(30), fixture_provider(responses) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session(
+            include_request_attempts=capture
+        ) as session:
+            native = session._native
+
+            class Admission:
+                def __getattr__(self, name):
+                    return getattr(native, name)
+
+                async def _submit(self, encoded, **kwargs):
+                    if failure == "rejected":
+                        return json.dumps(
+                            {"status": "not_submitted", "reason": {"type": "no_active_turn"}}
+                        )
+                    raise NativeError("Synthetic uncertain admission")
+
+            if failure == "validation":
+
+                def reject(request):
+                    raise ValueError("Synthetic pre-admission validation")
+
+                monkeypatch.setattr(session_module, "_check_audio_json", reject)
+            else:
+                monkeypatch.setattr(session, "_native", Admission())
+            turn = await session.submit("Answer.")
+            with pytest.raises(ValueError if failure == "validation" else NativeError):
+                await turn.get_result()
+            assert turn.turn_id is None
+            assert responses.requests == []
+            assert turn.request_attempts is None
+            report = turn.submission_request_attempts
+            if capture:
+                assert report is not None
+                assert report.counts == ()
+                assert report.availability == ("partial" if failure == "uncertain" else "complete")
+                assert not report.borrowed_requests_unavailable
+            else:
+                assert report is None
+
+
 @asynccontextmanager
 async def attempt_peer(*, mode="streaming", failures=0, hold=None, borrowed=False):
     requests = []
@@ -81,8 +129,44 @@ async def attempt_peer(*, mode="streaming", failures=0, hold=None, borrowed=Fals
                 yield provider, requests, entered
 
 
-def counts(turn):
-    snapshot = turn.request_attempts
+@pytest.mark.parametrize("capture", [False, True])
+async def test_withdrawn_queued_turn_retains_zero_logical_sends(responses, capture):
+    entered, release = asyncio.Event(), asyncio.Event()
+    responses.respond(assistant_output("First answer."))
+
+    async def hold(event):
+        entered.set()
+        await release.wait()
+
+    responses.before_event = hold
+    async with timeout(30), fixture_provider(responses) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session(
+            include_request_attempts=capture
+        ) as session:
+            first = await session.submit("First.")
+            try:
+                await entered.wait()
+                queued = await session.submit("Withdraw.", if_busy="queue")
+                await queued.cancel()
+                with pytest.raises(TurnStoppedError):
+                    await queued.get_result()
+                assert queued.turn_id is None and queued.request_attempts is None
+                report = queued.submission_request_attempts
+                if capture:
+                    assert report is not None
+                    assert report.availability == "complete" and report.counts == ()
+                else:
+                    assert report is None
+            finally:
+                release.set()
+            assert (await first.get_result()).final_output == "First answer."
+            assert len(responses.requests) == 1
+            if capture:
+                assert counts(first, submission=True) == {("root", "generation", "http_sse"): 1}
+
+
+def counts(turn, *, submission=False):
+    snapshot = turn.submission_request_attempts if submission else turn.request_attempts
     assert snapshot is not None
     return {(row.owner, row.operation, row.transport): row.count for row in snapshot.counts}
 
@@ -120,6 +204,7 @@ async def test_exhausted_native_request_still_has_settled_counts():
             assert len(received) == 2
             assert counts(turn) == {("root", "generation", "http_sse"): 2}
             assert turn.request_attempts.availability == "complete"
+            assert counts(turn, submission=True) == counts(turn)
 
 
 async def test_cancelled_native_request_keeps_counts_without_a_completed_response():
@@ -137,6 +222,7 @@ async def test_cancelled_native_request_keeps_counts_without_a_completed_respons
                     await turn.get_result()
                 assert len(received) == 1
                 assert counts(turn) == {("root", "generation", "http_sse"): 1}
+                assert counts(turn, submission=True) == counts(turn)
         finally:
             release.set()
 
@@ -148,12 +234,14 @@ async def test_default_and_borrowed_request_availability_are_distinct():
             default = await ordinary.submit("Default.")
             await default.get_result()
             assert default.request_attempts is None
+            assert default.submission_request_attempts is None
         async with agent.session(include_request_attempts=True) as observed:
             turn = await observed.submit("Opted in.")
             await turn.get_result()
             assert counts(turn) == {}
             assert turn.request_attempts.availability == "unavailable"
             assert turn.request_attempts.borrowed_requests_unavailable is True
+            assert turn.submission_request_attempts == turn.request_attempts
         assert len(received) == 2
 
 
@@ -216,6 +304,7 @@ async def test_restored_pending_turn_has_no_new_capture(responses):
             assert accepted[0].turn_id == restored_turn.turn_id
             assert (await restored_turn.get_result()).final_output == "Restored."
             assert restored_turn.request_attempts is None
+            assert restored_turn.submission_request_attempts is None
         assert len(responses.requests) == 2
 
 
@@ -243,6 +332,8 @@ async def test_snapshot_scope_keeps_private_repairs_separate(responses, private_
             await turn.get_result()
             assert len(responses.requests) == 2
             assert counts(turn) == {("root", "generation", "http_sse"): 1 if private_repair else 2}
+            assert counts(turn, submission=True) == {("root", "generation", "http_sse"): 2}
+            assert turn.submission_request_attempts.availability == "complete"
 
 
 async def test_post_turn_compaction_has_its_own_operation_count(responses, monkeypatch):
@@ -324,3 +415,81 @@ async def test_root_capture_includes_native_child_sends_but_child_has_no_capture
                 ("child", "generation", "http_sse")
             ] == len(peer.requests)
             assert all(child.request_attempts is None for child in children)
+
+
+async def test_concurrent_logical_reports_keep_private_repairs_with_their_owner(responses):
+    responses.respond(assistant_output("invalid"))
+    responses.respond(assistant_output("invalid"))
+    responses.respond(assistant_output("7"))
+    responses.respond(assistant_output("7"))
+    entered = asyncio.Event()
+
+    async def overlap(event):
+        if event["type"] == "response.created" and len(responses.requests) <= 2:
+            if len(responses.requests) == 2:
+                entered.set()
+            await entered.wait()
+
+    responses.before_event = overlap
+    async with timeout(30), fixture_provider(responses) as provider:
+        agent = Agent(model="fixture", instructions="Return a number.", provider=provider)
+        async with (
+            agent.session(include_request_attempts=True) as left,
+            agent.session(include_request_attempts=True) as right,
+        ):
+            turns = await asyncio.gather(
+                left.submit("Left.", output_type=PromptedOutput(int, max_retries=1)),
+                right.submit("Right.", output_type=PromptedOutput(int, max_retries=1)),
+            )
+            await asyncio.gather(*(turn.get_result() for turn in turns))
+            assert len(responses.requests) == 4
+            for turn in turns:
+                assert counts(turn) == {("root", "generation", "http_sse"): 1}
+                assert counts(turn, submission=True) == {("root", "generation", "http_sse"): 2}
+
+
+async def test_cancelled_private_repair_keeps_its_logical_send(responses):
+    responses.respond(assistant_output("invalid"))
+    responses.respond(assistant_output("7"))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_repair(event):
+        if len(responses.requests) == 2:
+            entered.set()
+            await release.wait()
+
+    responses.before_event = hold_repair
+    try:
+        async with timeout(30), fixture_provider(responses) as provider:
+            async with Agent(
+                model="fixture", instructions="Return a number.", provider=provider
+            ).session(include_request_attempts=True) as session:
+                turn = await session.submit(
+                    "Answer.", output_type=PromptedOutput(int, max_retries=1)
+                )
+                await entered.wait()
+                assert turn.submission_request_attempts is None
+                await turn.cancel()
+                with pytest.raises(TurnStoppedError):
+                    await turn.get_result()
+                assert counts(turn) == {("root", "generation", "http_sse"): 1}
+                assert counts(turn, submission=True) == {("root", "generation", "http_sse"): 2}
+    finally:
+        release.set()
+
+
+async def test_failed_private_repair_keeps_its_logical_send(responses):
+    from agents import OutputValidationError
+
+    responses.respond(assistant_output("invalid"))
+    responses.respond(assistant_output("still invalid"))
+    async with timeout(30), fixture_provider(responses) as provider:
+        async with Agent(
+            model="fixture", instructions="Return a number.", provider=provider
+        ).session(include_request_attempts=True) as session:
+            turn = await session.submit("Answer.", output_type=PromptedOutput(int, max_retries=1))
+            with pytest.raises(OutputValidationError):
+                await turn.get_result()
+            assert counts(turn) == {("root", "generation", "http_sse"): 1}
+            assert counts(turn, submission=True) == {("root", "generation", "http_sse"): 2}
