@@ -809,6 +809,9 @@ fn functions(
     for spec in specs {
         match spec {
             DynamicToolSpec::Function(tool) => functions.push((None, Cow::Borrowed(tool))),
+            DynamicToolSpec::Custom(tool) => {
+                functions.push((None, Cow::Owned(tool.callback_spec())));
+            }
             DynamicToolSpec::ApplyPatch => functions.push((
                 None,
                 Cow::Owned(DynamicToolFunctionSpec {
@@ -852,6 +855,7 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
         specs.iter().all(|spec| match spec {
             DynamicToolSpec::ApplyPatch
             | DynamicToolSpec::Function(_)
+            | DynamicToolSpec::Custom(_)
             | DynamicToolSpec::Computer(_)
             | DynamicToolSpec::HostedMcp(_)
             | DynamicToolSpec::ToolSearch(_)
@@ -2432,6 +2436,7 @@ impl PythonTools {
                 codex_tools::ComputerToolOutput::from_dynamic_response(arguments, response)
                     .map_err(|_| anyhow::anyhow!("Invalid native computer response"))?,
             ),
+            ToolPayload::Custom { .. } => Box::new(PythonOutput(response)),
             ToolPayload::HostedMcpApproval { .. } => Box::new(hosted_mcp_output(response)?),
             ToolPayload::Shell { arguments } => {
                 return crate::local_reconciliation::shell_receipt(
@@ -2485,6 +2490,25 @@ impl PythonTools {
             );
             let spec = match declaration {
                 DynamicToolSpec::ApplyPatch => ToolSpec::ApplyPatch {},
+                DynamicToolSpec::Custom(custom) => {
+                    use codex_protocol::dynamic_tools::DynamicCustomToolFormat;
+                    let (kind, syntax, definition) = match &custom.format {
+                        DynamicCustomToolFormat::Text => ("text", String::new(), String::new()),
+                        DynamicCustomToolFormat::Grammar { syntax, definition } => {
+                            ("grammar", syntax.clone(), definition.clone())
+                        }
+                    };
+                    ToolSpec::Freeform(codex_tools::FreeformTool {
+                        name: custom.name.clone(),
+                        description: custom.description.clone(),
+                        defer_loading: None,
+                        format: codex_tools::FreeformToolFormat {
+                            r#type: kind.to_string(),
+                            syntax,
+                            definition,
+                        },
+                    })
+                }
                 DynamicToolSpec::HostedMcp(hosted) => ToolSpec::Mcp(codex_tools::HostedMcpTool {
                     server_label: hosted.server_label.clone(),
                     provider_data: Default::default(),
@@ -4088,7 +4112,10 @@ impl PythonTools {
                 codex_history::RolloutItem::ResponseItem(envelope) => match &envelope.item {
                     ResponseItem::FunctionCallOutput {
                         call_id: Some(id), ..
-                    } => Some(id),
+                    } => Some((id.as_str(), false)),
+                    ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                        Some((call_id.as_str(), true))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -4100,22 +4127,17 @@ impl PythonTools {
                 let codex_history::RolloutItem::ResponseItem(envelope) = row else {
                     return None;
                 };
-                let ResponseItem::FunctionCall {
-                    call_id,
-                    name,
-                    namespace,
-                    ..
-                } = &envelope.item
-                else {
-                    return None;
-                };
+                let (call_id, name, namespace) = terminal_tool_call(&envelope.item)?;
+                let custom = matches!(&envelope.item, ResponseItem::CustomToolCall { .. });
                 (private_calls.contains(call_id)
-                    && !published.contains(call_id)
+                    && !published.contains(&(call_id, custom))
                     && generation.entries.iter().any(|entry| {
                         entry.finish_turn
-                            && entry.name == ToolName::new(namespace.clone(), name.clone())
+                            && entry.name
+                                == ToolName::new(namespace.map(str::to_owned), name.to_owned())
+                            && matches!(entry.spec, ToolSpec::Freeform(_)) == custom
                     }))
-                .then(|| call_id.clone())
+                .then(|| call_id.to_owned())
             })
             .collect())
     }
@@ -4439,19 +4461,25 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
-                    original_payload: match &entry.spec {
-                        ToolSpec::ApplyPatch {} => Some(ToolPayload::ApplyPatch {
+                    original_payload: match (&entry.spec, &generation.specs[slot]) {
+                        (_, DynamicToolSpec::Custom(custom)) => Some(ToolPayload::Custom {
+                            input: request["msg"]["arguments"][custom.input_field.as_str()]
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("Invalid native custom input"))?
+                                .to_owned(),
+                        }),
+                        (ToolSpec::ApplyPatch {}, _) => Some(ToolPayload::ApplyPatch {
                             arguments: request["msg"]["arguments"].to_string(),
                         }),
-                        ToolSpec::Mcp(_) => Some(ToolPayload::HostedMcpApproval {
+                        (ToolSpec::Mcp(_), _) => Some(ToolPayload::HostedMcpApproval {
                             request: serde_json::from_value(request["msg"]["arguments"].clone())?,
                         }),
-                        ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
+                        (ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }, _) => {
                             Some(ToolPayload::Computer {
                                 arguments: request["msg"]["arguments"].to_string(),
                             })
                         }
-                        ToolSpec::ApplicationShell { .. } => Some(ToolPayload::Shell {
+                        (ToolSpec::ApplicationShell { .. }, _) => Some(ToolPayload::Shell {
                             arguments: request["msg"]["arguments"].to_string(),
                         }),
                         _ => None,
@@ -4827,6 +4855,40 @@ struct StepCatalog {
     slots: Vec<usize>,
 }
 
+/// Only a live SDK callback in this issuing request can extend child policy.
+pub(crate) fn admits_custom_call(
+    admission: &dyn codex_extension_api::ModelToolAdmission,
+    item: &ResponseItem,
+) -> bool {
+    let ResponseItem::CustomToolCall {
+        name, namespace, ..
+    } = item
+    else {
+        return false;
+    };
+    let Some(receipt) = admission.turn_store().get::<Arc<TurnAdmission>>() else {
+        return false;
+    };
+    let Some(tools) = receipt.callback_tools() else {
+        return false;
+    };
+    let Some(step) = admission
+        .step_store()
+        .and_then(|step| step.get::<StepCatalog>())
+    else {
+        return false;
+    };
+    let qualified = ToolName::new(namespace.clone(), name.clone()).with_default_namespace();
+    receipt.thread_id == admission.thread_id()
+        && tools.admitted_turn(admission.turn_store()).is_some()
+        && tools.admits_generation(&step.generation)
+        && admission.admits(item)
+        && step.generation.entries.iter().any(|entry| {
+            entry.name.clone().with_default_namespace() == qualified
+                && matches!(entry.spec, ToolSpec::Freeform(_))
+        })
+}
+
 impl ToolLifecycleContributor for PythonContributor {
     fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move { sandbox_events::on_start(&input) })
@@ -4865,6 +4927,19 @@ impl ToolLifecycleContributor for PythonContributor {
     }
 }
 
+fn terminal_tool_call(item: &ResponseItem) -> Option<(&str, &str, Option<&str>)> {
+    match item {
+        ResponseItem::FunctionCall {
+            call_id,
+            name,
+            namespace,
+            ..
+        } => Some((call_id, name, namespace.as_deref())),
+        ResponseItem::CustomToolCall { call_id, name, .. } => Some((call_id, name, None)),
+        _ => None,
+    }
+}
+
 impl TurnLifecycleContributor for PythonContributor {
     fn hold_tool_completion(&self, input: codex_extension_api::ToolCompletionInput<'_>) -> bool {
         let Some(tools) = input.thread_store.get::<PythonTools>() else {
@@ -4873,25 +4948,19 @@ impl TurnLifecycleContributor for PythonContributor {
         let Some(step) = input.step_store.get::<StepCatalog>() else {
             return false;
         };
-        let ResponseItem::FunctionCall {
-            call_id,
-            name,
-            namespace,
-            ..
-        } = input.call
-        else {
+        let Some((call_id, name, namespace)) = terminal_tool_call(input.call) else {
             return false;
         };
         if !tools.admits_generation(&step.generation) {
             return false;
         }
-        let qualified = ToolName::new(namespace.clone(), name.clone());
+        let qualified = ToolName::new(namespace.map(str::to_owned), name.to_owned());
         step.accepted
             .lock()
             .expect("Terminal receipts poisoned")
             .keys()
             .any(|key| {
-                key.call == *call_id
+                key.call == call_id
                     && key.turn == input.turn_id
                     && key.reply.thread == input.thread_store.level_id()
                     && key.reply.generation == step.generation.id
@@ -4918,13 +4987,7 @@ impl TurnLifecycleContributor for PythonContributor {
             let Some(step) = input.step_store.get::<StepCatalog>() else {
                 return Ok(None);
             };
-            let ResponseItem::FunctionCall {
-                call_id,
-                name,
-                namespace,
-                ..
-            } = input.call
-            else {
+            let Some((call_id, name, namespace)) = terminal_tool_call(input.call) else {
                 return Ok(None);
             };
             if let Some(fresh) = input.turn_store.get::<FreshTerminalReceipts>() {
@@ -4932,14 +4995,14 @@ impl TurnLifecycleContributor for PythonContributor {
                     .adopt(&tools, &step)
                     .map_err(|error| error.to_string())?;
             }
-            let qualified_name = ToolName::new(namespace.clone(), name.clone());
+            let qualified_name = ToolName::new(namespace.map(str::to_owned), name.to_owned());
             let receipt = step
                 .accepted
                 .lock()
                 .expect("Terminal receipts poisoned")
                 .iter()
                 .find(|(key, _)| {
-                    key.call == *call_id
+                    key.call == call_id
                         && step
                             .generation
                             .entries
@@ -4998,7 +5061,7 @@ impl TurnLifecycleContributor for PythonContributor {
                     ensure!(
                         key.reply.thread == input.thread_store.level_id()
                             && key.turn == input.turn_id
-                            && key.call == *call_id
+                            && key.call == call_id
                             && key.reply.generation == step.generation.id
                             && key.reply.instance == tools.instance,
                         "Invalid terminal tool receipt identity"
@@ -5017,8 +5080,24 @@ impl TurnLifecycleContributor for PythonContributor {
                 Ok(())
             };
             verify().map_err(|e| e.to_string())?;
-            let ResponseItem::FunctionCallOutput { output, .. } = input.output else {
-                return Err("Invalid terminal tool output".into());
+            let output = match (input.call, input.output) {
+                (
+                    ResponseItem::FunctionCall { .. },
+                    ResponseItem::FunctionCallOutput {
+                        call_id: Some(output_id),
+                        output,
+                        ..
+                    },
+                )
+                | (
+                    ResponseItem::CustomToolCall { .. },
+                    ResponseItem::CustomToolCallOutput {
+                        call_id: output_id,
+                        output,
+                        ..
+                    },
+                ) if output_id == call_id => output,
+                _ => return Err("Invalid terminal tool output".into()),
             };
             let text = match &output.body {
                 FunctionCallOutputBody::Text(text) => Some(text.clone()),
@@ -6531,7 +6610,15 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
 
     fn exposure(&self) -> ToolExposure {
         let exposure = self.generation.entries[self.slot].exposure;
-        match (exposure, self.use_deferred_specs, self.code_mode_enabled) {
+        let custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_));
+        if custom && exposure == ToolExposure::Direct {
+            return ToolExposure::DirectModelOnly;
+        }
+        match (
+            exposure,
+            self.use_deferred_specs,
+            self.code_mode_enabled && !custom,
+        ) {
             (ToolExposure::Deferred, true, false) => ToolExposure::DeferredModelOnly,
             (ToolExposure::Deferred, false, false) => ToolExposure::DirectModelOnly,
             (ToolExposure::Deferred, false, true) => ToolExposure::Direct,
@@ -6569,14 +6656,25 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 ));
             }
 
-            let (arguments, argument_error) = match &call.payload {
-                ToolPayload::HostedMcpApproval { request } => (
+            let declaration = &self.generation.specs[self.slot];
+            let (arguments, argument_error) = match (declaration, &call.payload) {
+                (DynamicToolSpec::Custom(custom), ToolPayload::Custom { input })
+                    if call.source == ToolCallSource::Direct =>
+                {
+                    (json!({ (&custom.input_field): input }), None)
+                }
+                (DynamicToolSpec::Custom(_), _) => {
+                    return Err(FunctionCallError::RespondToModel(
+                        "Custom string tools require their direct provider call payload".into(),
+                    ));
+                }
+                (_, ToolPayload::HostedMcpApproval { request }) => (
                     serde_json::to_value(request).map_err(|_| {
                         FunctionCallError::Fatal("Invalid hosted MCP request".into())
                     })?,
                     None,
                 ),
-                ToolPayload::ClientToolSearch(search) => (search.arguments.clone(), None),
+                (_, ToolPayload::ClientToolSearch(search)) => (search.arguments.clone(), None),
                 _ => {
                     let raw = call.function_arguments()?;
                     match serde_json::from_str::<Value>(raw) {
@@ -6859,7 +6957,7 @@ impl ToolOutput for PythonOutput {
         self.0.success
     }
 
-    fn to_response_item(&self, call_id: &str, _: &ToolPayload) -> ResponseInputItem {
+    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         let content: Vec<FunctionCallOutputContentItem> = self
             .0
             .content_items
@@ -6873,12 +6971,20 @@ impl ToolOutput for PythonOutput {
             }
             _ => FunctionCallOutputBody::ContentItems(content),
         };
+        let output = FunctionCallOutputPayload {
+            body,
+            success: Some(self.0.success),
+        };
+        if matches!(payload, ToolPayload::Custom { .. }) {
+            return ResponseInputItem::CustomToolCallOutput {
+                call_id: call_id.to_string(),
+                name: None,
+                output,
+            };
+        }
         ResponseInputItem::FunctionCallOutput {
             call_id: call_id.to_string(),
-            output: FunctionCallOutputPayload {
-                body,
-                success: Some(self.0.success),
-            },
+            output,
         }
     }
 }
