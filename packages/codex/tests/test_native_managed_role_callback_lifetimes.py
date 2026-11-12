@@ -286,7 +286,9 @@ async def test_managed_callbacks_activate_native_trace_context(
             return "selected result" if kind == "extract" else None
 
         tool = NativeRoleTool(
-            name="research_topic", role="research", description="Research.",
+            name="research_topic",
+            role="research",
+            description="Research.",
             **({"extract_result": extract} if kind == "extract" else {"on_stream": extract}),
         )
         responses.respond(collaboration(tool.name, {"input": "Read."}, "traced-result"))
