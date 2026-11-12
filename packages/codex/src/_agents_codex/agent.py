@@ -77,7 +77,7 @@ from .input import InitialMessage, _native_input, _response_content
 from .model_context import HostedPromptSource, _ContextTransform
 from .models import ModelProvider, NativeModel, _capture_model_override
 from .retry import ModelRetrySettings as ModelRetrySettings
-from .tools import ToolRef
+from .tools import ToolNotFoundBehavior, ToolRef, _capture_tool_not_found_behavior
 from .usage import RunBudget
 
 if TYPE_CHECKING:
@@ -1833,6 +1833,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -1868,6 +1869,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -1903,6 +1905,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -1937,6 +1940,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -2005,6 +2009,9 @@ class Agent(Generic[ContextT, OutputT]):
         Token/cost limits have been rejecting active capture. return_state=True
         has been remaining available for idle results.
 
+        tool_not_found_behavior selects the new turn's handling of unknown direct function
+        calls. Pass "raise_error" to stop the turn, or use the default model-visible error.
+
         Pass state to restore with current bindings. For a supported pending
         manual checkpoint, input=None resumes the existing turn. Idle state
         needs input for a new turn. return_state=True captures a successful
@@ -2066,6 +2073,7 @@ class Agent(Generic[ContextT, OutputT]):
             from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
 
             model_override = _capture_model_override(model_override)
+            raise_on_unknown_tool = _capture_tool_not_found_behavior(tool_not_found_behavior)
             if budget is not None and not isinstance(budget, RunBudget):
                 raise TypeError("budget must be a RunBudget or None")
             if prepare_request is not None:
@@ -2099,6 +2107,8 @@ class Agent(Generic[ContextT, OutputT]):
             if resume_manual and state is not None:
                 if model_override is not None:
                     raise ValueError("Cannot replace a restored turn's model override")
+                if tool_not_found_behavior is not None:
+                    raise ValueError("Cannot replace a restored turn's tool_not_found_behavior")
                 if budget is not None and state.run_budget is None:
                     raise CapabilityError("Cannot set a budget when restoring an active checkpoint")
                 if input is not None:
@@ -2235,6 +2245,7 @@ class Agent(Generic[ContextT, OutputT]):
                         return_history or return_raw_usage or return_items or capture_error_details
                     )
                     and model_override is None
+                    and not raise_on_unknown_tool
                     and _private_text_run_eligible(
                         self, input, context, return_state, parent_trace, trace_options
                     )
@@ -2245,6 +2256,7 @@ class Agent(Generic[ContextT, OutputT]):
                         return_history or return_raw_usage or return_items or capture_error_details
                     )
                     and model_override is None
+                    and not raise_on_unknown_tool
                     and _completed_run_eligible(
                         self, input, context, return_state, parent_trace, trace_options
                     )
@@ -2415,6 +2427,8 @@ class Agent(Generic[ContextT, OutputT]):
                     submit_options: dict[str, Any] = {}
                     if model_override is not None:
                         submit_options["model_override"] = model_override
+                    if tool_not_found_behavior is not None:
+                        submit_options["tool_not_found_behavior"] = tool_not_found_behavior
                     if prepare_request is not None:
                         submit_options["prepare_request"] = prepare_request
                     if budget is not None:
@@ -2476,6 +2490,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -2511,6 +2526,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -2546,6 +2562,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -2580,6 +2597,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_override: str | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -2622,6 +2640,7 @@ class Agent(Generic[ContextT, OutputT]):
         """
         initial_messages = _capture_initial_messages(initial_messages, state=state)
         model_override = _capture_model_override(model_override)
+        _capture_tool_not_found_behavior(tool_not_found_behavior)
         if budget is not None and not isinstance(budget, RunBudget):
             raise TypeError("budget must be a RunBudget or None")
         options: dict[str, Any] = {}
@@ -2677,6 +2696,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["budget"] = budget
                 if model_override is not None:
                     options["model_override"] = model_override
+                if tool_not_found_behavior is not None:
+                    options["tool_not_found_behavior"] = tool_not_found_behavior
                 return _SyncRun().run(
                     self.run(
                         input,

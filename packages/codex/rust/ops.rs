@@ -5,7 +5,7 @@ use codex_core::context::{
     ContextualUserFragment, InternalContextSource, InternalModelContextFragment,
 };
 use codex_core_api::{AbsolutePathBuf, CodexThread, WithTurnExtensionData};
-use codex_extension_api::ExtensionDataInit;
+use codex_extension_api::{ExtensionDataInit, ToolNotFoundBehavior};
 use codex_protocol::config_types::{
     ApprovalsReviewer, CollaborationMode, Personality, ReasoningSummary, ToolChoice,
     WindowsSandboxLevel,
@@ -474,6 +474,8 @@ impl Default for Mode {
 
 params!(TurnParams {
     input: Value,
+    #[serde(default)]
+    raise_on_unknown_tool: bool,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     observation_submission_id: Option<String>,
     client_id: Option<String>,
@@ -863,6 +865,8 @@ pub(crate) async fn interrupt_managed_root(
 }
 
 params!(RecoveryOptions {
+    #[serde(default)]
+    raise_on_unknown_tool: bool,
     model_override: Option<String>,
     model_settings_override: Option<codex_protocol::model_request_controls::RunModelSettingsOverride>,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
@@ -903,6 +907,11 @@ pub async fn recover_prepared(
     }
     let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;
+    init.insert(if p.raise_on_unknown_tool {
+        ToolNotFoundBehavior::RaiseError
+    } else {
+        ToolNotFoundBehavior::ReturnErrorToModel
+    });
     if let Some(submission) = p.observation_submission_id {
         state
             .request_metadata
@@ -973,11 +982,28 @@ async fn start_with_params<'a>(
             Some(init) => init,
             None => thread.config_snapshot().await.turn_extension_init,
         };
+        if p.raise_on_unknown_tool {
+            ensure!(
+                matches!(p.mode, Mode::StartIfIdle | Mode::ContinueIfIdle),
+                "Unknown-tool handling requires a new managed turn"
+            );
+        }
+        if !matches!(p.mode, Mode::Steer) {
+            init.insert(if p.raise_on_unknown_tool {
+                ToolNotFoundBehavior::RaiseError
+            } else {
+                ToolNotFoundBehavior::ReturnErrorToModel
+            });
+        }
         init.insert(crate::agent_profiles::OperationDeclarationSource(
             p.operation_declaration_source,
         ));
         Some(init)
     } else {
+        ensure!(
+            !p.raise_on_unknown_tool,
+            "Unknown-tool handling requires a managed Session"
+        );
         ensure!(
             p.operation_declaration_source.is_none(),
             "Operation declaration provenance requires a managed Session"
