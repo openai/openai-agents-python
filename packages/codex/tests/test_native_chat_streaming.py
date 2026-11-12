@@ -379,6 +379,44 @@ async def test_native_chat_cancellation_joins_cleanup_and_discards_late_tools():
             assert effects == []
 
 
+async def test_native_chat_cancellation_closes_a_late_stream_without_iterating():
+    creating, returned, iterated, closed = (asyncio.Event() for _ in range(4))
+
+    class BorrowedStream:
+        def __aiter__(self):
+            iterated.set()
+
+            async def frames():
+                yield chunk({"content": "too late"}, "stop")
+
+            return frames()
+
+        async def close(self):
+            closed.set()
+
+    async def create(**body):
+        creating.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            returned.set()
+            return BorrowedStream()
+
+    async with (
+        timeout(15),
+        NativeProvider(model_backend=ChatCompletionsModel(client(create), stream=True)) as provider,
+    ):
+        async with Agent(
+            instructions="Wait.", model="fixture", provider=provider
+        ).session() as session:
+            turn = await session.submit("Wait.")
+            await creating.wait()
+            await turn.cancel()
+            assert returned.is_set()
+            assert closed.is_set()
+            assert not iterated.is_set()
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_native_chat_usage_stays_out_of_responses_originals(streaming):
     usage = {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}

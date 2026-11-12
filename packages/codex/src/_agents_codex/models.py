@@ -1054,6 +1054,9 @@ class ChatCompletionsModel:
             parameters, apply_patch_wire = self._parameters(request, True)
             chunks = await self._create(request, **parameters)
             try:
+                task = asyncio.current_task()
+                if task is not None and cancellation_requested(task):
+                    raise asyncio.CancelledError()
                 iterator = aiter(chunks)
                 async for chunk in iterator:
                     raw = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk
