@@ -16,6 +16,50 @@ class MaterializationResult:
     files: list[MaterializedFile]
 
 
+class _SkillCopyBudget:
+    def __init__(self, *, trusted: bool = False) -> None:
+        self.trusted = trusted
+        self.lock = asyncio.Lock()
+        self.members = 0
+        self.bytes = 0
+        self.snapshot_digest: str | None = None
+        self.snapshot_pending = False
+        self.restore_candidate: tuple[int, int, str] | None = None
+
+    def __eq__(self, other: object) -> bool:
+        """Copy-accounting value equality without lock identity."""
+        if type(self) is not type(other):
+            return False
+        return {key: value for key, value in vars(self).items() if key != "lock"} == {
+            key: value for key, value in vars(other).items() if key != "lock"
+        }
+
+    def _accept_snapshot(self, charge: tuple[int, int, str]) -> None:
+        self.members = max(self.members, charge[0])
+        self.bytes = max(self.bytes, charge[1])
+        self.snapshot_digest = charge[2]
+        self.restore_candidate = None
+        self.trusted = True
+        self.snapshot_pending = False
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "_SkillCopyBudget":
+        # Trusted state aliases have been sharing one physical resource's quota.
+        memo[id(self)] = self
+        return self
+
+    def reserve(self, *, members: int = 0, bytes: int = 0) -> None:
+        if not self.trusted:
+            raise ValueError(
+                "Skill materialization requires trusted quota continuity or a fresh workspace"
+            )
+        if self.members + members > 4096:
+            raise ValueError("Skill materialization exceeds the sandbox member limit")
+        if self.bytes + bytes > 64 * 1024 * 1024:
+            raise ValueError("Skill materialization exceeds the sandbox byte limit")
+        self.members += members
+        self.bytes += bytes
+
+
 _TaskResultT = TypeVar("_TaskResultT")
 _MISSING = object()
 

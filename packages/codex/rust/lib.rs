@@ -3208,7 +3208,9 @@ impl NativeThread {
                 let id = codex_protocol::ThreadId::from_string(&grant.key.reply.thread)
                     .map_err(py_error)?;
                 let reentry = tools.is_reentry(&grant.key);
-                let item = python_tools::PythonOutput(response.clone()).receipt(&grant.key);
+                let Some(item) = tools.response_receipt(&grant.key, response.clone()).map_err(py_error)? else {
+                    return Ok(false);
+                };
                 return async_bridge::retain_writer_operation(async move {
                     let _operation = _context_operation;
                     let _mutation = _mutation;
@@ -3467,7 +3469,7 @@ impl NativeThread {
                         })
                         .is_ok();
                     if accepted {
-                        tools.record_approved_result(&request, &receipt);
+                        tools.record_approved_result(&request, &receipt).map_err(py_error)?;
                     }
                     Ok(accepted)
                 }

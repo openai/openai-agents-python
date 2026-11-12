@@ -43,6 +43,106 @@ def shell_call(**fields: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("approved", [True, False])
+async def test_pending_shell_approval_rebinds_current_callback_after_portable_restore(
+    responses: ResponsesFixture, approved: bool
+) -> None:
+    effects: list[tuple[str, ShellCall]] = []
+
+    def original(_context: ToolContext[str], _call: ShellCall) -> ShellOutput:
+        raise AssertionError("The source callback must not execute")
+
+    def current(context: ToolContext[str], call: ShellCall) -> ShellOutput:
+        effects.append((context.context, call))
+        return ShellOutput(
+            max_output_length=3,
+            output=[ShellCommandOutput(stdout="abcdef", stderr="", outcome=ShellExit(exit_code=0))],
+        )
+
+    source_tool = shell_tool(original, needs_approval=True)
+    current_tool = shell_tool(current, needs_approval=True)
+    agent = Agent(
+        instructions="Use the application Shell.", tools=[source_tool], provider=provider(responses)
+    )
+    responses.respond(shell_call())
+    responses.respond(assistant_output("done"))
+    async with timeout(30), agent.session(context="source") as source:
+        await source.submit("Execute the configured command.")
+        await next_request(source.interactions(), source_tool)
+        assert effects == [] and len(responses.requests) == 1
+        saved = SessionState.from_json((await source.suspend()).to_json())
+    restored_agent = replace(agent, tools=[current_tool])
+    async with timeout(30), restored_agent.session(context="current", state=saved) as restored:
+        request = await next_request(restored.interactions(), current_tool)
+        assert request.call_id == "shell-local"
+        assert effects == [] and len(responses.requests) == 1
+        if approved:
+            await request.approve()
+        else:
+            await request.reject("Application denied execution")
+        assert restored.restored_turn is not None
+        assert (await restored.restored_turn.get_result()).final_output == "done"
+    assert len(effects) == int(approved)
+    receipts = [
+        item for item in responses.requests[1]["input"] if item["type"] == "shell_call_output"
+    ]
+    assert len(receipts) == 1 and receipts[0]["call_id"] == "shell-local"
+    if approved:
+        assert effects[0][0] == "current"
+        assert effects[0][1].action.commands == ["printf sample"]
+        assert effects[0][1].action.timeout_ms == 250
+        assert effects[0][1].action.max_output_length == 5
+        assert receipts[0]["max_output_length"] == 3
+        assert receipts[0]["output"][0]["stdout"] == "abc"
+    else:
+        assert receipts[0]["output"][0]["stderr"] == "Appli"
+        assert receipts[0]["max_output_length"] == 5
+
+
+@pytest.mark.parametrize("changed", ["declaration", "action", "effective_action"])
+async def test_pending_shell_restore_rejects_changed_declaration_or_saved_action(
+    responses: ResponsesFixture, changed: str
+) -> None:
+    import json
+
+    from agents import function_tool
+
+    effects: list[str] = []
+
+    def execute(_context: ToolContext[None], _call: ShellCall) -> ShellOutput:
+        effects.append("shell")
+        return ShellOutput(output=[])
+
+    tool = shell_tool(execute, needs_approval=True)
+    agent = Agent(
+        instructions="Use the application Shell.", tools=[tool], provider=provider(responses)
+    )
+    responses.respond(shell_call())
+    async with timeout(30), agent.session() as source:
+        await source.submit("Execute the configured command.")
+        await next_request(source.interactions(), tool)
+        raw = json.loads((await source.suspend()).to_json())
+    if changed == "declaration":
+
+        @function_tool(name="shell", needs_approval=True)
+        def ordinary() -> str:
+            effects.append("ordinary")
+            return "unreachable"
+
+        agent = replace(agent, tools=[ordinary])
+    else:
+        pending = raw["native_continuation"]["pending_manual"][0]
+        field = "arguments" if changed == "action" else "effective_arguments"
+        value = json.loads(pending.get(field) or pending["arguments"])
+        value["action"]["commands"] = ["changed command"]
+        pending[field] = json.dumps(value)
+    state = SessionState.from_json(json.dumps(raw))
+    with pytest.raises((RuntimeError, ValueError)):
+        async with timeout(30), agent.session(state=state):
+            pytest.fail("A changed Shell grant reached a current callback")
+    assert effects == [] and len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("approved", [True, False])
 async def test_application_shell_gates_execution_and_replays_typed_output(
     responses: ResponsesFixture, approved: bool
 ) -> None:

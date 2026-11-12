@@ -86,6 +86,7 @@ from .turn import Turn as Turn
 
 if TYPE_CHECKING:
     from .decisions import DecisionInput, DecisionProvider
+    from .executor import Environment
     from .usage import TokenUsage
 
 ToolContextT = TypeVar("ToolContextT")
@@ -160,6 +161,11 @@ class ToolContext(Generic[ContextT_co]):
     _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+
+    _environment: Environment[Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _sandbox_source: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def report_usage(self, usage: TokenUsage | None, *, requests: int = 1) -> None:
         """Report trusted measured external usage while this invocation is admitted.
