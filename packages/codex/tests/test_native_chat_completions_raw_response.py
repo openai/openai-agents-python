@@ -2,16 +2,47 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
-from agents import Agent, ChatCompletionsModel, NativeProvider
+from agents import Agent, ChatCompletionsModel, NativeProvider, RunDiagnosticError, function_tool
 from agents.observation import RawProviderEvent
 from tests._asyncio import timeout
 
 MARKER = "SYNTHETIC_CHAT_RESPONSE_EXTENSION_a8fd31"
+
+
+def chat_reply(tool_call=False):
+    message = {"role": "assistant", "content": "done"}
+    if tool_call:
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_fail",
+                    "type": "function",
+                    "function": {"name": "fail", "arguments": "{}"},
+                }
+            ],
+        }
+    return {
+        "id": "chat_failure_fixture",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "fixture",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls" if tool_call else "stop",
+                "message": message,
+            }
+        ],
+        "provider_extension": {"nested": [MARKER]},
+    }
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -80,3 +111,73 @@ async def test_chat_provider_json_native_opt_in_detachment_and_turn_isolation(en
             assert [event.payload["id"] for event in later] == (
                 ["chat_completion_2"] if enabled else []
             )
+
+
+async def test_chat_json_in_native_failure_details():
+    cause = ValueError("synthetic tool failure")
+    response = chat_reply(True)
+
+    @function_tool(error_function=None)
+    def fail() -> str:
+        raise cause
+
+    class Completions:
+        async def create(self, **_body):
+            return response
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url="https://example.invalid/v1", model_backend=ChatCompletionsModel(client)
+        ) as provider,
+    ):
+        agent = Agent(instructions="Call fail.", model="fixture", provider=provider, tools=[fail])
+        with pytest.raises(RunDiagnosticError) as caught:
+            await agent.run("Fail after model output.", capture_error_details=True)
+    assert caught.value.__cause__ is cause
+    assert caught.value.details.raw_responses == (response,)
+    assert MARKER not in repr(caught.value)
+
+
+async def test_cancelled_chat_client_cleanup_without_late_raw_json():
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    class Completions:
+        async def create(self, **_body):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+            return chat_reply()
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url="https://example.invalid/v1", model_backend=ChatCompletionsModel(client)
+        ) as provider,
+    ):
+        async with Agent(instructions="Reply briefly.", model="fixture", provider=provider).session(
+            include_raw_provider_events=True
+        ) as session:
+            turn = await session.submit("Wait.")
+            outcome = asyncio.create_task(turn.get_result())
+            await entered.wait()
+            stopping = asyncio.create_task(turn.cancel())
+            try:
+                await asyncio.wait_for(cancelled.wait(), timeout=5)
+                assert not stopping.done()
+            finally:
+                release.set()
+            await stopping
+            await asyncio.gather(outcome, return_exceptions=True)
+            assert not [
+                event
+                async for event in turn.events(include_execution_details=True)
+                if isinstance(event, RawProviderEvent)
+            ]

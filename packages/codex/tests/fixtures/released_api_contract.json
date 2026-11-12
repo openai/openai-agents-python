@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "815dd4de01ebeb419edcf347d0c117cf4e31f813",
+  "baseline_commit": "e39978aed6cd2e8a992dc37a03d23c89af5184b0",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -784,7 +784,7 @@
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass TurnFinished(_SubmissionEvent):\n    status: Literal['completed', 'failed', 'cancelled']\n    error_type: str | None = None\n    type: Literal['turn_finished'] = field(default='turn_finished', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass OutputTextDelta(_SubmissionEvent):\n    item_id: str\n    delta: str\n    type: Literal['output_text_delta'] = field(default='output_text_delta', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ResponseFactReceived(_SubmissionEvent):\n    record: RecordedResponseFact | RecordedResponseFactSummary = field(repr=False)\n    type: Literal['response_fact'] = field(default='response_fact', init=False)",
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass RawProviderEvent(_SubmissionEvent):\n    source: Literal['responses']\n    transport: Literal['sse', 'websocket', 'json']\n    payload: dict[str, JsonValue] = field(repr=False)\n    type: Literal['raw_provider_event'] = field(default='raw_provider_event', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass RawProviderEvent(_SubmissionEvent):\n    source: Literal['responses', 'chat_completions']\n    transport: Literal['sse', 'websocket', 'json']\n    payload: dict[str, JsonValue] = field(repr=False)\n    type: Literal['raw_provider_event'] = field(default='raw_provider_event', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass HostedToolCallSummary:\n    type: Literal['file_search_call', 'code_interpreter_call', 'image_generation_call', 'shell_call', 'shell_call_output']\n    id: str\n    turn_id: str\n    status: str",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ModelOutputItemCompleted(_SubmissionEvent):\n    item: MessageItem | ReasoningItem | WebSearchCallItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | ShellCallOutputItem | ImageGenerationCallItem | HostedToolCallSummary\n    type: Literal['model_output_item_completed'] = field(default='model_output_item_completed', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass HostedToolCallProgress(_SubmissionEvent):\n    item_id: str\n    event: dict[str, JsonValue]\n    type: Literal['hosted_tool_call_progress'] = field(default='hosted_tool_call_progress', init=False)",
@@ -1161,7 +1161,7 @@
         },
         "imports": [
           "from dataclasses import dataclass as dataclass, field as field",
-          "from typing import Literal",
+          "from typing import Literal as Literal",
           "from pydantic import JsonValue as JsonValue",
           "from ._events import SessionItem as SessionItem",
           "from .history import RecordedTurn as RecordedTurn",

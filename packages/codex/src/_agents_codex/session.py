@@ -931,7 +931,7 @@ class ProducedItem:
 class RunErrorDetails:
     """Evidence retained before a failed one-shot submission closes.
 
-    Raw response payloads use the existing Responses observation capture.
+    Detached client JSON from the existing provider observation capture.
     incomplete records gaps in the available native evidence.
     """
 

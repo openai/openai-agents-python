@@ -1421,7 +1421,7 @@ class Agent(Generic[ContextT, OutputT]):
         retains a limited suffix and reports gaps. This policy is not checkpointed.
         include_model_output_items=True records ordinary assistant messages and
         provider reasoning summaries in the Session's observation stream.
-        include_raw_provider_events=True captures Responses provider JSON. Use
+        include_raw_provider_events=True: Responses and completed Chat client JSON. Use
         include_execution_details=True on the observation reader to receive it.
         Capture uses the Session's in-memory observation retention policy.
 
