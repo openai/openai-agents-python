@@ -15,12 +15,17 @@ from collections.abc import Iterator, Mapping
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote
 
 import pytest
 
 from _agents_codex import telemetry as runtime_telemetry
+from _agents_codex._queued_roots import _QueuedRoots
+from _agents_codex._submission import _Submission
+from _agents_codex.schema import _prepare_spec
+from _agents_codex.session import TurnStoppedError
+from _agents_codex.turn import Turn
 from agents import telemetry
 from tests._asyncio import timeout
 
@@ -129,6 +134,91 @@ def native(monkeypatch: pytest.MonkeyPatch) -> NativeTracing:
     monkeypatch.setattr(runtime_telemetry, "_processor_acknowledged", 0)
     monkeypatch.setattr(runtime_telemetry, "_engine_options", "{}")
     return value
+
+
+@pytest.mark.parametrize("action", ["withdraw", "discard"])
+async def test_queued_rejection_retains_trace_release_failure(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    changed = asyncio.Event()
+    notifications = []
+
+    def notify() -> None:
+        notifications.append(True)
+        changed.set()
+
+    queue = _QueuedRoots(notify)
+    states = [_Submission(output=_prepare_spec(None)) for _ in range(2)]
+    captures = [runtime_telemetry._capture(telemetry.TraceOptions()) for _ in states]
+    leases = [capture.context for capture in captures]
+    spans = [entry["handle"] for entry in native.contexts.values()]
+    for state, capture in zip(states, captures, strict=True):
+        state.issued = cast(Turn[Any], object())
+        state.tracing = capture
+        queue.register(state, [])
+
+    primary = TurnStoppedError("queued rejection")
+    cause = ValueError("explicit cause")
+    previous = LookupError("earlier context")
+    cleanup = RuntimeError("lease release failed")
+    primary.__cause__ = cause
+    primary.__context__ = previous
+    release = native.release_trace_context
+
+    def fail_first_release(context: str) -> None:
+        # Account for retirement before failing at the real _CapturedTrace seam.
+        # TraceScope handles end_trace_span errors internally.
+        release(context)
+        if context == leases[0]:
+            raise cleanup
+
+    monkeypatch.setattr(native, "release_trace_context", fail_first_release)
+    observer = asyncio.create_task(changed.wait())
+    try:
+        if action == "withdraw":
+            assert states[0].issued is not None
+            queue.withdraw(states[0].issued, primary)
+        else:
+            queue.discard(primary, cancelled=True)
+        async with timeout(1):
+            assert await observer
+        assert notifications == [True]
+        rejected = states[:1] if action == "withdraw" else states
+        for state in rejected:
+            assert state.accepted.done() and state.completion.done()
+            assert state.accepted.exception() is primary
+            assert state.completion.exception() is primary
+            assert state.tracing is None
+        assert primary.__context__ is cleanup
+        assert cleanup.__context__ is previous
+        assert primary.__cause__ is cause
+        for index in range(len(rejected)):
+            assert captures[index].context is None and captures[index].scope is None
+            assert native.released.count(leases[index]) == 1
+            assert native.released.count(spans[index]) == 1
+            assert [handle for handle, _ in native.ends].count(spans[index]) == 1
+        assert all(options["status"] == "cancelled" for _, options in native.ends)
+        if action == "withdraw":
+            sibling = states[1]
+            assert sibling.issued is not None and queue.contains(sibling.issued)
+            assert sibling.tracing is captures[1]
+            assert not sibling.accepted.done() and not sibling.completion.done()
+            assert leases[1] not in native.released and spans[1] not in native.released
+            assert queue.select() == (sibling, [])
+        assert not queue
+        retired = list(native.released), list(native.ends)
+        for capture in captures[: len(rejected)]:
+            capture.close()
+        assert (native.released, native.ends) == retired
+    finally:
+        observer.cancel()
+        await asyncio.gather(observer, return_exceptions=True)
+        for state in states:
+            for future in (state.accepted, state.completion):
+                if future.done() and not future.cancelled():
+                    future.exception()
+        for capture in captures:
+            capture.close()
 
 
 def test_nested_scopes_restore_context_and_end_without_exception_payload(
@@ -865,7 +955,7 @@ async def test_public_submit_keeps_queued_context_until_cancel(
     try:
         with telemetry.trace("queued workflow"):
             turn = await session.submit("input", if_busy="queue")
-            pending, _ = session._pending[0]
+            pending, _ = session._queued_roots._entries[0]
             assert pending.tracing is not None
             lease = pending.tracing.context
         assert lease not in native.released
@@ -2091,7 +2181,7 @@ async def test_write_policy_and_trace_snapshots_survive_queue_and_continuation(
                 writable_roots=roots,
                 trace_options=telemetry.TraceOptions(disabled=True),
             )
-            state, _ = session._pending[0]
+            state, _ = session._queued_roots._entries[0]
             assert state.tracing is not None
             trace_owner = state.tracing.context
             captured_roots = state.writable_roots
@@ -2167,7 +2257,7 @@ async def test_steering_rejects_trace_and_write_policy_overrides(
     try:
         with pytest.raises(TypeError, match="cannot override"):
             await session.submit("steer", if_busy="steer", **kwargs)
-        assert not session._pending
+        assert not session._queued_roots
         assert native.starts == []
     finally:
         session._reader.cancel()
@@ -3275,7 +3365,7 @@ async def test_execution_factory_rejection_releases_owner_and_allows_progress(
                     await session.compact()
                 later = await session.submit("retry")
                 assert (await later.get_result()).final_output == "reply-1"
-            assert session.active_turn is None and not session._pending and not session._broken
+            assert session.active_turn is None and not session._queued_roots and not session._broken
             assert len(rejected_states) == backlog
             for state, token, work in zip(
                 rejected_states, rejected_tokens, rejected_work, strict=True

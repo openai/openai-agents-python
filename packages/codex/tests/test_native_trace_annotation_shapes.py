@@ -155,7 +155,7 @@ async def native_boundaries():
 
 
 @pytest.mark.parametrize(
-    "route", ["otlp", "generic", "wide", "wide-queue", "combined", "combined-escaped"]
+    "route", ["otlp", "generic", "wide", "wide-queue", "combined", "combined-escaped", "collision"]
 )
 def test_native_annotation_delivery_and_generic_limits(route):
     result = subprocess.run(
@@ -176,6 +176,30 @@ def test_native_annotation_delivery_and_generic_limits(route):
 
 
 async def native_delivery(route):
+    if route == "collision":
+        events = []
+
+        class Recorder:
+            def on_trace_event(self, event):
+                events.append(event)
+
+        configured = {"sdk.metadata.x": "configured"}
+        configured.update({f"generic.field-{i}": "g" * 4000 for i in range(20)})
+        await telemetry.configure(processors=[Recorder()], span_attributes=configured)
+        try:
+            with telemetry.trace(
+                "bounds.collision",
+                options={"detached": True, "metadata": {"x": "x" * 40000}},
+            ):
+                pass
+            flushed = await telemetry.force_flush(timeout_ms=5000)
+            assert flushed.status == "partial"
+            assert flushed.dropped_records == 2
+            assert events == []
+        finally:
+            await telemetry.shutdown()
+        return
+
     if route == "generic":
         events = []
 
