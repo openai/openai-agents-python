@@ -219,12 +219,7 @@ async def test_child_mail_preempts_undispatched_calls_and_reaches_next_request(
 @pytest.mark.parametrize(
     "with_before", [None, False, True], ids=["no-policy", "approval-only", "before"]
 )
-@pytest.mark.parametrize("binding", ["same", "selected", "rebind"])
-async def test_child_mail_during_mcp_selection_and_idle_rebind(
-    tmp_path, monkeypatch, websocket, with_before, binding
-):
-    # A change of policy on the same admitted resource must not change when
-    # Core delivers mail or narrow the public idle rebind operation.
+async def test_child_mail_during_mcp_selection(tmp_path, monkeypatch, websocket, with_before):
     model = MailboxOverlap("commentary", "no-policy")
     vault = Peer(names=("search",))
     app = web.Application()

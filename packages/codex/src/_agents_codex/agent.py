@@ -22,7 +22,7 @@ from contextlib import (
     AbstractAsyncContextManager as AbstractAsyncContextManager,
     asynccontextmanager as asynccontextmanager,
 )
-from copy import copy as copy
+from copy import copy as copy, deepcopy as deepcopy
 from dataclasses import (
     FrozenInstanceError as FrozenInstanceError,
     dataclass as dataclass,
@@ -1693,6 +1693,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
+        capture_error_details: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1724,6 +1725,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
+        capture_error_details: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1755,6 +1757,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
+        capture_error_details: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1790,6 +1793,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
+        capture_error_details: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1854,7 +1858,10 @@ class Agent(Generic[ContextT, OutputT]):
         4,096 responses or 8 MiB raises NativeError after completion.
         return_items=True retains the accepted assistant and tool items in
         Completed.items with their producing Agents.
+        capture_error_details=True retains run evidence on submission errors.
+        Read the snapshot from RunDiagnosticError.details. The original error is its cause.
         """
+        capture_error_details = capture_error_details is True
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(
             initial_messages, state=state, _audio_budget=audio_budget
@@ -1866,7 +1873,10 @@ class Agent(Generic[ContextT, OutputT]):
             _check_audio_json({"initial_messages": initial_messages, "input": parts})
             if not isinstance(input, str):
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
+        error_input = deepcopy(input) if capture_error_details else None
         options: dict[str, Any] = {}
+        if capture_error_details:
+            options["include_raw_provider_events"] = True
         raw_usage_token = None
         produced_items_token = None
         try:
@@ -1877,6 +1887,7 @@ class Agent(Generic[ContextT, OutputT]):
                 CapabilityError,
                 InteractionRequired,
                 NativeError,
+                RunDiagnosticError,
                 _handoff_default_names,
                 _produced_items_restore,
                 _raw_usage_restore,
@@ -2037,13 +2048,13 @@ class Agent(Generic[ContextT, OutputT]):
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
                 if not (
-                    return_history or return_raw_usage or return_items
+                    return_history or return_raw_usage or return_items or capture_error_details
                 ) and _private_text_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_private_text_run"] = True
                 if not (
-                    return_history or return_raw_usage or return_items
+                    return_history or return_raw_usage or return_items or capture_error_details
                 ) and _completed_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
@@ -2051,7 +2062,7 @@ class Agent(Generic[ContextT, OutputT]):
             if return_raw_usage and resume_manual:
                 assert state is not None
                 raw_usage_token = _raw_usage_restore.set((self, state, asyncio.current_task()))
-            if return_items and resume_manual:
+            if (return_items or capture_error_details) and resume_manual:
                 assert state is not None
                 produced_items_token = _produced_items_restore.set(
                     (self, state, asyncio.current_task())
@@ -2197,7 +2208,7 @@ class Agent(Generic[ContextT, OutputT]):
                 )
                 if return_raw_usage:
                     session._start_raw_usage()
-                if return_items:
+                if return_items or capture_error_details:
                     session._start_produced_items()
                 if resume_manual:
                     restored = session.restored_turn
@@ -2225,9 +2236,18 @@ class Agent(Generic[ContextT, OutputT]):
                         return_history=return_history,
                         return_raw_usage=return_raw_usage,
                         return_items=return_items,
+                        capture_error_details=capture_error_details,
+                        error_input=error_input,
                         pause_manual=pause_manual,
                     )
-                result = await submission.get_result()
+                try:
+                    result = await submission.get_result()
+                except Exception as error:
+                    if capture_error_details:
+                        details = await session._capture_run_error_details(submission, error_input)
+                        if details is not None:
+                            raise RunDiagnosticError(details) from error
+                    raise
                 if return_state:
                     result = replace(result, state=await session.save_state())
                 if return_history:
@@ -2263,6 +2283,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
+        capture_error_details: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2294,6 +2315,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
+        capture_error_details: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2325,6 +2347,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
+        capture_error_details: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2360,6 +2383,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
+        capture_error_details: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2402,6 +2426,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["initial_messages"] = initial_messages
                 if return_items:
                     options["return_items"] = return_items
+                if capture_error_details is True:
+                    options["capture_error_details"] = True
                 if return_state is not False:
                     options["return_state"] = return_state
                 if return_history is not False:
