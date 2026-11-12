@@ -1559,7 +1559,7 @@ class Agent(Generic[ContextT, OutputT]):
         native submission. Restored-only handles and private correction or child
         turns have not been acquiring their own capture. Borrowed client sends
         have been remaining unavailable. These counts have not been enforcing a cap.
-        include_raw_provider_events=True captures Responses provider JSON. Use
+        include_raw_provider_events=True captures Responses and completed Chat client JSON. Use
         include_execution_details=True on the observation reader to receive it.
         Capture uses the Session's in-memory observation retention policy.
 
