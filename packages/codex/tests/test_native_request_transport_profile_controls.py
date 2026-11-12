@@ -51,7 +51,14 @@ async def test_operation_tool_choice_replaces_hosted_default(choice, expected):
 
 
 @pytest.mark.parametrize("capture", ["save_state", "fork"])
-async def test_handoff_profile_rebinds_transport_without_persisting_it(monkeypatch, capture):
+@pytest.mark.parametrize(
+    ("source_transport", "restored_transport"),
+    [(True, True), (False, False), (True, False)],
+    ids=["rebound", "unset", "removed"],
+)
+async def test_handoff_profile_rebinds_transport_without_persisting_it(
+    monkeypatch, capture, source_transport, restored_transport
+):
     routes: list[tuple[str | None, str | None]] = []
     original = WebSocketPeer.handle
 
@@ -64,7 +71,7 @@ async def test_handoff_profile_rebinds_transport_without_persisting_it(monkeypat
     async with timeout(30), peer() as server:
         provider = server.provider(websocket=False)
 
-        def graph(prefix: str):
+        def graph(prefix: str, worker_transport: bool):
             worker = Agent(
                 name="Worker",
                 model="gpt-5.5",
@@ -73,7 +80,9 @@ async def test_handoff_profile_rebinds_transport_without_persisting_it(monkeypat
                 model_settings={
                     "extra_headers": {"x-profile-route": f"{prefix}_WORKER_HEADER"},
                     "extra_query": {"profile": f"{prefix}_WORKER_QUERY"},
-                },
+                }
+                if worker_transport
+                else None,
             )
             return Agent(
                 name="Root",
@@ -89,25 +98,28 @@ async def test_handoff_profile_rebinds_transport_without_persisting_it(monkeypat
 
         server.respond(function_call("transfer_to_worker", {}, "handoff"))
         server.respond(assistant_output("worker answer"))
-        async with graph("SYNTHETIC_SOURCE").session() as source:
+        async with graph("SYNTHETIC_SOURCE", source_transport).session() as source:
             turn = await source.submit("Start.")
             assert (await turn.get_result()).final_output == "worker answer"
             state = await getattr(source, capture)()
         assert routes == [
             ("SYNTHETIC_SOURCE_ROOT_HEADER", "SYNTHETIC_SOURCE_ROOT_QUERY"),
-            ("SYNTHETIC_SOURCE_WORKER_HEADER", "SYNTHETIC_SOURCE_WORKER_QUERY"),
+            ("SYNTHETIC_SOURCE_WORKER_HEADER", "SYNTHETIC_SOURCE_WORKER_QUERY")
+            if source_transport
+            else (None, None),
         ]
         encoded = state.to_json()
         assert "SYNTHETIC_SOURCE" not in encoded
 
         server.respond(assistant_output("restored worker answer"))
-        async with graph("SYNTHETIC_DESTINATION").session(
+        async with graph("SYNTHETIC_DESTINATION", restored_transport).session(
             state=SessionState.from_json(encoded)
         ) as restored:
             result = await (await restored.submit("Continue.")).get_result()
             assert result.final_output == "restored worker answer"
             assert "SYNTHETIC_DESTINATION" not in (await restored.save_state()).to_json()
         assert routes[-1] == (
-            "SYNTHETIC_DESTINATION_WORKER_HEADER",
-            "SYNTHETIC_DESTINATION_WORKER_QUERY",
+            ("SYNTHETIC_DESTINATION_WORKER_HEADER", "SYNTHETIC_DESTINATION_WORKER_QUERY")
+            if restored_transport
+            else (None, None)
         )

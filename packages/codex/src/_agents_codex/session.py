@@ -3644,8 +3644,10 @@ def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
 
 
 def _current_attempt_controls(
-    root: Mapping[str, Any], profile: Mapping[str, Any]
+    root: Mapping[str, Any], profile: Mapping[str, Any] | None
 ) -> dict[str, Any]:
+    if profile is None:
+        profile = root
     retry = root.get("retry")
     if "retry" in profile:
         profile_retry = profile["retry"]
@@ -3653,7 +3655,8 @@ def _current_attempt_controls(
     return {
         "retry": retry,
         "attempt_timeout_ms": profile.get("attempt_timeout_ms", root.get("attempt_timeout_ms")),
-        "request_transport": profile.get("request_transport", root.get("request_transport")),
+        # The active declaration owns routing, including clearing it.
+        "request_transport": profile.get("request_transport"),
     }
 
 
@@ -3689,7 +3692,7 @@ def _prepare_opening_model_settings(
             if restored_profile is not None
             else None
         )
-        profile_controls = profile_model["request_controls"] if profile_model is not None else {}
+        profile_controls = profile_model["request_controls"] if profile_model is not None else None
         attempt_controls = _current_attempt_controls(current_controls, profile_controls)
         invocation_timeout = (
             profile_model.get("invocation_timeout_ms")
