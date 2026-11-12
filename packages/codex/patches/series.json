@@ -717,9 +717,13 @@
       "sha256": "36d245c076fdae420316ecd26218c7039307ec4877b385a30e769cda0cfc02f9"
     },
     {
+      "path": "sdk-tracing-id-annotations.patch",
+      "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
+    },
+    {
       "path": "sdk-hosted-mcp-approvals.patch",
       "sha256": "4d7e9a0a8e6628c8829283959e4337031dfd3bd0f0fa60de484224349f35d128"
     }
   ],
-  "result_tree": "b152a73732d1ecb375d40f71abff71e875674f42"
+  "result_tree": "942e6bb5de5a8f8544353285ef1b5ecdfacc8c7e"
 }
