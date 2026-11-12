@@ -1,0 +1,36 @@
+diff --git a/codex-rs/core/src/agent_communication.rs b/codex-rs/core/src/agent_communication.rs
+index 9925d61f9f80c2cae077e094b330f0ecf8bb643d..c4730ed18b7ea572405521f23efe23ea551620b6 100644
+--- a/codex-rs/core/src/agent_communication.rs
++++ b/codex-rs/core/src/agent_communication.rs
+@@ -50,6 +50,19 @@ pub(crate) fn emit_agent_communication_send(
+     communication: &InterAgentCommunication,
+     receiver_thread_id: ThreadId,
+ ) {
++    let policy = codex_otel::sdk_trace::current_scope_policy();
++    if policy.as_ref().is_some_and(|policy| policy.disabled) {
++        return;
++    }
++    let content = policy
++        .is_none_or(|policy| policy.include_sensitive_data)
++        .then(|| {
++            communication
++                .encrypted_content
++                .as_deref()
++                .unwrap_or("[plaintext]")
++        });
++
+     tracing::info!(
+         target: AGENT_COMMUNICATION_TARGET,
+         {
+@@ -59,10 +72,7 @@ pub(crate) fn emit_agent_communication_send(
+             state = "send",
+             sender_thread_id = %context.sender_thread_id,
+             receiver_thread_id = %receiver_thread_id,
+-            content = communication
+-                .encrypted_content
+-                .as_deref()
+-                .unwrap_or("[plaintext]"),
++            content,
+         },
+         "agent communication"
+     );

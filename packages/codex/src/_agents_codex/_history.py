@@ -92,6 +92,7 @@ def _response_item(
         "function_call",
         "custom_tool_call",
         "computer_call",
+        "apply_patch_call",
         "shell_call",
         "tool_search_call",
     }:
@@ -100,6 +101,7 @@ def _response_item(
         "function_call_output",
         "custom_tool_call_output",
         "computer_call_output",
+        "apply_patch_call_output",
         "shell_call_output",
         "tool_search_output",
     }:
@@ -143,22 +145,31 @@ def _response_item(
             tools = raw.get("tools")
             return {**search_item, "tools": tools if isinstance(tools, list) else []}
         return {**search_item, "arguments": raw.get("arguments")}
-    if kind in {"function_call", "custom_tool_call", "computer_call"}:
-        name = "computer" if kind == "computer_call" else raw["name"]
-        if kind != "computer_call" and raw.get("namespace"):
+    if kind in {"function_call", "custom_tool_call", "computer_call", "apply_patch_call"}:
+        name = (
+            "computer"
+            if kind == "computer_call"
+            else "apply_patch"
+            if kind == "apply_patch_call"
+            else raw["name"]
+        )
+        if kind not in {"computer_call", "apply_patch_call"} and raw.get("namespace"):
             name = f"{raw['namespace']}.{name}"
         return {
             **common,
             "type": "function_call",
             "call_id": raw["call_id"],
             "name": name,
-            "arguments": raw if kind == "computer_call" else raw.get("arguments", raw.get("input")),
+            "arguments": raw
+            if kind in {"computer_call", "apply_patch_call"}
+            else raw.get("arguments", raw.get("input")),
             "status": "in_progress",
         }
     if kind in {
         "function_call_output",
         "custom_tool_call_output",
         "computer_call_output",
+        "apply_patch_call_output",
     } and raw.get("call_id"):
         return {
             **common,
@@ -174,10 +185,14 @@ def _response_item(
                         allow_nan=False,
                     )
                     if kind == "computer_call_output"
+                    else json.dumps({"status": raw["status"], "output": raw.get("output")})
+                    if kind == "apply_patch_call_output"
                     else raw["output"]
                 ),
                 status="completed",
-                success=tool_success,
+                success=(raw["status"] == "completed")
+                if kind == "apply_patch_call_output"
+                else tool_success,
             ),
         }
     if kind == "web_search_call":
@@ -367,6 +382,7 @@ def project_history(
                 "function_call_output",
                 "custom_tool_call_output",
                 "computer_call_output",
+                "apply_patch_call_output",
             }:
                 metadata = payload.get("internal_chat_message_metadata_passthrough")
                 if isinstance(metadata, dict):
@@ -389,6 +405,12 @@ def project_history(
                     ):
                         turn_id = aborted_turn
             if turn_id:
+                recorded_owner = record.get("metadata")
+                if payload.get("type") == "apply_patch_call" and (
+                    not isinstance(recorded_owner, dict)
+                    or recorded_owner.get("sdk_application_tool") != "apply_patch"
+                ):
+                    continue
                 item = _response_item(
                     payload,
                     turn_id,
@@ -405,7 +427,7 @@ def project_history(
                         recorded_id=bool(payload.get("id")),
                         original_input=(
                             payload
-                            if payload["type"] == "computer_call"
+                            if payload["type"] in {"computer_call", "apply_patch_call"}
                             else payload.get("input")
                             if uncertain_calls is not None and payload["type"] == "custom_tool_call"
                             else None
@@ -604,11 +626,10 @@ def project_history(
         if item["type"] == "tool_search_call" and item["status"] == "in_progress" and output:
             item["status"] = output.value["status"]
         if item["type"] == "function_call":
-            computer_call = (
-                isinstance(occurrence.original_input, dict)
-                and occurrence.original_input.get("type") == "computer_call"
-            )
-            if not occurrence.native or computer_call:
+            typed_application_call = isinstance(
+                occurrence.original_input, dict
+            ) and occurrence.original_input.get("type") in {"computer_call", "apply_patch_call"}
+            if not occurrence.native or typed_application_call:
                 recorded_turn = turns.get(item["turn_id"])
                 terminal = recorded_turn["status"] if recorded_turn is not None else None
                 item["status"] = (

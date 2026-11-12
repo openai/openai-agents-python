@@ -811,6 +811,8 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
     // Search only reads the admitted catalog. Carry a completed client search
     // as history, never as a pending effect or a destination grant.
     let mut search_receipts = HashSet::new();
+    let mut patch_receipts = HashSet::new();
+    let mut patch_calls = HashSet::new();
     for item in history.iter().rev() {
         if matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))) {
             break;
@@ -830,6 +832,19 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
             | ResponseItem::FunctionCallOutput {
                 call_id: Some(_), ..
             } => {}
+            ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
+                if call_id.is_empty() || !patch_receipts.insert(call_id) {
+                    return false;
+                }
+            }
+            ResponseItem::ApplyPatchCall { call_id, .. } => {
+                if !crate::local_reconciliation::owns_application_patch(envelope)
+                    || !patch_calls.insert(call_id)
+                    || !patch_receipts.remove(call_id)
+                {
+                    return false;
+                }
+            }
             ResponseItem::CustomToolCall { name, .. } if name == "apply_patch" => {}
             ResponseItem::CustomToolCallOutput { .. } => {}
             ResponseItem::ToolSearchOutput {
@@ -854,7 +869,7 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
             _ => return false,
         }
     }
-    search_receipts.is_empty()
+    search_receipts.is_empty() && patch_receipts.is_empty()
 }
 
 // Legacy or unopened runtimes have no snapshot. Admit them only when full
@@ -1652,4 +1667,51 @@ pub(crate) async fn capture(
         snapshot["native_continuation"]["output_schema"] = schema;
     }
     Ok(Some(snapshot))
+}
+
+#[cfg(test)]
+mod apply_patch_portability_tests {
+    use super::*;
+
+    fn records(owned: bool) -> Vec<RolloutItem> {
+        let mut call = serde_json::json!({
+            "type":"response_item", "payload":{
+                "type":"apply_patch_call", "call_id":"patch",
+                "operation":{"type":"delete_file","path":"application-owned"}
+            }
+        });
+        if owned {
+            call["metadata"] = serde_json::json!({"sdk_application_tool":"apply_patch"});
+        }
+        serde_json::from_value(serde_json::json!([
+            call,
+            {"type":"response_item","payload":{
+                "type":"apply_patch_call_output","call_id":"patch","status":"completed","output":"done"
+            }}
+        ])).unwrap()
+    }
+
+    #[test]
+    fn settled_application_patch_is_portable_without_another_execution_grant() {
+        assert!(portable_manual_actions(&records(true)));
+        assert!(!portable_manual_actions(&records(false)));
+    }
+
+    #[test]
+    fn missing_duplicate_or_cross_kind_patch_receipts_remain_nonportable() {
+        let mut history = records(true);
+        let output = history.pop().unwrap();
+        assert!(!portable_manual_actions(&history));
+        history.push(serde_json::from_value(serde_json::json!({
+            "type":"response_item","payload":{"type":"function_call_output","call_id":"patch","output":"done"}
+        })).unwrap());
+        assert!(!portable_manual_actions(&history));
+        history.pop();
+        history.push(output.clone());
+        history.push(output);
+        assert!(!portable_manual_actions(&history));
+        let mut duplicate_pairs = records(true);
+        duplicate_pairs.extend(records(true));
+        assert!(!portable_manual_actions(&duplicate_pairs));
+    }
 }

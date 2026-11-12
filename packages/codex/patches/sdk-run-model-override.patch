@@ -23,10 +23,10 @@ index a7011b90..67688a76 100644
          turn_id: Some(turn_id.to_string()),
          root_turn_id: None,
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index df8890dc..0b9ba18f 100644
+index c7064934..ba212944 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
-@@ -1150,6 +1150,11 @@ impl TurnRequestProcessor {
+@@ -1152,6 +1152,11 @@ impl TurnRequestProcessor {
                          None,
                          Some(AnalyticsJsonRpcError::Input(InputError::Empty)),
                      ),
@@ -39,10 +39,10 @@ index df8890dc..0b9ba18f 100644
                          "active turn uses a different output schema".to_string(),
                          None,
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 9bfcdbb3..fb9a7b4e 100644
+index 855c832b..47aa88f5 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -645,12 +645,14 @@ impl LocalAgentControl {
+@@ -647,12 +647,14 @@ impl LocalAgentControl {
                  .shared_thread_instructions_provider
                  .get()
                  .cloned();
@@ -63,7 +63,7 @@ index 9bfcdbb3..fb9a7b4e 100644
          };
          // Reserving a slot can evict an idle nested parent. Capture its instructions
          // alongside its authority so the child does not depend on a later live lookup.
-@@ -947,6 +949,10 @@ impl LocalAgentControl {
+@@ -949,6 +951,10 @@ impl LocalAgentControl {
          let durability_wait = durability_wait_started_at.elapsed();
  
          let start_options = TurnStartOptions {

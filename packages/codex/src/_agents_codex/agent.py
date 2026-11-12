@@ -1893,10 +1893,15 @@ class Agent(Generic[ContextT, OutputT]):
         4,096 responses or 8 MiB raises NativeError after completion.
         return_items=True retains the accepted assistant and tool items in
         Completed.items with their producing Agents.
-        capture_error_details=True retains run evidence on submission errors.
+        capture_error_details=True has been retaining run evidence on submission errors.
+        Portable manual checkpoints have been retaining captured caller input.
+        Restores without that origin have been reporting input=None and incomplete=True.
         Read the snapshot from RunDiagnosticError.details. The original error is its cause.
         """
         capture_error_details = capture_error_details is True
+        error_input = deepcopy(input) if capture_error_details else None
+        if error_input is not None:
+            input = error_input
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(
             initial_messages, state=state, _audio_budget=audio_budget
@@ -1908,7 +1913,6 @@ class Agent(Generic[ContextT, OutputT]):
             _check_audio_json({"initial_messages": initial_messages, "input": parts})
             if not isinstance(input, str):
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
-        error_input = deepcopy(input) if capture_error_details else None
         options: dict[str, Any] = {}
         if capture_error_details:
             options["include_raw_provider_events"] = True
@@ -2283,6 +2287,8 @@ class Agent(Generic[ContextT, OutputT]):
                         submission = await session.submit(
                             input, tools=tools, before_step=before_step, **submit_options
                         )
+                if capture_error_details and input is not None:
+                    session._remember_run_error_input(submission, error_input)
                 if session._interaction_handler is None and pause_manual:
                     return await session._run_with_interactions(
                         submission,

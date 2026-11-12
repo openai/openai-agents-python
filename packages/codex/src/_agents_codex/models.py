@@ -278,6 +278,19 @@ class ModelProvider(Protocol):
     def get_model(self, model_name: str) -> NativeModel: ...
 
 
+def _chat_apply_patch_input(arguments: Any) -> str:
+    if not isinstance(arguments, str):
+        return ""
+    try:
+        envelope = json.loads(arguments)
+    except (json.JSONDecodeError, RecursionError):
+        return arguments
+    if isinstance(envelope, str):
+        return envelope
+    patch = envelope.get("patch") if isinstance(envelope, dict) else None
+    return patch if isinstance(patch, str) else ""
+
+
 @dataclass(frozen=True)
 class ChatCompletionsModel:
     """Use an injected asynchronous Chat Completions client with the native loop.
@@ -285,6 +298,7 @@ class ChatCompletionsModel:
     The client must expose ``chat.completions.create``. This adapter requests one
     complete response; it does not claim token streaming. Native function tools
     and settled assistant/tool history retain their Core execution ownership.
+    Native workspace ApplyPatch uses a function declaration on the provider wire.
     ``prompt_cache_key`` selects provider cache affinity for this adapter only;
     ``None`` retains the native request key and existing client conversion.
     ``request_options`` captures HTTP options or a context-aware factory. Factory
@@ -311,6 +325,8 @@ class ChatCompletionsModel:
         object.__setattr__(self, "_request_options_source", source)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        apply_patch_calls: set[str] = set()
+        apply_patch_offered = False
         audio_data: Any = None
         audio_format: Any = None
         audio_header: Any = None
@@ -405,21 +421,34 @@ class ChatCompletionsModel:
                         messages[-1]["content"] = [*(messages[-1].get("content") or []), *content]
                     else:
                         messages.append({"role": item["role"], "content": content})
-                elif kind == "function_call":
+                elif kind == "function_call" or (
+                    kind == "custom_tool_call" and item.get("name") == "apply_patch"
+                ):
                     if item.get("namespace") not in (None, "functions"):
                         raise ValueError(
                             "ChatCompletionsModel supports the default function namespace"
                         )
                     if not messages or messages[-1].get("role") != "assistant":
                         messages.append({"role": "assistant", "tool_calls": []})
+                    if kind == "custom_tool_call":
+                        apply_patch_calls.add(item["call_id"])
                     messages[-1].setdefault("tool_calls", []).append(
                         {
                             "id": item["call_id"],
                             "type": "function",
-                            "function": {"name": item["name"], "arguments": item["arguments"]},
+                            "function": {
+                                "name": item["name"],
+                                "arguments": (
+                                    json.dumps({"patch": item["input"]})
+                                    if kind == "custom_tool_call"
+                                    else item["arguments"]
+                                ),
+                            },
                         }
                     )
-                elif kind == "function_call_output":
+                elif kind == "function_call_output" or (
+                    kind == "custom_tool_call_output" and item["call_id"] in apply_patch_calls
+                ):
                     output = item["output"]
                     if not isinstance(output, str):
                         if not isinstance(output, list) or any(
@@ -458,6 +487,36 @@ class ChatCompletionsModel:
                 for tool in leaves:
                     if tool.get("namespace") not in (None, "functions"):
                         raise ValueError("Chat adapters support the default function namespace")
+                    if tool.get("type") == "custom" and tool.get("name") == "apply_patch":
+                        apply_patch_offered = True
+                        tools.append(
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "apply_patch",
+                                    "description": "Apply a patch to files in the workspace.",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {
+                                            "patch": {
+                                                "type": "string",
+                                                "description": (
+                                                    "A patch between *** Begin Patch and "
+                                                    "*** End Patch. "
+                                                    "Use *** Add File:, *** Update File:, or "
+                                                    "*** Delete File: headers, and *** Move to: "
+                                                    "within an update to rename a file."
+                                                ),
+                                            }
+                                        },
+                                        "required": ["patch"],
+                                        "additionalProperties": False,
+                                    },
+                                    "strict": True,
+                                },
+                            }
+                        )
+                        continue
                     if tool.get("type") != "function":
                         raise ValueError("ChatCompletionsModel supports native function tools")
                     if tool.get("output_schema") is not None:
@@ -552,7 +611,11 @@ class ChatCompletionsModel:
                 options["max_completion_tokens"] = request.body["max_output_tokens"]
             if isinstance(options.get("tool_choice"), Mapping):
                 declaration = options["tool_choice"]
-                if declaration.get("type") != "function":
+                if declaration.get("type") != "function" and not (
+                    apply_patch_offered
+                    and declaration.get("type") == "custom"
+                    and declaration.get("name") == "apply_patch"
+                ):
                     raise ValueError("Chat adapters require a function tool selector")
                 tool = declaration.get("function", declaration)
                 if (
@@ -643,6 +706,16 @@ class ChatCompletionsModel:
             for call in message.get("tool_calls") or []:
                 if call.get("type") != "function":
                     raise ValueError("ChatCompletionsModel received an unsupported tool call")
+                if apply_patch_offered and call["function"]["name"] == "apply_patch":
+                    output.append(
+                        {
+                            "type": "custom_tool_call",
+                            "call_id": call["id"],
+                            "name": "apply_patch",
+                            "input": _chat_apply_patch_input(call["function"]["arguments"]),
+                        }
+                    )
+                    continue
                 output.append(
                     {
                         "type": "function_call",
@@ -688,6 +761,7 @@ class ChatCompletionsModel:
             # Release SDK-owned payloads before exposing any callback failure.
             del (
                 request,
+                apply_patch_calls,
                 audio_data,
                 audio_format,
                 audio_header,

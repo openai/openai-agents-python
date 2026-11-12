@@ -108,6 +108,32 @@
           "_ToolBatchCompletion": "agents.completion._ToolBatchCompletion"
         }
       },
+      "agents.apply_patch": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass ApplyPatchOperation:\n    type: Literal['create_file', 'update_file', 'delete_file']\n    path: str\n    diff: str | None = None\n    move_to: str | None = None\n    ctx_wrapper: ToolContext[Any] | None = field(default=None, repr=False, compare=False)",
+          "@dataclass(frozen=True)\nclass ApplyPatchResult:\n    status: Literal['completed', 'failed'] | None = None\n    output: str | None = None",
+          "class ApplyPatchEditor(Protocol):\n\n    def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass\n\n    def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass\n\n    def delete_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass",
+          "def apply_patch_tool(editor: ApplyPatchEditor, *, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False) -> FunctionTool[Any, ToolOutput, Any]:\n    pass"
+        ],
+        "exports": {
+          "ApplyPatchEditor": "agents.apply_patch.ApplyPatchEditor",
+          "ApplyPatchOperation": "agents.apply_patch.ApplyPatchOperation",
+          "ApplyPatchResult": "agents.apply_patch.ApplyPatchResult",
+          "apply_patch_tool": "agents.apply_patch.apply_patch_tool"
+        },
+        "imports": [
+          "from collections.abc import Awaitable, Callable",
+          "from dataclasses import dataclass, field",
+          "from typing import Any, Literal, Protocol",
+          "from ._function_tools import FunctionTool, ToolContext",
+          "from .tools import ToolOutput"
+        ],
+        "references": {
+          "FunctionTool": "agents._function_tools.FunctionTool",
+          "ToolContext": "agents._function_tools.ToolContext",
+          "ToolOutput": "agents.tools.ToolOutput"
+        }
+      },
       "agents.artifacts": {
         "declarations": [
           "def json_artifact_tool(*, name: str, path: str | Path, schema: type[Any]) -> FunctionTool[Any, Any, Any]:\n    pass"
@@ -1570,7 +1596,7 @@
           "class _RequestRunBudgetCheckpoint(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    version: int = Field(ge=1, le=1)\n    max_requests: int = Field(ge=0, le=2 ** 53 - 1)\n    admitted_requests: int = Field(ge=0, le=2 ** 53 - 1)\n\n    @model_validator(mode='after')\n    def validate_admissions(self) -> '_RequestRunBudgetCheckpoint':\n        pass",
           "class _ManualContinuation(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    turn_id: str\n    seen_call_ids: list[str]\n    turn_usage: TokenUsage\n    reply_order: list[str]\n    accepted_replies: dict[str, dict[str, Any]]\n    pending_manual: list[_PendingManual]\n    tool_outcomes: _ToolOutcomes | None = None\n    output_schema: dict[str, Any] | None = None\n    model_override: str | None = None",
           "class ApplicationToolOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)\n    submission_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    namespace: str | None = None\n    application_data: dict[str, JsonValue] = Field(repr=False)",
-          "class SessionState(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)\n    format_version: Literal[2, 3, 4, 5, 6, 7, 8, 9]\n    codex_revision: str\n    source_session_id: str\n    history: list[dict[str, Any]]\n    subagents: dict[str, SubagentConfig] = Field(default_factory=dict)\n    root_metadata: dict[str, Any] | None = None\n    root_memory_mode: Literal['enabled', 'disabled'] | None = None\n    root_checklist: ChecklistState | None = None\n    root_goal: GoalState | None = None\n    root_code_mode: dict[str, Any] | None = None\n    descendants: list[CheckpointThread] = Field(default_factory=list)\n    interrupted_thread_ids: list[str] = Field(default_factory=list)\n    pending_actions: list[RequiredAction] = Field(default_factory=list)\n    agent_options: dict[str, Any] = Field(default_factory=dict)\n    recovery: CheckpointRecovery | None = None\n    managed_tool_specs: list[dict[str, Any]] | None = None\n    root_tool_origins: dict[str, _RootToolOrigin] = Field(default_factory=dict)\n    step_mcp_tools: list[_StepMcpTool] | None = None\n    native_continuation: _ManualContinuation | None = None\n    run_budget: _RequestRunBudgetCheckpoint | None = None\n    run_usage: RunUsage | None = None\n    output_version: Literal[1] | None = None\n    output_fingerprint: str | None = None\n    operation_tools: list[ToolRef] | None = None\n    repair_turns: list[RecordedTurn] = Field(default_factory=list)\n    repair_items: list[SessionItem] = Field(default_factory=list)\n    application_tool_outputs: list[ApplicationToolOutput] = Field(default_factory=list, repr=False)\n    network_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_read_only: bool = False\n    codex_login_binding: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n\n    @model_validator(mode='after')\n    def validate_tree(self) -> 'SessionState':\n        pass\n\n    @property\n    def instructions(self) -> str:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, value: str) -> 'SessionState':\n        pass"
+          "class SessionState(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)\n    format_version: Literal[2, 3, 4, 5, 6, 7, 8, 9]\n    codex_revision: str\n    source_session_id: str\n    history: list[dict[str, Any]]\n    subagents: dict[str, SubagentConfig] = Field(default_factory=dict)\n    root_metadata: dict[str, Any] | None = None\n    root_memory_mode: Literal['enabled', 'disabled'] | None = None\n    root_checklist: ChecklistState | None = None\n    root_goal: GoalState | None = None\n    root_code_mode: dict[str, Any] | None = None\n    descendants: list[CheckpointThread] = Field(default_factory=list)\n    interrupted_thread_ids: list[str] = Field(default_factory=list)\n    pending_actions: list[RequiredAction] = Field(default_factory=list)\n    agent_options: dict[str, Any] = Field(default_factory=dict)\n    recovery: CheckpointRecovery | None = None\n    managed_tool_specs: list[dict[str, Any]] | None = None\n    root_tool_origins: dict[str, _RootToolOrigin] = Field(default_factory=dict)\n    step_mcp_tools: list[_StepMcpTool] | None = None\n    native_continuation: _ManualContinuation | None = None\n    run_budget: _RequestRunBudgetCheckpoint | None = None\n    run_usage: RunUsage | None = None\n    output_version: Literal[1] | None = None\n    output_fingerprint: str | None = None\n    operation_tools: list[ToolRef] | None = None\n    repair_turns: list[RecordedTurn] = Field(default_factory=list)\n    repair_items: list[SessionItem] = Field(default_factory=list)\n    application_tool_outputs: list[ApplicationToolOutput] = Field(default_factory=list, repr=False)\n    network_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_read_only: bool = False\n    codex_login_binding: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    original_input: UserInput | None = Field(default=None, repr=False)\n\n    @model_validator(mode='after')\n    def validate_tree(self) -> 'SessionState':\n        pass\n\n    @property\n    def instructions(self) -> str:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, value: str) -> 'SessionState':\n        pass"
         ],
         "exports": {
           "ApplicationToolOutput": "agents.state.ApplicationToolOutput",
@@ -1592,6 +1618,7 @@
           "from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict",
           "from ._events import RequiredAction as RequiredAction, SessionItem as SessionItem",
           "from .history import RecordedTurn as RecordedTurn",
+          "from .input import UserInput",
           "from .subagents import SubagentConfig as SubagentConfig",
           "from .tools import ToolRef as ToolRef",
           "from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage"
@@ -1603,7 +1630,8 @@
           "SessionItem": "agents._events.SessionItem",
           "SubagentConfig": "agents.subagents.SubagentConfig",
           "TokenUsage": "agents.usage.TokenUsage",
-          "ToolRef": "agents.tools.ToolRef"
+          "ToolRef": "agents.tools.ToolRef",
+          "UserInput": "agents.input.UserInput"
         }
       },
       "agents.subagents": {
@@ -1650,7 +1678,9 @@
           "async def shutdown(*, timeout_ms: int | None=None) -> None:\n    pass",
           "@dataclass(frozen=True, kw_only=True)\nclass TraceExportCredentials:\n    headers: Mapping[str, str] = field(repr=False)\n\n    def __init__(self, *, headers: Mapping[str, str]) -> None:\n        pass",
           "@dataclass(frozen=True, kw_only=True)\nclass SpanContext:\n    trace_id: str\n    span_id: str\n    parent_span_id: str | None\n    disabled: bool\n    include_sensitive_data: bool\n    _handle: str = field(repr=False, compare=False)\n\n    @property\n    def trace_metadata(self) -> Mapping[str, Any] | None:\n        pass",
-          "@dataclass(frozen=True, kw_only=True)\nclass TraceOptions:\n    parent: SpanContext | None = None\n    detached: bool = False\n    trace_id: str | None = None\n    group_id: str | None = None\n    metadata: Mapping[str, Any] = field(default_factory=dict)\n    disabled: bool | None = None\n    include_sensitive_data: bool | None = None\n    export_credentials: TraceExportCredentials | None = field(default=None, repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass TraceOptions:\n    parent: SpanContext | None = None\n    detached: bool = False\n    trace_id: str | None = None\n    group_id: str | None = None\n    metadata: Mapping[str, Any] = field(default_factory=dict)\n    disabled: bool | None = None\n    include_sensitive_data: bool | None = None\n    export_credentials: TraceExportCredentials | None = field(default=None, repr=False)\n    span_id: str | None = None",
+          "@dataclass(frozen=True, kw_only=True)\nclass TracingIdGenerator:\n    generate_trace_id: _Callable[[], str] | None = None\n    generate_span_id: _Callable[[], str] | None = None",
+          "def set_tracing_id_generator(generator: TracingIdGenerator | None=None) -> None:\n    pass",
           "def set_tracing_disabled(disabled: bool) -> None:\n    pass",
           "def set_sensitive_data_logging_enabled(enabled: bool) -> None:\n    pass",
           "def generate_group_id() -> str:\n    pass",
@@ -1683,6 +1713,7 @@
           "TraceOptions": "agents.telemetry.TraceOptions",
           "TraceProcessor": "agents.telemetry.TraceProcessor",
           "TraceScope": "agents.telemetry.TraceScope",
+          "TracingIdGenerator": "agents.telemetry.TracingIdGenerator",
           "add_trace_processor": "agents.telemetry.add_trace_processor",
           "configure": "agents.telemetry.configure",
           "current_context": "agents.telemetry.current_context",
@@ -1692,13 +1723,14 @@
           "set_sensitive_data_logging_enabled": "agents.telemetry.set_sensitive_data_logging_enabled",
           "set_trace_processors": "agents.telemetry.set_trace_processors",
           "set_tracing_disabled": "agents.telemetry.set_tracing_disabled",
+          "set_tracing_id_generator": "agents.telemetry.set_tracing_id_generator",
           "shutdown": "agents.telemetry.shutdown",
           "span": "agents.telemetry.span",
           "trace": "agents.telemetry.trace",
           "use_context": "agents.telemetry.use_context"
         },
         "imports": [
-          "from collections.abc import Iterator as Iterator, Mapping as Mapping, Sequence as Sequence",
+          "from collections.abc import Callable as _Callable, Iterator as Iterator, Mapping as Mapping, Sequence as Sequence",
           "from contextlib import contextmanager as contextmanager",
           "from dataclasses import dataclass as dataclass, field as field",
           "from pathlib import Path as Path",
@@ -1859,7 +1891,7 @@
           "@dataclass(frozen=True, slots=True)\nclass TurnNeedsAttention:\n    reason: Literal['interrupted', 'connection_lost', 'quota_blocked', 'rate_limited', 'budget_exceeded']\n    error: NativeError | TurnStoppedError\n    rate_limits: ApiRateLimits",
           "@dataclass(frozen=True, slots=True)\nclass RequestAttemptCount:\n    owner: Literal['root', 'child']\n    operation: Literal['generation', 'compaction', 'internal']\n    transport: Literal['http_sse', 'http_json', 'websocket']\n    count: int",
           "@dataclass(frozen=True, slots=True)\nclass RequestAttempts:\n    availability: Literal['complete', 'partial', 'unavailable']\n    counts: tuple[RequestAttemptCount, ...]\n    borrowed_requests_unavailable: bool",
-          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] | _CompletedTurnOwner = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _run_usage: _UsageCollector = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _observe_output_acceptance: bool = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n    _observation_after: int = field(repr=False, compare=False)\n    _guardrail_results: list[Any] = field(repr=False, compare=False)\n    _request_attempts: Any = field(repr=False, compare=False)\n\n    @property\n    def request_attempts(self) -> RequestAttempts | None:\n        pass\n\n    @property\n    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:\n        pass\n\n    @property\n    def guardrail_results(self) -> tuple[Any, ...]:\n        pass\n\n    @property\n    def run_usage(self) -> RunUsage:\n        pass\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    async def steer_exact(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] | _CompletedTurnOwner = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _run_usage: _UsageCollector = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _observe_output_acceptance: bool = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n    _observation_after: int = field(repr=False, compare=False)\n    _guardrail_results: list[Any] = field(repr=False, compare=False)\n    _request_attempts: Any = field(repr=False, compare=False)\n    _original_input: UserInput | None = field(default=None, repr=False, compare=False)\n\n    @property\n    def request_attempts(self) -> RequestAttempts | None:\n        pass\n\n    @property\n    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:\n        pass\n\n    @property\n    def guardrail_results(self) -> tuple[Any, ...]:\n        pass\n\n    @property\n    def run_usage(self) -> RunUsage:\n        pass\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    async def steer_exact(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass",
           "class ChildTurn(Protocol):\n\n    @property\n    def session_id(self) -> str:\n        pass\n\n    @property\n    def turn_id(self) -> str | None:\n        pass\n\n    @property\n    def submission_id(self) -> str:\n        pass\n\n    @property\n    def child_id(self) -> str | None:\n        pass\n\n    @property\n    def instance_id(self) -> int | None:\n        pass\n\n    @property\n    def guardrail_results(self) -> tuple[Any, ...]:\n        pass\n\n    @property\n    def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:\n        pass\n\n    @property\n    def run_usage(self) -> RunUsage:\n        pass\n\n    @property\n    def request_attempts(self) -> RequestAttempts | None:\n        pass\n\n    async def get_result(self) -> Completed[str, ChildTurn]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[str, ChildTurn] | PendingRequests[str, ChildTurn]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[str, ChildTurn] | PendingRequests[str, ChildTurn] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass"
         ],
         "exports": {
@@ -1981,6 +2013,9 @@
       "ApiRateLimitWindow": "agents.rate_limits.ApiRateLimitWindow",
       "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
       "ApplicationToolOutput": "agents.state.ApplicationToolOutput",
+      "ApplyPatchEditor": "agents.apply_patch.ApplyPatchEditor",
+      "ApplyPatchOperation": "agents.apply_patch.ApplyPatchOperation",
+      "ApplyPatchResult": "agents.apply_patch.ApplyPatchResult",
       "ApprovalDecision": "agents.manual.ApprovalDecision",
       "ApprovalRequest": "agents.manual.ApprovalRequest",
       "ApprovalRequested": "agents.manual.ApprovalRequested",
@@ -2168,6 +2203,7 @@
       "VerificationProof": "agents.manual.VerificationProof",
       "VerificationRequest": "agents.manual.VerificationRequest",
       "WebSearch": "agents.tools.WebSearch",
+      "apply_patch_tool": "agents.apply_patch.apply_patch_tool",
       "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
       "get_cleanup": "agents.session.get_cleanup",
@@ -4826,6 +4862,9 @@
       "ApiRateLimitWindow",
       "ApiRateLimits",
       "ApplicationToolOutput",
+      "ApplyPatchEditor",
+      "ApplyPatchOperation",
+      "ApplyPatchResult",
       "ApprovalDecision",
       "ApprovalRequest",
       "ApprovalRequested",
@@ -5013,6 +5052,7 @@
       "VerificationProof",
       "VerificationRequest",
       "WebSearch",
+      "apply_patch_tool",
       "computer_tool",
       "function_tool",
       "get_cleanup",
@@ -5024,6 +5064,7 @@
       "from ._tool_errors import ToolErrorContext as ToolErrorContext, ToolErrorFormatter as ToolErrorFormatter",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
+      "from .apply_patch import ApplyPatchEditor as ApplyPatchEditor, ApplyPatchOperation as ApplyPatchOperation, ApplyPatchResult as ApplyPatchResult, apply_patch_tool as apply_patch_tool",
       "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn, FinishToolBatch as FinishToolBatch, ToolBatchCompletionContext as ToolBatchCompletionContext, ToolBatchResult as ToolBatchResult",
