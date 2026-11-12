@@ -5638,6 +5638,9 @@ class Session(Generic[ContextT, OutputT]):
             specification = json.loads(bound.spec_json)
             if specification.pop("type", None) != "function":
                 raise CapabilityError("Realtime tools require bare function declarations")
+            callers = specification.pop("allowedCallers", None)
+            if callers is not None and "direct" not in callers:
+                continue
             selected.append(specification)
         return selected, selection_id
 

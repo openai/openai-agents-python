@@ -5986,9 +5986,10 @@ impl ToolContributor for PythonContributor {
         });
         let allows = |name: &ToolName| voice || tools.policy.allows(name);
         let mut declarations = Vec::new();
-        for ((_, raw), entry) in functions(&generation.specs)
+        for (slot, ((_, raw), entry)) in functions(&generation.specs)
             .into_iter()
             .zip(&generation.entries)
+            .enumerate()
         {
             let defaults = if crate::agent_profiles::is_handoff_callback(
                 input.thread_store,
@@ -6001,6 +6002,10 @@ impl ToolContributor for PythonContributor {
             };
             if !allows(&entry.name)
                 || entry.exposure == ToolExposure::Deferred
+                || generation
+                    .specs
+                    .caller_limits(slot)
+                    .is_some_and(|callers| !callers.contains(codex_tools::ToolExposures::DIRECT))
                 || defaults.as_ref().is_some_and(|defaults| {
                     !defaults.iter().any(|name| {
                         name.clone().with_default_namespace()
