@@ -334,45 +334,48 @@ class LocalDirLazySkillSource(LazySkillSource):
         workspace_root = Path(session.state.manifest.root)
         skill_dest = workspace_root / metadata.path
         skill_md_path = skill_dest / "SKILL.md"
-        try:
-            if indexed is None:
-                handle = await _read_with_expected_span_errors(
-                    session,
-                    skill_md_path,
-                    user=user,
-                    expected_span_errors=(FileNotFoundError, WorkspaceReadNotFoundError),
-                )
-                handle.close()
+        native_bounded = indexed is not None and type(self.source).apply is LocalDir.apply
+        if not native_bounded:
+            try:
+                if indexed is None:
+                    handle = await _read_with_expected_span_errors(
+                        session,
+                        skill_md_path,
+                        user=user,
+                        expected_span_errors=(FileNotFoundError, WorkspaceReadNotFoundError),
+                    )
+                    handle.close()
+                else:
+                    await session.read_bounded(skill_md_path, max_bytes=1)
+            except (FileNotFoundError, WorkspaceReadNotFoundError):
+                pass
             else:
-                await session.read_bounded(skill_md_path, max_bytes=1)
-        except (FileNotFoundError, WorkspaceReadNotFoundError):
-            pass
-        else:
-            return {
-                "status": "already_loaded",
-                "skill_name": metadata.name,
-                "path": str(metadata.path).replace("\\", "/"),
-            }
-
+                return {
+                    "status": "already_loaded",
+                    "skill_name": metadata.name,
+                    "path": str(metadata.path).replace("\\", "/"),
+                }
         # Materialize through a copy of the configured source so the loaded skill keeps the
         # entry metadata (permissions, group) that the eager `from_` path already applies.
         skill_source = self.source.model_copy(
             update={"src": src_root / metadata.path.name},
             deep=True,
         )
-        apply = (
-            skill_source._apply_bounded
-            if indexed is not None and type(skill_source).apply is LocalDir.apply
-            else skill_source.apply
-        )
-        await apply(
-            session,
-            skill_dest,
-            base_dir=Path.cwd(),
-            user=user,
-        )
+        status = "loaded"
+        if native_bounded:
+            copied = await skill_source._apply_bounded(
+                session,
+                skill_dest,
+                base_dir=Path.cwd(),
+                user=user,
+                existing_marker=skill_md_path,
+            )
+            if copied is None:
+                status = "already_loaded"
+        else:
+            await skill_source.apply(session, skill_dest, base_dir=Path.cwd(), user=user)
         return {
-            "status": "loaded",
+            "status": status,
             "skill_name": metadata.name,
             "path": str(metadata.path).replace("\\", "/"),
         }

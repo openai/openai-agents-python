@@ -774,9 +774,7 @@ async def test_owned_unixlocal_skill_stages_before_relocated_subdirectory_index(
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal snapshot")
 @pytest.mark.parametrize("kind", ["inline", "from", "lazy"])
-async def test_owned_cold_resume_uses_current_skill_sources(
-    tmp_path, monkeypatch, responses, kind
-):
+async def test_owned_cold_resume_uses_current_skill_sources(tmp_path, monkeypatch, responses, kind):
     from agents.classic.sandbox.entries import Dir, File
     from agents.classic.sandbox.sandboxes.unix_local import (
         UnixLocalSandboxClient,
@@ -1066,3 +1064,74 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
             await alias.aclose()
         await borrowed.aclose()
         await client.delete(borrowed)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
+async def test_native_duplicate_lazy_load_copies_and_charges_once(tmp_path, monkeypatch, responses):
+    import asyncio
+    import json
+
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    selected = tmp_path / "skills/report"
+    selected.mkdir(parents=True)
+    (selected / "SKILL.md").write_bytes(b"---\nname: report\n---\n")
+    with (selected / "large.bin").open("wb") as handle:
+        handle.truncate(40 * 1024 * 1024)
+    both_calls = asyncio.Event()
+    arrivals = 0
+    original = LocalDir._apply_bounded
+
+    async def concurrent_copy(source, *args, **kwargs):
+        nonlocal arrivals
+        arrivals += 1
+        if arrivals == 2:
+            both_calls.set()
+        await asyncio.wait_for(both_calls.wait(), timeout=10)
+        return await original(source, *args, **kwargs)
+
+    monkeypatch.setattr(LocalDir, "_apply_bounded", concurrent_copy)
+
+    @asynccontextmanager
+    async def connect(sandbox):
+        root = Path(sandbox.state.manifest.root)
+        async with ExecutorPeer(tmp_path / "executor").serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+            yield Environment(
+                url=peer.url,
+                headers={"Authorization": "Bearer " + peer.token},
+                cwd=str(root),
+                tools=(),
+                capability_directories=[str(root / ".agents")],
+            )
+
+    source = sandbox_environment(
+        UnixLocalSandboxClient(),
+        manifest=Manifest(),
+        options=UnixLocalSandboxClientOptions(),
+        connect=connect,
+        skills=Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path("skills")))),
+    )
+    responses.respond(
+        function_call("load_skill", {"skill_name": "report"}, "first-load"),
+        function_call("load_skill", {"skill_name": "report"}, "second-load"),
+    )
+    responses.respond(assistant_output("done"))
+    async with Agent(
+        instructions="Load report twice concurrently.",
+        model="gpt-5.5",
+        provider=provider(responses),
+        tools=source.skill_tools,
+    ).session(environment=source) as session:
+        assert (
+            await (await session.submit("Load report twice.")).get_result()
+        ).final_output == "done"
+    assert arrivals == 2
+    assert sorted(
+        json.loads(tool_output(responses.requests[1], call_id))["status"]
+        for call_id in ("first-load", "second-load")
+    ) == ["already_loaded", "loaded"]

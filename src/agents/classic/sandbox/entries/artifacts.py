@@ -24,6 +24,7 @@ from ..errors import (
     LocalChecksumError,
     LocalDirReadError,
     LocalFileReadError,
+    WorkspaceReadNotFoundError,
     _InvalidGitHostError,
     _redact_git_host_error_data,
 )
@@ -304,9 +305,17 @@ class LocalDir(BaseEntry):
         base_dir: Path,
         *,
         user: str | User | None = None,
-    ) -> list[MaterializedFile]:
+        existing_marker: Path | None = None,
+    ) -> list[MaterializedFile] | None:
         sandbox = session._skill_copy_budget()
         async with sandbox.lock:
+            if existing_marker is not None:
+                try:
+                    await session.read_bounded(existing_marker, max_bytes=1)
+                except (FileNotFoundError, WorkspaceReadNotFoundError):
+                    pass
+                else:
+                    return None
             sandbox.reserve()
             return await self._apply(session, dest, base_dir, user=user, budget=_LocalDirBudget())
 
