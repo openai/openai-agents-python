@@ -155,7 +155,28 @@ async def native_boundaries():
 
 
 @pytest.mark.parametrize(
-    "route", ["otlp", "generic", "wide", "wide-queue", "combined", "combined-escaped", "collision"]
+    "route",
+    [
+        "otlp",
+        "generic",
+        "wide",
+        "wide-queue",
+        "combined",
+        "combined-escaped",
+        "collision",
+        "carrier-host",
+        "carrier-otlp",
+        "redispatch-wide",
+        "redispatch-root",
+        "redispatch-queue",
+        "redispatch-unrelated",
+        "redispatch-root-queue",
+        "redispatch-root-unrelated",
+        "redispatch-configured",
+        "redispatch-receipt",
+        "redispatch-wide-legacy",
+        "redispatch-root-legacy",
+    ],
 )
 def test_native_annotation_delivery_and_generic_limits(route):
     result = subprocess.run(
@@ -176,6 +197,126 @@ def test_native_annotation_delivery_and_generic_limits(route):
 
 
 async def native_delivery(route):
+    if route.startswith("redispatch-"):
+        events = []
+
+        class Recorder:
+            def on_trace_event(self, event):
+                events.append(event)
+
+        await telemetry.configure(
+            processors=[Recorder()],
+            trace_delivery={"max_queue_bytes": 60000}
+            if route in {"redispatch-queue", "redispatch-root-queue"}
+            else None,
+            span_attributes={f"sdk.metadata.config-{i}": "c" * 4000 for i in range(8)}
+            if route == "redispatch-configured"
+            else None,
+        )
+        try:
+            metadata = {f"f{i}": 0 for i in range(3000)}
+            literal = "literal"
+            for _ in range(65):
+                literal = {"x": literal}
+            metadata["literal"] = json.dumps(literal, separators=(",", ":"))
+            with telemetry.trace(
+                "bounds.replay.root",
+                options={
+                    "metadata": {"x": "x" * 64000}
+                    if route == "redispatch-configured"
+                    else {"x": 0}
+                    if route
+                    in {
+                        "redispatch-queue",
+                        "redispatch-root-queue",
+                        "redispatch-unrelated",
+                        "redispatch-receipt",
+                    }
+                    else metadata
+                },
+            ) as root:
+                parent = root.context
+            if route.startswith("redispatch-root") or route == "redispatch-receipt":
+                with telemetry.use_context(parent):
+                    with telemetry.span("bounds.replay.child"):
+                        pass
+            assert (await telemetry.force_flush(timeout_ms=5000)).status == "success"
+            recorded = [event for event in events if event["lifecycle"] == "end"][-1]
+            replay = json.loads(json.dumps(recorded, default=dict))
+            if route.startswith("redispatch-root"):
+                assert not any(key.startswith("sdk.metadata.") for key in recorded["attributes"])
+                assert any(
+                    key.startswith("sdk.metadata.")
+                    for key in replay["root_descriptor"]["attributes"]
+                )
+            if route == "redispatch-queue":
+                replay["attributes"].update(
+                    {
+                        "sdk.metadata." + key: (value if isinstance(value, str) else str(value))
+                        for key, value in metadata.items()
+                    }
+                )
+            if route == "redispatch-root-queue":
+                replay["root_descriptor"]["attributes"].update(
+                    {
+                        "sdk.metadata." + key: (value if isinstance(value, str) else str(value))
+                        for key, value in metadata.items()
+                    }
+                )
+            if route == "redispatch-root-unrelated":
+                replay["root_descriptor"]["unrelated"] = "g" * 70000
+            if route == "redispatch-unrelated":
+                replay["attributes"].update(
+                    {"sdk.metadata.": "invalid-key", "unrelated": "g" * 70000}
+                )
+            if route.endswith("-legacy"):
+                replay.pop("__sdk_annotations", None)
+                if "root_descriptor" in replay:
+                    replay["root_descriptor"].pop("__sdk_annotations", None)
+            if route == "redispatch-queue":
+                replay["__sdk_annotations"] = json.dumps(dict(metadata, x=0), separators=(",", ":"))
+            if route == "redispatch-root-queue":
+                replay["root_descriptor"]["__sdk_annotations"] = json.dumps(
+                    dict(metadata, x=0), separators=(",", ":")
+                )
+            count = len(events)
+            if route == "redispatch-receipt":
+                parent = json.loads(
+                    json.dumps(
+                        next(
+                            event
+                            for event in events
+                            if event["lifecycle"] == "end" and event["name"].endswith(".root")
+                        ),
+                        default=dict,
+                    )
+                )
+                parent["__sdk_annotations"] = '{"x":1}'
+                replay["root_descriptor"]["__sdk_annotations"] = '{"x":1}'
+                with pytest.raises(Exception, match="receipt"):
+                    await telemetry.dispatch_trace_event(parent)
+                with pytest.raises(Exception, match="receipt"):
+                    await telemetry.dispatch_trace_event(replay)
+                assert len(events) == count
+            elif route in {
+                "redispatch-queue",
+                "redispatch-unrelated",
+                "redispatch-root-queue",
+                "redispatch-root-unrelated",
+            }:
+                with pytest.raises(Exception, match="queue capacity"):
+                    await telemetry.dispatch_trace_event(replay)
+                assert len(events) == count
+            else:
+                await telemetry.dispatch_trace_event(replay)
+                assert len(events) == count + 1
+                assert events[-1]["attributes"] == recorded["attributes"]
+                assert events[-1].get("root_descriptor") == replay.get("root_descriptor")
+            assert telemetry.current_context() is None
+        finally:
+            await telemetry.shutdown()
+        return
+
     if route == "collision":
         events = []
 
@@ -286,12 +427,29 @@ async def native_delivery(route):
         return
 
     with collector() as (endpoint, records):
-        await telemetry.configure(traces=telemetry.OtlpHttp(endpoint=endpoint, protocol="json"))
+        events = []
+
+        class Recorder:
+            def on_trace_event(self, event):
+                events.append(event)
+
+        await telemetry.configure(
+            traces=telemetry.OtlpHttp(endpoint=endpoint, protocol="json")
+            if route != "carrier-host"
+            else None,
+            processors=[Recorder()] if route.startswith("carrier-") else [],
+            span_attributes={"sdk.metadata": "service-label", "service.fixture": "retained"}
+            if route.startswith("carrier-")
+            else None,
+        )
         try:
             metadata = {"a-long": "x" * 8192, "b-encoded": ["x" * 3000, "y" * 3000]}
             metadata.update(payload("top-level"))
+            child_metadata = (
+                dict(metadata, child="owned") if route.startswith("carrier-") else metadata
+            )
             with telemetry.trace("bounds.otlp.root", options={"metadata": metadata}):
-                with telemetry.span("bounds.otlp.child", options={"metadata": metadata}):
+                with telemetry.span("bounds.otlp.child", options={"metadata": child_metadata}):
                     pass
             assert (await telemetry.force_flush(timeout_ms=5000)).status == "success"
         finally:
@@ -304,17 +462,38 @@ async def native_delivery(route):
             for span in scope["spans"]
             if span["name"].startswith("bounds.otlp.")
         ]
-        assert {span["name"] for span in spans} == {"bounds.otlp.root", "bounds.otlp.child"}
+        if route.startswith("carrier-"):
+            for event in events:
+                expected = child_metadata if event["name"].endswith(".child") else metadata
+                assert event["attributes"]["sdk.metadata"] == "service-label"
+                assert event["attributes"]["service.fixture"] == "retained"
+                actual = {
+                    key.removeprefix("sdk.metadata."): value
+                    for key, value in event["attributes"].items()
+                    if key.startswith("sdk.metadata.")
+                }
+                assert actual.keys() == expected.keys()
+                for key, value in expected.items():
+                    assert (
+                        actual[key] if isinstance(value, str) else json.loads(actual[key])
+                    ) == value
+        if route != "carrier-host":
+            assert {span["name"] for span in spans} == {"bounds.otlp.root", "bounds.otlp.child"}
         for span in spans:
             attributes = {item["key"]: item["value"] for item in span["attributes"]}
-            assert "sdk.metadata" not in attributes
+            if route.startswith("carrier-"):
+                assert attributes["sdk.metadata"]["stringValue"] == "service-label"
+                assert attributes["service.fixture"]["stringValue"] == "retained"
+            else:
+                assert "sdk.metadata" not in attributes
             delivered = {
                 key.removeprefix("sdk.metadata."): item["stringValue"]
                 for key, item in attributes.items()
                 if key.startswith("sdk.metadata.")
             }
-            assert delivered.keys() == metadata.keys()
-            for key, value in metadata.items():
+            expected = child_metadata if span["name"].endswith(".child") else metadata
+            assert delivered.keys() == expected.keys()
+            for key, value in expected.items():
                 assert (
                     delivered[key] if isinstance(value, str) else json.loads(delivered[key])
                 ) == value
