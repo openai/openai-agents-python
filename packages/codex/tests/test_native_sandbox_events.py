@@ -384,13 +384,12 @@ async def test_native_lifecycle_excludes_payloads_even_with_output_opt_in():
 
 
 @unix
-@pytest.mark.parametrize("valid", [True, False])
+@pytest.mark.parametrize("outcome", ["completed", "denied", "malformed"])
 async def test_native_builtin_dispatch_retains_resource_identity_and_measured_finish(
-    valid: bool, responses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    outcome: str, responses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     from tests.native_fixtures import assistant_output, function_call
     from tests.test_native_agent import provider
-    from tests.test_native_executor_tools import declaration, trust
 
     observed = []
     resources = []
@@ -401,7 +400,7 @@ async def test_native_builtin_dispatch_retains_resource_identity_and_measured_fi
     responses.respond(
         function_call(
             "exec_command",
-            {"cmd": "echo native-private-command" if valid else 7},
+            {"cmd": "echo native-private-command" if outcome != "malformed" else 7},
             "builtin-operation",
         )
     )
@@ -409,15 +408,23 @@ async def test_native_builtin_dispatch_retains_resource_identity_and_measured_fi
     async with (
         timeout(30),
         ExecutorPeer(
-            tmp_path / "executor", synthetic_process_output="native-private-output"
+            tmp_path / "executor",
+            synthetic_process_output="native-private-output",
+            synthetic_sandbox_denied=outcome == "denied",
         ).serve() as peer,
     ):
-        trust(peer, tmp_path, monkeypatch)
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
 
         @asynccontextmanager
         async def connect(session):
             resources.append(session)
-            yield declaration(peer)
+            yield Environment(
+                url=peer.url,
+                cwd=session.state.manifest.root,
+                headers={"Authorization": "Bearer " + peer.token},
+                tools=["exec_command", "write_stdin", "apply_patch"],
+            )
 
         environment = sandbox_environment(
             client, manifest=Manifest(), options=None, connect=connect
@@ -425,12 +432,22 @@ async def test_native_builtin_dispatch_retains_resource_identity_and_measured_fi
         async with Agent(
             instructions="Use the requested sandbox operation.", provider=provider(responses)
         ).session(environment=environment) as session:
-            assert (await (await session.submit("once")).get_result()).final_output == "done"
+            turn = await session.submit("once")
+            if outcome == "malformed":
+                from agents import NativeError
+
+                with pytest.raises(NativeError, match="invalid arguments before dispatch"):
+                    await turn.get_result()
+            else:
+                assert (await turn.get_result()).final_output == "done"
     operations = [event for event in observed if event.op == "exec"]
+    if outcome == "malformed":
+        assert operations == [] and peer.synthetic_process_starts == []
+        return
     assert [event.phase for event in operations] == ["start", "finish"]
     assert all(event.session_id == resources[0].state.session_id for event in operations)
     assert operations[0].span_id == operations[1].span_id
-    assert operations[1].ok is valid and operations[1].duration_ms >= 0
+    assert operations[1].ok is (outcome == "completed") and operations[1].duration_ms >= 0
     assert all(event.data == {} for event in operations)
     assert "native-private" not in "".join(event.model_dump_json() for event in operations)
-    assert bool(peer.synthetic_process_starts) is valid
+    assert peer.synthetic_process_starts

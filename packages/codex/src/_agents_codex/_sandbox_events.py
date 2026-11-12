@@ -114,13 +114,18 @@ def _retire_binding(sink: EventSink, session_id: UUID | None) -> None:
 
 
 class Instrumentation(_Instrumentation):
-    """Native owned-resource lifecycle events with bounded optional delivery.
+    """Bind native sandbox headers to their acquired provider resource.
 
-    Provider constructors have been accepting this instrumentation directly.
-    Start, stop and shutdown have been retaining safe status and correlation
-    fields. Provider details and exception text have been staying excluded.
-    Ordered chains and synchronous sinks have been retaining awaited delivery.
-    Optional deliveries have been getting cancelled when their resource closes.
+    Provider constructors have been accepting this configuration. Managed
+    native environments have also been forwarding builtin exec, stdin and image
+    operation headers from the admitted runtime. Arguments, paths, output and
+    provider exception text have been staying excluded.
+
+    Optional delivery has been dropping events at its finite capacity and
+    retaining physical HTTP sends until completion. Resource cleanup has been
+    cancelling optional delivery without joining observers. Explicit synchronous
+    sinks and ordered chains have been retaining awaited delivery and their
+    configured error policy.
     """
 
     def __init__(
