@@ -100,6 +100,46 @@ mod acknowledged_original_tests {
             &make("original", "foreign", true)
         ));
     }
+
+    #[test]
+    fn completed_and_failed_patch_receipts_require_exact_status_and_output() {
+        let make = |status: &str, output: &str| {
+            serde_json::from_value::<ResponseItem>(serde_json::json!({
+                "type":"apply_patch_call_output", "call_id":"call", "status":status, "output":output
+            }))
+            .unwrap()
+        };
+        for status in ["completed", "failed"] {
+            let accepted = make(status, "accepted output");
+            assert!(matches!(
+                &accepted,
+                ResponseItem::ApplyPatchCallOutput { .. }
+            ));
+            assert!(same_output_payload(
+                &accepted,
+                &make(status, "accepted output")
+            ));
+            assert!(same_acknowledged_output(
+                &accepted,
+                &make(status, "accepted output")
+            ));
+            assert!(!same_output_payload(
+                &accepted,
+                &make(status, "modified output")
+            ));
+            assert!(!same_output_payload(
+                &accepted,
+                &make(
+                    if status == "completed" {
+                        "failed"
+                    } else {
+                        "completed"
+                    },
+                    "accepted output"
+                )
+            ));
+        }
+    }
 }
 
 pub(crate) fn same_output_payload(left: &ResponseItem, right: &ResponseItem) -> bool {
@@ -115,6 +155,18 @@ pub(crate) fn same_output_payload(left: &ResponseItem, right: &ResponseItem) -> 
             .ok()
             .zip(serde_json::to_value(right).ok())
             .is_some_and(|(left, right)| left == right),
+        (
+            ResponseItem::ApplyPatchCallOutput {
+                status: left_status,
+                output: left_output,
+                ..
+            },
+            ResponseItem::ApplyPatchCallOutput {
+                status: right_status,
+                output: right_output,
+                ..
+            },
+        ) => left_status == right_status && left_output == right_output,
         (
             ResponseItem::ComputerCallOutput {
                 output: left,
