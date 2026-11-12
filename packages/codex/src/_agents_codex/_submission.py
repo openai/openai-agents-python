@@ -96,6 +96,7 @@ class _Submission:
     step_index: int = 0
     budget: _RunBudget | None = None
     model_override: str | None = None
+    raise_on_unknown_tool: bool = False
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None

@@ -2897,6 +2897,14 @@ impl NativeThread {
         })
     }
 
+    fn _manual_raises_unknown_tool(&self) -> PyResult<bool> {
+        let frame = self
+            .manual
+            .lock()
+            .map_err(|_| py_error("Manual continuation poisoned"))?;
+        Ok(frame.as_ref().is_some_and(|frame| frame.raise_on_unknown_tool))
+    }
+
     #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None, operation_declaration_source_json=None))]
     fn _continue_manual<'py>(
         &self,

@@ -903,7 +903,11 @@
     {
       "path": "sdk-function-tool-callers.patch",
       "sha256": "21594792346cd2fa805d34ae09d55737c9b8a7f1d3e55c733c4748edbeeafb7d"
+    },
+    {
+      "path": "sdk-unknown-direct-tool-policy.patch",
+      "sha256": "708d7a5b452a6c2dcc799c5c64057888b64a302812272b522a2ecf4fad45fa06"
     }
   ],
-  "result_tree": "661329934fe19a255f119541cb909dbd0bc33b0d"
+  "result_tree": "0c697c85eb613d66bcbff03b359224c38817b747"
 }

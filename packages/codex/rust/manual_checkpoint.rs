@@ -258,6 +258,7 @@ impl ToolOutcomes {
 
 pub(crate) struct Frame {
     tool_outcomes: Option<ToolOutcomes>,
+    pub(crate) raise_on_unknown_tool: bool,
     fresh: Option<crate::python_tools::FreshTerminalReceipts>,
     terminal_calls: HashSet<String>,
     batch_completion: bool,
@@ -948,6 +949,11 @@ fn validate_frame(
         }
     }
     Ok(Frame {
+        raise_on_unknown_tool: codex_extension_api::ToolNotFoundBehavior::from_turn_history(
+            &history, &turn,
+        )
+        .map_err(anyhow::Error::msg)?
+        .is_some(),
         profile_source: None,
         handoffs,
         tool_outcomes,
@@ -1525,6 +1531,9 @@ pub(crate) async fn continue_if_ready(
     };
     recovery_options["model_override"] =
         frame.state["native_continuation"]["model_override"].clone();
+    if frame.raise_on_unknown_tool {
+        recovery_options["raise_on_unknown_tool"] = Value::Bool(true);
+    }
     recovery_options["trace"] = serde_json::json!(trace);
     recovery_options["observation_submission_id"] = serde_json::json!(observation_submission_id);
     if let Some(source) = operation_declaration_source {
