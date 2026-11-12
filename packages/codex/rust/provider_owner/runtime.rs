@@ -136,6 +136,16 @@ pub(crate) async fn close_process_runtime() -> PyResult<()> {
     retire_process_slot(process_slot()?.clone().write_owned().await).await
 }
 
+// The same checkout that keeps the implicit engine live also proves it
+// is idle before a telemetry generation retires it.
+pub(crate) async fn close_idle_process_runtime() -> PyResult<bool> {
+    let Ok(slot) = process_slot()?.clone().try_write_owned() else {
+        return Ok(false);
+    };
+    retire_process_slot(slot).await?;
+    Ok(true)
+}
+
 async fn retire_process_slot(
     mut slot: OwnedRwLockWriteGuard<Option<PreparedRuntime>>,
 ) -> PyResult<()> {
