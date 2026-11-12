@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from ._function_tools import FunctionTool
     from .mcp import ChatGPTAppsMCP, HostedVerificationMCP
     from .native_agents import ChildInvocation
-    from .session import Session
+    from .session import Session, _CallbackState
     from .telemetry import SpanContext
     from .tools import ToolCallInfo, ToolRef, _CapturedFunction
     from .turn import Turn
@@ -873,6 +873,17 @@ class VerificationRequest(_NativeQuestion):
 Interaction: TypeAlias = (
     ActionRequested[Any, Any] | ApprovalRequest | ElicitationRequest | VerificationRequest
 )
+
+
+def _publish_question(
+    session: Session[Any, Any],
+    state: _CallbackState,
+    question: ApprovalRequest | ElicitationRequest | VerificationRequest,
+) -> None:
+    """Publish one constructed question through its existing callback owner."""
+    state.questions[id(question)] = question
+    session._dispatch_interaction(question, state)
+    session._observations.notify()
 
 
 def _question(

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
-index b52d33a2..aca02a2d 100644
+index b52d33a28d00ad2f620116d0d1c2e8402793788c..aca02a2db0504a95d46698ec67671c83e5c5f908 100644
 --- a/codex-rs/codex-api/src/endpoint/responses.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses.rs
 @@ -28,6 +28,7 @@ const MAX_JSON_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -8,7 +8,7 @@ index b52d33a2..aca02a2d 100644
      sse_telemetry: Option<Arc<dyn SseTelemetry>>,
 +    request_transport: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
  }
- 
+
  #[derive(Default)]
 @@ -47,6 +48,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
          Self {
@@ -17,7 +17,7 @@ index b52d33a2..aca02a2d 100644
 +            request_transport: None,
          }
      }
- 
+
 @@ -58,9 +60,18 @@ impl<T: HttpTransport> ResponsesClient<T> {
          Self {
              session: self.session.with_request_telemetry(request),
@@ -25,7 +25,7 @@ index b52d33a2..aca02a2d 100644
 +            request_transport: self.request_transport,
          }
      }
- 
+
 +    pub fn with_request_transport(
 +        mut self,
 +        overrides: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
@@ -40,7 +40,7 @@ index b52d33a2..aca02a2d 100644
 @@ -226,6 +237,10 @@ impl<T: HttpTransport> ResponsesClient<T> {
              Compression::Zstd => RequestCompression::Zstd,
          };
- 
+
 +        let prepared = crate::prepare_request_transport(
 +            &self.session.provider().url_for_path("/responses"),
 +            self.request_transport.as_ref(),
@@ -57,7 +57,7 @@ index b52d33a2..aca02a2d 100644
                      req.response_body_limit_bytes = response_body_limit_bytes;
                  },
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 207a02ec..a08927a7 100644
+index ae61392914c06ab63b25dc2e6431ba9b743b0f6d..9afa4d55e37645074ab546602d2f08249152f6ad 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -394,6 +394,7 @@ impl ResponsesWebsocketConnection {
@@ -75,7 +75,7 @@ index 207a02ec..a08927a7 100644
 +            request_transport: None,
          }
      }
- 
+
 +    pub fn with_request_transport(
 +        mut self,
 +        overrides: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
@@ -88,7 +88,7 @@ index 207a02ec..a08927a7 100644
      pub fn with_tls_selector(
          mut self,
 @@ -462,6 +472,12 @@ impl ResponsesWebsocketClient {
- 
+
          let mut headers =
              merge_request_headers(&self.provider.headers, extra_headers, default_headers);
 +        let mut effective_url = ws_url.to_string();
@@ -98,10 +98,10 @@ index 207a02ec..a08927a7 100644
 +            message: "invalid request query URL".into(),
 +        })?;
          self.auth.add_auth_headers(&mut headers);
- 
+
          let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index 628f299c..100fabad 100644
+index 628f299c76729594e1fe988fce7eecfb76f91532..100fabad82e1e1dcaf820d6a9f47a6ee62b69b90 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
 @@ -8,6 +8,7 @@ pub(crate) mod error;
@@ -118,12 +118,12 @@ index 628f299c..100fabad 100644
  pub use codex_client::TransportError;
 +pub use crate::request_transport::prepare_request_transport;
 +pub use crate::request_transport::PreparedRequestTransport;
- 
+
  pub use crate::api_bridge::map_api_error;
  pub use crate::auth::AgentIdentityTelemetry;
 diff --git a/codex-rs/codex-api/src/request_transport.rs b/codex-rs/codex-api/src/request_transport.rs
 new file mode 100644
-index 00000000..e6e44372
+index 0000000000000000000000000000000000000000..e6e44372d1cec1fcae829e29885b6c7f8c476528
 --- /dev/null
 +++ b/codex-rs/codex-api/src/request_transport.rs
 @@ -0,0 +1,123 @@
@@ -252,7 +252,7 @@ index 00000000..e6e44372
 +}
 diff --git a/codex-rs/codex-api/tests/request_transport_overrides.rs b/codex-rs/codex-api/tests/request_transport_overrides.rs
 new file mode 100644
-index 00000000..0e626dca
+index 0000000000000000000000000000000000000000..0e626dca99e6add268f142fb26d21b697eb2e949
 --- /dev/null
 +++ b/codex-rs/codex-api/tests/request_transport_overrides.rs
 @@ -0,0 +1,310 @@
@@ -567,7 +567,7 @@ index 00000000..0e626dca
 +    server.await.unwrap();
 +}
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index c1a4cce0..273a1509 100644
+index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7076407ee 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -1674,6 +1674,9 @@ impl ModelClient {
@@ -588,7 +588,7 @@ index c1a4cce0..273a1509 100644
                  .with_tls_selector(self.sdk_websocket_tls_selector.clone())
                  .connect(
                      &self.http_client_factory,
-@@ -2015,6 +2019,7 @@ impl ModelClientSession {
+@@ -2016,6 +2020,7 @@ impl ModelClientSession {
                      auth_context,
                      request_route_telemetry: RequestRouteTelemetry::for_endpoint("/responses"),
                      responses_headers: &responses_headers,
@@ -596,19 +596,25 @@ index c1a4cce0..273a1509 100644
                  })
                  .await
              {
-@@ -2083,8 +2088,10 @@ impl ModelClientSession {
+@@ -2085,6 +2090,7 @@ impl ModelClientSession {
              auth_context,
              request_route_telemetry,
              responses_headers,
 +            request_transport,
          } = params;
+         let api_auth = codex_model_provider::prepare_websocket_auth(
+             self.client.state.provider.info(),
+@@ -2094,7 +2100,8 @@ impl ModelClientSession {
+         )
+         .await
+         .map_err(|message| ApiError::InvalidRequest { message })?;
 -        let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision);
 +        let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision)
 +            .with_request_transport(&api_provider, request_transport)?;
          let reset_reason = match self.websocket_session.connection.as_ref() {
              Some(_)
                  if self.websocket_session.responses_headers != *responses_headers
-@@ -2119,6 +2126,7 @@ impl ModelClientSession {
+@@ -2129,6 +2136,7 @@ impl ModelClientSession {
                      auth_context,
                      request_route_telemetry,
                      responses_headers,
@@ -616,7 +622,7 @@ index c1a4cce0..273a1509 100644
                  )
                  .await?;
              self.websocket_session.connection = Some(new_conn);
-@@ -2342,7 +2350,8 @@ impl ModelClientSession {
+@@ -2352,7 +2360,8 @@ impl ModelClientSession {
                  client_setup.api_provider,
                  client_setup.api_auth,
              )
@@ -626,7 +632,7 @@ index c1a4cce0..273a1509 100644
              crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
              if let Some(admission) = &prompt.prepared_request_admission {
                  admission.admit_request().map_err(CodexErr::Fatal)?;
-@@ -2585,6 +2594,11 @@ impl ModelClientSession {
+@@ -2596,6 +2605,11 @@ impl ModelClientSession {
                      auth_context: request_auth_context,
                      request_route_telemetry: RequestRouteTelemetry::for_endpoint("/responses"),
                      responses_headers: &responses_headers,
@@ -638,17 +644,17 @@ index c1a4cce0..273a1509 100644
                  })
                  .await
              {
-@@ -3555,6 +3569,8 @@ struct WebsocketConnectParams<'a> {
+@@ -3567,6 +3581,8 @@ struct WebsocketConnectParams<'a> {
      auth_context: AuthRequestTelemetryContext,
      request_route_telemetry: RequestRouteTelemetry,
      responses_headers: &'a ApiHeaderMap,
 +    request_transport:
 +        Option<&'a codex_protocol::model_request_transport::RequestTransportOverrides>,
  }
- 
+
  fn emit_auth_recovery_event(
 diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
-index aa55d51e..60968dc9 100644
+index aa55d51ebbbb6b5f502bbfb226e4037d5bf2d5ec..60968dc973d6c8dbcf4f801284c1989f370b5318 100644
 --- a/codex-rs/core/src/model_request.rs
 +++ b/codex-rs/core/src/model_request.rs
 @@ -17,6 +17,7 @@ use codex_extension_api::ModelResponseInterceptor;
@@ -676,7 +682,7 @@ index aa55d51e..60968dc9 100644
          self.attempt.clone()
      }
 diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
-index b5930843..29fc6e4e 100644
+index b59308436d9845f0aec7c605137c06ea84326133..29fc6e4e37b46cc9843bac6a6608f58c652b2ccb 100644
 --- a/codex-rs/core/src/session/startup_prewarm.rs
 +++ b/codex-rs/core/src/session/startup_prewarm.rs
 @@ -387,11 +387,19 @@ async fn schedule_startup_prewarm_inner(
@@ -794,7 +800,7 @@ index b5930843..29fc6e4e 100644
 +    }
 +}
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index cf9c02c0..c5e4a121 100644
+index cf9c02c0fe07ffb6dab707708cbc92884012086b..c5e4a121bc19dbc732ce41e4efa11572289eca44 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
 @@ -3,6 +3,7 @@ use crate::ExtensionData;
@@ -817,12 +823,12 @@ index cf9c02c0..c5e4a121 100644
      fn model_attempt(&self) -> Option<Arc<dyn ModelAttemptAdmission>> {
          None
 diff --git a/codex-rs/model-provider/src/workspace_routing.rs b/codex-rs/model-provider/src/workspace_routing.rs
-index 267a2644..77cd6e0c 100644
+index 267a2644465dcc1142eea4d9e497bc5cc3acc9f8..77cd6e0cf16077a376b191a2f62bf73bfde72d0b 100644
 --- a/codex-rs/model-provider/src/workspace_routing.rs
 +++ b/codex-rs/model-provider/src/workspace_routing.rs
 @@ -85,19 +85,106 @@ pub struct ResolvedResponsesProvider {
  }
- 
+
  /// Effective destination and credentials that permit reusing a Responses socket.
 -#[derive(Debug, PartialEq, Eq)]
 +#[derive(PartialEq, Eq)]
@@ -846,7 +852,7 @@ index 267a2644..77cd6e0c 100644
 +            .finish()
 +    }
  }
- 
+
  impl ResponsesConnectionKey {
 +    pub fn with_request_transport(
 +        mut self,
@@ -929,7 +935,7 @@ index 267a2644..77cd6e0c 100644
 +    }
 +}
 diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
-index 4b9c7f15..2b354ad5 100644
+index 4b9c7f1538691710ea18d87e7cd57fe2be07b2f1..2b354ad52a1ce8a9cfcb75d8d3b37eb9833e6a8a 100644
 --- a/codex-rs/protocol/src/lib.rs
 +++ b/codex-rs/protocol/src/lib.rs
 @@ -37,6 +37,7 @@ pub mod memory_citation;
@@ -941,13 +947,13 @@ index 4b9c7f15..2b354ad5 100644
  pub mod models;
  pub mod network_policy;
 diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
-index 68c06eb3..37568d53 100644
+index 68c06eb388e2d69be268576c48890201a656bc37..37568d537a7bcf36bf63acd173a195234566bead 100644
 --- a/codex-rs/protocol/src/model_request_controls.rs
 +++ b/codex-rs/protocol/src/model_request_controls.rs
 @@ -120,11 +120,48 @@ pub struct HostedPromptControls {
      pub resolved_instructions: Option<String>,
  }
- 
+
 +/// Sparse start-only preferences, retained independently of profile defaults.
 +#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 +#[serde(default, deny_unknown_fields)]
@@ -994,7 +1000,7 @@ index 68c06eb3..37568d53 100644
      #[serde(
          default,
 @@ -311,7 +348,8 @@ pub struct ModelRequestControls {
- 
+
  impl ModelRequestControls {
      pub fn is_empty(&self) -> bool {
 -        self.retry.is_none()
@@ -1005,7 +1011,7 @@ index 68c06eb3..37568d53 100644
              && self.input_modalities.is_none()
 @@ -336,6 +374,11 @@ impl ModelRequestControls {
      }
- 
+
      pub fn apply_patch(&mut self, patch: &Self) {
 +        match (&mut self.request_transport, &patch.request_transport) {
 +            (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
@@ -1016,7 +1022,7 @@ index 68c06eb3..37568d53 100644
              (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
              (_, Some(update)) => self.retry = Some(update.clone()),
 @@ -409,6 +452,9 @@ impl ModelRequestControls {
- 
+
      /// Check wire shapes independently of uncertain model-level support.
      pub fn validate_shape(&self) -> Result<(), String> {
 +        if let Some(Some(transport)) = &self.request_transport {
@@ -1070,7 +1076,7 @@ index 68c06eb3..37568d53 100644
 +}
 diff --git a/codex-rs/protocol/src/model_request_transport.rs b/codex-rs/protocol/src/model_request_transport.rs
 new file mode 100644
-index 00000000..5579c3ea
+index 0000000000000000000000000000000000000000..5579c3ea444bbe2a474925145a52c364ca00fc2f
 --- /dev/null
 +++ b/codex-rs/protocol/src/model_request_transport.rs
 @@ -0,0 +1,131 @@

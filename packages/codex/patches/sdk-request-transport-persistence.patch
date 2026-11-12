@@ -5,7 +5,7 @@ index 37568d537a7bcf36bf63acd173a195234566bead..f538be7e373d5c6fa66ac3785c2fc25a
 @@ -147,6 +147,14 @@ pub struct RunModelSettingsOverride {
      pub request_controls: ModelRequestControls,
  }
- 
+
 +impl RunModelSettingsOverride {
 +    pub fn for_persistence(&self) -> Self {
 +        let mut settings = self.clone();
@@ -19,7 +19,7 @@ index 37568d537a7bcf36bf63acd173a195234566bead..f538be7e373d5c6fa66ac3785c2fc25a
  #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 @@ -347,6 +355,12 @@ pub struct ModelRequestControls {
  }
- 
+
  impl ModelRequestControls {
 +    pub fn for_persistence(&self) -> Self {
 +        let mut controls = self.clone();

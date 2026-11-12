@@ -40,7 +40,7 @@ index 1141f4cedcc64dfad0945d5fe91b151af6ba54aa..4c856bcd59d644c20ef23299c13cfb61
              | ResponseItem::ToolSearchOutput { .. }
 @@ -978,6 +978,10 @@ impl LocalAgentControl {
          let durability_wait = durability_wait_started_at.elapsed();
- 
+
          let start_options = TurnStartOptions {
 +            model_settings_override: options
 +                .spawning_source
@@ -111,7 +111,7 @@ index 51493b00ae817a8ee0bd3c54f36c1532889e5b3c..6f62222a57fd6f2f34016c4b10101d1b
 @@ -2153,6 +2153,15 @@ impl Session {
                  self.apply_session_settings(&updated, &effective)?;
              }
- 
+
 +            if let Some(settings) = &updates.model_settings_override_for_turn {
 +                let mut effective = SessionSettingsUpdate::default();
 +                effective.step_settings.apply_run_model_settings(settings);
@@ -277,7 +277,7 @@ index 76476dc3fb474d386a5b97f8d6981ace90ed088d..e9de6ee27d48943628977815907e2927
              reasoning_summary,
              service_tier,
 @@ -122,10 +132,25 @@ impl ResolvedStepSettings {
- 
+
      pub(super) fn release_forced_tool_choice(&mut self) {
          if self.tool_choice() == ToolChoice::Required {
 -            let selected = Arc::make_mut(&mut self.selected);
@@ -305,7 +305,7 @@ index 76476dc3fb474d386a5b97f8d6981ace90ed088d..e9de6ee27d48943628977815907e2927
 +            self.refresh_run_request_controls();
          }
      }
- 
+
 @@ -139,12 +164,22 @@ impl ResolvedStepSettings {
          {
              return;
@@ -333,16 +333,16 @@ index 76476dc3fb474d386a5b97f8d6981ace90ed088d..e9de6ee27d48943628977815907e2927
 +        }
 +        self.refresh_run_request_controls();
      }
- 
+
      pub(crate) fn request_model(&self) -> &str {
 @@ -155,13 +190,78 @@ impl ResolvedStepSettings {
- 
+
      pub(super) fn with_model_override(mut self, model_override: Option<String>) -> Self {
          self.model_override = model_override;
 +        self.refresh_run_request_controls();
          self
      }
- 
+
 +    pub(super) fn with_model_settings_override(
 +        self,
 +        settings: Option<codex_protocol::model_request_controls::RunModelSettingsOverride>,
@@ -413,11 +413,11 @@ index 76476dc3fb474d386a5b97f8d6981ace90ed088d..e9de6ee27d48943628977815907e2927
 +            Some(controls)
 +        });
      }
- 
+
      pub(super) fn with_agent_profile(
 @@ -177,7 +277,7 @@ impl ResolvedStepSettings {
      }
- 
+
      pub(crate) fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
 -        self.selected
 +        self.effective
@@ -426,7 +426,7 @@ index 76476dc3fb474d386a5b97f8d6981ace90ed088d..e9de6ee27d48943628977815907e2927
              .reasoning_effort
 @@ -191,7 +291,7 @@ impl ResolvedStepSettings {
      }
- 
+
      pub(crate) fn effective_collaboration_mode(&self) -> CollaborationMode {
 -        let mut collaboration_mode = self.selected.collaboration_mode.clone();
 +        let mut collaboration_mode = self.effective.collaboration_mode.clone();
@@ -435,17 +435,17 @@ index 76476dc3fb474d386a5b97f8d6981ace90ed088d..e9de6ee27d48943628977815907e2927
      }
 @@ -214,11 +314,11 @@ impl ResolvedStepSettings {
      }
- 
+
      pub(crate) fn invocation_timeout_ms(&self) -> Option<u32> {
 -        self.selected.invocation_timeout_ms
 +        self.effective.invocation_timeout_ms
      }
- 
+
      pub(crate) fn tool_choice(&self) -> ToolChoice {
 -        self.selected.tool_choice.unwrap_or_default()
 +        self.effective.tool_choice.unwrap_or_default()
      }
- 
+
      pub(crate) fn personality(&self) -> Option<Personality> {
 @@ -260,7 +360,7 @@ impl ResolvedStepSettings {
                      .and_then(Option::as_ref)
@@ -499,7 +499,7 @@ index 76476dc3fb474d386a5b97f8d6981ace90ed088d..e9de6ee27d48943628977815907e2927
 @@ -377,6 +488,36 @@ pub(crate) struct StepSettingsUpdate {
      pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
  }
- 
+
 +impl StepSettingsUpdate {
 +    pub(super) fn apply_run_model_settings(
 +        &mut self,
@@ -559,7 +559,7 @@ index 91ed8e60a8aecb024f12cbd3f47ecb42a53d0d6b..1de27ed539afad621761269d30ff529b
      pub(crate) cyber_access_program: Option<CyberAccessProgram>,
  }
 @@ -531,6 +533,12 @@ impl TurnContext {
- 
+
      /// Legacy: returns the frozen initial-turn model metadata.
      /// Step-scoped consumers should use their captured `StepContext::settings`.
 +    pub(crate) fn model_settings_override(
@@ -651,7 +651,7 @@ index 796e1db1537f2a3b76c89e838853bf705f76ff18..ff10d5068d707879b1e2a10b3e0c834f
              root_turn_id,
              cyber_access_program,
 @@ -177,6 +194,7 @@ impl PreparedTurnInputSettings {
- 
+
          let options = NewTurnContextOptions {
              model_override,
 +            model_settings_override,
@@ -777,7 +777,7 @@ index c5e4a121bc19dbc732ce41e4efa11572289eca44..9d73e86d81fda0939cbadaa32ea09ece
 @@ -338,6 +338,12 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
  #[derive(Clone, Debug)]
  pub struct CapturedRunModelOverride(pub String);
- 
+
 +/// Sparse model settings captured with the original native turn owner.
 +#[derive(Clone, Debug)]
 +pub struct CapturedRunModelSettingsOverride(

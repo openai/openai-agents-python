@@ -49,7 +49,7 @@ index 9d1179b..7167d2c 100644
 @@ -244,6 +244,16 @@ pub struct AgentProfileModelSettings {
      pub invocation_timeout_ms: Option<u32>,
  }
- 
+
 +impl AgentProfileModelSettings {
 +    /// Keep durable choices while taking request transport from the current caller.
 +    pub fn for_persistence(&self) -> Self {

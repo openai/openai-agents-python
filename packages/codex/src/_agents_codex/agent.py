@@ -396,6 +396,10 @@ class NativeProvider:
     implicit and no routing, proxy or CA override is present. Explicit WebSocket choices and live
     Session transport permission remain unchanged.
 
+    Set ``websocket_base_url`` to use a separate WebSocket endpoint. It accepts
+    absolute WS(S) and HTTP(S) URLs. The native runtime derives the WebSocket
+    scheme. This endpoint does not change transport selection or HTTP routing.
+
     ``request_max_retries`` controls retries of failed HTTP requests;
     ``stream_max_retries`` controls reconnections of dropped response streams.
     Omission uses native defaults (4 and 5 respectively). Zero disables retries
@@ -416,13 +420,13 @@ class NativeProvider:
     Native child agents are not supported in buffered mode.
 
     Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
-    Omit ``api_key`` and ``base_url`` in this experimental mode.
+    Omit ``api_key``, ``base_url``, and ``websocket_base_url`` in this experimental mode.
 
     Set ``auth=SignInWithChatGPT(get_credentials=...)`` for a registered
     integration with ChatGPT plan usage permission. The SDK uses HTTP streaming
     on OpenAI Responses and keeps the Session bound to the registration.
-    Omit ``api_key``, ``base_url``, and custom routing. Leave both retry limits
-    unset or set them to zero so the application owns retry timing. The SDK
+    Omit ``api_key``, ``base_url``, ``websocket_base_url``, and custom routing.
+    Leave both retry limits unset or set them to zero so the application owns retry timing. The SDK
     reports credential and entitlement failures without switching billing modes.
 
     Retry budgets and phase timeouts are native provider settings. Omission keeps
@@ -469,6 +473,7 @@ class NativeProvider:
     stream_max_retries: int | None = None
     stream_idle_timeout_ms: int | None = field(default=None, repr=False)
     websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
+    websocket_base_url: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         for name in (
@@ -482,10 +487,30 @@ class NativeProvider:
                 isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1
             ):
                 raise ValueError(f"{name} must be a non-negative signed 64-bit integer or None")
-        for name in ("base_url", "api_key"):
+        for name in ("base_url", "api_key", "websocket_base_url"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"{name} must be a non-empty string when provided")
+        if self.websocket_base_url is not None:
+            try:
+                parsed = urlsplit(self.websocket_base_url)
+                valid = (
+                    parsed.scheme in ("ws", "wss", "http", "https")
+                    and bool(parsed.hostname)
+                    and parsed.username is None
+                    and parsed.password is None
+                    and "#" not in self.websocket_base_url
+                    and not any(character.isspace() for character in self.websocket_base_url)
+                )
+                # Accessing port validates malformed and out-of-range values.
+                _ = parsed.port
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError(
+                    "websocket_base_url must be an absolute WS(S) or HTTP(S) URL "
+                    "without userinfo or fragment"
+                )
         if self.supports_websockets is not None and not isinstance(self.supports_websockets, bool):
             raise ValueError("supports_websockets must be a bool or None")
         if self.response_mode not in ("streaming", "buffered"):
@@ -502,7 +527,12 @@ class NativeProvider:
                 or self.stream_max_retries not in (None, 0)
             ):
                 raise ValueError("SignInWithChatGPT requires application-managed retries")
-            if self.api_key is not None or self.base_url is not None or self.supports_websockets:
+            if (
+                self.api_key is not None
+                or self.base_url is not None
+                or self.websocket_base_url is not None
+                or self.supports_websockets
+            ):
                 raise ValueError(
                     f"{type(self.auth).__name__} requires HTTP and its own endpoint and credentials"
                 )
