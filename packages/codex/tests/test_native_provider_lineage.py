@@ -623,7 +623,7 @@ async def test_lineage_all_handoff_profiles_require_current_store(store):
 
 
 async def test_lineage_saved_anchor_is_public_and_detached():
-    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, wire):
         model.respond(assistant_output("Accepted."))
         root = Agent(
             instructions="Continue.",
@@ -634,12 +634,20 @@ async def test_lineage_saved_anchor_is_public_and_detached():
         async with root.session(provider_history={"type": "previous_response"}) as session:
             await (await session.submit("Before.")).get_result()
             state = await session.save_state()
+        # Application-owned authorization, independent of the imported checkpoint.
+        authorized = {"type": "previous_response", "id": "resp_1"}
         selected = state.provider_history
-        assert selected == {"type": "previous_response", "id": "resp_1"}
+        assert selected == authorized
         selected["id"] = "modified"
         assert state.provider_history == {"type": "previous_response", "id": "resp_1"}
+        tampered = type(state).from_json(state.to_json().replace("resp_1", "resp_victim"))
+        before_rejected_restore = len(wire)
+        with pytest.raises(RuntimeError, match="exact current anchor"):
+            async with root.session(state=tampered, provider_history=authorized):
+                pass
+        assert len(wire) == before_rejected_restore
         model.respond(assistant_output("Restored."))
-        async with root.session(state=state, provider_history=state.provider_history) as restored:
+        async with root.session(state=state, provider_history=authorized) as restored:
             await (await restored.submit("After.")).get_result()
         assert model.requests[1]["previous_response_id"] == "resp_1"
 

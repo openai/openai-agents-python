@@ -485,7 +485,10 @@ class SessionState(BaseModel):
 
     @property
     def provider_history(self) -> ProviderHistory | None:
-        """Return the saved current anchor as detached data for explicit restore authorization."""
+        """Untrusted saved anchor data.
+
+        Independent application authorization required before restore.
+        """
         settings = _saved_thread_settings(self.history, self.source_session_id)
         receipt = settings.get("provider_history") if settings is not None else None
         if not isinstance(receipt, dict):
