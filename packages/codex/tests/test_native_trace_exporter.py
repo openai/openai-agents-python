@@ -149,6 +149,7 @@ def native_trace_child_env() -> dict[str, str]:
         "native_deadline_case",
         "native_deadline_reset_case",
         "native_restart_case",
+        "native_restart_credentials_case",
         "native_outcome_privacy_case",
         "native_auth_case",
         pytest.param("native_batch_case", marks=pytest.mark.serial),
@@ -214,6 +215,39 @@ async def native_restart_case():
     assert "after native restart" not in first.names
     assert "after native restart" in second.names
     assert "before native restart" not in second.names
+
+
+async def native_restart_credentials_case():
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="synthetic-fallback", endpoint=endpoint)
+        credentials = telemetry.TraceExportCredentials(
+            headers={"Authorization": "Bearer synthetic-open-credential"}
+        )
+        await telemetry.configure(processors=[exporter])
+        with telemetry.trace(
+            "credential before restart", options={"export_credentials": credentials}
+        ) as old_scope:
+            pass
+        assert (await telemetry.force_flush()).status == "success"
+        before = len(received)
+        assert before > 0
+        await telemetry.shutdown()
+        await telemetry.configure(processors=[exporter], restart_after_shutdown=True)
+        with telemetry.trace(
+            "credential after restart", options={"export_credentials": credentials}
+        ):
+            pass
+        assert (await telemetry.force_flush()).status == "success"
+        assert len(received) > before
+        assert all(
+            {key.lower(): value for key, value in request["headers"].items()}["authorization"]
+            == "Bearer synthetic-open-credential"
+            for request in received
+        )
+        with pytest.raises(RuntimeError, match="retired telemetry provider"):
+            with telemetry.span("stale credential scope", options={"parent": old_scope.context}):
+                pass
+        await telemetry.shutdown()
 
 
 async def native_case():
