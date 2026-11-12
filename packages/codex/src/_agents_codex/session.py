@@ -3390,6 +3390,23 @@ def _validate_siwc_opening_tools(
         )
 
 
+async def _verify_remembered_approvals(
+    saved: SessionState | None,
+    verifier: Callable[[SessionState], bool | Awaitable[bool]] | None,
+) -> Sequence[_RememberedApproval]:
+    try:
+        if verifier is not None and not callable(verifier):
+            raise TypeError("verify_remembered_approvals must be callable")
+        if saved is None or not saved.remembered_approvals or verifier is None:
+            return ()
+        detached = SessionState.from_json(saved.to_json())
+        if await _call_callback(verifier, lambda: True, detached) is not True:
+            return ()
+        return tuple(saved.remembered_approvals)
+    finally:
+        del verifier
+
+
 async def _opening_provider_config(
     provider: NativeProvider,
     opening: _OpeningOwner,
@@ -3562,6 +3579,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         context: ContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages_json: str | None = None,
@@ -3690,7 +3708,7 @@ class Session(Generic[ContextT, OutputT]):
             if not isinstance(programmatic_tool_calling, bool):
                 raise TypeError("programmatic_tool_calling must be a bool")
             checkpoint = None
-            remembered_approvals: Sequence[_RememberedApproval] = ()
+            approval_checkpoint: SessionState | None = None
             manual_restore = False
             continuation = None
             restored_budget = None
@@ -3708,7 +3726,7 @@ class Session(Generic[ContextT, OutputT]):
                 # Capture caller-owned data before the first await. The native
                 # importer validates identities, revision, and current tool specs.
                 saved = SessionState.from_json(state.to_json())
-                remembered_approvals = saved.remembered_approvals
+                approval_checkpoint = saved
                 restored_budget = _RunBudget.restore_checkpoint(saved.run_budget, resume_budget)
                 saved_plan_provider = _checkpoint_plan_provider(saved, auth)
                 if not uses_siwc:
@@ -3920,6 +3938,11 @@ class Session(Generic[ContextT, OutputT]):
             _atomic_first_turn = _atomic_first_turn and agent.provider is not None
             environment = opening.environment
         try:
+            verification = _verify_remembered_approvals(
+                approval_checkpoint, verify_remembered_approvals
+            )
+            verify_remembered_approvals = None
+            remembered_approvals = await verification
             if environment is not None and not isinstance(environment, Environment):
                 if not isinstance(environment, AbstractAsyncContextManager):
                     raise TypeError("environment must be an Environment or async context manager")

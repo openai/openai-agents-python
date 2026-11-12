@@ -30,7 +30,10 @@ async def main():
         provider=NativeProvider(base_url=url, api_key="synthetic-manual-test"),
     )
     state = SessionState.from_json(Path(state_path).read_text())
-    async with agent.session(state=state) as session:
+    async with agent.session(
+        state=state,
+        verify_remembered_approvals=lambda checkpoint: checkpoint.to_json() == state.to_json(),
+    ) as session:
         turn = await session.submit("continue")
         result = await asyncio.wait_for(turn.get_result(), timeout=10)
         assert result.final_output == "restored"

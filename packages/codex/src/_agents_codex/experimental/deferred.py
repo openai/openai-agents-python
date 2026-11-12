@@ -203,7 +203,7 @@ _CLOSED_BEFORE_START = "Deferred session closed before entering the start contex
 
 @asynccontextmanager
 async def _restored_session(
-    selection: _RestoreDeclaration, context: Any, timeout: float
+    selection: _RestoreDeclaration, source: Session[Any, Any], timeout: float
 ) -> AsyncIterator[tuple[Session[Any, Any], Callable[[], bool]]]:
     # The hook owns its Task and Context. The caller borrows the Session until exit.
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -227,7 +227,15 @@ async def _restored_session(
             selection.owner = asyncio.current_task()
             token = _restore_declaration.set(selection)
             try:
-                manager = selection.agent.session(state=selection.state, context=context)
+                sealed = source._sealed_checkpoint
+                trusted = SessionState.from_json(sealed).to_json() if sealed is not None else None
+                manager = selection.agent.session(
+                    state=selection.state,
+                    context=source._context,
+                    verify_remembered_approvals=lambda candidate: (
+                        trusted is not None and candidate.to_json() == trusted
+                    ),
+                )
                 restored = await manager.__aenter__()
             finally:
                 selection.owner = None
@@ -929,7 +937,7 @@ class DeferredTools:
             if remaining <= 0:
                 raise TimeoutError("Deferred session restore timed out")
             entered = False
-            async with _restored_session(selection, session._context, remaining) as (
+            async with _restored_session(selection, session, remaining) as (
                 restored,
                 hook_active,
             ):

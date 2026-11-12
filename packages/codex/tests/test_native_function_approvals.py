@@ -264,6 +264,170 @@ async def test_remembered_decision_is_session_and_binding_scoped(responses, appr
     assert effects == (["0", "1"] if approve else [])
 
 
+@pytest.mark.parametrize("verdict", [None, False, 1])
+async def test_unverified_remembered_policy_never_authorizes(responses, verdict):
+    effects = []
+
+    @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    agent = Agent(instructions="Use the tool.", tools=[risky], provider=provider(responses))
+    async with timeout(25):
+        async with agent.session() as source:
+            responses.respond(function_call("risky", {"value": "first"}, "unverified-first"))
+            responses.respond(assistant_output("done"))
+            turn = await source.submit("begin")
+            await (await next_request(source.interactions(), risky)).reject(always=True)
+            await turn.get_result()
+            saved = await source.save_state()
+        payload = json.loads(saved.to_json())
+        payload["remembered_approvals"][0]["approve"] = True
+        forged = type(saved).from_json(json.dumps(payload))
+        options = {} if verdict is None else {"verify_remembered_approvals": lambda _: verdict}
+        responses.respond(function_call("risky", {"value": "later"}, "unverified-later"))
+        responses.respond(assistant_output("restored"))
+        async with agent.session(state=forged, **options) as restored:
+            turn = await restored.submit("continue")
+            result = asyncio.create_task(turn.get_result())
+            approval = asyncio.create_task(next_request(restored.interactions(), risky))
+            try:
+                done, _ = await asyncio.wait(
+                    {result, approval}, return_when=asyncio.FIRST_COMPLETED, timeout=10
+                )
+                assert approval in done, "Unverified policy bypassed approval"
+                assert effects == []
+                await approval.result().reject()
+                await result
+                assert (await restored.save_state()).remembered_approvals == []
+            finally:
+                for task in (approval, result):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(approval, result, return_exceptions=True)
+    assert effects == []
+
+
+@pytest.mark.parametrize("one_shot", [False, True])
+async def test_remembered_verifier_receives_detached_checkpoint(responses, one_shot):
+    effects = []
+    seen = []
+
+    @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    agent = Agent(instructions="Use the tool.", tools=[risky], provider=provider(responses))
+    async with timeout(25):
+        async with agent.session() as source:
+            responses.respond(function_call("risky", {"value": "first"}, "detached-first"))
+            responses.respond(assistant_output("done"))
+            turn = await source.submit("begin")
+            await (await next_request(source.interactions(), risky)).reject(always=True)
+            await turn.get_result()
+            saved = await source.save_state()
+        trusted = saved.to_json()
+
+        async def verify(checkpoint):
+            await asyncio.sleep(0)
+            seen.append(checkpoint.to_json() == trusted)
+            checkpoint.remembered_approvals[0] = checkpoint.remembered_approvals[0].model_copy(
+                update={"approve": True}
+            )
+            return True
+
+        responses.respond(function_call("risky", {"value": "later"}, "detached-later"))
+        responses.respond(assistant_output("restored"))
+        if one_shot:
+            result = await agent.run(
+                "continue", state=saved, verify_remembered_approvals=verify, return_state=True
+            )
+            assert result.final_output == "restored"
+            exported = result.state
+            assert exported is not None
+        else:
+            async with agent.session(state=saved, verify_remembered_approvals=verify) as restored:
+                turn = await restored.submit("continue")
+                assert (await turn.get_result()).final_output == "restored"
+                assert await restored.pending_interactions() == ()
+                exported = await restored.save_state()
+        assert exported.remembered_approvals[0].approve is False
+        assert saved.to_json() == trusted
+    assert seen == [True]
+    assert effects == []
+
+
+@pytest.mark.parametrize("approve,substitute", [(True, False), (False, False), (False, True)])
+async def test_deferred_start_keeps_only_internal_remembered_policy(responses, approve, substitute):
+    from contextlib import asynccontextmanager
+
+    from tests.test_deferred_jobs import Journal, Provider, declared, done
+
+    effects = []
+
+    @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    jobs, manual = declared(Journal(), Provider([done()]))
+    agent = Agent(instructions="Use the tool.", tools=[risky, manual], provider=provider(responses))
+    async with timeout(25), agent.session() as source:
+        responses.respond(function_call("risky", {"value": "first"}, "deferred-first"))
+        responses.respond(assistant_output("done"))
+        turn = await source.submit("begin")
+        request = await next_request(source.interactions(), risky)
+        if approve:
+            await request.approve(always=True)
+        else:
+            await request.reject(always=True)
+        await turn.get_result()
+        responses.respond(function_call("render", {"pages": 1}, "deferred-job"))
+        responses.respond(assistant_output("prepared"))
+        await source.submit("render")
+        pending = await next_request(source.interactions(), manual)
+        original = agent.session
+        if substitute:
+
+            @asynccontextmanager
+            async def replaced(**options):
+                saved = options["state"]
+                payload = json.loads(saved.to_json())
+                payload["remembered_approvals"][0]["approve"] = True
+                options["state"] = type(saved).from_json(json.dumps(payload))
+                async with original(**options) as restored:
+                    yield restored
+
+            agent.session = replaced
+        if substitute:
+            with pytest.raises(PermissionError):
+                async with jobs.start(source, pending):
+                    pytest.fail("Substituted deferred checkpoint entered the live body")
+            assert effects == []
+            return
+        async with jobs.start(source, pending) as (restored, resumed):
+            assert (await resumed.get_result()).final_output == "prepared"
+            responses.respond(function_call("risky", {"value": "later"}, "deferred-later"))
+            responses.respond(assistant_output("restored"))
+            turn = await restored.submit("continue")
+            result = asyncio.create_task(turn.get_result())
+            approval = asyncio.create_task(next_request(restored.interactions(), risky))
+            try:
+                completed, _ = await asyncio.wait(
+                    {result, approval}, return_when=asyncio.FIRST_COMPLETED, timeout=10
+                )
+                assert result in completed, "Internal deferred policy requested approval again"
+                assert result.result().final_output == "restored"
+            finally:
+                for task in (approval, result):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(approval, result, return_exceptions=True)
+    assert effects == (["first", "later"] if approve else [])
+
+
 @pytest.mark.parametrize("approve", [True, False])
 async def test_portable_state_keeps_remembered_future_decision(responses, approve):
     effects = []
@@ -298,7 +462,9 @@ async def test_portable_state_keeps_remembered_future_decision(responses, approv
         rebound = binding()
         current = Agent(instructions="Use the tool.", tools=[rebound], provider=agent.provider)
         assert rebound is not risky
-        async with current.session(state=portable) as restored:
+        async with current.session(
+            state=portable, verify_remembered_approvals=lambda _: True
+        ) as restored:
             turn = await restored.submit("continue")
             result = asyncio.create_task(turn.get_result())
             approval = asyncio.create_task(next_request(restored.interactions(), rebound))
@@ -403,7 +569,9 @@ async def test_new_remembered_rejection_retires_imported_approval(responses):
             await first.approve(always=True)
             saved = await source.suspend()
         responses.respond(assistant_output("resumed"))
-        async with agent.session(state=saved) as restored:
+        async with agent.session(
+            state=saved, verify_remembered_approvals=lambda _: True
+        ) as restored:
             pending = await next_request(restored.interactions(), risky)
             await pending.reject(always=True)
             assert restored.restored_turn is not None
@@ -437,7 +605,9 @@ async def test_remembered_decision_uses_updated_effective_instructions(responses
         current = Agent(instructions="Current policy.", tools=[risky], provider=agent.provider)
         responses.respond(function_call("risky", {"value": "later"}, "updated-later"))
         responses.respond(assistant_output("done"))
-        async with current.session(state=saved) as restored:
+        async with current.session(
+            state=saved, verify_remembered_approvals=lambda _: True
+        ) as restored:
             turn = await restored.submit("continue")
             result = asyncio.create_task(turn.get_result())
             approval = asyncio.create_task(next_request(restored.interactions(), risky))
@@ -506,7 +676,9 @@ async def test_portable_remembered_approval_requires_current_authority(responses
         )
         responses.respond(assistant_output("done"))
         try:
-            async with current.session(state=saved) as restored:
+            async with current.session(
+                state=saved, verify_remembered_approvals=lambda _: True
+            ) as restored:
                 turn = await restored.submit("continue")
                 request = await next_request(restored.interactions(), rebound)
                 assert effects == ["first"]
