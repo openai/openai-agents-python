@@ -109,3 +109,97 @@ print(json.dumps({"home":str(home), "native":native.__file__}), flush=True)
     report = json.loads(result.stdout.strip().splitlines()[-1])
     assert report["native"] == native.__file__
     assert not Path(report["home"]).exists(), "orderly exit must retire the idle generated home"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="implicit runtime admission is Linux-only")
+def test_managed_function_scope_reuses_parent_before_model_send(tmp_path: Path) -> None:
+    environment = dict(os.environ)
+    for name in (
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "REQUEST_METHOD",
+        "CODEX_SANDBOX",
+        "CODEX_CA_CERTIFICATE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+    ):
+        environment.pop(name, None)
+    environment.update(OPENAI_API_KEY="managed-scope-test-key", TMPDIR=str(tmp_path))
+    program = r"""
+import asyncio, importlib, json, os
+from pathlib import Path
+from agents import Agent, NativeProvider, function_tool
+native = importlib.import_module("agents._native")
+session = importlib.import_module("_agents_codex.session")
+providers = []
+class TrackedProvider(NativeProvider):
+    def __init__(self):
+        super().__init__()
+        providers.append(self)
+session.NativeProvider = TrackedProvider
+open_conversation = native._open_conversation
+thread_ids = []
+class OpenedWithoutSend(Exception):
+    pass
+async def capture_scope(*args, **kwargs):
+    assert kwargs["_process_private_runtime"] is True
+    assert kwargs["_share_model_http"] is False
+    assert kwargs["_private_http"] is False
+    assert json.loads(args[2])["_sdk_websocket_tls"] is True
+    args = list(args)
+    config = json.loads(args[0])
+    # This is a native lifetime witness, not the real WSS protocol witness.
+    # Disable transport before Core startup and stop before the first submission.
+    provider = config["model_providers.native_agent"]
+    provider["supports_websockets"] = False
+    provider["base_url"] = "http://127.0.0.1:1/v1"
+    args[0] = json.dumps(config)
+    options = json.loads(args[2])
+    options["config"] = config
+    args[2] = json.dumps(options)
+    engine, thread, home = await open_conversation(*args, **kwargs)
+    assert home is None, "a managed scope must retain the parent-owned home"
+    thread_ids.append(thread.id)
+    # The registered opening lease must join these real owners after this failure.
+    raise OpenedWithoutSend
+native._open_conversation = capture_scope
+@function_tool
+def lookup(value: str) -> str:
+    "Return the supplied synthetic value."
+    raise AssertionError("no model request or callback is allowed in this witness")
+async def run():
+    agent = Agent(instructions="Use lookup.", model="gpt-5.1-codex", tools=[lookup])
+    try:
+        await agent.run("probe")
+    except OpenedWithoutSend:
+        pass
+    else:
+        raise AssertionError("the real native scope was not intercepted")
+asyncio.run(run())
+homes = list(Path(os.environ["TMPDIR"]).glob("native-agent-*"))
+assert len(homes) == 1, homes
+asyncio.run(run())
+assert len(thread_ids) == 2 and len(set(thread_ids)) == 2, thread_ids
+assert list(Path(os.environ["TMPDIR"]).glob("native-agent-*")) == homes
+assert len(providers) == 2 and all(provider._closed for provider in providers)
+async def drain():
+    await native._close_implicit_runtime()
+asyncio.run(drain())
+assert not homes[0].exists(), "the joined drain must retire the retained parent/home"
+print(json.dumps({"threads":thread_ids, "home":str(homes[0])}), flush=True)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert len(set(report["threads"])) == 2
+    assert not Path(report["home"]).exists()

@@ -356,7 +356,8 @@ async def native_case():
             agent = Agent(instructions="Respond.", model="gpt-5.5", provider=peer.provider)
             assert (await agent.run("synthetic input")).final_output == "native dynamic answer"
         telemetry.set_tracing_disabled(False)
-        assert (await telemetry.force_flush()).status == "success"
+        flushed = await telemetry.force_flush()
+        assert flushed.status == "success", flushed
         names = [event["name"] for event in events]
         assert "allowed" in names
         for name in ("suppressed", "disabled-parent", "still-suppressed", "operation"):
