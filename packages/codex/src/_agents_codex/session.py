@@ -302,6 +302,7 @@ from .tools import (
     WebSearch as WebSearch,
     _capture_application_data,
     _capture_hosted_tools,
+    _capture_tools as _capture_tools,
     _CapturedFunction as _CapturedFunction,
     _hosted_tool_name,
     _ToolCatalog as _ToolCatalog,
@@ -2705,17 +2706,6 @@ def _install_profile_options(
         grants.extend({"name": name, "namespace": "functions"} for name in profile.handoffs)
     options["tool_policy"]["allowed_tools"] = list(
         {tuple(sorted(grant.items())): grant for grant in grants}.values()
-    )
-
-
-def _capture_tools(
-    generation: int,
-    tools: tuple[FunctionTool[Any, Any, Any], ...],
-    context: ContextT | None,
-) -> _ToolCatalog:
-    return _ToolCatalog(
-        generation,
-        tuple(tool._capture(context) for tool in tools),
     )
 
 
