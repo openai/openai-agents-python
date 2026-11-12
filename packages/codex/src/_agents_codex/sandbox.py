@@ -73,6 +73,20 @@ from _agents_shared.snapshot_defaults import (
     resolve_default_local_snapshot_spec as resolve_default_local_snapshot_spec,
 )
 from agents.classic.sandbox.remote_mount_policy import build_remote_mount_policy_instructions
+from agents.classic.sandbox.session.events import (
+    EventPayloadPolicy as EventPayloadPolicy,
+    SandboxSessionEvent as SandboxSessionEvent,
+    SandboxSessionFinishEvent as SandboxSessionFinishEvent,
+    SandboxSessionStartEvent as SandboxSessionStartEvent,
+)
+from agents.classic.sandbox.session.sinks import (
+    CallbackSink as CallbackSink,
+    ChainedSink as ChainedSink,
+    EventSink as EventSink,
+    HttpProxySink as HttpProxySink,
+    JsonlOutboxSink as JsonlOutboxSink,
+    WorkspaceJsonlSink as WorkspaceJsonlSink,
+)
 
 from ._managed_workspace import (
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
@@ -80,6 +94,7 @@ from ._managed_workspace import (
     _ManagedWorkspaceSource,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._sandbox_events import Instrumentation as Instrumentation
 from .executor import Environment
 
 _OptionsT = TypeVar("_OptionsT")
@@ -513,6 +528,17 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
 
 
 __all__ = [
+    "Instrumentation",
+    "EventPayloadPolicy",
+    "SandboxSessionEvent",
+    "SandboxSessionStartEvent",
+    "SandboxSessionFinishEvent",
+    "EventSink",
+    "CallbackSink",
+    "ChainedSink",
+    "HttpProxySink",
+    "JsonlOutboxSink",
+    "WorkspaceJsonlSink",
     "RemoteSnapshotSpec",
     "RemoteSnapshot",
     "NoopSnapshotSpec",
