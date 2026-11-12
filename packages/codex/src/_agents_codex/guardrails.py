@@ -37,8 +37,10 @@ class GuardrailResult:
 class InputGuardrail(Generic[ContextT]):
     """Initial-input checks with explicit native-child admission.
 
-    Root callback: the public Turn and original UserInput. Optional child callback:
-    the existing child step context and original Core user/communication records.
+    Root callback: the public Turn and original UserInput. A resumed checkpoint
+    presents staged user content in order in one UserMessage. A batch with other
+    Responses items reaches the callback as JSON text. The optional child callback
+    receives its step context and original Core records.
     Parallel checks: overlap with model work; blocking checks: a concurrent group
     before the first model step. Independent declarations for each child callback.
     """

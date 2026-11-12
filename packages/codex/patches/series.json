@@ -897,9 +897,13 @@
       "sha256": "b29ef217c5eb88d94fc48bb6d6ef2b06c458e6ab6df5ca5cdbfd9e94bb52385a"
     },
     {
+      "path": "sdk-staged-manual-continuation-input.patch",
+      "sha256": "9954e733d95ce8fac27fb8fbac4286067149eec4191363c09428ffaa00be64d4"
+    },
+    {
       "path": "sdk-final-step-builtin-tools.patch",
       "sha256": "1430b0faf3bbecabcd41166e19b2ddd8a797b61c53c5c2b76ac7d59b174c01b1"
     }
   ],
-  "result_tree": "db3a3582f6f63f2f72dd41eff7fbd683bb3f5d17"
+  "result_tree": "7cb4062a2ff55bbb354466dc954f00b501e039b1"
 }
