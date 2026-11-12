@@ -681,8 +681,8 @@ async def test_restore_detaches_caller_input_before_native_acquisition(responses
         assert detached.run_usage.total_tokens == 14
         async with agent.session(state=detached, resume_budget=limits) as resumed:
             request = await next_request(resumed.interactions(), lookup)
-            await request.respond("A result")
             with pytest.raises(NativeError) as stopped:
+                await request.respond("A result")
                 await resumed.restored_turn.get_result()
             assert stopped.value.code == "run_budget_exceeded"
         assert len(acquisitions) == 2 and len(responses.requests) == 1
