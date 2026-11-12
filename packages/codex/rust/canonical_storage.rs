@@ -1,12 +1,14 @@
 //! Application-owned canonical snapshots. Memory is a rebuildable projection only.
 
+use codex_protocol::dynamic_tools::{DynamicToolCallOutputContentItem, DynamicToolResponse};
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use codex_history::RolloutItem;
+use codex_history::sdk_originals::SdkOriginalHistoryCheckpoint;
+use codex_history::{ResponseItemEnvelope, RolloutItem};
 use codex_protocol::ThreadId;
 use codex_thread_store::*;
 use pyo3::prelude::*;
@@ -21,6 +23,108 @@ fn failure() -> ThreadStoreError {
     }
 }
 
+// These snapshots have crossed the application store boundary. Live declarations
+// still deserialize references, but native snapshot serialization always omits them.
+fn validate_saved_prompt_history(history: &[RolloutItem]) -> anyhow::Result<()> {
+    let check_envelope = |envelope: &ResponseItemEnvelope| -> anyhow::Result<()> {
+        anyhow::ensure!(
+            envelope
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.sdk_agent_profile.as_ref())
+                .and_then(
+                    |profile| profile.pointer("/model/request_controls/hosted_prompt/reference")
+                )
+                .is_none_or(serde_json::Value::is_null),
+            "Saved prompt references are not restore authority"
+        );
+        Ok(())
+    };
+    for item in history {
+        match item {
+            RolloutItem::ResponseItem(envelope) => check_envelope(envelope)?,
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => anyhow::ensure!(
+                event
+                    .thread_settings
+                    .request_controls
+                    .hosted_prompt
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_none_or(|prompt| prompt.reference.is_none()),
+                "Saved prompt references are not restore authority"
+            ),
+            RolloutItem::Compacted(compacted) => {
+                for envelope in compacted.replacement_history.iter().flatten() {
+                    check_envelope(envelope)?;
+                }
+                if let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) =
+                    &compacted.sdk_originals
+                {
+                    for envelope in originals
+                        .items
+                        .iter()
+                        .filter_map(|item| item.projection.as_ref())
+                    {
+                        check_envelope(envelope)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn invocation_identity(item: &ResponseItem) -> Option<&str> {
+    match item {
+        ResponseItem::FunctionCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } => {
+            Some(call_id)
+        }
+        ResponseItem::ShellCall {
+            provider_fields, ..
+        } => crate::local_reconciliation::shell_call_id(provider_fields).map(String::as_str),
+        _ => None,
+    }
+}
+
+fn pending_invocation<'a>(
+    items: &'a [RolloutItem],
+    turn_id: &str,
+    call_id: &str,
+) -> ThreadStoreResult<&'a ResponseItem> {
+    let mut turn = None;
+    let mut invocation = None;
+    let mut completed = false;
+    for record in items {
+        match record {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                turn = Some(event.turn_id.as_str());
+            }
+            RolloutItem::ResponseItem(envelope)
+                if envelope.item.turn_id().or(turn) == Some(turn_id) =>
+            {
+                if invocation_identity(&envelope.item) == Some(call_id) {
+                    if invocation.replace(&envelope.item).is_some() {
+                        return Err(ThreadStoreError::InvalidRequest {
+                            message: "Reconciliation requires an unambiguous original call".into(),
+                        });
+                    }
+                } else if crate::local_reconciliation::output_identity(&envelope.item)
+                    .is_some_and(|(saved, _)| saved == call_id)
+                {
+                    completed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    invocation
+        .filter(|_| !completed)
+        .ok_or_else(|| ThreadStoreError::InvalidRequest {
+            message: "Reconciliation requires an unresolved original turn/call identity".into(),
+        })
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
@@ -31,6 +135,8 @@ struct Snapshot {
     write_id: String,
     create: CreateThreadParams,
     items: Vec<RolloutItem>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pending_shell_calls: BTreeSet<(String, String)>,
     patch: ThreadMetadataPatch,
     summary: StoredThread,
 }
@@ -51,15 +157,17 @@ pub(crate) struct CanonicalStore {
 }
 
 impl CanonicalStore {
-    pub(crate) fn new(backend: Py<PyAny>) -> Self {
-        Self {
+    pub(crate) fn new(backend: Py<PyAny>) -> Arc<Self> {
+        Arc::new_cyclic(|writer| Self {
             backend,
-            managed_calls: Arc::new(crate::storage::ManagedCalls::default()),
+            managed_calls: Arc::new(crate::storage::ManagedCalls::with_canonical_writer(
+                writer.clone(),
+            )),
             inner: InMemoryThreadStore::default(),
             writers: Mutex::new(HashMap::new()),
             failed: AtomicBool::new(false),
             cleanup_failed: AtomicBool::new(false),
-        }
+        })
     }
 
     fn acquire(&self, id: ThreadId) -> ThreadStoreResult<String> {
@@ -122,6 +230,7 @@ impl CanonicalStore {
                 return Err(failure());
             }
             crate::checkpoint::validate_imported_history(&snapshot.items).map_err(|_| failure())?;
+            validate_saved_prompt_history(&snapshot.items).map_err(|_| failure())?;
             self.inner.create_thread(snapshot.create.clone()).await?;
             // Keep the original canonical header in snapshots. The projection's
             // generated header is used only to rebuild native summary metadata.
@@ -232,6 +341,68 @@ impl CanonicalStore {
         Ok(())
     }
 
+    pub(crate) async fn record_shell_call(
+        &self,
+        id: ThreadId,
+        turn: &str,
+        call: &str,
+    ) -> ThreadStoreResult<()> {
+        let mut writers = self.writers.lock().await;
+        let writer = writers.get_mut(&id).ok_or_else(failure)?;
+        let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
+        if !matches!(
+            pending_invocation(&snapshot.items, turn, call),
+            Ok(ResponseItem::ShellCall { .. })
+        ) || !snapshot
+            .pending_shell_calls
+            .insert((turn.to_owned(), call.to_owned()))
+        {
+            return Err(failure());
+        }
+        self.commit(id, writer, snapshot)
+    }
+
+    pub(crate) async fn discard_shell_call(
+        &self,
+        id: ThreadId,
+        turn: &str,
+        call: &str,
+    ) -> ThreadStoreResult<()> {
+        let mut writers = self.writers.lock().await;
+        let writer = writers.get_mut(&id).ok_or_else(failure)?;
+        let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
+        if !snapshot
+            .pending_shell_calls
+            .remove(&(turn.to_owned(), call.to_owned()))
+        {
+            return Err(failure());
+        }
+        self.commit(id, writer, snapshot)
+    }
+
+    pub(crate) async fn pending_shell_calls(
+        &self,
+        id: ThreadId,
+    ) -> ThreadStoreResult<Vec<(String, String, ResponseItem)>> {
+        let writers = self.writers.lock().await;
+        let snapshot = writers
+            .get(&id)
+            .and_then(|writer| writer.snapshot.as_ref())
+            .ok_or_else(failure)?;
+        snapshot
+            .pending_shell_calls
+            .iter()
+            .map(|(turn, call)| {
+                let item =
+                    pending_invocation(&snapshot.items, turn, call).map_err(|_| failure())?;
+                if !matches!(item, ResponseItem::ShellCall { .. }) {
+                    return Err(failure());
+                }
+                Ok((turn.clone(), call.clone(), item.clone()))
+            })
+            .collect()
+    }
+
     pub(crate) async fn commit_sdk_receipt(
         &self,
         id: ThreadId,
@@ -241,46 +412,16 @@ impl CanonicalStore {
         let mut writers = self.writers.lock().await;
         let writer = writers.get_mut(&id).ok_or_else(failure)?;
         let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
-        let mut turn = None;
-        let mut invocation = None;
-        let mut completed = false;
-        for record in &snapshot.items {
-            match record {
-                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                    turn = Some(event.turn_id.as_str())
-                }
-                RolloutItem::ResponseItem(envelope) => {
-                    let owner = envelope.item.turn_id().or(turn);
-                    match &envelope.item {
-                        ResponseItem::FunctionCall { call_id, .. }
-                        | ResponseItem::ComputerCall { call_id, .. }
-                            if call_id == &key.call && owner == Some(key.turn.as_str()) =>
-                        {
-                            if invocation.replace(&envelope.item).is_some() {
-                                return Err(failure());
-                            }
-                        }
-                        _ => {
-                            if crate::local_reconciliation::output_identity(&envelope.item)
-                                .is_some_and(|(call, _)| {
-                                    call == key.call && owner == Some(key.turn.as_str())
-                                })
-                            {
-                                completed = true;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        let invocation =
+            pending_invocation(&snapshot.items, &key.turn, &key.call).map_err(|_| failure())?;
         if key.reply.thread != id.to_string()
-            || completed
-            || !invocation.is_some_and(|call| {
-                crate::local_reconciliation::output_matches_invocation(call, &item)
-            })
+            || !crate::local_reconciliation::output_matches_invocation(invocation, &item)
             || crate::local_reconciliation::output_identity(&item)
                 != Some((key.call.as_str(), Some(key.turn.as_str())))
+            || (matches!(invocation, ResponseItem::ShellCall { .. })
+                && !snapshot
+                    .pending_shell_calls
+                    .remove(&(key.turn.clone(), key.call.clone())))
         {
             return Err(failure());
         }
@@ -308,49 +449,39 @@ impl CanonicalStore {
             self.load(id, &mut writers).await?;
             let writer = writers.get_mut(&id).ok_or_else(failure)?;
             let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
-            let mut turn = None;
-            let mut invocation = None;
-            let mut completed = false;
-            for record in &snapshot.items {
-                match record {
-                    RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => turn = Some(event.turn_id.as_str()),
-                    RolloutItem::ResponseItem(envelope) => {
-                        let owner = envelope.item.turn_id().or(turn);
-                        match &envelope.item {
-                            ResponseItem::FunctionCall { call_id: saved, .. }
-                            | ResponseItem::ComputerCall { call_id: saved, .. }
-                                if saved == call_id && owner == Some(turn_id) => {
-                                    if invocation.replace(&envelope.item).is_some() {
-                                        return Err(ThreadStoreError::InvalidRequest { message: "Reconciliation requires an unambiguous original call".into() });
-                                    }
-                                }
-                            _ => {
-                                if crate::local_reconciliation::output_identity(&envelope.item)
-                                    .is_some_and(|(saved, _)| saved == call_id && owner == Some(turn_id)) {
-                                    completed = true;
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
+            let original = pending_invocation(&snapshot.items, turn_id, call_id)?;
+            let item = if matches!(original, ResponseItem::ShellCall { .. }) {
+                if !snapshot.pending_shell_calls.remove(&(turn_id.to_owned(), call_id.to_owned())) {
+                    return Err(ThreadStoreError::InvalidRequest {
+                        message: "Reconciliation requires an unresolved original application Shell call".into(),
+                    });
                 }
-            }
-            if invocation.is_none() || completed {
-                return Err(ThreadStoreError::InvalidRequest {
-                    message: "Reconciliation requires an unresolved original turn/call identity".into(),
-                });
-            }
-            let response =
-                serde_json::from_str::<codex_protocol::dynamic_tools::DynamicToolResponse>(output)
+                let arguments = serde_json::to_string(original).map_err(|_| failure())?;
+                let response = DynamicToolResponse {
+                    content_items: vec![DynamicToolCallOutputContentItem::InputText {
+                        text: output.to_owned(),
+                    }],
+                    success: true,
+                };
+                crate::local_reconciliation::shell_receipt(&arguments, response, turn_id, call_id)
                     .map_err(|_| ThreadStoreError::InvalidRequest {
-                        message: "Reconciliation requires valid tool output".into(),
-                    })?;
-            let original = invocation.expect("original invocation was checked");
-            let item = if matches!(original, ResponseItem::ComputerCall { .. }) {
-                crate::local_reconciliation::computer_receipt(original, response, turn_id)
-                    .map_err(|_| ThreadStoreError::InvalidRequest { message: "Computer reconciliation requires a valid screenshot and safety acknowledgements".into() })?
+                        message: "Shell reconciliation requires a valid ShellOutput".into(),
+                    })?
             } else {
-                crate::python_tools::PythonOutput(response).receipt_for(turn_id, call_id)
+                let response =
+                    serde_json::from_str::<DynamicToolResponse>(output).map_err(|_| {
+                        ThreadStoreError::InvalidRequest {
+                            message: "Reconciliation requires valid tool output".into(),
+                        }
+                    })?;
+                if matches!(original, ResponseItem::ComputerCall { .. }) {
+                    crate::local_reconciliation::computer_receipt(original, response, turn_id)
+                        .map_err(|_| ThreadStoreError::InvalidRequest {
+                            message: "Computer reconciliation requires a valid screenshot and safety acknowledgements".into(),
+                        })?
+                } else {
+                    crate::python_tools::PythonOutput(response).receipt_for(turn_id, call_id)
+                }
             };
             snapshot.items.push(RolloutItem::ResponseItem(
                 codex_history::ResponseItemEnvelope::new(item),
@@ -447,6 +578,7 @@ impl ThreadStore for CanonicalStore {
                         write_id: String::new(),
                         create: params,
                         items: history.items,
+                        pending_shell_calls: BTreeSet::new(),
                         patch: ThreadMetadataPatch::default(),
                         summary: self
                             .inner

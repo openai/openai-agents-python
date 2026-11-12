@@ -24,6 +24,13 @@ use crate::engine::ThreadState;
 const APPLIED: &str = "sdk_reconciliation.applied";
 const NOT_APPLIED: &str = "sdk_reconciliation.not_applied";
 
+pub(crate) fn shell_call_id(fields: &Map<String, Value>) -> Option<&String> {
+    match fields.get("call_id") {
+        Some(Value::String(id)) => Some(id),
+        _ => None,
+    }
+}
+
 pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>)> {
     let call = match item {
         ResponseItem::FunctionCallOutput {
@@ -32,6 +39,9 @@ pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>
         }
         | ResponseItem::CustomToolCallOutput { call_id: call, .. }
         | ResponseItem::ComputerCallOutput { call_id: call, .. } => call,
+        ResponseItem::ShellCallOutput {
+            provider_fields, ..
+        } => shell_call_id(provider_fields)?,
         _ => return None,
     };
     Some((call, item.turn_id()))
@@ -116,6 +126,21 @@ pub(crate) fn same_output_payload(left: &ResponseItem, right: &ResponseItem) -> 
                 ..
             },
         ) => left == right && left_checks == right_checks,
+        (
+            ResponseItem::ShellCallOutput {
+                provider_fields: left,
+                ..
+            },
+            ResponseItem::ShellCallOutput {
+                provider_fields: right,
+                ..
+            },
+        ) => {
+            left.get("output")
+                .zip(right.get("output"))
+                .is_some_and(|(left, right)| left == right)
+                && left.get("max_output_length") == right.get("max_output_length")
+        }
         _ => false,
     }
 }
@@ -147,6 +172,16 @@ pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseIt
                 call_id: actual, ..
             },
         ) => expected == actual,
+        (
+            ResponseItem::ShellCall {
+                provider_fields: expected,
+                ..
+            },
+            ResponseItem::ShellCallOutput {
+                provider_fields: actual,
+                ..
+            },
+        ) => shell_call_id(expected).is_some_and(|id| shell_call_id(actual) == Some(id)),
         _ => false,
     }
 }
@@ -185,6 +220,35 @@ pub(crate) fn computer_receipt(
     Ok(item)
 }
 
+pub(crate) fn shell_receipt(
+    arguments: &str,
+    response: codex_protocol::dynamic_tools::DynamicToolResponse,
+    turn: &str,
+    call_id: &str,
+) -> Result<ResponseItem> {
+    use codex_tools::ToolOutput as _;
+    let output = codex_tools::ApplicationShellOutput::from_dynamic_response(arguments, response)
+        .map_err(|_| anyhow::anyhow!("Invalid native shell response"))?;
+    let mut item = ResponseItem::from(output.to_response_item(
+        call_id,
+        &codex_tools::ToolPayload::Shell {
+            arguments: arguments.to_owned(),
+        },
+    ));
+    let ResponseItem::ShellCallOutput {
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = &mut item
+    else {
+        unreachable!("validated Shell output has the native Shell shape");
+    };
+    *internal_chat_message_metadata_passthrough = Some(InternalChatMessageMetadataPassthrough {
+        turn_id: Some(turn.to_owned()),
+        ..Default::default()
+    });
+    Ok(item)
+}
+
 fn computer_reconciliation(
     invocation: &ResponseItem,
     result: &str,
@@ -201,6 +265,25 @@ fn computer_reconciliation(
             success: true,
         },
         turn,
+    )
+}
+
+fn shell_reconciliation(
+    invocation: &ResponseItem,
+    receipt: &ReconciledCall,
+) -> Result<ResponseItem> {
+    shell_receipt(
+        &serde_json::to_string(invocation)?,
+        codex_protocol::dynamic_tools::DynamicToolResponse {
+            content_items: vec![
+                codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText {
+                    text: receipt.result.clone(),
+                },
+            ],
+            success: true,
+        },
+        &receipt.turn_id,
+        &receipt.call_id,
     )
 }
 
@@ -248,6 +331,8 @@ struct ReconciledCall {
     call_id: String,
     outcome: Outcome,
     result: String,
+    #[serde(default)]
+    shell: bool,
 }
 
 #[derive(Deserialize)]
@@ -300,6 +385,10 @@ fn tag(item: &ResponseItem) -> Option<&str> {
         | ResponseItem::ComputerCallOutput {
             internal_chat_message_metadata_passthrough,
             ..
+        }
+        | ResponseItem::ShellCallOutput {
+            internal_chat_message_metadata_passthrough,
+            ..
         } => internal_chat_message_metadata_passthrough.as_ref()?,
         _ => return None,
     };
@@ -310,13 +399,24 @@ fn tag(item: &ResponseItem) -> Option<&str> {
     }
 }
 
-fn matches_receipt(item: &ResponseItem, receipt: &ReconciledCall) -> bool {
-    item.turn_id() == Some(receipt.turn_id.as_str())
+fn matches_receipt(
+    item: &ResponseItem,
+    receipt: &ReconciledCall,
+    typed: Option<&ResponseItem>,
+) -> bool {
+    let same_result = match (item, typed) {
+        (
+            ResponseItem::ShellCallOutput { provider_fields: actual, .. },
+            Some(ResponseItem::ShellCallOutput { provider_fields: expected, .. }),
+        ) => actual == expected, // Core assigns the stored item ID at insertion.
+        _ => output(item).is_some_and(|(_, payload)| {
+            matches!(&payload.body, FunctionCallOutputBody::Text(text) if text == &receipt.result)
+        }) || computer_result_matches(item, &receipt.result),
+    };
+    same_result
+        && item.turn_id() == Some(receipt.turn_id.as_str())
         && tag(item) == Some(receipt.outcome.tag())
         && output_identity(item).is_some_and(|(id, _)| id == receipt.call_id)
-        && (output(item).is_some_and(|(_, payload)| {
-            matches!(&payload.body, FunctionCallOutputBody::Text(text) if text == &receipt.result)
-        }) || computer_result_matches(item, &receipt.result))
 }
 
 pub(crate) async fn executor_policies(state: &ThreadState) -> Result<Vec<Value>> {
@@ -444,6 +544,7 @@ fn has_sampled_model(history: &[RolloutItem]) -> bool {
             ResponseItem::Message { role, .. } => role == "assistant",
             ResponseItem::Reasoning { .. }
             | ResponseItem::LocalShellCall { .. }
+            | ResponseItem::ShellCall { .. }
             | ResponseItem::FunctionCall { .. }
             | ResponseItem::CustomToolCall { .. }
             | ResponseItem::ComputerCall { .. }
@@ -702,15 +803,11 @@ async fn verify_descendants(
 }
 
 fn confirm_durable(history: &[RolloutItem], receipts: &[&ReconciledCall]) -> Result<()> {
-    for receipt in receipts {
-        ensure!(
-            history.iter().any(|record| matches!(
-                record,
-                RolloutItem::ResponseItem(envelope) if matches_receipt(&envelope.item, receipt)
-            )),
-            "Reconciliation result was not confirmed in native storage"
-        );
-    }
+    let (missing, _) = plan(history, receipts)?;
+    ensure!(
+        missing.is_empty(),
+        "Reconciliation result was not confirmed in native storage"
+    );
     Ok(())
 }
 
@@ -747,6 +844,20 @@ fn plan(
                             *entry = None;
                         }
                     }
+                    ResponseItem::ShellCall {
+                        provider_fields, ..
+                    } if envelope
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.sdk_application_tool.as_deref())
+                        == Some("shell") =>
+                    {
+                        if let Some(call_id) = shell_call_id(provider_fields) {
+                            seen.entry((turn, call_id.as_str()))
+                                .and_modify(|invocation| *invocation = None)
+                                .or_insert(Some(item));
+                        }
+                    }
                     _ => {
                         if let Some((call_id, _)) = output_identity(item) {
                             let entry = outputs.entry((turn, call_id)).or_insert(Some(item));
@@ -773,38 +884,46 @@ fn plan(
             .copied()
             .flatten()
             .context("Reconciliation does not identify one retained invocation")?;
-        let computer = if matches!(call, ResponseItem::ComputerCall { .. }) {
-            Some(computer_reconciliation(
+        ensure!(
+            receipt.shell == matches!(call, ResponseItem::ShellCall { .. }),
+            "Application Shell reconciliation requires a verified ShellOutput"
+        );
+        let mut typed = match call {
+            ResponseItem::ShellCall { .. } => Some(shell_reconciliation(call, receipt)?),
+            ResponseItem::ComputerCall { .. } => Some(computer_reconciliation(
                 call,
                 &receipt.result,
                 &receipt.turn_id,
-            )?)
-        } else {
-            None
+            )?),
+            _ => None,
         };
+        if let Some(item) = typed.as_mut() {
+            let metadata = match item {
+                ResponseItem::ComputerCallOutput {
+                    internal_chat_message_metadata_passthrough,
+                    ..
+                }
+                | ResponseItem::ShellCallOutput {
+                    internal_chat_message_metadata_passthrough,
+                    ..
+                } => internal_chat_message_metadata_passthrough,
+                _ => unreachable!("typed reconciliation only creates Computer or Shell output"),
+            };
+            *metadata = Some(InternalChatMessageMetadataPassthrough {
+                turn_id: Some(receipt.turn_id.clone()),
+                content_item_kinds: Some(vec![ContentItemKind(receipt.outcome.tag().to_owned())]),
+                ..Default::default()
+            });
+        }
         if let Some(existing) = outputs.get(&key) {
             ensure!(
                 existing.is_some_and(|existing| output_matches_invocation(call, existing)
-                    && matches_receipt(existing, receipt)),
+                    && matches_receipt(existing, receipt, typed.as_ref())),
                 "Reconciliation conflicts with a retained result"
             );
             continue;
         }
-        if let Some(mut item) = computer {
-            if let ResponseItem::ComputerCallOutput {
-                internal_chat_message_metadata_passthrough,
-                ..
-            } = &mut item
-            {
-                *internal_chat_message_metadata_passthrough =
-                    Some(InternalChatMessageMetadataPassthrough {
-                        turn_id: Some(receipt.turn_id.clone()),
-                        content_item_kinds: Some(vec![ContentItemKind(
-                            receipt.outcome.tag().to_owned(),
-                        )]),
-                        ..Default::default()
-                    });
-            }
+        if let Some(item) = typed {
             append.push(item);
             protected.insert(receipt.call_id.clone());
             continue;
@@ -978,12 +1097,13 @@ mod computer_recovery_tests {
             call_id: "computer-1".into(),
             outcome: Outcome::NotApplied,
             result: screenshot(),
+            shell: false,
         };
-        assert!(matches_receipt(&item, &receipt));
+        assert!(matches_receipt(&item, &receipt, None));
         let changed = ReconciledCall {
             outcome: Outcome::Applied,
             ..receipt
         };
-        assert!(!matches_receipt(&item, &changed));
+        assert!(!matches_receipt(&item, &changed, None));
     }
 }

@@ -62,3 +62,17 @@ The executor uses the official TaskManager to project an event batch, then commi
 A save can succeed before its acknowledgment fails. Retain the desired snapshot and generation in that case. Once the old worker and its official handler have stopped, the host acquires exclusive ownership and calls `executor.recover(binding, authenticated_context)`. Recovery uses the same official store to republish the retained complete snapshot. It does not concatenate old artifact chunks, construct an Agent or rerun native work. The host schedules recovery and retains records for its required period. Running work without a committed settled outcome remains unknown and requires host reconciliation.
 
 This contract supports publication recovery. It does not make separate host databases transactional or supply distributed leases, production authentication, artifact retention, a scheduler or a storage implementation.
+
+## Trusted registry and receiver restart reference
+
+The source-build [wire recovery tests](../../../packages/codex/tests/test_a2a_wire_recovery.py) have been combining a host-owned specialist registry, caller-owned credentials, a persistent SQLite task store, and an application effect receipt. The `test_official_wire_fault_recovers_retained_result_in_fresh_process` cases have been selecting only `approved-specialist` through `connect_a2a`, rejecting an unknown name before acquiring credentials, and recording one synthetic order receipt through a native function tool.
+
+With the [source-build test prerequisites](../../../CONTRIBUTING.md), the focused command from the checkout root has been exercising all three publication faults without an API key:
+
+```sh
+uv run pytest packages/codex/tests/test_a2a_wire_recovery.py -k 'official_wire_fault or cancel_after_handler_restart'
+```
+
+After stopping the original receiver and official handler, each recovery case has been starting a fresh process against the saved store, republishing the committed snapshot with zero Agent factory calls, and checking the same single effect receipt. The receipt insertion itself has been serving as the synthetic business action. A real downstream operation has been requiring its own atomic receipt or idempotency contract; task publication recovery has not been establishing exactly-once delivery after an uncertain mutation acknowledgment.
+
+The existing `test_cancel_after_handler_restart_retires_waiting_checkpoint` case has been covering cancellation separately. The [provider tests](../../../packages/codex/tests/test_a2a_provider.py), especially `test_lost_creation_acknowledgment_stays_unknown_after_restart`, have been retaining unknown creation outcomes without replay. The host has been owning reconciliation against an authoritative business receipt, scheduling, current authorization, and storage. These local fixtures have been demonstrating supervised worker replacement with the previous owner stopped; they have not been demonstrating production authentication, distributed leases, power-loss recovery, or subscription reconnection.

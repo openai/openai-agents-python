@@ -431,7 +431,7 @@ impl EngineState {
             "Custom canonical storage cannot combine with local storage, goals or checkpoints"
         );
         let store: Arc<dyn ThreadStore> = if let Some(backend) = canonical_store {
-            Arc::new(crate::canonical_storage::CanonicalStore::new(backend))
+            crate::canonical_storage::CanonicalStore::new(backend)
         } else {
             match &local_checklist_store {
                 Some(store) => store.clone(),
@@ -629,7 +629,8 @@ impl EngineState {
                 installation_id,
                 None,
                 None,
-            );
+            )
+            .with_sdk_child_trace_privacy();
             match code_mode {
                 Some(provider) => manager.with_code_mode_session_provider(Arc::new(
                     crate::native_interception::Provider {
@@ -943,6 +944,18 @@ impl EngineState {
                         .await?;
                 }
                 crate::checkpoint::validate_imported_history(&history.history)?;
+                if self.local_checklist_store.is_none()
+                    && let Some(opening) = startup
+                        .thread_extension_init
+                        .get::<crate::agent_profiles::OpeningProfiles>()
+                    && history.history.iter().any(|item| {
+                        matches!(item, codex_history::RolloutItem::ResponseItem(envelope)
+                            if envelope.metadata.as_ref().is_some_and(|metadata|
+                                metadata.sdk_agent_profile.is_some()))
+                    })
+                {
+                    crate::agent_profiles::restore_source(&opening, &history.history)?;
+                }
                 Some(history.conversation_id)
             }
             InitialHistory::Forked(history) => {
