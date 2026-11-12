@@ -62,7 +62,9 @@ fn verifier(path: &Path) -> Arc<CurrentDefaultRoots> {
     codex_utils_rustls_provider::ensure_rustls_crypto_provider();
     Arc::new(CurrentDefaultRoots {
         provider: CryptoProvider::get_default().unwrap().clone(),
+        bundle_first: false,
         roots_path: Some(path.to_owned()),
+        roots_dir: None,
     })
 }
 
@@ -320,5 +322,191 @@ fn empty_late_trust_selector_refuses_verification() {
                 UnixTime::now()
             )
             .is_err()
+    );
+}
+
+#[test]
+fn bundle_first_retained_verifier_observes_rotation_removal_and_invalid_peers() {
+    if !isolated(
+        "bundle_first_retained_verifier_observes_rotation_removal_and_invalid_peers",
+        None,
+    ) {
+        return;
+    }
+    let directory = tempfile::TempDir::new().unwrap();
+    let path = directory.path().join("current-roots.pem");
+    std::fs::write(&path, CA_A).unwrap();
+    codex_utils_rustls_provider::ensure_rustls_crypto_provider();
+    let verifier = CurrentDefaultRoots {
+        provider: CryptoProvider::get_default().unwrap().clone(),
+        bundle_first: true,
+        roots_path: Some(path.clone()),
+        roots_dir: None,
+    };
+    let a = CertificateDer::from_pem_slice(CERT_A).unwrap();
+    let b = CertificateDer::from_pem_slice(CERT_B).unwrap();
+    let host = ServerName::try_from("localhost").unwrap();
+    let now = UnixTime::now();
+    assert!(
+        verifier
+            .verify_server_cert(&a, &[], &host, &[], now)
+            .is_ok()
+    );
+    std::fs::write(&path, CA_B).unwrap();
+    assert!(
+        verifier
+            .verify_server_cert(&a, &[], &host, &[], now)
+            .is_err()
+    );
+    assert!(
+        verifier
+            .verify_server_cert(&b, &[], &host, &[], now)
+            .is_ok()
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        verifier
+            .verify_server_cert(&b, &[], &host, &[], now)
+            .is_err()
+    );
+    std::fs::write(&path, CA_A).unwrap();
+    assert!(
+        verifier
+            .verify_server_cert(&a, &[], &host, &[], now)
+            .is_ok()
+    );
+    assert!(
+        verifier
+            .verify_server_cert(
+                &a,
+                &[],
+                &ServerName::try_from("wrong.example").unwrap(),
+                &[],
+                now
+            )
+            .is_err()
+    );
+    assert!(
+        verifier
+            .verify_server_cert(
+                &a,
+                &[],
+                &host,
+                &[],
+                UnixTime::since_unix_epoch(Duration::ZERO)
+            )
+            .is_err()
+    );
+    let mut damaged = a.as_ref().to_vec();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 1;
+    assert!(
+        verifier
+            .verify_server_cert(&CertificateDer::from(damaged), &[], &host, &[], now)
+            .is_err()
+    );
+}
+
+#[test]
+fn websocket_selector_returns_fresh_wss_configs_only() {
+    if !isolated("websocket_selector_returns_fresh_wss_configs_only", None) {
+        return;
+    }
+    let url = url::Url::parse("wss://api.openai.com/v1/responses").unwrap();
+    let first = crate::private_wss::client_config(&url).unwrap();
+    let second = crate::private_wss::client_config(&url).unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert!(first.alpn_protocols.is_empty() && second.alpn_protocols.is_empty());
+    assert!(first.enable_sni && second.enable_sni);
+    assert!(
+        crate::private_wss::client_config(
+            &url::Url::parse("wss://example.invalid/v1/responses").unwrap()
+        )
+        .is_none()
+    );
+    assert!(
+        crate::private_wss::client_config(
+            &url::Url::parse("https://api.openai.com/v1/responses").unwrap()
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn websocket_selector_leaves_explicit_ca_with_original_connector() {
+    if !isolated(
+        "websocket_selector_leaves_explicit_ca_with_original_connector",
+        Some("SSL_CERT_FILE"),
+    ) {
+        return;
+    }
+    assert!(
+        crate::private_wss::client_config(
+            &url::Url::parse("wss://api.openai.com/v1/responses").unwrap()
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn bundle_first_uses_unhashed_directory_fallback_and_observes_removal() {
+    if !isolated(
+        "bundle_first_uses_unhashed_directory_fallback_and_observes_removal",
+        None,
+    ) {
+        return;
+    }
+    let directory = tempfile::TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle.pem");
+    let roots_dir = directory.path().join("unhashed");
+    std::fs::create_dir(&roots_dir).unwrap();
+    let b_root = roots_dir.join("arbitrary-root-name.pem");
+    std::fs::write(&bundle, CA_A).unwrap();
+    std::fs::write(&b_root, CA_B).unwrap();
+    codex_utils_rustls_provider::ensure_rustls_crypto_provider();
+    let verifier = CurrentDefaultRoots {
+        provider: CryptoProvider::get_default().unwrap().clone(),
+        bundle_first: true,
+        roots_path: Some(bundle),
+        roots_dir: Some(roots_dir),
+    };
+    let a = CertificateDer::from_pem_slice(CERT_A).unwrap();
+    let b = CertificateDer::from_pem_slice(CERT_B).unwrap();
+    let host = ServerName::try_from("localhost").unwrap();
+    let now = UnixTime::now();
+    assert!(
+        verifier
+            .verify_server_cert(&a, &[], &host, &[], now)
+            .is_ok()
+    );
+    assert!(
+        verifier
+            .verify_server_cert(&b, &[], &host, &[], now)
+            .is_ok()
+    );
+    let mut damaged = b.as_ref().to_vec();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 1;
+    assert!(
+        verifier
+            .verify_server_cert(&CertificateDer::from(damaged), &[], &host, &[], now)
+            .is_err()
+    );
+    std::fs::remove_file(&b_root).unwrap();
+    assert!(
+        verifier
+            .verify_server_cert(&b, &[], &host, &[], now)
+            .is_err()
+    );
+    assert!(
+        verifier
+            .verify_server_cert(&a, &[], &host, &[], now)
+            .is_ok()
+    );
+    std::fs::write(&b_root, CA_B).unwrap();
+    assert!(
+        verifier
+            .verify_server_cert(&b, &[], &host, &[], now)
+            .is_ok()
     );
 }

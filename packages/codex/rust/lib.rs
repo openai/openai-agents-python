@@ -32,6 +32,7 @@ mod ops;
 mod options;
 mod plan_usage;
 mod private_http;
+mod private_wss;
 mod project_search;
 mod provider_owner;
 mod python_tools;
@@ -2386,15 +2387,16 @@ impl NativeThread {
     }
 
     fn _start_model_producer_stream(&self, request_id: u64) -> PyResult<bool> {
-        Ok(self
-            .live()?
-            .and_then(|inner| {
-                inner
-                    .thread
-                    .thread_extension_data()
-                    .get::<python_tools::PythonTools>()
-            })
-            .is_some_and(|tools| tools.start_model_producer_stream(request_id)))
+        let Some(inner) = self.live()? else {
+            return Ok(false);
+        };
+        let store = inner.thread.thread_extension_data();
+        let observe_raw = store
+            .get::<codex_core::ObserveRawProviderEvents>()
+            .is_some();
+        Ok(store
+            .get::<python_tools::PythonTools>()
+            .is_some_and(|tools| tools.start_model_producer_stream(request_id, observe_raw)))
     }
 
     fn _push_model_producer_event<'py>(
@@ -3992,7 +3994,7 @@ impl ContextChange {
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false))]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false, _process_private_runtime=false))]
 fn _open_conversation<'py>(
     py: Python<'py>,
     config_json: String,
@@ -4004,6 +4006,7 @@ fn _open_conversation<'py>(
     provider_lease: PyRef<'py, provider_owner::NativeProviderLease>,
     _share_model_http: bool,
     _private_http: bool,
+    _process_private_runtime: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let opening = conversation_opening(
         config_json,
@@ -4016,7 +4019,7 @@ fn _open_conversation<'py>(
         _share_model_http,
         _private_http,
         false,
-        false,
+        _process_private_runtime,
     )?;
     async_bridge::future_factory_into_py(py, move || opening)
 }
@@ -4032,7 +4035,7 @@ fn conversation_opening(
     share_model_http: bool,
     private_http: bool,
     private_disposable: bool,
-    process_private_http: bool,
+    process_private_runtime: bool,
 ) -> PyResult<
     impl std::future::Future<
         Output = PyResult<(
@@ -4061,17 +4064,38 @@ fn conversation_opening(
     }
     let instructions = options.application_instructions.clone().unwrap_or_default();
     let files = options.sdk_instruction_files.clone().unwrap_or_default();
-    let specs: Vec<codex_protocol::dynamic_tools::DynamicToolSpec> =
-        serde_json::from_str(specs_json).map_err(py_error)?;
-    let process_private_http = process_private_http
+    use codex_protocol::dynamic_tools::{DynamicToolNamespaceTool, DynamicToolSpec};
+
+    let specs: Vec<DynamicToolSpec> = serde_json::from_str(specs_json).map_err(py_error)?;
+    let process_private_wss = process_private_runtime
+        && !private_http
+        && !private_disposable
+        && options.private_wss_tls
+        && cfg!(target_os = "linux")
+        && options.permits_private_functions()
+        && !specs.is_empty()
+        && specs.iter().all(|spec| match spec {
+            DynamicToolSpec::Function(function) => !function.defer_loading,
+            DynamicToolSpec::Namespace(namespace) => {
+                !namespace.tools.is_empty()
+                    && namespace.tools.iter().all(|tool| match tool {
+                        DynamicToolNamespaceTool::Function(function) => !function.defer_loading,
+                    })
+            }
+            _ => false,
+        });
+    let process_private_http = process_private_runtime
         && private_http
         && private_disposable
         && cfg!(target_os = "linux")
         && options.permits_private_disposable()
         && specs.is_empty();
-    if process_private_http {
+    let process_runtime = process_private_http || process_private_wss;
+    if process_runtime {
         provider_owner::check_process_runtime_pid()?;
     }
+    // A WSS scope must never inherit a previous implicit Provider's HTTP owner.
+    let share_model_http = share_model_http && !process_private_wss;
     let settings_value: serde_json::Value = serde_json::from_str(settings_json)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let has_settings = settings_value
@@ -4086,7 +4110,7 @@ fn conversation_opening(
                 runtime_json,
                 api_key,
                 share_model_http,
-                process_private_http,
+                process_runtime,
             )
             .await?;
         if private_http {
