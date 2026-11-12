@@ -73,13 +73,29 @@ from _agents_shared.snapshot_defaults import (
     resolve_default_local_snapshot_spec as resolve_default_local_snapshot_spec,
 )
 from agents.classic.sandbox.remote_mount_policy import build_remote_mount_policy_instructions
+from agents.classic.sandbox.session.events import (
+    EventPayloadPolicy as EventPayloadPolicy,
+    SandboxSessionEvent as SandboxSessionEvent,
+    SandboxSessionFinishEvent as SandboxSessionFinishEvent,
+    SandboxSessionStartEvent as SandboxSessionStartEvent,
+)
+from agents.classic.sandbox.session.sinks import (
+    CallbackSink as CallbackSink,
+    ChainedSink as ChainedSink,
+    EventSink as EventSink,
+    HttpProxySink as HttpProxySink,
+    JsonlOutboxSink as JsonlOutboxSink,
+    WorkspaceJsonlSink as WorkspaceJsonlSink,
+)
 
 from ._managed_workspace import (
+    _SANDBOX_EVENTS_ATTRIBUTE,
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
     ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint,
     _ManagedWorkspaceSource,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._sandbox_events import Instrumentation as Instrumentation, _OperationObserver
 from .executor import Environment
 
 _OptionsT = TypeVar("_OptionsT")
@@ -337,7 +353,20 @@ def sandbox_environment(
                 _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
                 _render_workspace_instructions(selected.state.manifest, environment),
             )
-            yield environment
+            observer = (
+                _OperationObserver(selected)
+                if isinstance(selected._instrumentation, Instrumentation)
+                else None
+            )
+            if observer is not None:
+                setattr(source_manager, _SANDBOX_EVENTS_ATTRIBUTE, observer)
+                if managed_source is not None:
+                    setattr(managed_source, _SANDBOX_EVENTS_ATTRIBUTE, observer)
+            try:
+                yield environment
+            finally:
+                if observer is not None:
+                    observer.active = False
 
     source_manager = source()
     if managed_workspace:
@@ -513,6 +542,17 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
 
 
 __all__ = [
+    "Instrumentation",
+    "EventPayloadPolicy",
+    "SandboxSessionEvent",
+    "SandboxSessionStartEvent",
+    "SandboxSessionFinishEvent",
+    "EventSink",
+    "CallbackSink",
+    "ChainedSink",
+    "HttpProxySink",
+    "JsonlOutboxSink",
+    "WorkspaceJsonlSink",
     "RemoteSnapshotSpec",
     "RemoteSnapshot",
     "NoopSnapshotSpec",

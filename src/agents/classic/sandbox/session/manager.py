@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
+from uuid import UUID
 
 from ...logger import log_tool_action_error
 from ..errors import OpName
 from .events import EventPayloadPolicy, SandboxSessionEvent, SandboxSessionFinishEvent
-from .sinks import ChainedSink, EventSink
+from .sinks import ChainedSink, EventSink, SandboxSessionBoundSink
 from .utils import _safe_decode
+
+if TYPE_CHECKING:
+    from .base_sandbox_session import BaseSandboxSession
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +28,23 @@ class Instrumentation:
         sinks: Sequence[EventSink] | None = None,
         payload_policy: EventPayloadPolicy | None = None,
         payload_policy_by_op: dict[OpName, EventPayloadPolicy] | None = None,
+        max_pending_events: int | None = None,
+        delivery_timeout_s: float | None = None,
     ) -> None:
+        if max_pending_events is not None and (
+            type(max_pending_events) is not int or max_pending_events <= 0
+        ):
+            raise ValueError("max_pending_events must be a positive integer or None")
+        if delivery_timeout_s is not None and (
+            not math.isfinite(delivery_timeout_s) or delivery_timeout_s <= 0
+        ):
+            raise ValueError("delivery_timeout_s must be positive and finite or None")
+        self.max_pending_events = max_pending_events
+        self.delivery_timeout_s = delivery_timeout_s
         self._sinks: list[EventSink] = list(sinks or [])
         self.payload_policy = payload_policy if payload_policy is not None else EventPayloadPolicy()
         self.payload_policy_by_op = dict(payload_policy_by_op or {})
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._tasks: dict[asyncio.Task[None], tuple[EventSink, UUID]] = {}
 
     @property
     def sinks(self) -> list[EventSink]:
@@ -34,6 +52,26 @@ class Instrumentation:
 
     def add_sink(self, sink: EventSink) -> None:
         self._sinks.append(sink)
+
+    def remove_sink(self, sink: EventSink) -> bool:
+        retained = [current for current in self._sinks if current is not sink]
+        if len(retained) == len(self._sinks):
+            return False
+        self._sinks = retained
+        for task, (owner, _) in tuple(self._tasks.items()):
+            if owner is sink:
+                task.cancel()
+        return True
+
+    def _bind_session(self, session: BaseSandboxSession) -> None:
+        for sink in self._sinks:
+            selected = sink.sinks if isinstance(sink, ChainedSink) else [sink]
+            for child in selected:
+                if isinstance(child, SandboxSessionBoundSink):
+                    child.bind(session)
+
+    async def _finish_session(self, session_id: UUID) -> None:
+        await self.flush()
 
     async def emit(self, event: SandboxSessionEvent) -> None:
         for sink in self._sinks:
@@ -53,7 +91,12 @@ class Instrumentation:
         pending = tuple(self._tasks)
         if not pending:
             return
-        await asyncio.gather(*pending, return_exceptions=True)
+        if self.delivery_timeout_s is None:
+            await asyncio.gather(*pending, return_exceptions=True)
+        else:
+            _, remaining = await asyncio.wait(pending, timeout=self.delivery_timeout_s)
+            for task in remaining:
+                task.cancel()
 
     def _policy_for(self, op: OpName, sink: EventSink) -> EventPayloadPolicy:
         # Merge semantics: default -> per-op overrides -> per-sink overrides.
@@ -111,31 +154,38 @@ class Instrumentation:
             if sink.on_error == "raise":
                 await _run()
                 return
-
-            async def _task() -> None:
-                try:
-                    await _run()
-                except Exception as exc:
-                    self._handle_sink_error(sink, event, exc)
-
-            task = asyncio.create_task(_task())
-            # Track background deliveries so the task is kept alive and can be discarded once done.
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            self._schedule(sink, event, force_no_raise=False)
         elif sink.mode == "best_effort":
-
-            async def _task() -> None:
-                try:
-                    await _run()
-                except Exception as exc:
-                    self._handle_sink_error(sink, event, exc, force_no_raise=True)
-
-            task = asyncio.create_task(_task())
-            # Same bookkeeping as async mode, but failures are always swallowed after logging.
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            self._schedule(sink, event, force_no_raise=True)
         else:
             raise AssertionError(f"unknown sink.mode: {sink.mode!r}")
+
+    def _schedule(
+        self, sink: EventSink, event: SandboxSessionEvent, *, force_no_raise: bool
+    ) -> None:
+        if self.max_pending_events is not None and len(self._tasks) >= self.max_pending_events:
+            return
+
+        async def deliver() -> None:
+            try:
+                await sink.handle(event)
+            except Exception as exc:
+                self._handle_sink_error(sink, event, exc, force_no_raise=force_no_raise)
+
+        task = asyncio.create_task(deliver())
+        self._tasks[task] = (sink, event.session_id)
+        timer = (
+            asyncio.get_running_loop().call_later(self.delivery_timeout_s, task.cancel)
+            if self.delivery_timeout_s is not None
+            else None
+        )
+
+        def finished(completed: asyncio.Task[None]) -> None:
+            self._tasks.pop(completed, None)
+            if timer is not None:
+                timer.cancel()
+
+        task.add_done_callback(finished)
 
     async def _deliver_chained(self, sink: EventSink, event: SandboxSessionEvent) -> None:
         """

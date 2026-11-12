@@ -827,7 +827,11 @@
     {
       "path": "sdk-acknowledged-provider-window.patch",
       "sha256": "cbf049d3d03e9071d9100217c969138574df3735def89c74abe2037da3978513"
+    },
+    {
+      "path": "sdk-native-sandbox-operation-events.patch",
+      "sha256": "1d7c7fec2d0faf1956b48dfd7e48b135f3847748d88efb1835b233e39df2f765"
     }
   ],
-  "result_tree": "d2b7382a4f22da95c9b90989eee624657de347e1"
+  "result_tree": "c9e8230bb2c4d0fe02925f8ba7071903834df92b"
 }
