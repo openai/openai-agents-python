@@ -222,6 +222,7 @@ from .observation import (
     AgentProfileChanged as AgentProfileChanged,
     ApiRateLimitsUpdated as ApiRateLimitsUpdated,
     ContextCompacted as ContextCompacted,
+    EventGap,
     EventStream as EventStream,
     ExecutionItemCompleted as ExecutionItemCompleted,
     HostedToolCallProgress,
@@ -931,6 +932,36 @@ class ProducedItem:
     item: SessionItem
     agent: Agent[Any, Any]
     handoff_target: Agent[Any, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunErrorDetails:
+    """Evidence retained before a failed one-shot submission closes.
+
+    Raw response payloads use the existing Responses observation capture.
+    incomplete records gaps in the available native evidence.
+    """
+
+    input: UserInput | None = field(repr=False)
+    last_agent: Agent[Any, Any] | None
+    items: tuple[ProducedItem, ...] = field(repr=False)
+    raw_responses: tuple[dict[str, Any], ...] = field(repr=False)
+    guardrail_results: tuple[GuardrailRecord, ...] = field(repr=False)
+    incomplete: bool = False
+
+
+class RunDiagnosticError(Exception):
+    """An opted-in native run failure, with the original exception as its cause."""
+
+    __slots__ = ("_details",)
+
+    def __init__(self, details: RunErrorDetails) -> None:
+        super().__init__("Native run failed")
+        self._details = details
+
+    @property
+    def details(self) -> RunErrorDetails:
+        return self._details
 
 
 @dataclass(frozen=True)
@@ -8089,6 +8120,62 @@ class Session(Generic[ContextT, OutputT]):
         for event, owner in pending:
             self._dispatch_interaction(event, owner)
 
+    async def _capture_run_error_details(
+        self,
+        turn: Turn[Any],
+        input: UserInput | None,
+        *,
+        settled: bool = True,
+    ) -> RunErrorDetails | None:
+        # Preserve the first failure if evidence capture is interrupted.
+        with suppress(Exception, asyncio.CancelledError):
+            guardrail_results = turn.guardrail_results
+            if turn.turn_id is None and not guardrail_results:
+                return None
+            responses: list[dict[str, Any]] = []
+            items: tuple[ProducedItem, ...] = ()
+            incomplete = not settled
+            if settled:
+                try:
+                    async for event in turn.events(include_execution_details=True):
+                        if isinstance(event, EventGap):
+                            incomplete = True
+                        if isinstance(event, RawProviderEvent):
+                            payload = event.payload
+                            if payload.get("type") in {
+                                "response.completed",
+                                "response.incomplete",
+                                "response.failed",
+                            }:
+                                response = payload.get("response")
+                            elif payload.get("object") == "response":
+                                response = payload
+                            else:
+                                continue
+                            if isinstance(response, dict):
+                                responses.append(response)
+                except Exception:
+                    incomplete = True
+                if turn.turn_id is not None:
+                    try:
+                        items = self._take_produced_items(turn)
+                    except Exception:
+                        incomplete = True
+            last_agent = None
+            try:
+                last_agent = await self.get_active_agent()
+            except Exception:
+                incomplete = True
+            return RunErrorDetails(
+                input=input,
+                last_agent=last_agent,
+                items=items,
+                raw_responses=tuple(responses),
+                guardrail_results=guardrail_results,
+                incomplete=incomplete,
+            )
+        return None
+
     async def _run_with_interactions(
         self,
         submission: Turn[OutputT],
@@ -8098,6 +8185,8 @@ class Session(Generic[ContextT, OutputT]):
         return_history: bool = False,
         return_raw_usage: bool = False,
         return_items: bool = False,
+        capture_error_details: bool = False,
+        error_input: UserInput | None = None,
         pause_manual: Sequence[FunctionTool[Any, Any, Any]] = (),
     ) -> Completed[OutputT]:
         """Own live replies and Session shutdown for a one-shot run."""
@@ -8224,7 +8313,16 @@ class Session(Generic[ContextT, OutputT]):
             if return_items:
                 result = replace(result, items=self._take_produced_items(result.turn))
         except BaseException as error:
-            await _close_after_error(error, close)
+            run_error = error
+            if capture_error_details and isinstance(error, Exception):
+                details = await self._capture_run_error_details(
+                    submission, error_input, settled=waiter.done() and not waiter.cancelled()
+                )
+                if details is not None:
+                    run_error = RunDiagnosticError(details)
+            await _close_after_error(run_error, close)
+            if run_error is not error:
+                raise run_error from error
             raise
         else:
             await _join(asyncio.create_task(close()))
