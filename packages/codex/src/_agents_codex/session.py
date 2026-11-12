@@ -4068,7 +4068,8 @@ class Session(Generic[ContextT, OutputT]):
                 if restored_profile is not None
                 else output
             )
-            trusted_restore_default = restored_declaration.model
+            # A handoff without its own model inherits the opening Agent's model.
+            trusted_restore_default = restored_declaration.model or agent.model
             if (
                 continuation is not None
                 and continuation.model_override is None
