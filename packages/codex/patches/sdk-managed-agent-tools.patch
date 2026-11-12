@@ -532,7 +532,7 @@ index 855c832b4e1dc6f6d9ff5ef72bba1de1772a9df3..aa53b22f522c4f22a1bc369c263f153c
  
      async fn spawn_forked_thread(
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 1c89558bb4d9e3ca3a9892336ed330653ef7fab6..93972310ebb236488a5fc88fc5205ae0d533bca6 100644
+index 1c89558bb4d9e3ca3a9892336ed330653ef7fab6..0e2af8029f10d2c22f2b40037b22631ee83ab05a 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -6232,6 +6232,7 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
@@ -543,7 +543,7 @@ index 1c89558bb4d9e3ca3a9892336ed330653ef7fab6..93972310ebb236488a5fc88fc5205ae0
          tool_completion: None,
          thread_id: ThreadId::new(),
          turn_id: turn.to_owned(),
-@@ -6247,6 +6248,43 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
+@@ -6247,6 +6248,44 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
          status: AgentStatus::Completed(Some("finished".to_owned())),
          error_info: None,
      };
@@ -556,6 +556,7 @@ index 1c89558bb4d9e3ca3a9892336ed330653ef7fab6..93972310ebb236488a5fc88fc5205ae0
 +        name: "complete_agent".to_owned(),
 +        namespace: None,
 +        final_output: serde_json::json!({"checked": true}),
++        batch_call_ids: None,
 +    };
 +    managed.tool_completion = Some(typed.clone());
 +    let crate::agent::api::ManagedToolTerminal::Reply(reply) = slot.claim("managed") else {
@@ -587,7 +588,7 @@ index 1c89558bb4d9e3ca3a9892336ed330653ef7fab6..93972310ebb236488a5fc88fc5205ae0
      let first = outcome("first");
      let first_control = control.clone();
      let first_delivery = tokio::spawn(async move {
-@@ -6308,7 +6346,7 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
+@@ -6308,7 +6347,7 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
      .await
      .expect("read canonical history after writer close");
      assert_eq!(parse_errors, 0, "canonical history parses cleanly");

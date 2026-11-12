@@ -742,8 +742,8 @@
     },
     {
       "path": "sdk-managed-agent-tools.patch",
-      "sha256": "59a07c624bf0ab68f7ab34ee064d457a9227ece1206f9df971d03695c9862b21"
+      "sha256": "ad8d845a6da5485d0010f95d2afa19b10139c9cd05ba3bb5c0b8790491a13fb6"
     }
   ],
-  "result_tree": "de3b2c0aabe8eb7f9fb890c67316bdb2e428b04b"
+  "result_tree": "4a6547ef35128ed5f33a1c926e29abc218dfecda"
 }
