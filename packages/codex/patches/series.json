@@ -719,7 +719,11 @@
     {
       "path": "sdk-model-attempt-accounting.patch",
       "sha256": "36d245c076fdae420316ecd26218c7039307ec4877b385a30e769cda0cfc02f9"
+    },
+    {
+      "path": "sdk-tracing-id-annotations.patch",
+      "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
     }
   ],
-  "result_tree": "c4b5487e0a10e9edfb2aae1b236199024ea81e67"
+  "result_tree": "6ebd2e7eae8dc58f8dd4241bd65fe7514ab3251b"
 }

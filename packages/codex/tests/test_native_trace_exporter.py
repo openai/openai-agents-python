@@ -156,13 +156,21 @@ def native_trace_child_env() -> dict[str, str]:
 def test_real_native_capture_policy_and_openai_export(case_name):
     env = native_trace_child_env()
     env.pop("OPENAI_API_KEY", None)
+    runner = "asyncio.run(case)"
+    if (
+        sys.platform == "win32"
+        and sys.version_info >= (3, 12)
+        and case_name in {"native_deadline_case", "native_deadline_reset_case"}
+    ):
+        # A peer reset can interrupt Proactor transport teardown in this loopback server.
+        runner = "asyncio.run(case, loop_factory=asyncio.SelectorEventLoop)"
     result = subprocess.run(
         [
             sys.executable,
             "-c",
             "import asyncio, sys; "
             "from tests import test_native_trace_exporter as cases; "
-            "asyncio.run(getattr(cases, sys.argv[1])())",
+            "case = getattr(cases, sys.argv[1])(); " + runner,
             case_name,
         ],
         env=env,
@@ -376,6 +384,8 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     try:
         if cancelled:
             await asyncio.wait_for(request_started.wait(), 1)
+            # Cancellation latency, excluding transport startup.
+            started = time.monotonic()
             delivery.cancel("synthetic caller cancellation")
             with pytest.raises(asyncio.CancelledError) as failure:
                 await delivery
@@ -658,7 +668,7 @@ async def native_outcome_privacy_case():
     scope = telemetry.span("bounded-outcome")
     with pytest.raises(RuntimeError, match="Native trace span end failed") as failure:
         with scope:
-            scope.set_outcome(status="ok", data={"private": secret * 300})
+            scope.set_outcome(status="ok", data={"private": secret * 2000})
     assert_sanitized_failure(failure.value, secret)
     assert scope._outcome is None
     await telemetry.force_flush()
