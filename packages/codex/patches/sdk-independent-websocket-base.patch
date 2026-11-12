@@ -10,6 +10,46 @@ index bb5d510a..5cf75a4c 100644
              model_catalog_url: None,
              env_key: None,
              env_key_instructions: None,
+diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
+index 427aa8d3..edb652d8 100644
+--- a/codex-rs/cli/src/doctor.rs
++++ b/codex-rs/cli/src/doctor.rs
+@@ -2310,6 +2310,9 @@ async fn websocket_reachability_check(
+     ));
+ 
+     let runtime_provider = create_model_provider(provider.clone(), auth_manager);
++    let auth_changes = runtime_provider
++        .auth_manager()
++        .map(|manager| manager.auth_change_receiver());
+     let auth = runtime_provider.auth().await;
+     details.push(format!(
+         "auth mode: {}",
+@@ -2355,6 +2358,25 @@ async fn websocket_reachability_check(
+         }
+     };
+ 
++    if let Err(message) = provider.validate_websocket_auth(auth.as_ref().map(CodexAuth::auth_mode))
++    {
++        return websocket_probe_warning(
++            "Responses WebSocket auth could not be used",
++            details,
++            message,
++        );
++    }
++    if auth_changes
++        .as_ref()
++        .is_some_and(|changes| changes.has_changed().unwrap_or(true))
++    {
++        return websocket_probe_warning(
++            "Responses WebSocket auth changed",
++            details,
++            "authentication changed while resolving the probe".to_string(),
++        );
++    }
++
+     let mut extra_headers = HeaderMap::new();
+     extra_headers.insert(
+         OPENAI_BETA_HEADER,
 diff --git a/codex-rs/codex-api/src/endpoint/images.rs b/codex-rs/codex-api/src/endpoint/images.rs
 index 2217ce89..e11a4860 100644
 --- a/codex-rs/codex-api/src/endpoint/images.rs
@@ -332,6 +372,55 @@ index 43d5ed1c..ccd6aed1 100644
          "websocket_connect_timeout_ms": {
            "description": "Maximum time (in milliseconds) to wait for a websocket connection attempt before treating it as failed.",
            "format": "uint64",
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 62b0ed13..7663dcb4 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1985,6 +1985,7 @@ impl ModelClientSession {
+                 .websocket_connection(WebsocketConnectParams {
+                     session_telemetry,
+                     api_provider: client_setup.api_provider,
++                    auth_mode: client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                     auth_revision: client_setup.auth_revision,
+                     api_auth: client_setup.api_auth,
+                     auth_owner_generation: client_setup.auth_owner_generation,
+@@ -2053,6 +2054,7 @@ impl ModelClientSession {
+         let WebsocketConnectParams {
+             session_telemetry,
+             api_provider,
++            auth_mode,
+             auth_revision,
+             api_auth,
+             auth_owner_generation,
+@@ -2061,6 +2063,12 @@ impl ModelClientSession {
+             request_route_telemetry,
+             responses_headers,
+         } = params;
++        self.client
++            .state
++            .provider
++            .info()
++            .validate_websocket_auth(auth_mode)
++            .map_err(|message| ApiError::InvalidRequest { message })?;
+         let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision);
+         let reset_reason = match self.websocket_session.connection.as_ref() {
+             Some(_)
+@@ -2555,6 +2563,7 @@ impl ModelClientSession {
+                 .websocket_connection(WebsocketConnectParams {
+                     session_telemetry,
+                     api_provider: client_setup.api_provider,
++                    auth_mode: client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                     auth_revision: client_setup.auth_revision,
+                     api_auth: client_setup.api_auth,
+                     auth_owner_generation: client_setup.auth_owner_generation,
+@@ -3525,6 +3534,7 @@ impl AuthRequestTelemetryContext {
+ struct WebsocketConnectParams<'a> {
+     session_telemetry: &'a SessionTelemetry,
+     api_provider: codex_api::Provider,
++    auth_mode: Option<AuthMode>,
+     auth_revision: Option<u64>,
+     api_auth: SharedAuthProvider,
+     auth_owner_generation: Option<u64>,
 diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
 index a9504eab..4cc6e1f6 100644
 --- a/codex-rs/core/src/realtime_conversation_tests.rs
@@ -452,6 +541,133 @@ index 1823275e..ba9b3794 100644
          model_catalog_url: None,
          // Environment variable that should exist in the test environment.
          // ModelClient will return an error if the environment variable for the
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
+index cf5d463e..7215c310 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
+@@ -34,6 +34,7 @@ use codex_model_provider::ProviderAuthScope;
+ use codex_model_provider::ResolvedResponsesProvider;
+ use codex_model_provider::ResponsesConnectionKey;
+ use codex_protocol::ThreadId;
++use codex_protocol::auth::AuthMode;
+ use http::HeaderMap;
+ use http::HeaderValue;
+ use std::sync::Arc;
+@@ -86,6 +87,7 @@ pub(super) struct PooledConnection {
+ struct ClientSetup {
+     provider: Provider,
+     auth: SharedAuthProvider,
++    auth_mode: Option<AuthMode>,
+     redirect_policy: ClientRedirectPolicy,
+     key: ResponsesConnectionKey,
+     auth_changes: Option<tokio::sync::watch::Receiver<u64>>,
+@@ -185,6 +187,7 @@ impl ConnectionPool {
+         let ClientSetup {
+             mut provider,
+             auth,
++            auth_mode,
+             redirect_policy,
+             key,
+             auth_changes,
+@@ -197,7 +200,13 @@ impl ConnectionPool {
+                 .pop();
+             match idle {
+                 Some(connection)
+-                    if connection.key == key
++                    if self
++                        .config
++                        .provider
++                        .info()
++                        .validate_websocket_auth(auth_mode)
++                        .is_ok()
++                        && connection.key == key
+                         && connection
+                             .auth_changes
+                             .as_ref()
+@@ -299,6 +308,13 @@ impl ConnectionPool {
+             .auth_manager()
+             .map(|manager| manager.auth_change_receiver());
+         let revision = auth_changes.as_mut().map(|auth| *auth.borrow_and_update());
++        let auth_mode = self
++            .config
++            .provider
++            .auth()
++            .await
++            .as_ref()
++            .map(CodexAuth::auth_mode);
+         let ResolvedResponsesProvider {
+             provider,
+             redirect_policy,
+@@ -331,6 +347,7 @@ impl ConnectionPool {
+         Ok(ClientSetup {
+             provider,
+             auth,
++            auth_mode,
+             redirect_policy,
+             key,
+             auth_changes,
+@@ -399,6 +416,7 @@ impl ConnectionPool {
+         let ClientSetup {
+             provider,
+             auth,
++            auth_mode,
+             redirect_policy: _,
+             key,
+             auth_changes,
+@@ -412,6 +430,9 @@ impl ConnectionPool {
+         );
+ 
+         let provider_info = self.config.provider.info();
++        provider_info
++            .validate_websocket_auth(auth_mode)
++            .map_err(|message| LunaSamplerError::Api(ApiError::InvalidRequest { message }))?;
+         let client = ResponsesWebsocketClient::new(provider, auth);
+         let connect = client.connect(
+             &self.config.http_client_factory,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
+index 6cf716de..bd411bfe 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
+@@ -460,3 +460,39 @@ async fn http_cache_preserves_no_constraint_redirect_policy_and_configured_heade
+     );
+     Ok(())
+ }
++
++#[tokio::test]
++async fn independent_websocket_keeps_managed_http_fallback_without_opening_a_socket() -> Result<()>
++{
++    skip_if_no_network!(Ok(()));
++    let http = responses::start_mock_server().await;
++    let events = vec![
++        responses::ev_output_text_delta("low"),
++        responses::ev_completed("score"),
++    ];
++    let output = responses::mount_sse_sequence(&http, vec![responses::sse(events)]).await;
++    let ws = responses::start_websocket_server(vec![Vec::new()]).await;
++    let gateway = Gateway::new(&http.uri(), ws.uri()).await?;
++    let base_url = format!("{}/v1", http.uri());
++    let mut provider = ModelProviderInfo::create_openai_provider(Some(base_url.clone()));
++    provider.websocket_base_url = Some(format!("{}/v1", gateway.url));
++    let mut config = sampler_config(base_url);
++    config.provider = create_model_provider(
++        provider,
++        Some(AuthManager::from_auth_for_testing(
++            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++        )),
++    );
++    let sampler = LunaSampler::new(config);
++    let permit = Arc::clone(&sampler.connections.sockets)
++        .acquire_owned()
++        .await?;
++    assert!(matches!(
++        sampler.connections.open_connection(permit).await,
++        Err(LunaSamplerError::Api(ApiError::InvalidRequest { .. }))
++    ));
++    assert_eq!(sampler.sample(sample_request("managed-http")).await?, "low");
++    assert_eq!(output.requests().len(), 1);
++    assert_eq!(gateway.opens.load(Ordering::SeqCst), 0);
++    Ok(())
++}
 diff --git a/codex-rs/login/src/auth_env_telemetry.rs b/codex-rs/login/src/auth_env_telemetry.rs
 index 6ee0c439..e9f89d9a 100644
 --- a/codex-rs/login/src/auth_env_telemetry.rs
@@ -535,7 +751,7 @@ index f5ea122f..b50ec585 100644
 +    }
 +}
 diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
-index 3a328dd2..2a179410 100644
+index 3a328dd2..f6686618 100644
 --- a/codex-rs/model-provider-info/src/lib.rs
 +++ b/codex-rs/model-provider-info/src/lib.rs
 @@ -142,6 +142,9 @@ pub struct ModelProviderInfo {
@@ -606,18 +822,16 @@ index 3a328dd2..2a179410 100644
          if let Some(gateway) = &self.gateway_oauth {
              gateway.validate(self)?;
          }
-@@ -434,6 +487,10 @@ other non-default provider fields are not supported"
+@@ -434,6 +487,8 @@ other non-default provider fields are not supported"
  
      /// Builds an API provider with managed residency taking precedence over configured headers.
      pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
 +        self.validate_websocket_base_url()
 +            .map_err(CodexErr::InvalidRequest)?;
-+        self.validate_websocket_auth(auth_mode)
-+            .map_err(CodexErr::InvalidRequest)?;
          let default_base_url = if matches!(
              auth_mode,
              Some(
-@@ -471,6 +528,10 @@ other non-default provider fields are not supported"
+@@ -471,6 +526,10 @@ other non-default provider fields are not supported"
          Ok(ApiProvider {
              name: self.name.clone(),
              base_url,
@@ -628,7 +842,7 @@ index 3a328dd2..2a179410 100644
              query_params: self.query_params.clone().map(|params| {
                  params
                      .into_iter()
-@@ -536,6 +597,7 @@ other non-default provider fields are not supported"
+@@ -536,6 +595,7 @@ other non-default provider fields are not supported"
          ModelProviderInfo {
              name: OPENAI_PROVIDER_NAME.into(),
              base_url,
@@ -636,7 +850,7 @@ index 3a328dd2..2a179410 100644
              model_catalog_url: None,
              env_key: None,
              env_key_instructions: None,
-@@ -583,6 +645,7 @@ other non-default provider fields are not supported"
+@@ -583,6 +643,7 @@ other non-default provider fields are not supported"
              // this is unset. A configured value is therefore unambiguously an
              // endpoint override.
              base_url: None,
@@ -644,7 +858,7 @@ index 3a328dd2..2a179410 100644
              model_catalog_url: None,
              env_key: None,
              env_key_instructions: None,
-@@ -765,6 +828,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
+@@ -765,6 +826,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
      ModelProviderInfo {
          name: "gpt-oss".into(),
          base_url: Some(base_url.into()),
@@ -653,7 +867,7 @@ index 3a328dd2..2a179410 100644
          env_key: None,
          env_key_instructions: None,
 diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
-index 9c15c54b..dd0df967 100644
+index 9c15c54b..a0144aef 100644
 --- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 +++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 @@ -78,6 +78,7 @@ base_url = "http://localhost:11434/v1"
@@ -781,7 +995,7 @@ index 9c15c54b..dd0df967 100644
 +}
 +
 +#[test]
-+fn websocket_override_keeps_explicit_keys_and_denies_managed_auth() {
++fn websocket_override_allows_http_setup_and_denies_managed_websocket_auth() {
 +    let mut info =
 +        ModelProviderInfo::create_openai_provider(Some("https://http.example/v1".into()));
 +    info.websocket_base_url = Some("wss://socket.example/v1".into());
@@ -792,7 +1006,7 @@ index 9c15c54b..dd0df967 100644
 +        AuthMode::AgentIdentity,
 +        AuthMode::PersonalAccessToken,
 +    ] {
-+        assert!(info.to_api_provider(Some(mode)).is_err());
++        assert!(info.to_api_provider(Some(mode)).is_ok());
 +        assert!(info.validate_websocket_auth(Some(mode)).is_err());
 +    }
 +    assert!(info.to_api_provider(Some(AuthMode::ApiKey)).is_ok());
@@ -828,30 +1042,10 @@ index 9c15c54b..dd0df967 100644
 +    );
 +}
 diff --git a/codex-rs/model-provider/src/auth.rs b/codex-rs/model-provider/src/auth.rs
-index f4d27646..3b4a4764 100644
+index f4d27646..08822f2f 100644
 --- a/codex-rs/model-provider/src/auth.rs
 +++ b/codex-rs/model-provider/src/auth.rs
-@@ -198,6 +198,9 @@ pub(crate) fn resolve_provider_auth(
-     auth: Option<&CodexAuth>,
-     provider: &ModelProviderInfo,
- ) -> codex_protocol::error::Result<SharedAuthProvider> {
-+    provider
-+        .validate_websocket_auth(auth.map(CodexAuth::auth_mode))
-+        .map_err(CodexErr::InvalidRequest)?;
-     if let Some(auth) = bearer_auth_for_provider(provider)? {
-         return Ok(Arc::new(auth));
-     }
-@@ -227,6 +230,9 @@ pub(crate) async fn resolve_provider_auth_for_scope(
-     provider: &ModelProviderInfo,
-     scope: ProviderAuthScope,
- ) -> codex_protocol::error::Result<ResolvedProviderAuth> {
-+    provider
-+        .validate_websocket_auth(auth.map(CodexAuth::auth_mode))
-+        .map_err(CodexErr::InvalidRequest)?;
-     let ProviderAuthScope {
-         agent_identity_policy,
-         session_source,
-@@ -852,3 +858,66 @@ mod tests {
+@@ -852,3 +852,76 @@ mod tests {
          assert_eq!(registration_count.load(Ordering::SeqCst), 3);
      }
  }
@@ -871,13 +1065,18 @@ index f4d27646..3b4a4764 100644
 +    }
 +
 +    #[test]
-+    fn websocket_endpoint_auth_keeps_explicit_key_over_ambient_managed_headers() {
++    fn websocket_endpoint_http_keeps_managed_and_explicit_credentials() {
 +        let ambient = managed_headers();
 +        let mut provider =
 +            ModelProviderInfo::create_openai_provider(Some("https://http.example/v1".into()));
 +        provider.websocket_base_url = Some("wss://socket.example/v1".into());
 +        assert_eq!(ambient.auth_mode(), AuthMode::Headers);
-+        assert!(resolve_provider_auth(Some(&ambient), &provider).is_err());
++        assert!(resolve_provider_auth(Some(&ambient), &provider).is_ok());
++        assert!(
++            provider
++                .validate_websocket_auth(Some(ambient.auth_mode()))
++                .is_err()
++        );
 +        provider.experimental_bearer_token = Some("synthetic-explicit-key".into());
 +        let headers = resolve_provider_auth(Some(&ambient), &provider)
 +            .unwrap()
@@ -889,7 +1088,7 @@ index f4d27646..3b4a4764 100644
 +    }
 +
 +    #[tokio::test]
-+    async fn websocket_endpoint_auth_is_checked_before_scoped_managed_resolution() {
++    async fn websocket_endpoint_http_allows_scoped_managed_resolution() {
 +        let ambient = managed_headers();
 +        let mut provider =
 +            ModelProviderInfo::create_openai_provider(Some("https://http.example/v1".into()));
@@ -902,6 +1101,11 @@ index f4d27646..3b4a4764 100644
 +        assert!(
 +            resolve_provider_auth_for_scope(None, Some(&ambient), &provider, scope.clone())
 +                .await
++                .is_ok()
++        );
++        assert!(
++            provider
++                .validate_websocket_auth(Some(ambient.auth_mode()))
 +                .is_err()
 +        );
 +        provider.experimental_bearer_token = Some("synthetic-explicit-key".into());
