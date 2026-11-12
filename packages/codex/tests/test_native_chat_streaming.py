@@ -291,6 +291,27 @@ async def test_chat_stream_bounds_tool_only_assembly():
         _ = [event async for event in model.stream(request())]
 
 
+async def test_chat_stream_bounds_usage_only_chunks_and_closes(monkeypatch):
+    monkeypatch.setattr("_agents_codex.models._MAX_CHAT_STREAM_CHUNKS", 3, raising=False)
+    closed = []
+
+    async def frames():
+        try:
+            yield chunk({"content": "done"}, "stop")
+            for _ in range(3):
+                yield chunk(usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
+        finally:
+            closed.append(True)
+
+    async def create(**body):
+        return frames()
+
+    model = ChatCompletionsModel(client(create), stream=True)
+    with pytest.raises(ValueError, match="chunk limit"):
+        _ = [event async for event in model.stream(request(lambda value: True))]
+    assert closed == [True]
+
+
 async def test_chat_stream_keeps_measured_usage_when_cleanup_fails():
     measured = []
 

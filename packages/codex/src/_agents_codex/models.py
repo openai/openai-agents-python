@@ -443,6 +443,7 @@ def _chat_patch_replay_arguments(kind: str, item: Mapping[str, Any]) -> Any:
 
 
 _MAX_CHAT_STREAM_BYTES = 8 * 1024 * 1024
+_MAX_CHAT_STREAM_CHUNKS = 128 * 1024
 
 
 class _ChatStreamEvent(dict[str, Any]):
@@ -1043,12 +1044,16 @@ class ChatCompletionsModel:
     async def _stream_response(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]]:
         parameters = apply_patch_wire = chunks = iterator = chunk = raw = choice = delta = None
         retained = choices = probabilities = function = provider_data = ordered = measured = None
+        function_piece = None
         completion_request = task = opening = index = None
         usage = result = output = item = fragment = call = close = closed = None
-        text = refusal = response_id = finish_reason = None
+        text_parts: list[str] | None = None
+        refusal_parts: list[str] | None = None
+        response_id = finish_reason = None
         calls: dict[int, dict[str, Any]] = {}
         logprobs: list[Any] = []
         buffered_bytes = 0
+        chunk_count = 0
         message_id = "msg_chat_" + uuid4().hex
         try:
             parameters, apply_patch_wire = self._parameters(request, True)
@@ -1059,6 +1064,12 @@ class ChatCompletionsModel:
                     raise asyncio.CancelledError()
                 iterator = aiter(chunks)
                 async for chunk in iterator:
+                    # Usage-only chunks bypass the retained-byte budget.
+                    chunk_count += 1
+                    if chunk_count > _MAX_CHAT_STREAM_CHUNKS:
+                        raise ValueError("Chat stream exceeded its chunk limit")
+                    if chunk_count % 256 == 0:
+                        await asyncio.sleep(0)
                     raw = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk
                     if not isinstance(raw, dict):
                         raise TypeError("Chat stream chunks must be objects")
@@ -1118,7 +1129,10 @@ class ChatCompletionsModel:
                     ):
                         raise ValueError("Chat adapters do not support provider reasoning replay")
                     if delta.get("content") is not None:
-                        if text is None:
+                        if not isinstance(delta["content"], str):
+                            raise TypeError("Chat stream content must be a string")
+                        if text_parts is None:
+                            text_parts = []
                             yield _ChatStreamEvent(
                                 {
                                     "type": "response.output_item.added",
@@ -1131,7 +1145,7 @@ class ChatCompletionsModel:
                                     },
                                 }
                             )
-                        text = (text or "") + delta["content"]
+                        text_parts.append(delta["content"])
                         yield _ChatStreamEvent(
                             {
                                 "type": "response.output_text.delta",
@@ -1147,7 +1161,11 @@ class ChatCompletionsModel:
                             }
                         )
                     if delta.get("refusal") is not None:
-                        refusal = (refusal or "") + delta["refusal"]
+                        if not isinstance(delta["refusal"], str):
+                            raise TypeError("Chat stream refusal must be a string")
+                        if refusal_parts is None:
+                            refusal_parts = []
+                        refusal_parts.append(delta["refusal"])
                     if probabilities is not None:
                         logprobs.extend(deepcopy(probabilities))
                     for fragment in delta.get("tool_calls") or []:
@@ -1174,7 +1192,7 @@ class ChatCompletionsModel:
                             {
                                 "id": "",
                                 "type": "function",
-                                "function": {"name": "", "arguments": ""},
+                                "function": {"name": [], "arguments": []},
                             },
                         )
                         if fragment.get("id") is not None:
@@ -1182,8 +1200,11 @@ class ChatCompletionsModel:
                                 raise ValueError("Chat stream changed a tool call ID")
                             call["id"] = fragment["id"]
                         function = fragment.get("function") or {}
-                        call["function"]["name"] += function.get("name") or ""
-                        call["function"]["arguments"] += function.get("arguments") or ""
+                        for field in ("name", "arguments"):
+                            function_piece = function.get(field) or ""
+                            if not isinstance(function_piece, str):
+                                raise TypeError(f"Chat tool call {field} must be a string")
+                            call["function"][field].append(function_piece)
                     finish_reason = choice.get("finish_reason")
             finally:
                 try:
@@ -1194,6 +1215,10 @@ class ChatCompletionsModel:
             if response_id is None or finish_reason is None:
                 raise ValueError("Chat stream ended without a completed choice")
             ordered = [calls[index] for index in sorted(calls)]
+            for call in ordered:
+                function = call["function"]
+                for field in ("name", "arguments"):
+                    function[field] = "".join(function[field])
             if any(
                 not isinstance(call["id"], str)
                 or not call["id"].strip()
@@ -1214,8 +1239,10 @@ class ChatCompletionsModel:
                             "logprobs": {"content": logprobs},
                             "message": {
                                 "role": "assistant",
-                                "content": text,
-                                "refusal": refusal,
+                                "content": None if text_parts is None else "".join(text_parts),
+                                "refusal": None
+                                if refusal_parts is None
+                                else "".join(refusal_parts),
                                 "tool_calls": ordered,
                             },
                         }
@@ -1279,14 +1306,15 @@ class ChatCompletionsModel:
                 call,
                 close,
                 closed,
-                text,
-                refusal,
+                text_parts,
+                refusal_parts,
                 calls,
                 logprobs,
                 retained,
                 choices,
                 probabilities,
                 function,
+                function_piece,
                 provider_data,
                 ordered,
                 measured,
