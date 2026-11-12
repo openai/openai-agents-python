@@ -4,6 +4,16 @@ from typing import Any as Any
 
 from ._public import preserve_module_identity as _preserve_module_identity
 
+_HOSTED_RESPONSE_ITEM_FIELDS = {
+    "mcp_list_tools": ("server_label", "tools", "error"),
+    "mcp_call": ("server_label", "name", "arguments", "output", "error"),
+    "file_search_call": ("queries", "results"),
+    "code_interpreter_call": ("container_id", "code", "outputs"),
+    "shell_call": ("call_id", "action"),
+    "shell_call_output": ("call_id", "output"),
+    "image_generation_call": ("result", "revised_prompt"),
+}
+
 
 def project_hosted_response_item(
     raw: dict[str, Any], turn_id: str | None, *, item_id: str | None = None
@@ -15,15 +25,7 @@ def project_hosted_response_item(
         if key != "internal_chat_message_metadata_passthrough"
     }
     kind = raw.get("type", "")
-    fields = {
-        "mcp_list_tools": ("server_label", "tools", "error"),
-        "mcp_call": ("server_label", "name", "arguments", "output", "error"),
-        "file_search_call": ("queries", "results"),
-        "code_interpreter_call": ("container_id", "code", "outputs"),
-        "shell_call": ("call_id", "action"),
-        "shell_call_output": ("call_id", "output"),
-        "image_generation_call": ("result", "revised_prompt"),
-    }.get(kind)
+    fields = _HOSTED_RESPONSE_ITEM_FIELDS.get(kind)
     resolved_id = raw.get("id") or item_id
     if fields is None or not resolved_id:
         return None

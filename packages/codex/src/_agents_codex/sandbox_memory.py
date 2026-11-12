@@ -22,6 +22,7 @@ from _agents_shared.sandbox_memory_artifacts import (
     validate_rollout_id,
 )
 
+from ._hosted_projection import _HOSTED_RESPONSE_ITEM_FIELDS
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
@@ -146,7 +147,7 @@ def _memory_transcript(
             if isinstance(kind, str) and (
                 kind in _INCLUDED_MEMORY_ITEM_TYPES
                 or kind in _EXCLUDED_MEMORY_ITEM_TYPES
-                or kind in ("file_search_call", "code_interpreter_call")
+                or kind in _HOSTED_RESPONSE_ITEM_FIELDS
             ):
                 raise ValueError(
                     "Native sandbox memory requires text messages and function tool history"

@@ -194,7 +194,7 @@ def test_memory_preserves_projected_failed_function_output() -> None:
     ]
 
 
-@pytest.mark.parametrize("kind", ["file_search_call", "code_interpreter_call"])
+@pytest.mark.parametrize("kind", ["file_search_call", "code_interpreter_call", "mcp_list_tools"])
 def test_memory_refuses_unprojected_hosted_tool_history(kind: str) -> None:
     snapshot = CanonicalHistorySnapshot(
         revision="test-revision",
