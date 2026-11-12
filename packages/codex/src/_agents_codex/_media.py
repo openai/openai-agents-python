@@ -33,6 +33,8 @@ def _contains_audio(value: Any) -> bool:
     if isinstance(value, Mapping):
         if value.get("type") in ("audio", "input_audio"):
             return True
+        if value.get("type") in ("function_call_output", "custom_tool_call_output"):
+            return _contains_audio(value.get("output"))
         return any(
             _contains_audio(value[key])
             for key in ("input", "content", "initial_messages")

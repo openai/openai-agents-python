@@ -1284,6 +1284,11 @@ impl NativeThread {
             let mut state = checkpoint::export(&inner, request.as_ref())
                 .await
                 .map_err(py_error)?;
+            if request.is_none()
+                && let Some(retry) = manual_checkpoint::staged_retry(&inner, &state)
+            {
+                state["_staged_manual_retry"] = retry;
+            }
             if let Some(guard) = inner
                 .thread
                 .thread_extension_data()

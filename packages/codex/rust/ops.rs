@@ -878,6 +878,7 @@ pub async fn recover_prepared(
     original_call_ids: Vec<String>,
     value: Value,
     terminal: Option<crate::python_tools::RecoveredToolCompletionSeed>,
+    staged_input: Option<codex_extension_api::StagedInputBatch>,
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
     if let Some(model) = p.model_override.as_deref() {
@@ -911,6 +912,9 @@ pub async fn recover_prepared(
         p.operation_declaration_source,
     ));
     crate::recovery_guard::Seed::attach(&mut init, &turn_id, original_call_ids);
+    if let Some(staged) = staged_input {
+        init.insert(staged);
+    }
     if let Some(terminal) = terminal {
         terminal.attach(&mut init);
     }
