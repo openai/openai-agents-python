@@ -401,6 +401,7 @@ const LOCAL_COMMAND_CLEANUP_FAILED: &str = "Interrupted local command cleanup di
 pub(crate) struct TurnAdmission {
     thread_id: String,
     pub(crate) tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
+    pub(crate) model_override: Option<String>,
     turn_id: String,
     owner: Weak<PythonTools>,
     use_deferred_specs: bool,
@@ -4686,6 +4687,7 @@ impl TurnLifecycleContributor for PythonContributor {
                 let receipt = Arc::new(TurnAdmission {
                     thread_id: input.thread_store.level_id().to_owned(),
                     tracing: tracing.context.clone(),
+                    model_override: run_model.as_ref().map(|model| model.0.clone()),
                     turn_id: input.turn_id.to_owned(),
                     owner: Arc::downgrade(&tools),
                     use_deferred_specs,

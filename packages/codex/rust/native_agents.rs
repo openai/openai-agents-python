@@ -976,6 +976,7 @@ pub async fn continue_retained(
             "Continue with the latest user input already in the conversation. Do not repeat completed work.",
         ),
     )));
+    request.start.model_override = receipt.model_override.clone();
     request.trace = receipt
         .tracing
         .as_ref()
