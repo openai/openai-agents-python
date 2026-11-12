@@ -63,7 +63,9 @@ from ._compat import cancel_once as cancel_once, cancellation_requested
 from ._events import (
     CodeInterpreterCallItem,
     FileSearchCallItem,
+    HostedMcpCallItem,
     ImageGenerationCallItem,
+    McpListToolsItem,
     MessageItem,
     ReasoningItem,
     SessionItem as SessionItem,
@@ -214,6 +216,7 @@ from .mcp import (
     _tool_names as _tool_names,
 )
 from .model_context import ModelContextSnapshot, ModelRequestContext
+from .models import _capture_model_override
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     ChildInvocation as ChildInvocation,
@@ -354,6 +357,7 @@ from .usage import (
 
 if TYPE_CHECKING:
     from ._sandbox_events import _OperationObserver
+    from .hosted_mcp import HostedMCP
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage
     from .turn import ChildTurn
@@ -452,7 +456,9 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     return result
 
 
-def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, Any]]:
+def _manual_restore_model_settings(
+    state: SessionState, *, authorized_model: str | None, trusted_default: str | None
+) -> tuple[str, dict[str, Any]]:
     """Read only accepted model fields; connection and tool authority stay current."""
     metadata = state.root_metadata
     model = metadata.get("model") if metadata is not None else None
@@ -467,13 +473,22 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
         ):
             captured = payload.get("thread_settings")
             break
-    if (
-        not isinstance(model, str)
-        or not model.strip()
-        or not isinstance(captured, dict)
-        or captured.get("model") != model
-    ):
+    if not isinstance(captured, dict):
         raise ValueError("Manual checkpoint has invalid accepted model settings")
+    default = captured.get("model")
+    if not isinstance(default, str) or not default.strip():
+        raise ValueError("Manual checkpoint has invalid accepted model settings")
+    continuation = state.native_continuation
+    if continuation is not None and continuation.model_override is not None:
+        if authorized_model != continuation.model_override:
+            raise ValueError("Authorize the saved manual checkpoint model override with model=...")
+        if model != authorized_model:
+            raise ValueError("Manual checkpoint has invalid accepted model settings")
+    elif model != default:
+        raise ValueError("Manual checkpoint has invalid accepted model settings")
+    if trusted_default is not None and default != trusted_default:
+        raise ValueError("Authorize the saved manual checkpoint default model on the Agent")
+    model = default
     settings: dict[str, Any] = {"model": model}
     for source, target in (
         ("reasoning_effort", "effort"),
@@ -1064,12 +1079,21 @@ class _ManualBoundaryLost(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedAgentToolOrigin:
+    """The tool name and declared role for a managed agent invocation."""
+
+    name: str
+    role: str
+
+
+@dataclass(frozen=True, slots=True)
 class ProducedItem:
     """One accepted assistant or tool item and its producing Agent."""
 
     item: SessionItem
     agent: Agent[Any, Any]
     handoff_target: Agent[Any, Any] | None = None
+    tool_origin: ManagedAgentToolOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1322,6 +1346,7 @@ class _RestoreDeclaration:
     resume_budget: RunBudget | None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
+    sealed_checkpoint: str | None = None
     verify_remembered_approvals: Callable[[SessionState], bool] | None = None
 
 
@@ -1461,6 +1486,8 @@ def _project_progress(
                 or item["type"]
                 in {
                     "web_search_call",
+                    "mcp_list_tools",
+                    "mcp_call",
                     "file_search_call",
                     "code_interpreter_call",
                     "shell_call",
@@ -1481,6 +1508,8 @@ def _project_progress(
                             MessageItem
                             | ReasoningItem
                             | WebSearchCallItem
+                            | McpListToolsItem
+                            | HostedMcpCallItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
                             | ShellCallItem
@@ -2095,6 +2124,14 @@ def _split_tools(
 ) -> tuple[
     tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents[Any] | None
 ]:
+    from .hosted_mcp import HostedMCP
+
+    def bindings(values: Any) -> Any:
+        return tuple(item._binding if isinstance(item, HostedMCP) else item for item in values)
+
+    tools = bindings(tools)
+    available = bindings(available) if available is not None else None
+    ceiling = bindings(ceiling) if ceiling is not None else None
     opening = ceiling if ceiling is not None else tools if available is None else available
     admitted: dict[ToolRef, FunctionTool[Any, Any, Any] | HttpMCP[Any] | StdioMCP[Any]] = {}
     mcp_raw_names: dict[ToolRef, str] = {}
@@ -2796,6 +2833,44 @@ def _install_profile_options(
     )
 
 
+def _capture_restored_hosted_mcp(
+    state: SessionState | None,
+    tools: Sequence[HostedMCP[Any]] | None,
+) -> tuple[HostedMCP[Any], ...] | None:
+    if tools is None:
+        return None
+    grants = tuple(tools)
+    if state is None or state.native_continuation is None:
+        raise ValueError("restored_hosted_mcp requires a pending restored turn")
+    return grants
+
+
+def _check_restored_hosted_mcp(
+    saved: SessionState,
+    available: Sequence[Tool[Any]],
+    authorized: Sequence[HostedMCP[Any]] | None,
+    selection: _RestoreDeclaration | None = None,
+) -> None:
+    from .hosted_mcp import HostedMCP
+
+    # DeferredTools.start owns the selection in the exact checkpoint it just sealed.
+    if authorized is None and (
+        selection is not None
+        and selection.sealed_checkpoint is not None
+        and saved.to_json() == selection.sealed_checkpoint
+    ):
+        return
+    grants = () if authorized is None else authorized
+    selected = None if saved.operation_tools is None else frozenset(saved.operation_tools)
+    for tool in available:
+        if (
+            isinstance(tool, HostedMCP)
+            and (selected is None or tool.ref in selected)
+            and not any(tool is grant for grant in grants)
+        ):
+            raise ValueError("Restore selected hosted MCP tools with restored_hosted_mcp")
+
+
 def _restore_operation_tools(
     saved: SessionState,
     catalog: _ToolCatalog,
@@ -2811,9 +2886,11 @@ def _restore_operation_tools(
     tuple[int, ...],
     tuple[ToolRef, ...],
     tuple[_MCP[Any], ...],
-    tuple[FunctionTool[Any, Any, Any] | _MCP[Any], ...],
+    tuple[Tool[Any], ...],
 ]:
     """Reconstruct one saved ceiling from its fresh, proven source declaration."""
+    from .hosted_mcp import HostedMCP
+
     assert saved.operation_tools is not None and saved.native_continuation is not None
     selected, mcp, _ = _split_tools(
         saved.operation_tools,
@@ -2840,19 +2917,23 @@ def _restore_operation_tools(
         for tool in available
         if isinstance(tool, FunctionTool)
         and any(tool is selected_tool for selected_tool in selected)
+        or isinstance(tool, HostedMCP)
+        and any(tool._binding is selected_tool for selected_tool in selected)
         or isinstance(tool, _MCP)
         and any(tool.name == server.name for server in mcp)
     )
     current_selected = selected
     selected_mcp = mcp
     if current_available is not None:
+        current_functions, current_mcp, _ = _split_tools(
+            current_available, programmatic_tool_calling
+        )
         current_refs = {tool._ref for tool in catalog.tools}
         current_selected = tuple(
             tool
             for tool in selected
-            if tool.ref in current_refs and any(tool is current for current in current_available)
+            if tool.ref in current_refs and any(tool is current for current in current_functions)
         )
-        _, current_mcp, _ = _split_tools(current_available, programmatic_tool_calling)
         selected_mcp = tuple(
             replace(server, tools=tuple(raw for raw in server.tools if server.tool(raw) in refs))
             for server in current_mcp
@@ -3566,6 +3647,28 @@ class _OriginalToolArgumentsError(ValueError):
     """A parse failure carried by the native invocation's existing receipt."""
 
 
+def _capture_opening_hosted_tools(
+    available: Sequence[Tool[Any]],
+    profiles: Sequence[_AgentProfile],
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+    codex_login: CodexLogin | None,
+) -> list[dict[str, Any]]:
+    from .hosted_mcp import HostedMCP
+
+    profile_mcp = (
+        tool
+        for profile in profiles
+        for tool in profile.declaration.tools
+        if isinstance(tool, HostedMCP)
+    )
+    hosted_tools = _capture_hosted_tools([*available, *profile_mcp])
+    if codex_login is not None and (
+        hosted_tools or any(isinstance(tool, _ClientToolSearch) for tool in tools)
+    ):
+        raise ValueError("Hosted tools require an API-key Responses provider, not Codex login")
+    return hosted_tools
+
+
 def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
     if isinstance(error, UnicodeEncodeError) and error.object is api_key:
         # Keep only the character or range shown by the native conversion error.
@@ -3648,6 +3751,21 @@ def _prepare_opening_model_settings(
     return model, settings
 
 
+def _capture_opening_model(
+    state: SessionState | None,
+    model: str | None,
+    model_settings: ModelSettings | None,
+) -> tuple[str | None, str | None]:
+    if state is None:
+        return model, None
+    if model_settings is not None or (model is not None and state.native_continuation is None):
+        raise ValueError(
+            "Opening model and model_settings overrides cannot be used with state; "
+            "use update(model=...) after the restored Session is idle"
+        )
+    return None, _capture_model_override(model)
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -3664,6 +3782,7 @@ class Session(Generic[ContextT, OutputT]):
         context: ContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
+        restored_hosted_mcp: Sequence[HostedMCP[Any]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages_json: str | None = None,
@@ -3705,6 +3824,7 @@ class Session(Generic[ContextT, OutputT]):
         )
         if state is not None:
             state._check_prompt_references()
+        hosted_restore_grants = _capture_restored_hosted_mcp(state, restored_hosted_mcp)
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -3742,11 +3862,7 @@ class Session(Generic[ContextT, OutputT]):
             if not isinstance(discover_agents_md, bool):
                 raise TypeError("discover_agents_md must be a bool")
             reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
-            if state is not None and (model is not None or model_settings is not None):
-                raise ValueError(
-                    "Opening model and model_settings overrides cannot be used with state; "
-                    "use update(model=...) after the restored Session is idle"
-                )
+            model, authorized_restore_model = _capture_opening_model(state, model, model_settings)
             policy_agent = agent
             selected = _restore_declaration.get()
             if (
@@ -3811,7 +3927,6 @@ class Session(Generic[ContextT, OutputT]):
             operation_slots = None
             restored_operation_refs = None
             restored_operation_declarations = None
-            restored_model_settings = None
             restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None = None
             restored_resource_servers: tuple[str, ...] = ()
             restored_override = False
@@ -3837,8 +3952,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 manual_restore = saved.native_continuation is not None
                 continuation = saved.native_continuation
-                if manual_restore:
-                    restored_model_settings = _manual_restore_model_settings(saved)
             if isinstance(storage, LocalStorage) and programmatic_tool_calling:
                 raise ValueError(
                     "LocalStorage does not support code mode: nested tool identities "
@@ -3873,13 +3986,7 @@ class Session(Generic[ContextT, OutputT]):
             )
             if goals and storage is None:
                 raise ValueError("NativeGoals requires an explicit LocalStorage profile")
-            hosted_tools = _capture_hosted_tools(available)
-            if codex_login is not None and (
-                hosted_tools or any(isinstance(tool, _ClientToolSearch) for tool in tools)
-            ):
-                raise ValueError(
-                    "Hosted tools require an API-key Responses provider, not Codex login"
-                )
+            hosted_tools = _capture_opening_hosted_tools(available, profiles, tools, codex_login)
             web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
             # Capture the controls before opening can await. Later selections only select the grant.
             web_search_config = _capture_web_search_config(web_search)
@@ -3970,6 +4077,26 @@ class Session(Generic[ContextT, OutputT]):
                 if restored_profile is not None
                 else output
             )
+            # A handoff without its own model inherits the opening Agent's model.
+            trusted_restore_default = restored_declaration.model or agent.model
+            if (
+                continuation is not None
+                and continuation.model_override is None
+                and authorized_restore_model is not None
+            ):
+                trusted_restore_default = authorized_restore_model
+            restored_model_settings = (
+                _manual_restore_model_settings(
+                    saved,
+                    authorized_model=authorized_restore_model,
+                    trusted_default=trusted_restore_default,
+                )
+                if state is not None and manual_restore
+                else None
+            )
+            verify_current_default = (
+                restored_model_settings is not None and trusted_restore_default is None
+            )
             model, settings = _prepare_opening_model_settings(
                 agent,
                 model,
@@ -3999,6 +4126,9 @@ class Session(Generic[ContextT, OutputT]):
                     "Run outside that sandboxed environment or remove unused proxy settings."
                 )
             if manual_restore:
+                _check_restored_hosted_mcp(
+                    saved, operation_declaration.tools, hosted_restore_grants, selected
+                )
                 _check_restored_tool_context(
                     restored_tools, restored_mcp, saved.operation_tools, context
                 )
@@ -4257,7 +4387,7 @@ class Session(Generic[ContextT, OutputT]):
                         "enabled": True,
                         "disable_in_process_fallback": True,
                     }
-                if model is not None:
+                if model is not None and not verify_current_default:
                     config["model"] = model
                 if codex_login is not None:
                     # Apps require an explicit MCP registration with its own credentials.
@@ -4368,6 +4498,7 @@ class Session(Generic[ContextT, OutputT]):
                         + [
                             {"name": tool["type"], "namespace": "functions"}
                             for tool in hosted_tools
+                            if tool["type"] != "mcp"
                         ]
                         + (
                             [{"name": "run", "namespace": "web"}]
@@ -4472,6 +4603,11 @@ class Session(Generic[ContextT, OutputT]):
                                     "initial_checkpoint": checkpoint,
                                     "initial_specs_json": native_specs,
                                     "initial_options_json": json.dumps(options),
+                                    **(
+                                        {"_verify_current_default_model": True}
+                                        if verify_current_default
+                                        else {}
+                                    ),
                                 }
                                 if checkpoint is not None
                                 else {}
@@ -4633,71 +4769,18 @@ class Session(Generic[ContextT, OutputT]):
                 session._bind_native_agents(native_agents)
                 session._storage = storage
                 if checkpoint is not None:
-                    session._repair_turns = saved.repair_turns
-                    session._repair_items = saved.repair_items
-                    session._application_tool_outputs = [
-                        record.model_copy(deep=True) for record in saved.application_tool_outputs
-                    ]
-                    recorded_policy = saved.executor_policy_digest
-                    if (
-                        recorded_policy == _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
-                        and restored_operation_refs is not None
-                        and executor is None
-                    ):
-                        # Older checkpoints can carry an implicit policy even
-                        # when the saved subset resolves without an executor.
-                        recorded_policy = None
-                    if recorded_policy is not None and (
-                        recorded_policy not in await session._executor_policy_digests()
-                    ):
-                        raise ValueError(
-                            "Checkpoint and Environment must agree on the applied executor policy"
-                        )
-                if restored_defaults is not None:
-                    session._default_tools = restored_defaults
-                if (
-                    checkpoint is not None
-                    and not manual_restore
-                    and (catalog.tools != bound_tools or saved.step_mcp_tools is not None)
-                ):
-                    # The acknowledged idle catalog is the restored default.
-                    # Other current opening declarations remain explicitly selectable.
-                    restored_fixed_refs: list[ToolRef] = sorted(
-                        _fixed_tool_refs(
-                            restored_available,
-                            programmatic_tool_calling,
-                            executor,
-                            native_agents,
-                            project_guidance=project_guidance,
-                        ),
-                        key=lambda ref: (ref.namespace or "", ref.name),
+                    await session._restore_opening_checkpoint(
+                        saved,
+                        catalog,
+                        restored_available,
+                        restored_mcp,
+                        manual_restore=manual_restore,
+                        restored_defaults=restored_defaults,
+                        restored_operation_refs=restored_operation_refs,
+                        programmatic_tool_calling=programmatic_tool_calling,
                     )
-                    restored_mcp_refs = [
-                        server.tool(name) for server in restored_mcp for name in server.tools
-                    ]
-                    if saved.step_mcp_tools is not None:
-                        current_mcp_refs = {
-                            (server.name, name): server.tool(name)
-                            for server in restored_mcp
-                            for name in server.tools
-                        }
-                        saved_mcp_pairs = [
-                            (item.server, item.name) for item in saved.step_mcp_tools
-                        ]
-                        if len(set(saved_mcp_pairs)) != len(saved_mcp_pairs) or any(
-                            pair not in current_mcp_refs for pair in saved_mcp_pairs
-                        ):
-                            raise ValueError(
-                                "Saved idle MCP tools must name distinct current declarations"
-                            )
-                        restored_mcp_refs = [current_mcp_refs[pair] for pair in saved_mcp_pairs]
-                    if restored_defaults is None:
-                        # Older checkpoints lack exact persistent fixed selectors.
-                        session._default_tools = (
-                            *(tool._ref for tool in catalog.tools),
-                            *restored_mcp_refs,
-                            *restored_fixed_refs,
-                        )
+                elif restored_defaults is not None:
+                    session._default_tools = restored_defaults
                 if resume is not None:
                     await session._reconcile_local_history(reconciliation)
                 await session._publish_opening_configuration(
@@ -4747,6 +4830,7 @@ class Session(Generic[ContextT, OutputT]):
                     ).hexdigest()
                     active = _Submission(
                         restored_output,
+                        model_override=continuation.model_override,
                         guardrail_results=session._restore_guardrail_records(saved),
                         run_usage=_UsageCollector(saved.run_usage),
                         original_input=saved.original_input,
@@ -5280,6 +5364,74 @@ class Session(Generic[ContextT, OutputT]):
         finally:
             del config
 
+    async def _restore_opening_checkpoint(
+        self,
+        saved: SessionState,
+        catalog: _ToolCatalog,
+        restored_available: Sequence[Tool[Any]],
+        restored_mcp: Sequence[_MCP[Any]],
+        *,
+        manual_restore: bool,
+        restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None,
+        restored_operation_refs: tuple[ToolRef, ...] | None,
+        programmatic_tool_calling: bool,
+    ) -> None:
+        self._repair_turns = saved.repair_turns
+        self._repair_items = saved.repair_items
+        self._application_tool_outputs = [
+            record.model_copy(deep=True) for record in saved.application_tool_outputs
+        ]
+        recorded_policy = saved.executor_policy_digest
+        if (
+            recorded_policy == _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
+            and restored_operation_refs is not None
+            and self._executor is None
+        ):
+            # Older checkpoints can carry an implicit policy even
+            # when the saved subset resolves without an executor.
+            recorded_policy = None
+        if (
+            recorded_policy is not None
+            and recorded_policy not in await self._executor_policy_digests()
+        ):
+            raise ValueError("Checkpoint and Environment must agree on the applied executor policy")
+        if restored_defaults is not None:
+            self._default_tools = restored_defaults
+        if manual_restore or (catalog.tools == self._bound_tools and saved.step_mcp_tools is None):
+            return
+        # The acknowledged idle catalog is the restored default.
+        # Other current opening declarations remain explicitly selectable.
+        restored_fixed_refs = sorted(
+            _fixed_tool_refs(
+                restored_available,
+                programmatic_tool_calling,
+                self._executor,
+                self._native_agents,
+                project_guidance=self._project_guidance,
+            ),
+            key=lambda ref: (ref.namespace or "", ref.name),
+        )
+        restored_mcp_refs = [server.tool(name) for server in restored_mcp for name in server.tools]
+        if saved.step_mcp_tools is not None:
+            current_mcp_refs = {
+                (server.name, name): server.tool(name)
+                for server in restored_mcp
+                for name in server.tools
+            }
+            saved_mcp_pairs = [(item.server, item.name) for item in saved.step_mcp_tools]
+            if len(set(saved_mcp_pairs)) != len(saved_mcp_pairs) or any(
+                pair not in current_mcp_refs for pair in saved_mcp_pairs
+            ):
+                raise ValueError("Saved idle MCP tools must name distinct current declarations")
+            restored_mcp_refs = [current_mcp_refs[pair] for pair in saved_mcp_pairs]
+        if restored_defaults is None:
+            # Older checkpoints lack exact persistent fixed selectors.
+            self._default_tools = (
+                *(tool._ref for tool in catalog.tools),
+                *restored_mcp_refs,
+                *restored_fixed_refs,
+            )
+
     async def _publish_opening_configuration(
         self,
         *,
@@ -5787,6 +5939,8 @@ class Session(Generic[ContextT, OutputT]):
     ) -> set[ToolRef] | None:
         if not self._profiles or state.operation_refs is None:
             return None
+        from .hosted_mcp import HostedMCP
+
         declared = state.operation_declarations or ()
         allowed = _fixed_tool_refs(
             source.tools,
@@ -5800,7 +5954,7 @@ class Session(Generic[ContextT, OutputT]):
         for tool in bindings:
             if not any(tool is grant for grant in declared):
                 continue
-            if isinstance(tool, FunctionTool):
+            if isinstance(tool, (FunctionTool, HostedMCP)):
                 allowed.add(tool.ref)
             elif isinstance(tool, _MCP):
                 allowed.update(tool.tool(raw) for raw in tool.tools)
@@ -6420,6 +6574,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        model_override: str | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -6437,6 +6592,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        model_override: str | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -6453,6 +6609,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: None = None,
         prepare_request: None = None,
         budget: None = None,
+        model_override: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -6469,6 +6626,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        model_override: str | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -6533,6 +6691,7 @@ class Session(Generic[ContextT, OutputT]):
         """
         try:
             self._check_open()
+            model_override = _capture_model_override(model_override)
             parent_trace = _trace_context(parent_trace)
             self._check_callback_operation("start work in its own Session")
             self._check_graph_admission()
@@ -6546,6 +6705,7 @@ class Session(Generic[ContextT, OutputT]):
                 or writable_roots is not None
                 or prepare_request is not None
                 or budget is not None
+                or model_override is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -6602,6 +6762,7 @@ class Session(Generic[ContextT, OutputT]):
                 writable_roots=roots,
                 prepare_request=prepare_request,
                 budget=_RunBudget(budget) if budget is not None else None,
+                model_override=model_override,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -7985,11 +8146,19 @@ class Session(Generic[ContextT, OutputT]):
             metadata = entry["record"].get("metadata") or {}
             handoff = metadata.get("sdk_agent_handoff")
             target = self._profiles.get(handoff["target_profile_id"]) if handoff else None
+            origin = metadata.get("sdk_managed_agent_tool")
+            tool_origin = None
+            if isinstance(origin, dict):
+                name = origin.get("name")
+                role = origin.get("role")
+                if isinstance(name, str) and isinstance(role, str):
+                    tool_origin = ManagedAgentToolOrigin(name, role)
             produced.append(
                 ProducedItem(
                     item,
                     self._original_agent_for_profile(entry["agent"]),
                     target.profile.agent if target is not None else None,
+                    tool_origin=tool_origin,
                 )
             )
         return tuple(produced)
@@ -8292,8 +8461,8 @@ class Session(Generic[ContextT, OutputT]):
                     else {}
                 ),
             )
-            thread = await engine.restore_checkpoint(
-                checkpoint,
+            thread = await change.restore_candidate(
+                engine,
                 json.dumps(options),
                 self._catalog.native_specs(),
             )
@@ -8676,6 +8845,14 @@ class Session(Generic[ContextT, OutputT]):
                             "Native interaction needs on_interaction or Agent.session()"
                         )
 
+                    from ._hosted_mcp_binding import _HostedMCPBinding
+
+                    if isinstance(event._declaration, _HostedMCPBinding):
+                        raise InteractionRequired(
+                            "Hosted MCP approvals require live replies; "
+                            "pass on_interaction or use Agent.session()"
+                        )
+
                     def check_pending() -> None:
                         # Check the whole settled sample, not only the first
                         # request this cursor happened to observe.
@@ -8787,6 +8964,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: _RunBudget | None = None,
+        model_override: str | None = None,
         run_usage: _UsageCollector | None = None,
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
@@ -8867,12 +9045,14 @@ class Session(Generic[ContextT, OutputT]):
                         project_guidance=self._project_guidance,
                     )
                 if tools is not None:
+                    from .hosted_mcp import HostedMCP
+
                     chosen = {tool.ref for tool in python}
                     server_names = {server.name for server in mcp}
                     operation_declarations = tuple(
                         tool
                         for tool in self._bindings
-                        if isinstance(tool, FunctionTool)
+                        if isinstance(tool, (FunctionTool, HostedMCP))
                         and tool.ref in chosen
                         or isinstance(tool, _MCP)
                         and tool.name in server_names
@@ -8908,6 +9088,7 @@ class Session(Generic[ContextT, OutputT]):
                 before_step=before_step,
                 prepare_request=prepare_request,
                 budget=budget,
+                model_override=model_override,
                 tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
@@ -9220,15 +9401,19 @@ class Session(Generic[ContextT, OutputT]):
             )
             # Explicit idle declarations replace bindings; refs only select.
             # Preserve every omitted opening slot and alias for later operations.
+            from .hosted_mcp import HostedMCP
+
             supplied_python = {
-                tool.ref: tool for tool in selection if isinstance(tool, FunctionTool)
+                tool.ref: tool._binding if isinstance(tool, HostedMCP) else tool
+                for tool in selection
+                if isinstance(tool, (FunctionTool, HostedMCP))
             }
             supplied_mcp = tuple(
                 tool for tool in selection if isinstance(tool, (HttpMCP, StdioMCP))
             )
             bindings: list[Tool[ContextT]] = []
             for bound in self._bindings:
-                if isinstance(bound, FunctionTool):
+                if isinstance(bound, (FunctionTool, HostedMCP)):
                     bindings.append(supplied_python.get(bound.ref, bound))
                 elif isinstance(bound, (HttpMCP, StdioMCP)):
                     if not any(server.name == bound.name for server in supplied_mcp):
@@ -9244,6 +9429,20 @@ class Session(Generic[ContextT, OutputT]):
                 else bound
                 for bound in self._bound_tools
             )
+            from ._hosted_mcp_binding import (
+                _CapturedHostedMCPApproval,
+                _CapturedHostedMCPManual,
+            )
+
+            hosted_bindings = (_CapturedHostedMCPApproval, _CapturedHostedMCPManual)
+            for previous, replacement in zip(self._bound_tools, selected, strict=True):
+                if isinstance(previous, hosted_bindings) and (
+                    not isinstance(replacement, hosted_bindings)
+                    or previous.config != replacement.config
+                ):
+                    raise CapabilityError(
+                        "Hosted MCP provider configuration is fixed when the Session opens"
+                    )
             bound_tools = selected
             if self._native_agents is not None:
                 refs = {tool.ref for tool in python}
@@ -10565,6 +10764,8 @@ class Session(Generic[ContextT, OutputT]):
                             request["expected_previous_turn_id"] = state.continued_from
                         if state.output.mode == "native" and state.realtime_tool is None:
                             request["start"] = {"final_output_json_schema": state.output.schema}
+                        if state.model_override is not None:
+                            request.setdefault("start", {})["model_override"] = state.model_override
                         if state.writable_roots is not None:
                             request["writable_roots"] = state.writable_roots
                         state.observation_after = self._observations.sequence
@@ -10859,6 +11060,7 @@ class Session(Generic[ContextT, OutputT]):
                     preparation_index=state.preparation_index,
                     step_index=state.step_index,
                     budget=state.budget,
+                    model_override=state.model_override,
                     run_usage=state.run_usage,
                     original_input=state.original_input,
                     guardrail_results=state.guardrail_results,
@@ -11119,6 +11321,7 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                         _prepare_spec(str),
                         budget=state.budget,
+                        model_override=state.model_override,
                         run_usage=state.run_usage,
                     )
                 except NativeError as error:
@@ -15336,7 +15539,19 @@ class Session(Generic[ContextT, OutputT]):
                 )
 
             try:
-                if isinstance(entry, _CapturedComputer):
+                from ._hosted_mcp_binding import _CapturedHostedMCPApproval
+
+                if isinstance(entry, _CapturedHostedMCPApproval):
+                    assert context is not None
+                    value = await self._call_decision_callback(
+                        state,
+                        message,
+                        entry.invoke,
+                        lambda: self._admit_tool(state, request),
+                        context,
+                        parsed,
+                    )
+                elif isinstance(entry, _CapturedComputer):
                     assert context is not None and isinstance(parsed, _ComputerCall)
                     value = await self._call_decision_callback(
                         state,
@@ -16197,8 +16412,10 @@ class Session(Generic[ContextT, OutputT]):
                 "portable restore cannot recover its callback"
             )
 
+        from ._hosted_mcp_binding import _CapturedHostedMCPManual
+
         if any(
-            isinstance(tool, (_CapturedFunction, _CapturedApproval))
+            isinstance(tool, (_CapturedFunction, _CapturedApproval, _CapturedHostedMCPManual))
             and tool._requires_live_manual_session
             for tool in self._catalog.tools
         ):

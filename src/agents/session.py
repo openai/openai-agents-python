@@ -57,6 +57,7 @@ from _agents_codex.session import (
     Literal as Literal,
     LocalRecoveryRequired as LocalRecoveryRequired,
     LocalStorage as LocalStorage,
+    ManagedAgentToolOrigin as ManagedAgentToolOrigin,
     Mapping as Mapping,
     MappingProxyType as MappingProxyType,
     MCPResultContext as MCPResultContext,

@@ -391,7 +391,23 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
 
     # Capture nested mutable configuration before opening can await.
     specs: list[dict[str, Any]] = []
+    hosted_servers: dict[str, dict[str, Any]] = {}
+    from .hosted_mcp import HostedMCP, _live_config
+
     for tool in tools:
+        if isinstance(tool, HostedMCP):
+            config = _live_config(tool)
+            label = config["server_label"]
+            previous = hosted_servers.get(label)
+            if previous is not None:
+                if previous != config:
+                    raise ValueError(
+                        "Hosted MCP profiles must share configuration for the same server label"
+                    )
+                continue
+            hosted_servers[label] = config
+            specs.append(config)
+            continue
         if not isinstance(tool, _HOSTED_TOOLS):
             continue
         if isinstance(tool, ToolSearch):
@@ -734,6 +750,9 @@ class _ToolCatalog:
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
     kind = spec.get("type")
+    if kind == "hostedMcp":
+        label = spec.get("serverLabel")
+        return ToolRef(label, "hosted_mcp") if isinstance(label, str) else None
     if kind == "applyPatch":
         return ToolRef("apply_patch")
     if kind in ("computer", "shell"):

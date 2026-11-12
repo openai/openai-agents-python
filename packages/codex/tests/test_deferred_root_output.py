@@ -1,7 +1,9 @@
 """Deferred restore keeps the selected root output and the opening default."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +12,7 @@ from agents import (
     InteractionRequired,
     NativeError,
     NativeOutput,
+    NativeProvider,
     PromptedOutput,
     RunBudget,
     Turn,
@@ -25,8 +28,60 @@ from tests.native_fixtures import (
 )
 from tests.test_deferred_jobs import Journal, Output, Provider, declared, done
 from tests.test_native_function_concurrency import queued
+from tests.test_native_hosted_mcp import declaration
 from tests.test_native_manual_tools import next_request, provider
 from tests.test_native_output_modes import output_format
+
+
+@pytest.mark.parametrize("changed", [False, True], ids=["sealed", "changed"])
+async def test_deferred_start_preserves_selected_hosted_mcp(responses, monkeypatch, changed):
+    journal, backend = Journal(), Provider([done()])
+    jobs, manual = declared(journal, backend)
+    docs = declaration(require_approval="never")
+    other = declaration("other", require_approval="never")
+    catalog = Path(__file__).with_name("fixtures") / "request-control-models.json"
+    model = next(
+        entry["slug"]
+        for entry in json.loads(catalog.read_text())["models"]
+        if not entry.get("use_responses_lite")
+    )
+    native = NativeProvider(base_url=responses.url, api_key="synthetic-deferred-key")
+    agent = Agent(
+        instructions="Render.",
+        model=model,
+        tools=[manual, docs, other],
+        provider=native,
+    )
+    responses.respond(function_call("render", {"pages": 2}, "deferred-render"))
+    responses.respond(assistant_output("finished"))
+
+    async with timeout(20), native, agent.session() as original:
+        await original.submit("Render.", tools=[manual.ref, docs.ref])
+        request = await next_request(original.interactions(), manual)
+        if changed:
+            prepare = jobs.prepare
+
+            async def change_selection(*args, **kwargs):
+                saved = await prepare(*args, **kwargs)
+                return saved.model_copy(
+                    update={"operation_tools": [*saved.operation_tools, other.ref]}
+                )
+
+            monkeypatch.setattr(jobs, "prepare", change_selection)
+            with pytest.raises(ValueError, match="restored_hosted_mcp"):
+                async with jobs.start(original, request):
+                    pytest.fail("The changed checkpoint was treated as the SDK-sealed state")
+            assert len(responses.requests) == 1
+            assert backend.calls == []
+            return
+        async with jobs.start(original, request) as (_, resumed):
+            assert isinstance(resumed, Turn)
+            assert (await resumed.get_result()).final_output == "finished"
+
+    assert [
+        [tool["server_label"] for tool in request["tools"] if tool["type"] == "mcp"]
+        for request in responses.requests
+    ] == [["docs"], ["docs"]]
 
 
 @pytest.mark.parametrize(

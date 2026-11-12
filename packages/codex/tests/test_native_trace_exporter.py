@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import io
 import json
 import os
@@ -275,6 +276,11 @@ def native_trace_child_env() -> dict[str, str]:
         "native_external_parent_case",
         "native_deadline_case",
         "native_deadline_reset_case",
+        "native_restart_case",
+        "native_restart_credentials_case",
+        "native_restart_unadmitted_credentials_case",
+        "native_restart_diagnostics_omitted_case",
+        "native_restart_diagnostics_none_case",
         "native_outcome_privacy_case",
         "native_auth_case",
         "native_auth_destination_case",
@@ -308,6 +314,179 @@ def test_real_native_capture_policy_and_openai_export(case_name):
         timeout=45,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    if case_name.startswith("native_restart_diagnostics_"):
+        before, after = result.stdout.split("DIAGNOSTICS_RESTART_BOUNDARY", 1)
+
+        def records(output):
+            values = []
+            for line in output.splitlines():
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and value.get("kind") == "native_diagnostic":
+                    values.append(value)
+            return values
+
+        assert "DIAGNOSTICS_ENABLED_PAYLOAD" in json.dumps(records(before))
+        assert records(after) == []
+
+
+async def native_restart_diagnostics_omitted_case():
+    await native_restart_diagnostics_case(explicit_none=False)
+
+
+async def native_restart_diagnostics_none_case():
+    await native_restart_diagnostics_case(explicit_none=True)
+
+
+async def native_restart_diagnostics_case(*, explicit_none):
+    async def operation(output):
+        async with ScriptedResponses(lambda body: [text(output)]) as peer:
+            agent = Agent(instructions="Answer.", provider=peer.provider)
+            assert (await agent.run("Synthetic input")).final_output == output
+
+    await telemetry.configure(
+        diagnostics=telemetry.ConsoleDiagnostics(
+            level="trace", targets=("codex_api::sse::responses",), include_fields=True
+        )
+    )
+    await operation("DIAGNOSTICS_ENABLED_PAYLOAD")
+    await telemetry.shutdown()
+    print("DIAGNOSTICS_RESTART_BOUNDARY", flush=True)
+    if explicit_none:
+        await telemetry.configure(restart_after_shutdown=True, diagnostics=None)
+    else:
+        await telemetry.configure(restart_after_shutdown=True)
+    await operation("DIAGNOSTICS_DISABLED_PAYLOAD")
+    await telemetry.shutdown()
+
+
+async def native_restart_case():
+    class Recorder:
+        def __init__(self):
+            self.names = []
+
+        def on_trace_event(self, event):
+            self.names.append(event["name"])
+
+    first = Recorder()
+    second = Recorder()
+    await telemetry.configure(processors=[first])
+    with pytest.raises(RuntimeError):
+        await telemetry.configure(processors=[second], restart_after_shutdown=True)
+    native = importlib.import_module("agents._native")
+    with telemetry.trace("before native restart") as before:
+        retired_parent = native.retain_trace_context(before.context._handle)
+    assert (await telemetry.force_flush()).status == "success"
+    live = await native.create_engine(
+        '{"web_search":"disabled"}', '{"ephemeral":true}', "synthetic-key"
+    )
+    await telemetry.shutdown()
+    with pytest.raises(RuntimeError, match="all Codex clients to close"):
+        await telemetry.configure(processors=[second], restart_after_shutdown=True)
+    await live.close()
+
+    await telemetry.configure(processors=[second], restart_after_shutdown=True)
+    with pytest.raises(RuntimeError, match="retired telemetry provider"):
+        native.start_trace_span(
+            json.dumps({"name": "retired child", "kind": "custom", "parent": retired_parent})
+        )
+    native.release_trace_context(retired_parent)
+    with telemetry.trace("after native restart"):
+        pass
+    assert (await telemetry.force_flush()).status == "success"
+    await telemetry.shutdown()
+
+    assert "before native restart" in first.names
+    assert "after native restart" not in first.names
+    assert "after native restart" in second.names
+    assert "before native restart" not in second.names
+
+
+async def native_restart_credentials_case():
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="synthetic-fallback", endpoint=endpoint)
+        credentials = telemetry.TraceExportCredentials(
+            headers={"Authorization": "Bearer synthetic-open-credential"}
+        )
+        await telemetry.configure(processors=[exporter])
+        with telemetry.trace(
+            "credential before restart", options={"export_credentials": credentials}
+        ) as old_scope:
+            pass
+        assert (await telemetry.force_flush()).status == "success"
+        before = len(received)
+        assert before > 0
+        await telemetry.shutdown()
+        await telemetry.configure(processors=[exporter], restart_after_shutdown=True)
+        with telemetry.trace(
+            "credential after restart", options={"export_credentials": credentials}
+        ):
+            pass
+        assert (await telemetry.force_flush()).status == "success"
+        assert len(received) > before
+        assert all(
+            {key.lower(): value for key, value in request["headers"].items()}["authorization"]
+            == "Bearer synthetic-open-credential"
+            for request in received
+        )
+        with pytest.raises(RuntimeError, match="retired telemetry provider"):
+            with telemetry.span("stale credential scope", options={"parent": old_scope.context}):
+                pass
+        await telemetry.shutdown()
+
+
+async def native_restart_unadmitted_credentials_case():
+    native = importlib.import_module("agents._native")
+    with collector() as (first_endpoint, first), collector() as (second_endpoint, second):
+        await telemetry.configure(
+            processors=[
+                telemetry.OpenAITraceExporter(api_key="synthetic-fallback", endpoint=first_endpoint)
+            ]
+        )
+        stale = native.register_trace_credentials(
+            json.dumps({"Authorization": "Bearer synthetic-stale-credential"})
+        )
+        await telemetry.shutdown()
+        await telemetry.configure(
+            processors=[
+                telemetry.OpenAITraceExporter(
+                    api_key="synthetic-fallback", endpoint=second_endpoint
+                )
+            ],
+            restart_after_shutdown=True,
+        )
+        with pytest.raises(RuntimeError, match="unknown trace credential reference"):
+            native.start_trace_span(
+                json.dumps(
+                    {"name": "paused old registration", "kind": "custom", "credential_ref": stale}
+                )
+            )
+        fresh = native.register_trace_credentials(
+            json.dumps({"Authorization": "Bearer synthetic-fresh-credential"})
+        )
+        assert int(fresh.rsplit("_", 1)[1]) > int(stale.rsplit("_", 1)[1])
+        native.release_trace_credentials(stale)
+        span = json.loads(
+            native.start_trace_span(
+                json.dumps(
+                    {"name": "fresh registration", "kind": "custom", "credential_ref": fresh}
+                )
+            )
+        )
+        native.end_trace_span(span["handle"], '{"status":"ok","category":null,"data":{}}')
+        native.release_trace_context(span["handle"])
+        native.release_trace_credentials(fresh)
+        assert (await telemetry.force_flush()).status == "success"
+        assert first == []
+        assert second
+        assert all(
+            {key.lower(): value for key, value in request["headers"].items()}["authorization"]
+            == "Bearer synthetic-fresh-credential"
+            for request in second
+        )
+        await telemetry.shutdown()
 
 
 async def native_case():
@@ -439,7 +618,18 @@ async def native_external_parent_case():
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_export_deadline_and_cancellation_close_trickling_connection(cancelled):
+def test_export_deadline_and_cancellation_close_trickling_connection(cancelled):
+    import asyncio
+
+    case = _check_trickling_connection(cancelled)
+    if sys.platform == "win32" and sys.version_info >= (3, 12):
+        # A peer reset can interrupt Proactor transport teardown in this loopback server.
+        asyncio.run(case, loop_factory=asyncio.SelectorEventLoop)
+    else:
+        asyncio.run(case)
+
+
+async def _check_trickling_connection(cancelled):
     import asyncio
     import time
 
@@ -722,7 +912,10 @@ async def test_batch_delivery_preserves_order_and_bounded_descriptor_lifetime():
         for index in range(30)
     ]
     with collector() as (endpoint, received):
-        exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
+        # Let the loopback fixture drain the large batch under parallel CI load.
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-key", endpoint=endpoint, timeout_ms=5000
+        )
         await exporter.on_trace_events(events)
         assert len(received) == 1
         records = received[0]["payload"]["data"]

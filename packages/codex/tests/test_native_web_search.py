@@ -515,7 +515,8 @@ async def test_hosted_lite_refuses_without_standalone_dispatch():
         assert rejected, "The actual Lite metadata cannot use the declared hosted protocol"
 
 
-async def test_hosted_rejects_a_lite_model_change_without_changing_the_original_grant():
+@pytest.mark.parametrize("admission", ["update", "run_override"])
+async def test_hosted_rejects_a_lite_model_change_without_changing_the_original_grant(admission):
     async with timeout(25), search_peer() as (model, searches):
         provider = NativeProvider(base_url=model.url, api_key="hosted-update")
         agent = Agent(
@@ -526,8 +527,17 @@ async def test_hosted_rejects_a_lite_model_change_without_changing_the_original_
             programmatic_tool_calling=True,
         )
         async with provider, agent.session() as current:
-            with pytest.raises(ValueError, match="hosted"):
-                await current.update(model="gpt-5.6-sol")
+
+            async def change_model(*, model):
+                if admission == "update":
+                    await current.update(model=model)
+                else:
+                    await (
+                        await current.submit("refuse the route change", model_override=model)
+                    ).get_result()
+
+            with pytest.raises((ValueError, RuntimeError), match="hosted"):
+                await change_model(model="gpt-5.6-sol")
             assert not model.requests and not searches
             model.respond(search_call(True, "not-granted"))
             model.respond(assistant_output("hosted survived"))
