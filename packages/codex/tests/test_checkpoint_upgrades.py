@@ -260,6 +260,47 @@ async def test_staged_input_after_restored_approval(
         assert staged_text in json.dumps(responses.requests[1]["input"])
 
 
+@_POSIX_CAPTURE
+@pytest.mark.parametrize("approve", [False, True])
+async def test_staged_checkpoint_cannot_grant_hosted_mcp_approval(
+    responses: ResponsesFixture, approve: bool
+):
+    @function_tool(needs_approval=True)
+    def record(value: str) -> str:
+        return value
+
+    responses.respond(function_call("record", {"value": "hold"}, "hold-call"))
+    async with timeout(20), provider(responses) as current:
+        agent = Agent(
+            instructions="Wait for the application approval.",
+            model="gpt-5.5",
+            provider=current,
+            tools=[record],
+        )
+        async with agent.session() as source:
+            await source.submit("Record after approval.")
+            await next_request(source.interactions(), record)
+            saved = await source.suspend()
+        payload = json.loads(saved.to_json())
+        payload["native_continuation"]["pending_input"] = [
+            {
+                "type": "mcp_approval_response",
+                "approval_request_id": "provider-approval",
+                "approve": approve,
+            }
+        ]
+        imported = SessionState.from_json(json.dumps(payload))
+        restore = agent.session(state=imported)
+        if approve:
+            with pytest.raises(RuntimeError, match="require live SDK approval authority"):
+                async with restore:
+                    pytest.fail("Checkpoint restore accepted a staged positive MCP approval")
+        else:
+            async with restore as restored:
+                assert restored.restored_turn is not None
+    assert len(responses.requests) == 1
+
+
 class LookupArgs(BaseModel):
     key: str
 

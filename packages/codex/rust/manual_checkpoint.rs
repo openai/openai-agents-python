@@ -932,6 +932,7 @@ fn validate_frame(
                 !matches!(item, ResponseItem::Other),
                 "Staged input is not a supported Responses item"
             );
+            crate::checkpoint::validate_external_response_item(&item)?;
             staged_input.push(item);
         }
     }
