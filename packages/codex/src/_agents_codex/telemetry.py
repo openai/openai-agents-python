@@ -1009,9 +1009,16 @@ def span(name: str, *, options: TraceOptions | Mapping[str, Any] | None = None) 
 class _CapturedTrace:
     """Host lease plus optional operation span; never part of saved state."""
 
-    def __init__(self, context: str | None, scope: TraceScope | None):
+    def __init__(self, context: str | None, scope: TraceScope | None, *, policy_only: bool):
         self.context = context
         self.scope = scope
+        self.policy_only = policy_only
+
+    def correlation_id(self) -> str | None:
+        if self.context is None:
+            return None
+        metadata = json.loads(_native_tracing().trace_span_context(self.context))
+        return None if metadata["disabled"] else str(metadata["trace_id"])
 
     def close(
         self,
@@ -1038,6 +1045,9 @@ class _CapturedTrace:
 def _capture(
     options: TraceOptions | Mapping[str, Any] | None = None,
     fallback: str | None = None,
+    *,
+    fallback_policy_only: bool = False,
+    continuation_trace_id: str | None = None,
 ) -> _CapturedTrace:
     try:
         scope = None
@@ -1045,6 +1055,18 @@ def _capture(
         native = None
         context = current_context()
         handle = context._handle if context else fallback
+        policy_only = options is None and handle is None and continuation_trace_id is None
+        if (
+            options is None
+            and context is None
+            and (fallback is None or fallback_policy_only)
+            and continuation_trace_id is not None
+        ):
+            options = TraceOptions(
+                trace_id=continuation_trace_id,
+                include_sensitive_data=False,
+                detached=fallback is not None,
+            )
         if (
             options is not None
             or (context is not None and fallback is not None)
@@ -1082,6 +1104,7 @@ def _capture(
             captured = _CapturedTrace(
                 (native or _native_tracing()).retain_trace_context(handle) if handle else None,
                 scope,
+                policy_only=policy_only and scope is not None,
             )
             _ensure_processor_pump()
             return captured

@@ -157,6 +157,7 @@ async def capture(
         output_override=False,
         budget=None,
         original_input=None,
+        tracing=None,
         run_usage=full,
         model_run_usage=model,
         stopping=False,
