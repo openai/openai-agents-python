@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 
 import pytest
 
 from agents import telemetry
+from tests.test_native_trace_exporter import collector, native_trace_child_env
 
-CASES = ["array", "object", "nested", "string", "encoded", "unicode"]
+CASES = ["array", "object", "nested", "string", "encoded", "unicode", "top-level"]
 
 
 def payload(case):
@@ -30,6 +30,8 @@ def payload(case):
         return {"x": ["x" * 3000, "y" * 3000]}
     if case == "unicode":
         return {"x": "é" * 2100}
+    if case == "top-level":
+        return {f"field-{i}": i for i in range(200)}
     raise AssertionError(case)
 
 
@@ -44,7 +46,7 @@ def test_small_native_trace_payloads_round_trip(case):
             "asyncio.run(native_case(sys.argv[1]))",
             case,
         ],
-        env=os.environ.copy(),
+        env=native_trace_child_env(),
         text=True,
         capture_output=True,
         timeout=30,
@@ -67,7 +69,9 @@ async def native_case(case):
             options={"metadata": value, "include_sensitive_data": True, "detached": True},
         ) as root:
             assert root.trace_metadata == value
-            with telemetry.span("bounds.child", options={"include_sensitive_data": True}) as child:
+            with telemetry.span(
+                "bounds.child", options={"metadata": value, "include_sensitive_data": True}
+            ) as child:
                 child.set_outcome(status="ok", data=value)
         flushed = await telemetry.force_flush(timeout_ms=5000)
         assert flushed.status == "success"
@@ -78,6 +82,22 @@ async def native_case(case):
         ]
         assert len(outcomes) == 1
         assert json.loads(outcomes[0]["attributes"]["sdk.outcome.data"]) == value
+        for name in ("bounds.root", "bounds.child"):
+            snapshots = [
+                event for event in events if event["lifecycle"] == "end" and event["name"] == name
+            ]
+            assert len(snapshots) == 1
+            attributes = snapshots[0]["attributes"]
+            delivered = {
+                key.removeprefix("sdk.metadata."): item
+                for key, item in attributes.items()
+                if key.startswith("sdk.metadata.")
+            }
+            assert delivered.keys() == value.keys()
+            for key, item in value.items():
+                assert (
+                    delivered[key] if isinstance(item, str) else json.loads(delivered[key])
+                ) == item
         assert telemetry.current_context() is None
     finally:
         await telemetry.shutdown()
@@ -92,7 +112,7 @@ def test_native_trace_aggregate_and_nesting_bounds_preserve_cleanup():
             "from tests.test_native_trace_annotation_shapes import native_boundaries; "
             "asyncio.run(native_boundaries())",
         ],
-        env=os.environ.copy(),
+        env=native_trace_child_env(),
         text=True,
         capture_output=True,
         timeout=30,
@@ -132,3 +152,82 @@ async def native_boundaries():
         assert telemetry.current_context() is None
     finally:
         await telemetry.shutdown()
+
+
+@pytest.mark.parametrize("route", ["otlp", "generic"])
+def test_native_annotation_delivery_and_generic_limits(route):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio,sys; "
+            "from tests.test_native_trace_annotation_shapes import native_delivery; "
+            "asyncio.run(native_delivery(sys.argv[1]))",
+            route,
+        ],
+        env=native_trace_child_env(),
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def native_delivery(route):
+    if route == "generic":
+        events = []
+
+        class Recorder:
+            def on_trace_event(self, event):
+                events.append(event)
+
+        configured = {f"generic.field-{i}": "small" for i in range(200)}
+        configured["generic.000-long"] = "x" * 8192
+        await telemetry.configure(processors=[Recorder()], span_attributes=configured)
+        try:
+            with telemetry.trace("bounds.generic", options={"detached": True}):
+                pass
+            assert (await telemetry.force_flush(timeout_ms=5000)).status == "success"
+            ended = [event for event in events if event["lifecycle"] == "end"]
+            assert len(ended) == 1
+            delivered = ended[0]["attributes"]
+            assert delivered["generic.000-long"] == "x" * 4096
+            assert len(delivered) <= 128
+            assert ended[0]["dropped_attributes_count"] > 0
+        finally:
+            await telemetry.shutdown()
+        return
+
+    with collector() as (endpoint, records):
+        await telemetry.configure(traces=telemetry.OtlpHttp(endpoint=endpoint, protocol="json"))
+        try:
+            metadata = {"a-long": "x" * 8192, "b-encoded": ["x" * 3000, "y" * 3000]}
+            metadata.update(payload("top-level"))
+            with telemetry.trace("bounds.otlp.root", options={"metadata": metadata}):
+                with telemetry.span("bounds.otlp.child", options={"metadata": metadata}):
+                    pass
+            assert (await telemetry.force_flush(timeout_ms=5000)).status == "success"
+        finally:
+            await telemetry.shutdown()
+        spans = [
+            span
+            for record in records
+            for resource in record["payload"]["resourceSpans"]
+            for scope in resource["scopeSpans"]
+            for span in scope["spans"]
+            if span["name"].startswith("bounds.otlp.")
+        ]
+        assert {span["name"] for span in spans} == {"bounds.otlp.root", "bounds.otlp.child"}
+        for span in spans:
+            attributes = {item["key"]: item["value"] for item in span["attributes"]}
+            assert "sdk.metadata" not in attributes
+            delivered = {
+                key.removeprefix("sdk.metadata."): item["stringValue"]
+                for key, item in attributes.items()
+                if key.startswith("sdk.metadata.")
+            }
+            assert delivered.keys() == metadata.keys()
+            for key, value in metadata.items():
+                assert (
+                    delivered[key] if isinstance(value, str) else json.loads(delivered[key])
+                ) == value

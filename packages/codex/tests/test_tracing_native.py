@@ -1097,7 +1097,7 @@ async def _processor_failures(fixture: ResponsesFixture, provider: NativeProvide
 
 
 async def _bounds(fixture: ResponsesFixture, provider: NativeProvider, recorder: Recorder) -> None:
-    for metadata in ({"huge": "é" * 2049}, {"too_many": list(range(65))}):
+    for metadata in ({"huge": "é" * 32769}, {"over_budget": [0] * 32768}):
         with pytest.raises((ValueError, RuntimeError), match="Tracing|tracing"):
             with telemetry.trace(
                 "invalid metadata", options=telemetry.TraceOptions(metadata=metadata)
