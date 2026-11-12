@@ -175,6 +175,9 @@ if TYPE_CHECKING:
         NativeAgents as NativeAgents,
         NativeRole as NativeRole,
         NativeRoleTool as NativeRoleTool,
+        NativeRoleToolInvocation as NativeRoleToolInvocation,
+        NativeRoleToolResult as NativeRoleToolResult,
+        NativeRoleToolStreamEvent as NativeRoleToolStreamEvent,
     )
     from .native_interception import (
         Allow as Allow,
@@ -351,6 +354,9 @@ _MODULES = {
     "NativeAgents": ".native_agents",
     "NativeRole": ".native_agents",
     "NativeRoleTool": ".native_agents",
+    "NativeRoleToolInvocation": ".native_agents",
+    "NativeRoleToolResult": ".native_agents",
+    "NativeRoleToolStreamEvent": ".native_agents",
     "Environment": ".executor",
     "LocalStorageMount": ".executor",
     "EnvironmentSource": ".executor",
