@@ -499,6 +499,9 @@ impl ModelResponseInterceptor for Producer {
             let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
             let (reply, receive) = oneshot::channel();
             let mut event = json!({"id":receipt.turn_id,"msg":{"type":"_sdk_model_produce","turn_id":receipt.turn_id,"thread":admission.thread_id(),"instance":tools.instance,"request_id":id,"generation":ticket.generation.id,"model":model,"data":request}});
+            if let Some(transport) = admission.request_transport() {
+                event["msg"]["request_transport"] = json!(transport);
+            }
             if let Some(profile) = profile {
                 event["msg"]["profile_id"] = json!(profile.profile_id);
                 event["msg"]["profile_epoch"] = json!(profile.epoch);

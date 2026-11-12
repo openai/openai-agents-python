@@ -423,6 +423,8 @@ pub fn model_settings(params: Value) -> Result<ThreadSettingsOverrides> {
 pub struct StartOptions {
     turn_trigger: Option<String>,
     model_override: Option<String>,
+    model_settings_override:
+        Option<codex_protocol::model_request_controls::RunModelSettingsOverride>,
     final_output_json_schema: Option<Value>,
     service_tier: Option<String>,
     parent_turn_id: Option<String>,
@@ -562,6 +564,19 @@ pub async fn submit_replaceable_with_attempts(
     let mut p: TurnParams = decode(value)?;
     if let Some(model) = p.start.model_override.as_deref() {
         if let Err(error) = state.engine.validate_model(model).await {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
+    }
+    if let Some(settings) = &p.start.model_settings_override {
+        let mut controls = model_settings(serde_json::to_value(settings)?)?;
+        controls.model = p.start.model_override.clone();
+        if let Err(error) = state
+            .engine
+            .validate_request_controls(&state.thread, &controls)
+            .await
+        {
             return Ok(json!({"status": "not_submitted", "reason": {
                 "type": "model_override_refused", "message": error.to_string()
             }}));
@@ -849,6 +864,7 @@ pub(crate) async fn interrupt_managed_root(
 
 params!(RecoveryOptions {
     model_override: Option<String>,
+    model_settings_override: Option<codex_protocol::model_request_controls::RunModelSettingsOverride>,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     trace: Option<W3cTraceContext>,
     observation_submission_id: Option<String>,
@@ -867,6 +883,19 @@ pub async fn recover_prepared(
     let p: RecoveryOptions = decode(value)?;
     if let Some(model) = p.model_override.as_deref() {
         if let Err(error) = state.engine.validate_model(model).await {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
+    }
+    if let Some(settings) = &p.model_settings_override {
+        let mut controls = model_settings(serde_json::to_value(settings)?)?;
+        controls.model = p.model_override.clone();
+        if let Err(error) = state
+            .engine
+            .validate_request_controls(&state.thread, &controls)
+            .await
+        {
             return Ok(json!({"status": "not_submitted", "reason": {
                 "type": "model_override_refused", "message": error.to_string()
             }}));
@@ -898,6 +927,7 @@ pub async fn recover_prepared(
                 trace: p.trace,
                 cyber_access_program: None,
                 model_override: p.model_override,
+                model_settings_override: p.model_settings_override,
                 final_output_json_schema: p.output_schema.map(Value::Object),
             },
             init,
@@ -1125,7 +1155,7 @@ params!(RecoverParams {
     #[serde(default, with = "StartOptions")]
     start_options: TurnStartOptions
 });
-params!(RecoverIdleParams { turn_id: String, model_override: Option<String>, #[serde(default, alias = "settings", with = "ThreadSettings")] thread_settings: ThreadSettingsOverrides, trace: Option<W3cTraceContext>, cyber_access_program: Option<CyberAccessProgram>, final_output_json_schema: Option<Value> });
+params!(RecoverIdleParams { turn_id: String, model_override: Option<String>, model_settings_override: Option<codex_protocol::model_request_controls::RunModelSettingsOverride>, #[serde(default, alias = "settings", with = "ThreadSettings")] thread_settings: ThreadSettingsOverrides, trace: Option<W3cTraceContext>, cyber_access_program: Option<CyberAccessProgram>, final_output_json_schema: Option<Value> });
 params!(CommunicationParams {
     communication: InterAgentCommunication,
     #[serde(default, with = "StartOptions")]
@@ -1262,6 +1292,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                         trace: p.trace,
                         cyber_access_program: p.cyber_access_program,
                         model_override: p.model_override,
+                        model_settings_override: p.model_settings_override,
                         final_output_json_schema: p.final_output_json_schema,
                     })
                     .await?,

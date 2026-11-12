@@ -202,3 +202,33 @@ def test_idle_profile_storage_uses_selected_current_declaration(profile_store):
     else:
         _, settings = _prepare_opening_model_settings(*args, {"type": "previous_response"})
         assert settings["request_controls"]["store"] is True
+
+
+def test_manual_history_restore_keeps_current_root_transport():
+    _, settings = _prepare_opening_model_settings(
+        Agent(
+            instructions="Current declaration.",
+            model_settings={
+                "store": True,
+                "extra_headers": {"x-history-route": "current"},
+            },
+        ),
+        "current-model",
+        "Current declaration.",
+        None,
+        (
+            "current-model",
+            {
+                "request_controls": {
+                    "store": True,
+                    "request_transport": {"headers": {"x-history-route": "saved"}},
+                }
+            },
+        ),
+        None,
+        [],
+        {"type": "previous_response", "id": "resp_current"},
+    )
+    assert settings["request_controls"]["request_transport"]["headers"] == {
+        "x-history-route": "current"
+    }

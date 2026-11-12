@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +25,32 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
+from agents.observation import OutputTextDelta
 from tests._asyncio import timeout
+
+
+def _chat_event_frames(completion):
+    choice = completion["choices"][0]
+    delta = dict(choice["message"])
+    if "tool_calls" in delta:
+        delta["tool_calls"] = [
+            {**call, "index": index} for index, call in enumerate(delta["tool_calls"])
+        ]
+    header = {
+        "id": completion["id"],
+        "object": "chat.completion.chunk",
+        "created": completion["created"],
+        "model": completion["model"],
+    }
+    chunks = [
+        {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]},
+        {"choices": [], "usage": completion["usage"]},
+    ]
+    return [
+        *(f"data: {json.dumps({**header, **chunk})}\n\n".encode() for chunk in chunks),
+        b"data: [DONE]\n\n",
+    ]
 
 
 async def _exercise_borrowed_provider(
@@ -36,6 +62,7 @@ async def _exercise_borrowed_provider(
     check_cache_key=False,
     penalties=False,
     reasoning=False,
+    streaming=False,
 ):
     seen = []
     effects = []
@@ -52,7 +79,7 @@ async def _exercise_borrowed_provider(
         body = await request.json()
         seen.append(body)
         entered.set()
-        if outcome == "cancel":
+        if outcome == "cancel" and not streaming:
             await release.wait()
         final = len(seen) > 1
         if final:
@@ -124,6 +151,8 @@ async def _exercise_borrowed_provider(
                 }
             )
         message = {"role": "assistant", "content": "42" if final else None}
+        if streaming and outcome == "cancel":
+            message["content"] = "partial"
         if not final:
             message["tool_calls"] = [
                 {
@@ -134,32 +163,40 @@ async def _exercise_borrowed_provider(
             ]
         if outcome == "refusal":
             message["refusal"] = "synthetic-private-refusal"
-        return web.json_response(
-            {
-                "id": f"chatcmpl_{len(seen)}",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "gpt-4.1",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": message,
-                        "finish_reason": "length"
-                        if outcome == "incomplete"
-                        else "stop"
-                        if final
-                        else "tool_calls",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": "synthetic-private-output"
-                    if outcome == "invalid_usage"
-                    else 3,
-                    "completion_tokens": 2,
-                    "total_tokens": 5,
-                },
-            }
-        )
+        completion = {
+            "id": f"chatcmpl_{len(seen)}",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4.1",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": "length"
+                    if outcome == "incomplete"
+                    else "stop"
+                    if final
+                    else "tool_calls",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": "synthetic-private-output" if outcome == "invalid_usage" else 3,
+                "completion_tokens": 2,
+                "total_tokens": 5,
+            },
+        }
+        if not streaming:
+            return web.json_response(completion)
+        frames = _chat_event_frames(completion)
+        if final or outcome == "cancel":
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(frames[0])
+            await release.wait()
+            if outcome != "cancel":
+                await response.write(b"".join(frames[1:]))
+            return response
+        return web.Response(body=b"".join(frames), content_type="text/event-stream")
 
     async def unexpected(request):
         fallback.append(request.path)
@@ -175,6 +212,8 @@ async def _exercise_borrowed_provider(
         base = str(server.make_url("/v1"))
         async with AsyncOpenAI(api_key="synthetic", base_url=base, max_retries=0) as client:
             options = {} if cache_key is None else {"prompt_cache_key": cache_key}
+            if streaming:
+                options["stream"] = True
             if adapter == "responses":
                 backend = ResponsesModel(client, **options)
             elif adapter == "chat":
@@ -212,14 +251,27 @@ async def _exercise_borrowed_provider(
                 )
                 async with agent.session() as session:
                     turn = await session.submit("Double21.")
-                    if outcome == "cancel":
-                        await entered.wait()
-                        stopping = asyncio.create_task(turn.cancel())
+                    if streaming and outcome in ("complete", "cancel"):
                         try:
-                            await asyncio.sleep(0)
+                            async for event in turn.events():
+                                if isinstance(event, OutputTextDelta):
+                                    assert event.delta == (
+                                        "42" if outcome == "complete" else "partial"
+                                    )
+                                    break
+                            if outcome == "cancel":
+                                await turn.cancel()
                         finally:
                             release.set()
-                            await stopping
+                    if outcome == "cancel":
+                        if not streaming:
+                            await entered.wait()
+                            stopping = asyncio.create_task(turn.cancel())
+                            try:
+                                await asyncio.sleep(0)
+                            finally:
+                                release.set()
+                                await stopping
                         with pytest.raises(TurnStoppedError):
                             await turn.get_result()
                     elif outcome == "incomplete":
@@ -247,7 +299,7 @@ async def _exercise_borrowed_provider(
             assert effects == ([21] if outcome == "complete" else [])
             assert len(seen) == (2 if outcome == "complete" else 1)
             assert fallback == []
-            assert seen[0].get("stream", False) is False
+            assert seen[0].get("stream", False) is streaming
             if adapter == "responses":
                 assert not client.is_closed()
 
@@ -270,6 +322,12 @@ async def _exercise_borrowed_provider(
 @pytest.mark.parametrize("outcome", ["incomplete", "refusal", "cancel"])
 async def test_borrowed_provider_library_retains_native_ownership(adapter, outcome, monkeypatch):
     await _exercise_borrowed_provider(adapter, outcome, monkeypatch)
+
+
+@pytest.mark.parametrize("adapter", ["litellm", "any_llm"])
+@pytest.mark.parametrize("outcome", ["complete", "incomplete", "refusal", "cancel"])
+async def test_borrowed_chat_stream_retains_native_ownership(adapter, outcome, monkeypatch):
+    await _exercise_borrowed_provider(adapter, outcome, monkeypatch, streaming=True)
 
 
 @pytest.mark.parametrize("adapter", ["chat", "responses", "litellm", "any_llm"])

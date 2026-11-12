@@ -12,7 +12,7 @@ from tests.native_fixtures import ResponsesFixture, assistant_output, function_c
 
 
 @asynccontextmanager
-async def history_peer(rejection=None):
+async def history_peer(rejection=None, *, routing=None, allow_changed_route=None):
     model = ResponsesFixture()
     reads = []
     wire = []
@@ -20,11 +20,25 @@ async def history_peer(rejection=None):
     @web.middleware
     async def record_wire(request, handler):
         wire.append((request.method, request.path))
+        if routing is not None:
+            routing.append(
+                (
+                    request.method,
+                    request.headers.get("x-history-route"),
+                    request.query.get("tenant"),
+                    request.headers.get("Authorization"),
+                    request.headers.get("x-sdk-sentinel-grant"),
+                )
+            )
         return await handler(request)
 
     async def read_anchor(request):
         reads.append((request.path, request.headers.get("Authorization")))
         if request.headers.get("Authorization") != "Bearer current-owner":
+            raise web.HTTPForbidden()
+        if allow_changed_route is False and (
+            request.headers.get("x-history-route") != "A" or request.query.get("tenant") != "A"
+        ):
             raise web.HTTPForbidden()
         identity = request.match_info["identity"]
         return web.json_response(

@@ -74,6 +74,9 @@ pub struct ThreadOptions {
     pub(crate) application_instructions: Option<String>,
     #[serde(rename = "_agent_profiles")]
     pub(crate) agent_profiles: Option<crate::agent_profiles::OpeningProfiles>,
+    #[serde(rename = "_sdk_request_transport")]
+    sdk_request_transport:
+        Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
     #[serde(rename = "_sdk_instruction_files")]
     pub(crate) sdk_instruction_files: Option<Vec<crate::application_instructions::InstructionFile>>,
     #[serde(rename = "_manual_tool_slots")]
@@ -278,6 +281,14 @@ impl ThreadOptions {
             }
             _ => config::load(&source, &runtime, Some(cloud)).await?.0,
         };
+        if let Some(transport) = self.sdk_request_transport {
+            let controls = codex_protocol::model_request_controls::ModelRequestControls {
+                request_transport: Some(Some(transport)),
+                ..Default::default()
+            };
+            controls.validate_shape().map_err(anyhow::Error::msg)?;
+            configuration.sdk_request_controls.apply_patch(&controls);
+        }
         let instructions = Arc::new(ThreadInstructions(
             RwLock::new(self.instructions),
             self.share_instructions_with_subagents,

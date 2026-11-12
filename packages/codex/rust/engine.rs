@@ -29,6 +29,7 @@ use codex_thread_store::{
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock, broadcast, mpsc, watch};
 
 use crate::environment::{LocalPrivatePaths, LocalStorageHome};
+use crate::tool_callers::ToolDeclarations;
 use crate::{NativeThread, config, extensions, goals, options, telemetry};
 
 mod scoped;
@@ -723,15 +724,21 @@ impl EngineState {
         python_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
         use_initial_config: bool,
     ) -> anyhow::Result<NativeThread> {
-        self.start_with_initial_messages(options, history, python_specs, use_initial_config, None)
-            .await
+        self.start_with_initial_messages(
+            options,
+            history,
+            python_specs.map(Into::into),
+            use_initial_config,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn start_with_initial_messages(
         self: &Arc<Self>,
         mut options: options::ThreadOptions,
         history: Option<InitialHistory>,
-        python_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
+        python_specs: Option<ToolDeclarations>,
         use_initial_config: bool,
         initial_messages: Option<crate::initial_messages::Batch>,
     ) -> anyhow::Result<NativeThread> {
@@ -748,12 +755,12 @@ impl EngineState {
             && !options.tool_batch_completion
             && initial_messages.is_none()
             && history.is_none()
-            && python_specs.as_ref().is_some_and(Vec::is_empty);
+            && python_specs.as_ref().is_some_and(|specs| specs.is_empty());
         let private_disposable = options.private_disposable
             && options.permits_private_disposable()
             && initial_messages.is_none()
             && history.is_none()
-            && python_specs.as_ref().is_some_and(Vec::is_empty);
+            && python_specs.as_ref().is_some_and(|specs| specs.is_empty());
         if initial_messages.is_some() {
             ensure!(
                 history.is_none() && python_specs.is_some() && options.permits_initial_config(),
@@ -1132,7 +1139,7 @@ impl EngineState {
         self: &Arc<Self>,
         state: &Arc<ThreadState>,
         mut options: options::ThreadOptions,
-        specs: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        specs: ToolDeclarations,
         expected: Vec<codex_history::RolloutItem>,
         prepared: Vec<codex_history::RolloutItem>,
         receipt: impl Into<crate::storage::Rebuild>,
@@ -1335,7 +1342,7 @@ impl EngineState {
         nth_user_message: Option<usize>,
         boundary: ForkSelection,
         options: options::ThreadOptions,
-        python_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
+        python_specs: Option<ToolDeclarations>,
     ) -> anyhow::Result<NativeThread> {
         Box::pin(self.fork_owned(
             id_or_path,
@@ -1411,7 +1418,7 @@ impl EngineState {
         nth_user_message: Option<usize>,
         boundary: ForkSelection,
         mut options: options::ThreadOptions,
-        python_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
+        python_specs: Option<ToolDeclarations>,
         stored: bool,
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
@@ -3603,7 +3610,7 @@ mod rebuild_consumer_tests {
                         .rebuild_local(
                             &original_state,
                             options::ThreadOptions::default(),
-                            specs,
+                            specs.into(),
                             expected,
                             prepared,
                             crate::storage::RebuildReceipt {

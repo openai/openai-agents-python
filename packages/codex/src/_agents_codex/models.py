@@ -204,6 +204,10 @@ async def _request_options_for(
 ) -> dict[str, Any]:
     value: Any = source
     observed: ModelRequest | None = None
+    selected: dict[str, Any] = {}
+    transport: Any = None
+    scoped_headers: Any = None
+    scoped_query: Any = None
     task = asyncio.current_task()
 
     def admit(owner: asyncio.Task[Any] | None = task) -> bool:
@@ -219,9 +223,33 @@ async def _request_options_for(
             value = await _call_callback(source, admit, observed)
         if task is not None and cancellation_requested(task):
             raise asyncio.CancelledError
-        return dict(_capture_request_options(value)) if value is not None else {}
+        if value is not None:
+            selected = dict(_capture_request_options(value))
+        transport = getattr(request, "_request_transport", None)
+        if transport is not None:
+            scoped_headers = transport.get("headers")
+            scoped_query = transport.get("query")
+            if scoped_headers is not None:
+                overridden = {name.lower() for name in scoped_headers}
+                selected["headers"] = {
+                    **{
+                        name: header
+                        for name, header in selected.get("headers", {}).items()
+                        if name.lower() not in overridden
+                    },
+                    **scoped_headers,
+                }
+            if scoped_query is not None:
+                from openai import omit
+
+                selected["query"] = {
+                    **selected.get("query", {}),
+                    **{name: omit if item is None else item for name, item in scoped_query.items()},
+                }
+        return selected
     finally:
-        del source, request, value, observed, task, admit
+        del source, request, value, observed, selected, transport, scoped_headers, scoped_query
+        del task, admit
 
 
 def _client_request_options(options: Mapping[str, Any]) -> dict[str, Any]:
@@ -1138,10 +1166,25 @@ class ChatCompletionsModel:
                         or choices[0].get("index") != 0
                     ):
                         raise ValueError("Chat stream requires exactly one response choice")
-                    if finish_reason is not None:
-                        raise ValueError("Chat stream continued after its final choice")
                     choice = choices[0]
+                    if finish_reason is not None:
+                        # LiteLLM keeps an empty choice on its usage-only tail.
+                        delta = choice.get("delta")
+                        if (
+                            isinstance(self, LitellmModel)
+                            and raw.get("usage") is not None
+                            and choice.get("finish_reason") is None
+                            and choice.get("logprobs") is None
+                            and isinstance(delta, dict)
+                            and all(value in (None, "", [], {}) for value in delta.values())
+                        ):
+                            continue
+                        raise ValueError("Chat stream continued after its final choice")
                     delta = choice["delta"]
+                    if isinstance(self, LitellmModel) and delta.get("refusal") is None:
+                        provider_data = (delta.get("provider_specific_fields") or {}).get("refusal")
+                        if provider_data is not None:
+                            delta = {**delta, "refusal": provider_data}
                     probabilities = (choice.get("logprobs") or {}).get("content")
                     retained = {
                         "content": delta.get("content"),
@@ -1379,18 +1422,17 @@ class ChatCompletionsModel:
             del request, options, selected, client
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class LitellmModel(ChatCompletionsModel):
     """Borrow LiteLLM or a Router exposing asynchronous ``acompletion``.
 
     Construct the client with its credentials, routing and transport settings.
     Core owns tools and history; the application owns and closes the client.
-    Completed text/function responses only; provider reasoning replay unsupported.
+    Set ``stream=True`` to receive text and function calls incrementally.
     """
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
         response: Any = None
-        value: Any = None
         try:
             if self._request_options_source is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
@@ -1402,19 +1444,19 @@ class LitellmModel(ChatCompletionsModel):
             if request.disable_provider_retries:
                 options["num_retries"] = 0
             response = await self.client.acompletion(**options)
-            value = response.model_dump()
-            return value
+            return response if options["stream"] else response.model_dump()
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
-            del request, options, response, value
+            del request, options, response
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class AnyLLMModel(ChatCompletionsModel):
     """Borrow an AnyLLM provider exposing asynchronous ``acompletion``.
 
     Pass an application-created ``AnyLLM.create(...)`` provider. Optional provider
     packages are not imported by the native root; credentials remain with it.
+    Set ``stream=True`` to receive text and function calls incrementally.
     Inherited native cache hints are omitted for providers declaring them unsupported.
     Explicit adapter cache overrides, including empty strings, remain provider-validated.
     Generic completion requests omit the native ``store=False`` default.

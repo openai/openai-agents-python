@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
-index 67688a76..8713386c 100644
+index b6bf3d5b..43acb833 100644
 --- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
 +++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
 @@ -30,6 +30,7 @@ fn settings_item(
@@ -75,10 +75,10 @@ index d3212088..a2983ece 100644
  pub struct PromptCacheOptions {
      pub ttl: codex_protocol::model_request_controls::PromptCacheTtl,
 diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
-index b52d33a2..6b6d4be6 100644
+index aca02a2d..a4fea21c 100644
 --- a/codex-rs/codex-api/src/endpoint/responses.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses.rs
-@@ -50,6 +50,73 @@ impl<T: HttpTransport> ResponsesClient<T> {
+@@ -52,6 +52,75 @@ impl<T: HttpTransport> ResponsesClient<T> {
          }
      }
  
@@ -122,15 +122,17 @@ index b52d33a2..6b6d4be6 100644
 +            .expect("hierarchical URL")
 +            .push(resource)
 +            .push(id);
++        let path = path.path().trim_start_matches('/');
++        let prepared = crate::prepare_request_transport(
++            &self.session.provider().url_for_path(path),
++            self.request_transport.as_ref(),
++        )?;
 +        let response = self
 +            .session
-+            .execute_with(
-+                Method::GET,
-+                path.path().trim_start_matches('/'),
-+                headers,
-+                None,
-+                |request| request.response_body_limit_bytes = Some(MAX_JSON_RESPONSE_BODY_BYTES),
-+            )
++            .execute_with(Method::GET, path, headers, None, |request| {
++                prepared.apply(request);
++                request.response_body_limit_bytes = Some(MAX_JSON_RESPONSE_BODY_BYTES);
++            })
 +            .await?;
 +        super::responses_json::check_json_structure(&response.body)?;
 +        let body: Value = serde_json::from_slice(&response.body)
@@ -153,10 +155,10 @@ index b52d33a2..6b6d4be6 100644
          self,
          request: Option<Arc<dyn RequestTelemetry>>,
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index 628f299c..08769c51 100644
+index 100fabad..793d30a9 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
-@@ -179,3 +179,5 @@ pub use crate::endpoint::RealtimeHostedMcpToolFilter;
+@@ -182,3 +182,5 @@ pub use crate::endpoint::RealtimeHostedMcpToolFilter;
  pub struct SdkWebsocketTlsSelector(
      pub fn(&url::Url) -> Option<std::sync::Arc<rustls::ClientConfig>>,
  );
@@ -414,7 +416,7 @@ index 6658db68..b6bfd171 100644
                          invocation_timeout_ms: None,
                          tool_choice: None,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 179e58e5..012f75c8 100644
+index 48da6c0c..e664ffb6 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -34,6 +34,8 @@ use std::sync::atomic::Ordering;
@@ -622,7 +624,7 @@ index 179e58e5..012f75c8 100644
                  extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
                  max_output_tokens: controls.max_output_tokens.flatten(),
                  temperature: controls.temperature.flatten(),
-@@ -1806,6 +1919,16 @@ impl ModelClientSession {
+@@ -1810,6 +1923,16 @@ impl ModelClientSession {
              .is_some_and(|manager| manager.uses_app_managed_model_oauth())
      }
  
@@ -639,7 +641,7 @@ index 179e58e5..012f75c8 100644
      pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
          let source = &self.client.state.session_source;
          // ThreadSpawn children expose the same attention API as root turns.
-@@ -1974,6 +2097,11 @@ impl ModelClientSession {
+@@ -1978,6 +2101,11 @@ impl ModelClientSession {
          if !self.client.responses_websocket_enabled() {
              return Ok(());
          }
@@ -651,7 +653,7 @@ index 179e58e5..012f75c8 100644
          let provider = Arc::clone(&self.client.state.provider);
          let auth_manager = provider.auth_manager();
          let mut auth_recovery = auth_manager
-@@ -2268,6 +2396,7 @@ impl ModelClientSession {
+@@ -2276,6 +2404,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -659,7 +661,7 @@ index 179e58e5..012f75c8 100644
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2306,16 +2435,6 @@ impl ModelClientSession {
+@@ -2314,16 +2443,6 @@ impl ModelClientSession {
                  prompt.cyber_access_program,
                  self.client.api_key_cyber_access_programs,
              )?;
@@ -676,7 +678,7 @@ index 179e58e5..012f75c8 100644
              let observation_is_reviewer = is_guardian_reviewer(&responses_headers);
              options.extra_headers.extend(responses_headers);
              let interceptors = crate::model_request::prepare(
-@@ -2327,6 +2446,34 @@ impl ModelClientSession {
+@@ -2335,6 +2454,35 @@ impl ModelClientSession {
                  &mut request.client_metadata,
                  prompt.tool_admission.clone(),
              );
@@ -687,6 +689,7 @@ index 179e58e5..012f75c8 100644
 +                }
 +                logical_history_input = cursor.prepare(
 +                    &mut request, &client_setup, transport.clone(), options.extra_headers.clone(),
++                    prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref),
 +                    prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt()),
 +                ).await?;
 +                client_setup.api_provider.retry.max_attempts = 0;
@@ -711,7 +714,7 @@ index 179e58e5..012f75c8 100644
              let inference_trace_attempt = inference_trace.start_attempt();
              inference_trace_attempt.add_request_headers(&mut options.extra_headers);
              if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
-@@ -2335,7 +2482,13 @@ impl ModelClientSession {
+@@ -2343,7 +2491,13 @@ impl ModelClientSession {
                  }
                  request.input = input;
              }
@@ -726,7 +729,7 @@ index 179e58e5..012f75c8 100644
              let request_transport = if prompt.prefer_buffered_response {
                  codex_extension_api::ModelRequestTransport::HttpJson
              } else {
-@@ -2429,6 +2582,19 @@ impl ModelClientSession {
+@@ -2438,6 +2592,19 @@ impl ModelClientSession {
  
              match stream_result {
                  Ok((request_id, interrupt, events, producer_task, producer_stop)) => {
@@ -746,7 +749,7 @@ index 179e58e5..012f75c8 100644
                      let (mut stream, response) = map_response_events(
                          request_id,
                          crate::model_request::intercept_stream(events, interceptors),
-@@ -2445,8 +2611,13 @@ impl ModelClientSession {
+@@ -2454,8 +2621,13 @@ impl ModelClientSession {
                      stream.producer_task = producer_task;
                      stream.producer_stop = producer_stop;
                      stream.request_observation = request_observation;
@@ -762,7 +765,7 @@ index 179e58e5..012f75c8 100644
                      return Ok(stream);
                  }
                  Err(ApiError::Transport(unauthorized_transport))
-@@ -2463,6 +2634,7 @@ impl ModelClientSession {
+@@ -2472,6 +2644,7 @@ impl ModelClientSession {
                          response_debug_context.request_id.as_deref(),
                          /*output_items*/ &[],
                      );
@@ -770,7 +773,7 @@ index 179e58e5..012f75c8 100644
                      auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
                          handle_unauthorized(
                              unauthorized_transport,
-@@ -2478,6 +2650,11 @@ impl ModelClientSession {
+@@ -2487,6 +2660,11 @@ impl ModelClientSession {
                      continue;
                  }
                  Err(err) => {
@@ -782,7 +785,7 @@ index 179e58e5..012f75c8 100644
                      let response_debug_context =
                          extract_response_debug_context_from_api_error(&err);
                      let err = self.client.state.provider.map_api_error(err);
-@@ -2521,6 +2698,9 @@ impl ModelClientSession {
+@@ -2530,6 +2708,9 @@ impl ModelClientSession {
          inference_trace: &InferenceTraceContext,
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<WebsocketStreamOutcome> {
@@ -792,7 +795,7 @@ index 179e58e5..012f75c8 100644
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
-@@ -2553,6 +2733,7 @@ impl ModelClientSession {
+@@ -2562,6 +2743,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -800,7 +803,7 @@ index 179e58e5..012f75c8 100644
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2649,7 +2830,11 @@ impl ModelClientSession {
+@@ -2663,7 +2845,11 @@ impl ModelClientSession {
              if let Some(turn_state) = self.turn_state.get() {
                  client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
              }
@@ -813,7 +816,7 @@ index 179e58e5..012f75c8 100644
              let (mode, reason) = if continuation.is_some() {
                  ("incremental", "incremental")
              } else {
-@@ -2909,6 +3094,10 @@ impl ModelClientSession {
+@@ -2923,6 +3109,10 @@ impl ModelClientSession {
          service_tier: Option<String>,
          responses_metadata: &CodexResponsesMetadata,
      ) -> Result<()> {
@@ -826,10 +829,10 @@ index 179e58e5..012f75c8 100644
          // ordinary request run the awaited context policy before sending input.
 diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
 new file mode 100644
-index 00000000..f3c5cdd1
+index 00000000..b4a6e8d6
 --- /dev/null
 +++ b/codex-rs/core/src/client/provider_history.rs
-@@ -0,0 +1,1017 @@
+@@ -0,0 +1,1023 @@
 +use super::*;
 +use codex_protocol::provider_history::{
 +    ProviderHistoryInputBoundary, ProviderHistoryReference, ProviderHistorySelection,
@@ -850,7 +853,7 @@ index 00000000..f3c5cdd1
 +    generation: Option<u64>,
 +    revision: Option<u64>,
 +    headers: HeaderMap,
-+    query: Option<HashMap<String, String>>,
++    effective_url: String,
 +}
 +
 +impl std::fmt::Debug for Scope {
@@ -1271,6 +1274,7 @@ index 00000000..f3c5cdd1
 +        setup: &CurrentClientSetup,
 +        transport: ReqwestTransport,
 +        headers: HeaderMap,
++        request_transport: Option<&codex_protocol::model_request_transport::RequestTransportOverrides>,
 +        attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
 +    ) -> Result<Option<Vec<ResponseItem>>> {
 +        let canonical_input = request
@@ -1280,11 +1284,15 @@ index 00000000..f3c5cdd1
 +            .ok_or_else(|| invalid("Provider history has no admitted canonical input"))?;
 +        let mut auth_headers = setup.api_provider.headers.clone();
 +        setup.api_auth.add_auth_headers(&mut auth_headers);
++        let mut effective_url = setup.api_provider.url_for_path("/responses");
++        let prepared = codex_api::prepare_request_transport(&effective_url, request_transport)
++            .map_err(self_error)?;
++        prepared.apply_parts(&mut effective_url, &mut auth_headers);
 +        let scope = Scope {
 +            generation: setup.auth_owner_generation,
 +            revision: setup.auth_revision,
 +            headers: auth_headers,
-+            query: setup.api_provider.query_params.clone(),
++            effective_url,
 +        };
 +        let current_route = route(&setup.api_provider.base_url)?;
 +        let (saved, needs_read) = {
@@ -1421,6 +1429,7 @@ index 00000000..f3c5cdd1
 +                setup.api_provider.clone(),
 +                setup.api_auth.clone(),
 +            )
++            .with_request_transport(request_transport.cloned())
 +            .verify_history_anchor(&saved.selection, saved.stored_response, headers)
 +            .await
 +            .map_err(|error| self_error(error))?;
@@ -1972,10 +1981,10 @@ index 74dcc9a2..abd83501 100644
              model_context_window: cfg.model_context_window,
              model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
 diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
-index aa55d51e..50c792fa 100644
+index 60968dc9..ac4cd0f5 100644
 --- a/codex-rs/core/src/model_request.rs
 +++ b/codex-rs/core/src/model_request.rs
-@@ -171,6 +171,35 @@ impl ModelToolAdmission for StepToolAdmission {
+@@ -181,6 +181,35 @@ impl ModelToolAdmission for StepToolAdmission {
              .as_ref()
              .is_some_and(|router| router.admits_response_item(item))
      }
@@ -2033,7 +2042,7 @@ index cb0334d8..dc17c2f1 100644
          let checkpoint = codex_history::CompactedItem {
              sdk_originals: Some(originals.clone().into()),
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index cc6ae7e0..5135706f 100644
+index 50ee8148..38d9ff34 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -691,6 +691,11 @@ impl Session {
@@ -2077,7 +2086,7 @@ index cc6ae7e0..5135706f 100644
              instructions,
              installation_id,
              auth_manager.clone(),
-@@ -2228,10 +2248,12 @@ impl Session {
+@@ -2237,10 +2257,12 @@ impl Session {
      }
  
      pub(crate) async fn thread_settings_snapshot(&self) -> ThreadSettingsSnapshot {
@@ -2095,7 +2104,7 @@ index cc6ae7e0..5135706f 100644
  
      pub(crate) async fn restorable_thread_settings(&self) -> CodexThreadSettingsOverrides {
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index b06c448a..7582f074 100644
+index 7f81e89e..0b178d78 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -320,6 +320,7 @@ impl SessionConfiguration {
@@ -2106,7 +2115,7 @@ index b06c448a..7582f074 100644
              tool_choice: self.step_settings.tool_choice,
              invocation_timeout_ms: self.step_settings.invocation_timeout_ms,
              request_controls: self.step_settings.request_controls.clone(),
-@@ -798,6 +799,7 @@ impl Session {
+@@ -800,6 +801,7 @@ impl Session {
          mut session_configuration: SessionConfiguration,
          environment_selections: &[TurnEnvironmentSelection],
          config: Arc<Config>,
@@ -2114,7 +2123,7 @@ index b06c448a..7582f074 100644
          mut instructions: SessionInstructions,
          installation_id: String,
          auth_manager: Arc<AuthManager>,
-@@ -1922,6 +1924,7 @@ impl Session {
+@@ -1924,6 +1926,7 @@ impl Session {
                      extensions.model_request_contributors().to_vec(),
                  )
                  .with_sdk_model_http_pool(sdk_model_http_pool)
@@ -2122,7 +2131,7 @@ index b06c448a..7582f074 100644
                  .with_sdk_websocket_tls_selector(sdk_websocket_tls_selector)
                  .with_executed_tool_calls(executed_tool_calls.clone())
                  .with_restored_history(matches!(
-@@ -1989,6 +1992,7 @@ impl Session {
+@@ -1991,6 +1994,7 @@ impl Session {
                  forked_from_ordinal_exclusive,
                  next_internal_sub_id: AtomicU64::new(0),
              });
@@ -2131,10 +2140,10 @@ index b06c448a..7582f074 100644
                  let _ = startup.session.set(Arc::clone(&sess));
              }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index a37bfa50..aab17cd5 100644
+index 9faf9f11..4a8b6f8c 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -6645,6 +6645,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+@@ -6646,6 +6646,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
          session_configuration,
          /*environment_selections*/ &[],
          Arc::clone(&config),
@@ -2142,7 +2151,7 @@ index a37bfa50..aab17cd5 100644
          SessionInstructions::default(),
          "11111111-1111-4111-8111-111111111111".to_string(),
          auth_manager,
-@@ -7210,6 +7211,7 @@ async fn make_session_with_config_and_rx(
+@@ -7211,6 +7212,7 @@ async fn make_session_with_config_and_rx(
          session_configuration,
          &default_environments,
          Arc::clone(&config),
@@ -2150,7 +2159,7 @@ index a37bfa50..aab17cd5 100644
          SessionInstructions::default(),
          "11111111-1111-4111-8111-111111111111".to_string(),
          auth_manager,
-@@ -7347,6 +7349,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+@@ -7348,6 +7350,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
          session_configuration,
          &default_environments,
          Arc::clone(&config),
@@ -2827,10 +2836,10 @@ index 36cb86a8..5202e11b 100644
          model: PROTECTED_MODEL.to_string(),
          collaboration_mode: initial.collaboration_mode.with_updates(
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index 546ffbee..8c13e69e 100644
+index 6583b8e0..31528e7b 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
-@@ -416,6 +416,15 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+@@ -427,6 +427,15 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
      }
      /// Whether the exact selected runtime accepts this model item's payload kind.
      fn admits(&self, item: &ResponseItem) -> bool;
@@ -2847,7 +2856,7 @@ index 546ffbee..8c13e69e 100644
  
  /// Measurement can settle during joined cleanup after executable reply authority expires.
 diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
-index 4b9c7f15..5ee35fc0 100644
+index 2b354ad5..d2dcea72 100644
 --- a/codex-rs/protocol/src/lib.rs
 +++ b/codex-rs/protocol/src/lib.rs
 @@ -28,6 +28,7 @@ mod environment;
@@ -2859,7 +2868,7 @@ index 4b9c7f15..5ee35fc0 100644
  pub mod local_media;
  pub mod mcp;
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 004e40e6..4b90d105 100644
+index 93b45fe5..ed821f8d 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -2983,6 +2983,9 @@ pub struct ThreadSettingsAppliedEvent {
@@ -3111,10 +3120,10 @@ index 00000000..7c049077
 +    assert!(receipt.unsent_input_indices(4, &prefix, &[a, b]).is_err());
 +}
 diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
-index c0225b5f..c7075f74 100644
+index 5cf8e552..9a222460 100644
 --- a/codex-rs/state/src/extract.rs
 +++ b/codex-rs/state/src/extract.rs
-@@ -762,6 +762,7 @@ mod tests {
+@@ -766,6 +766,7 @@ mod tests {
              ThreadSettingsAppliedEvent {
                  thread_id: None,
                  thread_settings: ThreadSettingsSnapshot {
