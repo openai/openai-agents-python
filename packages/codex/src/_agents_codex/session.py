@@ -120,8 +120,11 @@ from ._stored_history import (
     StoredSessionPage,
     StoredTurnPage,
     _item_page as _stored_item_page,
-    _options as _stored_options,
+    _items_request as _stored_items_request,
+    _search_request as _stored_search_request,
+    _sessions_request as _stored_sessions_request,
     _turn_page as _stored_turn_page,
+    _turns_request as _stored_turns_request,
 )
 from ._submission import _future as _future, _Submission as _Submission
 from ._tool_errors import ToolErrorContext, ToolErrorFormatter
@@ -15772,12 +15775,8 @@ class Session(Generic[ContextT, OutputT]):
                     break
         """
         self._check_open()
-        options = _stored_options(limit, cursor)
-        options.pop("descending")
-        if type(archived) is not bool:
-            raise TypeError("archived must be a bool")
         value = await self._native._stored_history(
-            json.dumps({"kind": "sessions", **options, "archived": archived})
+            _stored_sessions_request(limit, cursor, archived)
         )
         return cast(StoredSessionPage, json.loads(value))
 
@@ -15796,11 +15795,8 @@ class Session(Generic[ContextT, OutputT]):
         Full projected item detail through stored_items; explicit unsupported-store errors.
         """
         self._check_open()
-        options = _stored_options(limit, cursor, direction)
-        if type(include_summary) is not bool:
-            raise TypeError("include_summary must be a bool")
         value = await self._native._stored_history(
-            json.dumps({"kind": "turns", **options, "include_items": include_summary})
+            _stored_turns_request(limit, cursor, direction, include_summary)
         )
         return _stored_turn_page(json.loads(value))
 
@@ -15818,11 +15814,8 @@ class Session(Generic[ContextT, OutputT]):
         No hidden full-journal fallback for stores without an index.
         """
         self._check_open()
-        options = _stored_options(limit, cursor, direction)
-        if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
-            raise ValueError("turn_id must be a nonempty string or None")
         value = await self._native._stored_history(
-            json.dumps({"kind": "items", **options, "turn_id": turn_id})
+            _stored_items_request(limit, cursor, direction, turn_id)
         )
         return _stored_item_page(json.loads(value))
 
@@ -15835,13 +15828,7 @@ class Session(Generic[ContextT, OutputT]):
         Inclusive turn_cursor for stored_turns at the matching turn.
         """
         self._check_open()
-        options = _stored_options(limit, cursor)
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Stored history search requires nonempty text")
-        options.pop("descending")
-        value = await self._native._stored_history(
-            json.dumps({"kind": "search", **options, "text": text})
-        )
+        value = await self._native._stored_history(_stored_search_request(limit, cursor, text))
         return cast(StoredMatchPage, json.loads(value))
 
     async def items(self, *, subagent_id: str | None = None) -> AsyncIterator[SessionItem]:
