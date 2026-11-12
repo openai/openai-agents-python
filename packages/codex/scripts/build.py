@@ -49,6 +49,11 @@ def main():
         ("RMCP_LICENSE", root / ".upstream/rust-sdk/LICENSE"),
     ):
         shutil.copy2(source, licenses / name)
+    openssl_license = licenses / "OPENSSL_LICENSE"
+    if os.environ.get("OPENAI_AGENTS_NATIVE_OPENSSL_SHA256"):
+        shutil.copy2(Path(os.environ["OPENSSL_DIR"]) / "LICENSE.txt", openssl_license)
+    else:
+        openssl_license.unlink(missing_ok=True)
     environment = build_environment(root)
     if sys.prefix != sys.base_prefix:
         environment["VIRTUAL_ENV"] = sys.prefix

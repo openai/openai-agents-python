@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "f706c289ce02b03fa1bfb3cfb220b21364a15285",
+  "baseline_commit": "2a960c337eda1434711fb77add7c73df5d1adc4f",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -807,7 +807,7 @@
           "class NativeModel(Protocol):\n\n    def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]:\n        pass",
           "class NativeStreamingModel(NativeModel, Protocol):\n\n    def stream(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]] | Awaitable[AsyncIterator[Mapping[str, Any]]]:\n        pass",
           "class ModelProvider(Protocol):\n\n    def get_model(self, model_name: str) -> NativeModel:\n        pass",
-          "@dataclass(frozen=True)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
+          "@dataclass(frozen=True, init=False)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n    _stream_enabled: bool = field(default=False, init=False, repr=False)\n    _include_usage: bool = field(default=True, init=False, repr=False)\n\n    def __init__(self, client: Any, model: str | None=None, *, prompt_cache_key: str | None=None, request_options: ModelRequestOptions | ModelRequestOptionsFactory | None=None, stream: bool=False, include_usage: bool=True) -> None:\n        pass\n\n    @property\n    def stream(self) -> Callable[[ModelRequest], AsyncIterator[Mapping[str, Any]]] | None:\n        pass\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
           "@dataclass(frozen=True)\nclass LitellmModel(ChatCompletionsModel):\n    pass",
           "@dataclass(frozen=True)\nclass AnyLLMModel(ChatCompletionsModel):\n    pass",
           "@dataclass(frozen=True)\nclass ResponsesModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass"
@@ -3126,7 +3126,7 @@
           "from pathlib import Path",
           "from typing import Any, ClassVar, Literal",
           "from pydantic import BaseModel, ConfigDict, Field, PrivateAttr",
-          "from agents.classic.sandbox.entries import BaseEntry, Dir, LocalDir",
+          "from agents.classic.sandbox.entries import BaseEntry, Dir as Dir, LocalDir as LocalDir",
           "from agents.classic.sandbox.manifest import Manifest as Manifest",
           "from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession",
           "from agents.classic.sandbox.types import User",

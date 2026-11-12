@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 # Resolve this trusted sibling even when the host enables PYTHONSAFEPATH.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from owned_process import defer_cleanup_signals, read_ready_line, terminate_child
-from workloads import WORKLOADS, get_workload
+from workloads import WORKLOADS, fresh_native_supported, get_workload
 
 INHERITED_OVERRIDES = {
     "PYTHONPATH",
@@ -137,7 +137,7 @@ async def exercise(
         **adapter_options,
     )
     construction_ns = time.perf_counter_ns() - construction_start
-    prefix = workload.name.replace("_", "-")
+    prefix = (workload.identity_family or workload.name).replace("_", "-")
     operations = []
 
     async def operation(runner, lane, index, warmup=False):
@@ -225,11 +225,19 @@ async def exercise(
                 raise AssertionError(
                     f"Wrong stream chunk count for {identity}: {len(result['deltas'])}"
                 )
+        if native_provider_mode == "omitted" and workload.tools_per_round:
+            row["native_session_id"] = result["native_session_id"]
+            row["tool_context_validated"] = result["tool_context_validated"]
+            row["context_submission_is_result_turn"] = result["context_submission_is_result_turn"]
+            row["reader_ready"] = result["reader_ready"]
+            row["stream_fully_drained"] = result["stream_fully_drained"]
         history = lane_histories[row["lane"]]
         history.append(identity)
         row["output_sha256"] = hashlib.sha256(result["text"].encode()).hexdigest()
         row["delta_count"] = len(result["deltas"])
         row["expected_history"] = list(history) if workload.mode == "conversation" else [identity]
+    if native_provider_mode == "omitted" and workload.tools_per_round:
+        validate_fresh_tool_rows(workload, operations)
     latencies = [row["latency_ms"] for row in operations if not row["warmup"]]
     return {
         "charged_operations": charged_operations,
@@ -270,6 +278,28 @@ async def exercise(
     }
 
 
+def validate_fresh_tool_rows(workload, operations):
+    expected = workload.concurrency * (workload.prefill + workload.iterations)
+    if not isinstance(operations, list) or len(operations) != expected:
+        raise ValueError("Incomplete fresh tool identity rows")
+    identities = [row.get("native_session_id") for row in operations]
+    if (
+        any(not isinstance(value, str) or not value for value in identities)
+        or len(set(identities)) != expected
+    ):
+        raise ValueError("Fresh tool calls reused or omitted a native Session")
+    for row in operations:
+        if any(
+            row.get(name) is not True
+            for name in ("tool_context_validated", "context_submission_is_result_turn")
+        ):
+            raise ValueError("ToolContext did not belong to the returned Turn")
+        if workload.stream and any(
+            row.get(name) is not True for name in ("reader_ready", "stream_fully_drained")
+        ):
+            raise ValueError("Fresh active reader was not ready and fully drained")
+
+
 def validate_receipts(workload, result, stats):
     expected_operations = workload.concurrency * (workload.prefill + workload.iterations)
     expected_requests = expected_operations * (workload.tool_rounds + 1)
@@ -291,6 +321,10 @@ def validate_receipts(workload, result, stats):
         receipts = by_operation.get(operation["id"], [])
         if len(receipts) != workload.tool_rounds + 1:
             raise AssertionError(f"Missing or repeated model work for {operation['id']}")
+        if receipts and receipts[0].get("wire_transport") == "websocket":
+            connections = {receipt["websocket_connection_id"] for receipt in receipts}
+            if len(connections) != 1:
+                raise AssertionError("One fresh conversation used multiple WebSocket connections")
         for receipt in receipts:
             if receipt["history_user_markers"] != operation["expected_history"]:
                 raise AssertionError(f"Incorrect conversation history for {operation['id']}")
@@ -336,7 +370,8 @@ def validate_transport(workload, stats, *, engine, response_mode, native_transpo
         raise ValueError("Incomplete provider transport receipts")
     websocket = engine == "v1" and native_transport == "websocket"
     if websocket and (
-        stats.get("websocket_connections") != expected_requests
+        stats.get("websocket_connections")
+        != workload.concurrency * (workload.prefill + workload.iterations)
         or stats.get("websocket_open_connections") != 0
     ):
         raise ValueError("Fresh WebSocket connections have not been retiring")
@@ -376,7 +411,7 @@ def main():
         "--native-provider-mode",
         choices=["caller-owned", "omitted"],
         default="caller-owned",
-        help="Native Provider mode (omitted: default-host, final-only, no-tool oneshot cases)",
+        help="Native Provider mode (omitted: default-host fresh no-tool or one-async-tool calls)",
     )
     parser.add_argument("--response-mode", choices=["streaming", "buffered"], default="streaming")
     parser.add_argument("--case", choices=WORKLOADS, default="oneshot_text")
@@ -458,22 +493,22 @@ def main():
     workload = get_workload(args.case, iterations=args.iterations)
     if args.native_transport == "websocket" and (
         args.engine != "v1"
-        or (args.case != "oneshot_text" and not setup)
+        or not fresh_native_supported(workload)
         or args.import_only
         or args.response_mode != "streaming"
     ):
-        parser.error("WebSocket reproduction requires native oneshot_text in streaming mode")
+        parser.error(
+            "WebSocket reproduction requires supported fresh native calls in streaming mode"
+        )
     if args.response_mode == "buffered" and not args.import_only:
         if args.engine != "v1" or workload.stream:
             parser.error("Buffered mode requires a native final-result workload")
     if setup and (
         args.import_only
-        or workload.mode != "oneshot"
-        or workload.stream
-        or workload.tool_rounds
+        or not fresh_native_supported(workload)
         or args.response_mode != "streaming"
     ):
-        parser.error("Default-host mode requires fresh final-only no-tool streaming calls")
+        parser.error("Default-host mode requires fresh no-tool or one-async-tool streaming calls")
     result = {
         "default_host": bool(setup),
         "response_mode": args.response_mode

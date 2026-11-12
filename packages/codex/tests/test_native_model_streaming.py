@@ -399,3 +399,49 @@ async def test_model_stream_cancellation_joins_iterator_before_reusing_session()
                 await turn.get_result()
             next_turn = await session.submit("Continue.")
             assert (await next_turn.get_result()).final_output == "next turn"
+
+
+@pytest.mark.parametrize("first", ["empty", "cancel", "failure"])
+async def test_model_stream_before_first_event_keeps_cleanup_and_session_reuse(first: str) -> None:
+    entered, closed = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            raise AssertionError("streaming request entered complete()")
+
+        async def stream(self, request: ModelRequest) -> AsyncIterator[dict[str, Any]]:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                yield assistant_output("next turn")
+                yield completed("next-turn")
+                return
+            try:
+                entered.set()
+                if first == "cancel":
+                    await asyncio.Event().wait()
+                if first == "failure":
+                    raise RuntimeError("stream failed before first event")
+            finally:
+                closed.set()
+
+    async with timeout(20), NativeProvider(model_backend=Model()) as provider:
+        async with Agent(
+            instructions="Reply.", model="fixture", provider=provider
+        ).session() as session:
+            turn = await session.submit("Begin.")
+            await entered.wait()
+            if first == "cancel":
+                await turn.cancel()
+                with pytest.raises(TurnStoppedError):
+                    await turn.get_result()
+            elif first == "failure":
+                with pytest.raises(RuntimeError, match="stream failed before first event"):
+                    await turn.get_result()
+            else:
+                with pytest.raises(NativeError):
+                    await turn.get_result()
+            assert closed.is_set()
+            next_turn = await session.submit("Continue.")
+            assert (await next_turn.get_result()).final_output == "next turn"
