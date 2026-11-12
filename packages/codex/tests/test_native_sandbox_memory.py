@@ -434,7 +434,11 @@ async def test_memory_reader_excludes_writable_interpreter_locations(
 
     owner = cast(
         BaseSandboxSession,
-        SimpleNamespace(_workspace_path_policy=lambda: policy, exec=execute),
+        SimpleNamespace(
+            _workspace_path_policy=lambda: policy,
+            _memory_interpreter_path=lambda: BaseSandboxSession._memory_interpreter_path(owner),
+            exec=execute,
+        ),
     )
     assert (
         await BaseSandboxSession._read_memory_file(owner, Path("memory.md"), max_bytes=4) == b"safe"
@@ -457,8 +461,287 @@ async def test_memory_reader_rejects_workspace_owned_bootstrap() -> None:
 
     owner = cast(
         BaseSandboxSession,
-        SimpleNamespace(_workspace_path_policy=lambda: WorkspacePathPolicy(root="/usr/bin")),
+        SimpleNamespace(
+            _workspace_path_policy=lambda: WorkspacePathPolicy(root="/usr/bin"),
+            _memory_interpreter_path=lambda: BaseSandboxSession._memory_interpreter_path(owner),
+        ),
     )
     # No exec implementation: rejection must precede provider execution.
     with pytest.raises(WorkspaceArchiveReadError):
         await BaseSandboxSession._read_memory_file(owner, Path("memory.md"), max_bytes=4)
+
+
+async def test_native_sandbox_memory_replaces_output_links(tmp_path: Path, monkeypatch):
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    workspace = tmp_path / "workspace"
+    async with (
+        timeout(30),
+        _workspace_gateway(workspace, monkeypatch) as connect,
+        ScriptedResponses(
+            [text("Source reply.")],
+            [text('{"rollout_slug":"new","rollout_summary":"new","raw_memory":"New memory."}')],
+            [text('{"memory":"combined memory","summary":"combined summary"}')],
+        ) as peer,
+    ):
+
+        @asynccontextmanager
+        async def checked_connect(resource: SandboxSession):
+            memory = workspace / "memories"
+            memory.mkdir(parents=True)
+            victim = workspace / "victim.txt"
+            victim.write_text("unchanged sentinel")
+            for name in ("MEMORY.md", "memory_summary.md", "raw_memories.md"):
+                (memory / name).symlink_to(victim)
+            async with connect(resource) as environment:
+                yield environment
+
+        agent = Agent(instructions="Source.", provider=peer.provider)
+        environment = sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(workspace)),
+            options=UnixLocalSandboxClientOptions(),
+            connect=checked_connect,
+            memory=SandboxMemoryOptions(
+                phase_one=Agent(instructions="Extract.", provider=peer.provider),
+                phase_two=Agent(instructions="Consolidate.", provider=peer.provider),
+            ),
+        )
+        async with agent.session(environment=environment) as session:
+            await (await session.submit("Remember native text.")).get_result()
+            await session.flush_memory()
+        assert (workspace / "victim.txt").read_text() == "unchanged sentinel"
+        for name in ("MEMORY.md", "memory_summary.md", "raw_memories.md"):
+            assert not (workspace / "memories" / name).is_symlink()
+        assert (workspace / "memories/MEMORY.md").read_text() == "combined memory"
+
+
+async def test_docker_memory_writes_replace_leaves_and_reject_ancestor_links(monkeypatch):
+    import io
+
+    docker = pytest.importorskip("docker")
+    from agents.classic.sandbox.config import MemoryLayoutConfig
+    from agents.classic.sandbox.errors import WorkspaceArchiveWriteError
+    from agents.classic.sandbox.memory.storage import SandboxMemoryStorage
+    from agents.classic.sandbox.sandboxes.docker import (
+        DockerSandboxClient,
+        DockerSandboxClientOptions,
+    )
+
+    image = "python:3.13.16-slim"
+    try:
+        daemon = docker.from_env()
+        daemon.images.get(image)
+    except docker.errors.DockerException:
+        if "daemon" in locals():
+            daemon.close()
+        pytest.skip("Retained Docker Python image is unavailable")
+    client = DockerSandboxClient(daemon)
+    resource = await client.create(
+        manifest=Manifest(root="/workspace"),
+        options=DockerSandboxClientOptions(image=image, network_mode="none"),
+    )
+    inner = resource._inner
+    try:
+        await inner.start()
+        storage = SandboxMemoryStorage(session=inner, layout=MemoryLayoutConfig(), bounded=True)
+        await storage.ensure_layout()
+        await inner.write(Path("victim.txt"), io.BytesIO(b"unchanged sentinel"))
+        generated = "generated native memory \u2603"
+        original_stream = inner._stream_into_exec
+
+        async def streamed_write(**options):
+            assert generated not in json.dumps(options["cmd"], ensure_ascii=False)
+            assert options["system_tools"] is True
+            assert options["append_input_length"] is True
+            return await original_stream(**options)
+
+        monkeypatch.setattr(inner, "_stream_into_exec", streamed_write)
+        destinations = (
+            "sessions/source.jsonl",
+            "memories/raw_memories/source.md",
+            "memories/rollout_summaries/source.md",
+            "memories/raw_memories.md",
+            "memories/MEMORY.md",
+            "memories/memory_summary.md",
+            "memories/phase_two_selection.json",
+        )
+        for destination in destinations:
+            assert (
+                await inner.exec("/bin/rm", "-f", "/workspace/" + destination, shell=False)
+            ).ok()
+            assert (
+                await inner.exec(
+                    "/bin/ln",
+                    "-s",
+                    "/workspace/victim.txt",
+                    "/workspace/" + destination,
+                    shell=False,
+                )
+            ).ok()
+            await storage.write_text(Path(destination), generated)
+            assert (
+                await inner._read_memory_file(Path(destination), max_bytes=128)
+                == generated.encode()
+            )
+            assert (
+                await inner._read_memory_file(Path("victim.txt"), max_bytes=128)
+                == b"unchanged sentinel"
+            )
+        assert (
+            await inner.exec(
+                "/bin/ln", "/workspace/victim.txt", "/workspace/memories/hard.md", shell=False
+            )
+        ).ok()
+        await storage.write_text(Path("memories/hard.md"), generated)
+        assert (
+            await inner._read_memory_file(Path("victim.txt"), max_bytes=128)
+            == b"unchanged sentinel"
+        )
+        assert (await inner.exec("/bin/mkdir", "/workspace/other", shell=False)).ok()
+        assert (
+            await inner.exec("/bin/ln", "-s", "/workspace/other", "/workspace/alias", shell=False)
+        ).ok()
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await storage.write_text(Path("alias/out.md"), generated)
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await inner._mkdir_memory_directory(Path("alias/nested"))
+        assert (
+            await inner.exec("/bin/test", "!", "-e", "/workspace/other/out.md", shell=False)
+        ).ok()
+        assert (
+            await inner.exec("/bin/test", "!", "-e", "/workspace/other/nested", shell=False)
+        ).ok()
+    finally:
+        await inner.aclose()
+        daemon.close()
+
+
+async def test_native_memory_rejects_linked_layout_before_generation(tmp_path: Path, monkeypatch):
+    from agents.classic.sandbox.errors import WorkspaceArchiveWriteError
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    workspace = tmp_path / "workspace"
+    async with (
+        timeout(30),
+        _workspace_gateway(workspace, monkeypatch) as connect,
+        ScriptedResponses([text("Source reply.")]) as peer,
+    ):
+
+        @asynccontextmanager
+        async def checked_connect(resource: SandboxSession):
+            victim = workspace / "victim"
+            victim.mkdir()
+            (workspace / "memories").symlink_to(victim, target_is_directory=True)
+            async with connect(resource) as environment:
+                yield environment
+
+        agent = Agent(instructions="Memory phase.", provider=peer.provider)
+        environment = sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(workspace)),
+            options=UnixLocalSandboxClientOptions(),
+            connect=checked_connect,
+            memory=SandboxMemoryOptions(
+                phase_one=Agent(instructions="Memory phase.", provider=peer.provider),
+                phase_two=Agent(instructions="Memory phase.", provider=peer.provider),
+            ),
+        )
+        async with agent.session(environment=environment) as session:
+            await (await session.submit("Remember native text.")).get_result()
+            with pytest.raises(WorkspaceArchiveWriteError):
+                await session.flush_memory()
+        assert list((workspace / "victim").iterdir()) == []
+        assert len(peer.requests) == 1
+
+
+async def test_native_memory_requires_provider_atomic_operations(tmp_path: Path, monkeypatch):
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+        UnixLocalSandboxSession,
+    )
+    from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
+
+    monkeypatch.setattr(
+        UnixLocalSandboxSession, "_write_memory_file", BaseSandboxSession._write_memory_file
+    )
+    workspace = tmp_path / "workspace"
+    async with _workspace_gateway(workspace, monkeypatch) as connect, ScriptedResponses() as peer:
+        agent = Agent(instructions="Memory phase.", provider=peer.provider)
+        environment = sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(workspace)),
+            options=UnixLocalSandboxClientOptions(),
+            connect=connect,
+            memory=SandboxMemoryOptions(
+                phase_one=Agent(instructions="Memory phase.", provider=peer.provider),
+                phase_two=Agent(instructions="Memory phase.", provider=peer.provider),
+            ),
+        )
+        with pytest.raises(ValueError, match="provider-owned atomic"):
+            async with agent.session(environment=environment):
+                pytest.fail("Unsupported memory writes were admitted")
+        assert not (workspace / "memories").exists()
+        assert not peer.requests
+
+
+@pytest.mark.parametrize("cleanup_error", [False, True])
+async def test_docker_memory_cancellation_waits_for_physical_write(cleanup_error):
+    import io
+    from types import SimpleNamespace
+    from typing import cast
+
+    pytest.importorskip("docker")
+    from agents.classic.sandbox.sandboxes.docker import DockerSandboxSession
+    from agents.classic.sandbox.workspace_paths import WorkspacePathPolicy
+
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = Event()
+    finished = Event()
+
+    def write():
+        loop.call_soon_threadsafe(started.set)
+        release.wait(10)
+        finished.set()
+        if cleanup_error:
+            raise RuntimeError("synthetic write cleanup")
+
+    async def stream(**_kwargs):
+        await loop.run_in_executor(None, write)
+        return 0
+
+    owner = cast(
+        DockerSandboxSession,
+        SimpleNamespace(
+            _workspace_path_policy=lambda: WorkspacePathPolicy(root="/workspace"),
+            _memory_interpreter_path=lambda: "/usr/local/bin:/usr/bin:/bin",
+            _stream_into_exec=stream,
+        ),
+    )
+    task = asyncio.create_task(
+        DockerSandboxSession._memory_file_operation(
+            owner, Path("memories/MEMORY.md"), io.BytesIO(b"synthetic payload"), operation="file"
+        )
+    )
+    try:
+        await started.wait()
+        task.cancel("caller cancellation")
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await task
+    assert finished.is_set()
+    assert cancelled.value.args == ("caller cancellation",)
+    if cleanup_error:
+        assert isinstance(cancelled.value.__context__, RuntimeError)
+        assert str(cancelled.value.__context__) == "synthetic write cleanup"

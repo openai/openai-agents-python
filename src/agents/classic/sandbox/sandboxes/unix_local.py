@@ -1215,6 +1215,30 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
         return self._files.read_bounded(self.normalize_path(path), max_bytes)
 
+    async def _mkdir_memory_directory(self, path: Path) -> None:
+        relative = self._workspace_path_policy().relative_path(path)
+        workspace_path = self.normalize_path(Path(".")) / relative
+        try:
+            self._files.mkdir(workspace_path, parents=True)
+        except OSError:
+            raise WorkspaceArchiveWriteError(path=path) from None
+
+    async def _ensure_memory_file(self, path: Path) -> None:
+        relative = self._workspace_path_policy().relative_path(path)
+        workspace_path = self.normalize_path(Path(".")) / relative
+        try:
+            self._files.ensure_file(workspace_path)
+        except OSError:
+            raise WorkspaceArchiveWriteError(path=path) from None
+
+    async def _write_memory_file(self, path: Path, data: io.IOBase) -> None:
+        relative = self._workspace_path_policy().relative_path(path)
+        workspace_path = self.normalize_path(Path(".")) / relative
+        try:
+            self._files.replace(workspace_path, data)
+        except OSError:
+            raise WorkspaceArchiveWriteError(path=path) from None
+
     async def _read_memory_file(self, path: Path, *, max_bytes: int) -> bytes:
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")

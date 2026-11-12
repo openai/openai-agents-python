@@ -127,16 +127,49 @@ class _FileOps:
         with out:
             shutil.copyfileobj(stream, out)
 
+    def ensure_file(self, path: Path) -> None:
+        with self.parent(path, for_write=True, create_parents=True) as (parent_fd, name):
+            try:
+                fd = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                mode = os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode
+                if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+                    raise OSError(
+                        errno.EINVAL, "Unsafe memory-file destination", str(path)
+                    ) from None
+            else:
+                os.close(fd)
+
     def write_sensitive(self, path: Path, stream: io.IOBase) -> None:
         """Replace mount credentials without exposing bytes through a public inode."""
+        self.replace(path, stream, require_owned_regular=True)
+
+    def replace(
+        self, path: Path, stream: io.IOBase, *, require_owned_regular: bool = False
+    ) -> None:
+        """Atomically replace a leaf without opening its existing inode."""
         with self.parent(path, for_write=True, create_parents=True) as (parent_fd, name):
             try:
                 existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             except FileNotFoundError:
                 pass
             else:
-                if not stat.S_ISREG(existing.st_mode) or existing.st_uid != os.geteuid():
-                    raise OSError(errno.EINVAL, "Unsafe sensitive-file destination", str(path))
+                if require_owned_regular:
+                    safe = stat.S_ISREG(existing.st_mode) and existing.st_uid == os.geteuid()
+                else:
+                    safe = stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode)
+                if not safe:
+                    message = (
+                        "Unsafe sensitive-file destination"
+                        if require_owned_regular
+                        else "Unsafe replacement destination"
+                    )
+                    raise OSError(errno.EINVAL, message, str(path))
             temporary = f".mount-config-{secrets.token_hex(16)}"
             fd = os.open(
                 temporary,

@@ -56,6 +56,80 @@ _PtyEntryT = TypeVar("_PtyEntryT")
 _RUNTIME_HELPER_CACHE_KEY_UNSET = object()
 _WORKSPACE_ROOT_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_TIMEOUT_S = 10.0
+_MEMORY_FILE_SCRIPT = """
+import os
+import secrets
+import stat
+import sys
+
+root, path, operation, length = sys.argv[1:]
+parts = path.split("/")
+if any(part in ("", ".", "..") for part in parts):
+    sys.exit(45)
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+parent = None
+try:
+    parent = os.open(root, flags)
+    for part in parts if operation == "directory" else parts[:-1]:
+        try:
+            child = os.open(part, flags, dir_fd=parent)
+        except FileNotFoundError:
+            try:
+                os.mkdir(part, 0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+            child = os.open(part, flags, dir_fd=parent)
+        os.close(parent)
+        parent = child
+    if operation == "directory":
+        sys.exit(0)
+    try:
+        existing = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        if not (stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode)):
+            sys.exit(45)
+    if operation == "ensure":
+        try:
+            fd = os.open(
+                parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600, dir_fd=parent,
+            )
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
+        sys.exit(0)
+    temporary = ".memory-" + secrets.token_hex(16)
+    fd = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600, dir_fd=parent,
+    )
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as output:
+            remaining = int(length)
+            while remaining:
+                chunk = sys.stdin.buffer.read(min(65536, remaining))
+                if not chunk:
+                    sys.exit(45)
+                output.write(chunk)
+                remaining -= len(chunk)
+            output.flush()
+        os.fsync(fd)
+        os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+except OSError:
+    sys.exit(45)
+finally:
+    if parent is not None:
+        os.close(parent)
+"""
 _READ_MEMORY_FILE_SCRIPT = """
 import os
 import stat
@@ -1038,12 +1112,25 @@ class BaseSandboxSession(abc.ABC):
         finally:
             stream.close()
 
-    async def _read_memory_file(self, path: Path, *, max_bytes: int) -> bytes:
-        """Read a bounded regular file beneath the workspace without following links."""
-        if max_bytes <= 0:
-            raise ValueError("max_bytes must be positive")
+    def _check_memory_write_support(self) -> None:
+        if (
+            type(self)._write_memory_file is BaseSandboxSession._write_memory_file
+            or type(self)._mkdir_memory_directory is BaseSandboxSession._mkdir_memory_directory
+            or type(self)._ensure_memory_file is BaseSandboxSession._ensure_memory_file
+        ):
+            raise ValueError("Native sandbox memory requires provider-owned atomic file operations")
+
+    async def _mkdir_memory_directory(self, path: Path) -> None:
+        raise WorkspaceArchiveWriteError(path=path)
+
+    async def _ensure_memory_file(self, path: Path) -> None:
+        raise WorkspaceArchiveWriteError(path=path)
+
+    async def _write_memory_file(self, path: Path, data: io.IOBase) -> None:
+        raise WorkspaceArchiveWriteError(path=path)
+
+    def _memory_interpreter_path(self) -> str | None:
         policy = self._workspace_path_policy()
-        relative = policy.relative_path(path)
         writable_roots = (policy.sandbox_root(),) + tuple(
             root for root, read_only in policy.extra_path_grant_rules() if not read_only
         )
@@ -1058,10 +1145,21 @@ class BaseSandboxSession(abc.ABC):
 
         # The shell and its system libraries must remain image-owned too.
         if overlaps_writable(("/bin", "/usr/bin", "/lib", "/lib64", "/usr/lib", "/usr/lib64")):
-            raise WorkspaceArchiveReadError(path=path)
+            return None
         interpreter_path = "/usr/bin:/bin"
         if not overlaps_writable(("/usr/local/bin", "/usr/local/lib", "/usr/local/lib64")):
             interpreter_path = "/usr/local/bin:" + interpreter_path
+        return interpreter_path
+
+    async def _read_memory_file(self, path: Path, *, max_bytes: int) -> bytes:
+        """Read a bounded regular file beneath the workspace without following links."""
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        policy = self._workspace_path_policy()
+        relative = policy.relative_path(path)
+        interpreter_path = self._memory_interpreter_path()
+        if interpreter_path is None:
+            raise WorkspaceArchiveReadError(path=path)
         result = None
         try:
             # Use image-owned Python and disable workspace and environment import paths.

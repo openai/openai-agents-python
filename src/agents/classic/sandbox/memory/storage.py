@@ -71,6 +71,8 @@ class SandboxMemoryStorage:
         layout: MemoryLayoutConfig,
         bounded: bool = False,
     ) -> None:
+        if bounded:
+            session._check_memory_write_support()
         self._session = session
         self._layout = layout
         self._bounded = bounded
@@ -102,17 +104,27 @@ class SandboxMemoryStorage:
 
     async def ensure_layout(self) -> None:
         async with self._layout_lock:
-            await asyncio.gather(
-                self._session.mkdir(self.sessions_dir, parents=True),
-                self._session.mkdir(self.memories_dir, parents=True),
-                self._session.mkdir(self.memories_dir / "raw_memories", parents=True),
-                self._session.mkdir(self.memories_dir / "rollout_summaries", parents=True),
-                self._session.mkdir(self.memories_dir / "skills", parents=True),
+            directories = (
+                self.sessions_dir,
+                self.memories_dir,
+                self.memories_dir / "raw_memories",
+                self.memories_dir / "rollout_summaries",
+                self.memories_dir / "skills",
             )
+            if self._bounded:
+                for directory in directories:
+                    await self._session._mkdir_memory_directory(directory)
+            else:
+                await asyncio.gather(
+                    *(self._session.mkdir(directory, parents=True) for directory in directories)
+                )
             await self.ensure_text_file(self.memories_dir / "MEMORY.md")
             await self.ensure_text_file(self.memories_dir / "memory_summary.md")
 
     async def ensure_text_file(self, path: Path) -> None:
+        if self._bounded:
+            await self._session._ensure_memory_file(path)
+            return
         absolute = self._session.normalize_path(path)
         exists = await self._session.exec("test", "-f", sandbox_path_str(absolute), shell=False)
         if exists.ok():
@@ -132,7 +144,11 @@ class SandboxMemoryStorage:
             handle.close()
 
     async def write_text(self, path: Path, text: str) -> None:
-        await self._session.write(path, io.BytesIO(text.encode("utf-8")))
+        payload = io.BytesIO(text.encode("utf-8"))
+        if self._bounded:
+            await self._session._write_memory_file(path, payload)
+        else:
+            await self._session.write(path, payload)
 
     async def build_phase_two_input_selection(
         self,
