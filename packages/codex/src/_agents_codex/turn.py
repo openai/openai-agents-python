@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import asyncio as asyncio
+import inspect as inspect
 import json as json
-from collections.abc import Iterator as Iterator, Sequence as Sequence
+from collections.abc import (
+    AsyncIterator as AsyncIterator,
+    Awaitable as Awaitable,
+    Callable as Callable,
+    Iterator as Iterator,
+    Sequence as Sequence,
+)
 from dataclasses import dataclass as dataclass, field as field
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
@@ -18,6 +25,7 @@ from typing import (
 
 from typing_extensions import TypeVar as TypeVar
 
+from ._compat import cancellation_requested
 from ._mcp_errors import _protect_mcp_methods, _strip_mcp_frames, _uses_mcp
 from ._public import preserve_module_identity as _preserve_module_identity
 from .usage import RunUsage, _UsageCollector
@@ -81,12 +89,10 @@ class RequestAttemptCount:
 
 @dataclass(frozen=True, slots=True)
 class RequestAttempts:
-    """Transport send counts for one explicitly submitted native turn.
+    """Transport sends have been counting within the reporting property's scope.
 
-    Complete coverage has been applying to this native turn. Private corrections
-    have been using separate submissions. Borrowed model clients can hide sends.
-    Usage, accepted effects, and request budgets have been following their own
-    accounting contracts.
+    Borrowed model clients have been hiding sends. Usage, accepted effects, and
+    request budgets have been following their own accounting contracts.
     """
 
     availability: Literal["complete", "partial", "unavailable"]
@@ -128,6 +134,57 @@ def _request_attempts_snapshot(capture: Any) -> RequestAttempts | None:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptedTextChunk:
+    """An application-approved prefix has been retaining its exact native item."""
+
+    session_id: str
+    submission_id: str
+    turn_id: str
+    item_id: str
+    text: str
+
+
+class _SubmissionRequestAttempts:
+    """Bounded totals, merged once by each owned native step's producer."""
+
+    def __init__(self) -> None:
+        self.counts: dict[
+            tuple[
+                Literal["root", "child"],
+                Literal["generation", "compaction", "internal"],
+                Literal["http_sse", "http_json", "websocket"],
+            ],
+            int,
+        ] = {}
+        self.borrowed = False
+        self.incomplete = False
+
+    def add(self, snapshot: RequestAttempts | None) -> None:
+        if snapshot is None:
+            self.incomplete = True
+            return
+        self.borrowed |= snapshot.borrowed_requests_unavailable
+        self.incomplete |= snapshot.availability != "complete"
+        for row in snapshot.counts:
+            key = (row.owner, row.operation, row.transport)
+            self.counts[key] = self.counts.get(key, 0) + row.count
+
+    def snapshot(self) -> RequestAttempts:
+        availability: Literal["complete", "partial", "unavailable"] = (
+            "unavailable"
+            if self.borrowed and not self.counts
+            else "partial"
+            if self.incomplete
+            else "complete"
+        )
+        return RequestAttempts(
+            availability,
+            tuple(RequestAttemptCount(*key, count) for key, count in sorted(self.counts.items())),
+            self.borrowed,
+        )
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class Turn(Generic[OutputT]):
     """One submitted root task, or a separately scoped native child turn.
@@ -153,6 +210,9 @@ class Turn(Generic[OutputT]):
     _observation_after: int = field(repr=False, compare=False)
     _guardrail_results: list[Any] = field(repr=False, compare=False)
     _request_attempts: Any = field(repr=False, compare=False)
+    _submission_request_attempts: _SubmissionRequestAttempts | None = field(
+        repr=False, compare=False
+    )
     _original_input: UserInput | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -165,6 +225,19 @@ class Turn(Generic[OutputT]):
         been leaving settled counts readable, including after Session close.
         """
         return _request_attempts_snapshot(self._request_attempts)
+
+    @property
+    def submission_request_attempts(self) -> RequestAttempts | None:
+        """Opted-in native-model sends have been including private output corrections.
+
+        The logical submission has been retaining bounded totals after settlement,
+        including failure and cancellation. Native-step request_attempts has been
+        keeping its original scope. Borrowed sends have been remaining unavailable.
+        """
+        report = self._submission_request_attempts
+        if report is None or not self._root_result_ready():
+            return None
+        return report.snapshot()
 
     @property
     def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
@@ -374,6 +447,76 @@ class Turn(Generic[OutputT]):
         """
         await self._session._cancel_turn(self, mode)
 
+    async def accepted_text(
+        self, accept: Callable[[str], str | None | Awaitable[str | None]]
+    ) -> AsyncIterator[AcceptedTextChunk]:
+        """Application checks have been approving independent prefixes during generation.
+
+        accept has been receiving contiguous pending text for one native item and
+        returning an exact prefix, or None to wait. Empty prefixes have been waiting.
+        Earlier chunks have been remaining approved even after later turn failure.
+        Private corrections and child text have been staying outside this reader.
+        Gaps, invalid prefixes, and pending UTF-8 text above 64 KiB have been failing
+        closed. Cancelling this passive reader has been leaving execution independent.
+        """
+        from .observation import EventGap, OutputTextDelta
+
+        if self.child_id is not None:
+            raise ValueError("accepted_text requires a root Turn")
+        if not callable(accept):
+            raise TypeError("accept must be callable")
+        pending = ""
+        identity: tuple[str, str] | None = None
+        async for event in self.events():
+            if isinstance(event, EventGap):
+                raise RuntimeError("Accepted text observation gap")
+            if not isinstance(event, OutputTextDelta) or event.parent_submission_id is not None:
+                continue
+            owners = {step.submission_id for step in self._steps()}
+            if event.submission_id not in owners:
+                continue
+            current = (event.turn_id, event.item_id)
+            if current != identity:
+                pending = ""
+                identity = current
+            pending += event.delta
+            if len(pending.encode("utf-8")) > 65536:
+                raise RuntimeError("Accepted text pending limit exceeded")
+
+            def live(
+                native_turn_id: str = event.turn_id, owning_submissions: set[str] = owners
+            ) -> bool:
+                active = getattr(self._session, "_active", None)
+                handle = getattr(active, "handle", None)
+                return (
+                    active is not None
+                    and handle is not None
+                    and handle.turn_id == native_turn_id
+                    and handle.submission_id in owning_submissions
+                    and not active.stopping
+                    and not active.terminal.done()
+                    and not active.failure.done()
+                )
+
+            if not live():
+                return
+            approved = accept(pending)
+            if inspect.isawaitable(approved):
+                approved = await approved
+            task = asyncio.current_task()
+            if task is not None and cancellation_requested(task):
+                raise asyncio.CancelledError
+            if not live():
+                return
+            if approved is None or approved == "":
+                continue
+            if not isinstance(approved, str) or not pending.startswith(approved):
+                raise ValueError("accept must return a pending text prefix or None")
+            pending = pending[len(approved) :]
+            yield AcceptedTextChunk(
+                self.session_id, self.submission_id, event.turn_id, event.item_id, approved
+            )
+
     def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream:
         """Observe owned steps; all retention omits gaps from before admission.
 
@@ -480,6 +623,7 @@ def _root_turn(
         "_owner": session._owner,
         "_run_usage": _UsageCollector(),
         "_request_attempts": None,
+        "_submission_request_attempts": None,
         "_completion": completion,
         "_continuation": None,
         "_result": None,
@@ -510,6 +654,7 @@ def _child_turn(session: Session[Any, Any], native: Any) -> Turn[str]:
         "_owner": session._owner,
         "_run_usage": observed.run_usage if observed is not None else _UsageCollector(),
         "_request_attempts": None,
+        "_submission_request_attempts": None,
         "_completion": None,
         "_continuation": None,
         "_result": None,
