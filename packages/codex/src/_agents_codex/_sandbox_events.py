@@ -185,7 +185,21 @@ class Instrumentation(_Instrumentation):
 
     async def emit(self, event: SandboxSessionEvent) -> None:
         if (
-            event.op not in ("start", "stop", "shutdown", "exec", "write_stdin", "view_image")
+            event.op
+            not in (
+                "start",
+                "stop",
+                "shutdown",
+                "exec",
+                "write_stdin",
+                "view_image",
+                "read",
+                "write",
+                "running",
+                "resolve_exposed_port",
+                "persist_workspace",
+                "hydrate_workspace",
+            )
             or not self.sinks
         ):
             return

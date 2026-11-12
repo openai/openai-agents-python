@@ -404,6 +404,36 @@ async def test_local_resume_requires_profile_before_provider_acquisition():
             pytest.fail("unscoped resume opened")
 
 
+async def test_local_resume_opening_rejection_order(responses, tmp_path):
+    storage = LocalStorage(tmp_path / "profile")
+    missing = tmp_path / "missing-instructions.md"
+    malformed = [object()]
+    agent = Agent(instructions="No operations before validation.", provider=provider(responses))
+    cases = [
+        (None, "", malformed, ValueError, "resume requires the original storage backend"),
+        (storage, "", malformed, TypeError, "resume must be a nonempty native Session ID"),
+        (
+            storage,
+            "synthetic-existing-session",
+            malformed,
+            TypeError,
+            "reconciled_calls must contain ReconciledCall records",
+        ),
+        (storage, "synthetic-existing-session", [], FileNotFoundError, "missing-instructions.md"),
+    ]
+    for backend, identity, receipts, error, message in cases:
+        with pytest.raises(error, match=message):
+            async with agent.session(
+                storage=backend,
+                resume=identity,
+                reconciled_calls=receipts,
+                instruction_files=[missing],
+            ):
+                pytest.fail("Invalid local resume opened")
+        assert responses.requests == []
+        assert list(tmp_path.iterdir()) == []
+
+
 async def test_local_known_receipt_before_crash_survives_next_root(responses, tmp_path):
     receipt_reached_model = asyncio.Event()
     release = asyncio.Event()

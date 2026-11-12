@@ -681,8 +681,11 @@ async def test_restore_detaches_caller_input_before_native_acquisition(responses
         assert detached.run_usage.total_tokens == 14
         async with agent.session(state=detached, resume_budget=limits) as resumed:
             request = await next_request(resumed.interactions(), lookup)
-            with pytest.raises(NativeError) as stopped:
+            try:
                 await request.respond("A result")
+            except NativeError as error:
+                assert error.code == "run_budget_exceeded"
+            with pytest.raises(NativeError) as stopped:
                 await resumed.restored_turn.get_result()
             assert stopped.value.code == "run_budget_exceeded"
         assert len(acquisitions) == 2 and len(responses.requests) == 1
@@ -930,7 +933,10 @@ async def test_manual_capture_drains_usage_before_retiring_reader(
         assert saved.run_budget.consumed_tokens == 14
         async with agent.session(state=saved, resume_budget=limits) as restored:
             request = await next_request(restored.interactions(), lookup)
-            await request.respond("result")
+            try:
+                await request.respond("result")
+            except NativeError as error:
+                assert error.code == "run_budget_exceeded"
             with pytest.raises(NativeError) as stopped:
                 await restored.restored_turn.get_result()
             assert stopped.value.code == "run_budget_exceeded"
