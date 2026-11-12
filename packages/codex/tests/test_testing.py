@@ -142,6 +142,16 @@ async def request(provider: NativeProvider, method: str, path: str, body: object
 
 async def test_http_response_order_and_request_snapshots(capsys):
     assert testing.__all__ == [
+        "ExecResult",
+        "InvalidSandboxStep",
+        "SandboxCall",
+        "SandboxCallMatcherError",
+        "SandboxScriptError",
+        "SandboxStepSpec",
+        "ScriptedSandboxSession",
+        "UnconsumedSandboxSteps",
+        "UnexpectedSandboxCall",
+        "scripted_sandbox_session",
         "ModelError",
         "ScriptedModel",
         "ScriptedResponse",

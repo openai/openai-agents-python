@@ -1888,15 +1888,25 @@
           "class ScriptedResponses(AbstractAsyncContextManager['ScriptedResponses']):\n\n    def __init__(self, *responses: Script, default_usage: Mapping[str, JsonValue] | None=None) -> None:\n        pass\n\n    @property\n    def remaining_steps(self) -> int:\n        pass\n\n    def set_default_usage(self, usage: Mapping[str, JsonValue] | None) -> None:\n        pass\n\n    def append(self, *responses: Script) -> None:\n        pass\n\n    def clear(self) -> None:\n        pass\n\n    async def __aenter__(self) -> ScriptedResponses:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass\n\n    @property\n    def provider(self) -> NativeProvider:\n        pass\n\n    @property\n    def requests(self) -> tuple[Mapping[str, JsonValue], ...]:\n        pass\n\n    def tool_output(self, call_id: str) -> str | None:\n        pass\n\n    def assert_exhausted(self) -> None:\n        pass"
         ],
         "exports": {
+          "ExecResult": "agents.classic.sandbox.types.ExecResult",
+          "InvalidSandboxStep": "agents.classic.testing.sandbox.InvalidSandboxStep",
           "ModelError": "agents.testing.ModelError",
           "RealtimeConnectCall": "agents.testing.RealtimeConnectCall",
           "RealtimeStep": "agents.testing.RealtimeStep",
+          "SandboxCall": "agents.classic.testing.sandbox.SandboxCall",
+          "SandboxCallMatcherError": "agents.classic.testing.sandbox.SandboxCallMatcherError",
+          "SandboxScriptError": "agents.classic.testing.sandbox.SandboxScriptError",
+          "SandboxStepSpec": "agents.classic.testing.sandbox.SandboxStepSpec",
           "ScriptedModel": "agents.testing.ScriptedModel",
           "ScriptedRealtimeAdapter": "agents.testing.ScriptedRealtimeAdapter",
           "ScriptedResponse": "agents.testing.ScriptedResponse",
           "ScriptedResponses": "agents.testing.ScriptedResponses",
+          "ScriptedSandboxSession": "agents.testing.ScriptedSandboxSession",
+          "UnconsumedSandboxSteps": "agents.classic.testing.sandbox.UnconsumedSandboxSteps",
+          "UnexpectedSandboxCall": "agents.classic.testing.sandbox.UnexpectedSandboxCall",
           "computer_call": "agents.testing.computer_call",
           "event": "agents.testing.event",
+          "scripted_sandbox_session": "agents.testing.scripted_sandbox_session",
           "text": "agents.testing.text",
           "tool_call": "agents.testing.tool_call"
         },
@@ -1908,16 +1918,27 @@
           "from .agent import NativeProvider as NativeProvider",
           "from .config import JsonValue as JsonValue",
           "from .testing_model import ModelError as ModelError, ScriptedModel as ScriptedModel",
-          "from .testing_realtime import RealtimeConnectCall as RealtimeConnectCall, RealtimeStep as RealtimeStep, ScriptedRealtimeAdapter as ScriptedRealtimeAdapter"
+          "from .testing_realtime import RealtimeConnectCall as RealtimeConnectCall, RealtimeStep as RealtimeStep, ScriptedRealtimeAdapter as ScriptedRealtimeAdapter",
+          "from .testing_sandbox import ExecResult as ExecResult, InvalidSandboxStep as InvalidSandboxStep, SandboxCall as SandboxCall, SandboxCallMatcherError as SandboxCallMatcherError, SandboxScriptError as SandboxScriptError, SandboxStepSpec as SandboxStepSpec, ScriptedSandboxSession as ScriptedSandboxSession, UnconsumedSandboxSteps as UnconsumedSandboxSteps, UnexpectedSandboxCall as UnexpectedSandboxCall, scripted_sandbox_session as scripted_sandbox_session"
         ],
         "references": {
+          "ExecResult": "_agents_codex.testing_sandbox.ExecResult",
+          "InvalidSandboxStep": "_agents_codex.testing_sandbox.InvalidSandboxStep",
           "JsonValue": "agents.config.JsonValue",
           "ModelError": "_agents_codex.testing_model.ModelError",
           "NativeProvider": "agents.agent.NativeProvider",
           "RealtimeConnectCall": "_agents_codex.testing_realtime.RealtimeConnectCall",
           "RealtimeStep": "_agents_codex.testing_realtime.RealtimeStep",
+          "SandboxCall": "_agents_codex.testing_sandbox.SandboxCall",
+          "SandboxCallMatcherError": "_agents_codex.testing_sandbox.SandboxCallMatcherError",
+          "SandboxScriptError": "_agents_codex.testing_sandbox.SandboxScriptError",
+          "SandboxStepSpec": "_agents_codex.testing_sandbox.SandboxStepSpec",
           "ScriptedModel": "_agents_codex.testing_model.ScriptedModel",
-          "ScriptedRealtimeAdapter": "_agents_codex.testing_realtime.ScriptedRealtimeAdapter"
+          "ScriptedRealtimeAdapter": "_agents_codex.testing_realtime.ScriptedRealtimeAdapter",
+          "ScriptedSandboxSession": "_agents_codex.testing_sandbox.ScriptedSandboxSession",
+          "UnconsumedSandboxSteps": "_agents_codex.testing_sandbox.UnconsumedSandboxSteps",
+          "UnexpectedSandboxCall": "_agents_codex.testing_sandbox.UnexpectedSandboxCall",
+          "scripted_sandbox_session": "_agents_codex.testing_sandbox.scripted_sandbox_session"
         }
       },
       "agents.tools": {
@@ -2661,6 +2682,33 @@
           "RealtimeAdapterContext": "_agents_codex.realtime_adapter.RealtimeAdapterContext"
         }
       },
+      "_agents_codex.testing_sandbox": {
+        "declarations": [
+          "class ScriptedSandboxSession(SandboxSession):\n\n    def __init__(self, steps: Iterable[SandboxStepSpec | Mapping[str, Any]]=(), *, manifest: Manifest | None=None) -> None:\n        pass\n\n    @property\n    def calls(self) -> tuple[SandboxCall, ...]:\n        pass\n\n    @property\n    def remaining_steps(self) -> int:\n        pass\n\n    async def apply_patch(self, operations: ApplyPatchOperation | dict[str, object] | list[ApplyPatchOperation | dict[str, object]], *, patch_format: PatchFormat | Literal['v4a']='v4a') -> str:\n        pass\n\n    def assert_complete(self) -> None:\n        pass",
+          "def scripted_sandbox_session(steps: Iterable[SandboxStepSpec | Mapping[str, Any]]=(), *, manifest: Manifest | None=None) -> ScriptedSandboxSession:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Iterable, Mapping",
+          "from typing import Any, Literal",
+          "from .sandbox import Manifest, SandboxSession",
+          "from _agents_shared.testing_sandbox import ApplyPatchOperation, ExecResult as ExecResult, InvalidSandboxStep as InvalidSandboxStep, PatchFormat, SandboxCall as SandboxCall, SandboxCallMatcherError as SandboxCallMatcherError, SandboxScriptError as SandboxScriptError, SandboxStepSpec as SandboxStepSpec, UnconsumedSandboxSteps as UnconsumedSandboxSteps, UnexpectedSandboxCall as UnexpectedSandboxCall"
+        ],
+        "references": {
+          "ApplyPatchOperation": "_agents_shared.testing_sandbox.ApplyPatchOperation",
+          "ExecResult": "_agents_shared.testing_sandbox.ExecResult",
+          "InvalidSandboxStep": "_agents_shared.testing_sandbox.InvalidSandboxStep",
+          "Manifest": "agents.sandbox.Manifest",
+          "PatchFormat": "_agents_shared.testing_sandbox.PatchFormat",
+          "SandboxCall": "_agents_shared.testing_sandbox.SandboxCall",
+          "SandboxCallMatcherError": "_agents_shared.testing_sandbox.SandboxCallMatcherError",
+          "SandboxScriptError": "_agents_shared.testing_sandbox.SandboxScriptError",
+          "SandboxSession": "agents.sandbox.SandboxSession",
+          "SandboxStepSpec": "_agents_shared.testing_sandbox.SandboxStepSpec",
+          "UnconsumedSandboxSteps": "_agents_shared.testing_sandbox.UnconsumedSandboxSteps",
+          "UnexpectedSandboxCall": "_agents_shared.testing_sandbox.UnexpectedSandboxCall"
+        }
+      },
       "_agents_shared.apply_diff": {
         "declarations": [
           "ApplyDiffMode = Literal['default', 'create']",
@@ -2956,6 +3004,36 @@
         ],
         "references": {
           "LocalSnapshotSpec": "_agents_shared.snapshot.LocalSnapshotSpec"
+        }
+      },
+      "_agents_shared.testing_sandbox": {
+        "declarations": [
+          "SandboxMethod = Literal['apply_patch', 'exec', 'ls', 'mkdir', 'mv', 'pty_exec_start', 'pty_write_stdin', 'read', 'rm', 'same_file', 'write']",
+          "SandboxStepReason = Literal['invalid_input', 'unknown_method', 'invalid_matcher', 'invalid_outcome']",
+          "class SandboxScriptError(Exception):\n    pass",
+          "class InvalidSandboxStep(SandboxScriptError):\n\n    def __init__(self, message: str, *, reason: SandboxStepReason, input_index: int, method: str | None) -> None:\n        pass",
+          "class UnexpectedSandboxCall(SandboxScriptError):\n\n    def __init__(self, message: str, *, call: SandboxCall, call_index: int, expected_method: str | None, remaining_steps: int) -> None:\n        pass",
+          "class SandboxCallMatcherError(SandboxScriptError):\n\n    def __init__(self, message: str, *, call: SandboxCall, call_index: int) -> None:\n        pass",
+          "class UnconsumedSandboxSteps(SandboxScriptError):\n\n    def __init__(self, message: str, *, remaining_steps: int, pending_methods: tuple[str, ...]) -> None:\n        pass",
+          "@dataclass(frozen=True)\nclass SandboxCall:\n    call_index: int\n    method: str\n    args: tuple[Any, ...]\n    kwargs: Mapping[str, Any]",
+          "SandboxMatcher: TypeAlias = Callable[[SandboxCall], bool | None]",
+          "SandboxResponder: TypeAlias = Callable[[SandboxCall], Any | Awaitable[Any]]",
+          "class SandboxStepSpec(TypedDict, total=False):\n    method: SandboxMethod\n    match: SandboxMatcher\n    result: Any\n    responder: SandboxResponder\n    error: Exception"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Awaitable, Callable, Mapping",
+          "from dataclasses import dataclass",
+          "from typing import Any, Literal, TypeAlias",
+          "from typing_extensions import TypedDict",
+          "from agents.classic.editor import ApplyPatchOperation as ApplyPatchOperation",
+          "from agents.classic.sandbox.apply_patch import PatchFormat as PatchFormat",
+          "from agents.classic.sandbox.types import ExecResult as ExecResult"
+        ],
+        "references": {
+          "ApplyPatchOperation": "agents.classic.editor.ApplyPatchOperation",
+          "ExecResult": "agents.classic.sandbox.types.ExecResult",
+          "PatchFormat": "agents.classic.sandbox.apply_patch.PatchFormat"
         }
       },
       "_agents_shared.token_truncation": {
