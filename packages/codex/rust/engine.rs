@@ -163,6 +163,7 @@ impl EngineState {
         let mut controls = current.request_controls;
         if settings.tool_choice.is_some() {
             controls.named_tool_choice = Some(None);
+            controls.hosted_tool_choice = Some(None);
         }
         if let Some(patch) = &settings.request_controls {
             controls.apply_patch(patch);

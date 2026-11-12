@@ -11,10 +11,10 @@ index 67688a764e73ccbcbe9ebed36092d2b43a25db40..8713386c0e018228bcb5cd99c77ab841
                  tool_choice: None,
                  disabled_plugin_ids: Vec::new(),
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index d91f201adc9672d0554cc6e686e5e20269055531..602b22b44390dabfe8334751f1d7fc30aa7116ce 100644
+index d321208851f5681c94faa9a7fc5b039b1fc3f8e2..3caf7c2be480510ca4788ea1c505819c0b1f0f47 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
-@@ -282,9 +282,23 @@ impl Serialize for ResponsesApiTools {
+@@ -282,12 +282,26 @@ impl Serialize for ResponsesApiTools {
      }
  }
  
@@ -30,6 +30,9 @@ index d91f201adc9672d0554cc6e686e5e20269055531..602b22b44390dabfe8334751f1d7fc30
  /// Effective wire values. Cleared and omitted SDK settings emit no member here.
  #[derive(Debug, Default, Serialize, Clone, PartialEq)]
  pub struct ResponsesRequestControls {
+     // Core suppresses the outer scalar when this captured selector is present.
+     #[serde(rename = "tool_choice", skip_serializing_if = "Option::is_none")]
+     pub hosted_tool_choice: Option<codex_protocol::model_request_controls::HostedToolChoice>,
 +    /// Local prepared-request data; never sent to the provider.
 +    #[serde(skip)]
 +    pub canonical_history_input: Option<ProviderHistoryInputProjection>,
@@ -38,7 +41,7 @@ index d91f201adc9672d0554cc6e686e5e20269055531..602b22b44390dabfe8334751f1d7fc30
      #[serde(skip_serializing_if = "Option::is_none")]
      pub prompt: Option<codex_protocol::model_request_controls::HostedPromptReference>,
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -312,6 +326,29 @@ pub struct ResponsesRequestControls {
+@@ -315,6 +329,29 @@ pub struct ResponsesRequestControls {
      pub prompt_cache_options: Option<PromptCacheOptions>,
  }
  
@@ -408,7 +411,7 @@ index 6658db6865ca01f887b791209b5e47300b0f3cf0..b6bfd1710a925092c7fc119ad3c346b1
                          invocation_timeout_ms: None,
                          tool_choice: None,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a964b598e84 100644
+index c1a4cce0cb5577febf1374315fc2419cb02ed0a9..97d409c41c1e3f4d18f3d36a53dbb34d6bec5c1b 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -34,6 +34,7 @@ use std::sync::atomic::Ordering;
@@ -443,7 +446,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
              request_contributors,
              executed_tool_calls: None,
              api_key_cyber_access_programs:
-@@ -699,6 +703,57 @@ impl ModelClient {
+@@ -699,6 +703,59 @@ impl ModelClient {
          self
      }
  
@@ -475,7 +478,9 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
 +        self.provider_history.as_ref().map(|cursor| cursor.snapshot())
 +    }
 +
-+    fn provider_history_selection(&self) -> Option<codex_protocol::provider_history::ProviderHistorySelection> {
++    pub(crate) fn provider_history_selection(
++        &self,
++    ) -> Option<codex_protocol::provider_history::ProviderHistorySelection> {
 +        self.provider_history.as_ref().map(|cursor| cursor.selection())
 +    }
 +
@@ -501,7 +506,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
      pub(crate) fn with_session_context(
          mut self,
          prompt_cache_key_override: Option<String>,
-@@ -754,6 +809,7 @@ impl ModelClient {
+@@ -754,6 +811,7 @@ impl ModelClient {
              websocket_session,
              pending_http_response: None,
              turn_state: Arc::new(OnceLock::new()),
@@ -509,7 +514,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
          }
      }
  
-@@ -1136,6 +1192,14 @@ impl ModelClient {
+@@ -1136,6 +1194,14 @@ impl ModelClient {
                  })
              })
              .transpose()?;
@@ -524,15 +529,29 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
          controls
              .validate_profile(model_info)
              .map_err(CodexErr::InvalidRequest)?;
-@@ -1162,11 +1226,19 @@ impl ModelClient {
-             }
-         }
-         let mut input = prompt.get_formatted_input_for_request(model_info);
+@@ -1183,12 +1249,33 @@ impl ModelClient {
+                 Ok(selected)
+             })
+             .transpose()?;
+-        let mut input = prompt.get_formatted_input_for_request(model_info);
 -        if !self.reasoning_effort_override_enabled(model_info) {
 -            // Unsupported models and disabled overrides must also accept saved history.
 -            // Filter only the request copy; persisted history remains unchanged.
 -            input.retain(|item| !matches!(item, ResponseItem::ConfigurationUpdate { .. }));
--        }
++        let context_management =
++            controls.context_management_for_model((!prompt_owns_model).then_some(model_info));
++        if self.provider_history.is_some()
++            && context_management.as_ref().is_some_and(|items| {
++                items.iter().any(|item| {
++                    item.get("type").and_then(serde_json::Value::as_str) == Some("compaction")
++                })
++            })
++        {
++            return Err(CodexErr::InvalidRequest(
++                "Provider-side compaction is unavailable for provider-managed history".into(),
++            ));
+         }
++        let mut input = prompt.get_formatted_input_for_request(model_info);
 +        let mut wire_input_indices = self.provider_history.as_ref().map(|_| Vec::new());
 +        let mut input_index = 0;
 +        let allow_reasoning_overrides = self.reasoning_effort_override_enabled(model_info);
@@ -549,7 +568,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
          let is_openai = self.state.provider.info().is_openai();
          // These prompt-only items are rebuilt on every request. Hash their visible payloads
          // within the thread so retries and resumed sessions preserve their identity.
-@@ -1201,6 +1273,11 @@ impl ModelClient {
+@@ -1223,6 +1310,11 @@ impl ModelClient {
              )));
              prefix.push(instructions);
          }
@@ -561,16 +580,26 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
          input.splice(0..0, prefix);
          filter_provider_response_metadata(&mut input, is_openai);
          let reasoning = if prompt_owns_model {
-@@ -1316,6 +1393,8 @@ impl ModelClient {
-                 },
-             ),
+@@ -1339,6 +1431,8 @@ impl ModelClient {
+             }),
              request_controls: codex_api::ResponsesRequestControls {
+                 hosted_tool_choice,
 +                canonical_history_input,
 +                provider_history: self.provider_history_selection(),
                  prompt: prompt_reference,
                  instructions: hosted_prompt
                      .filter(|prompt| !prompt.omit_instructions)
-@@ -1783,6 +1862,16 @@ impl ModelClientSession {
+@@ -1351,8 +1445,7 @@ impl ModelClient {
+                     })
+                     .transpose()?,
+                 truncation: controls.truncation.clone().flatten(),
+-                context_management: controls
+-                    .context_management_for_model((!prompt_owns_model).then_some(model_info)),
++                context_management,
+                 extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
+                 max_output_tokens: controls.max_output_tokens.flatten(),
+                 temperature: controls.temperature.flatten(),
+@@ -1806,6 +1899,16 @@ impl ModelClientSession {
              .is_some_and(|manager| manager.uses_app_managed_model_oauth())
      }
  
@@ -587,7 +616,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
      pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
          let source = &self.client.state.session_source;
          // ThreadSpawn children expose the same attention API as root turns.
-@@ -1951,6 +2040,11 @@ impl ModelClientSession {
+@@ -1974,6 +2077,11 @@ impl ModelClientSession {
          if !self.client.responses_websocket_enabled() {
              return Ok(());
          }
@@ -599,7 +628,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
          let provider = Arc::clone(&self.client.state.provider);
          let auth_manager = provider.auth_manager();
          let mut auth_recovery = auth_manager
-@@ -2235,6 +2329,7 @@ impl ModelClientSession {
+@@ -2258,6 +2366,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -607,7 +636,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2273,16 +2368,6 @@ impl ModelClientSession {
+@@ -2296,16 +2405,6 @@ impl ModelClientSession {
                  prompt.cyber_access_program,
                  self.client.api_key_cyber_access_programs,
              )?;
@@ -624,7 +653,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
              let observation_is_reviewer = is_guardian_reviewer(&responses_headers);
              options.extra_headers.extend(responses_headers);
              let interceptors = crate::model_request::prepare(
-@@ -2294,6 +2379,31 @@ impl ModelClientSession {
+@@ -2317,6 +2416,31 @@ impl ModelClientSession {
                  &mut request.client_metadata,
                  prompt.tool_admission.clone(),
              );
@@ -656,7 +685,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
              let inference_trace_attempt = inference_trace.start_attempt();
              inference_trace_attempt.add_request_headers(&mut options.extra_headers);
              if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
-@@ -2302,7 +2412,13 @@ impl ModelClientSession {
+@@ -2325,7 +2449,13 @@ impl ModelClientSession {
                  }
                  request.input = input;
              }
@@ -671,7 +700,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
              let request_transport = if prompt.prefer_buffered_response {
                  codex_extension_api::ModelRequestTransport::HttpJson
              } else {
-@@ -2396,6 +2512,19 @@ impl ModelClientSession {
+@@ -2419,6 +2549,19 @@ impl ModelClientSession {
  
              match stream_result {
                  Ok((request_id, interrupt, events, producer_task, producer_stop)) => {
@@ -691,7 +720,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
                      let (mut stream, response) = map_response_events(
                          request_id,
                          crate::model_request::intercept_stream(events, interceptors),
-@@ -2412,8 +2541,13 @@ impl ModelClientSession {
+@@ -2435,8 +2578,13 @@ impl ModelClientSession {
                      stream.producer_task = producer_task;
                      stream.producer_stop = producer_stop;
                      stream.request_observation = request_observation;
@@ -707,7 +736,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
                      return Ok(stream);
                  }
                  Err(ApiError::Transport(unauthorized_transport))
-@@ -2430,6 +2564,7 @@ impl ModelClientSession {
+@@ -2453,6 +2601,7 @@ impl ModelClientSession {
                          response_debug_context.request_id.as_deref(),
                          /*output_items*/ &[],
                      );
@@ -715,7 +744,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
                      auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
                          handle_unauthorized(
                              unauthorized_transport,
-@@ -2445,6 +2580,11 @@ impl ModelClientSession {
+@@ -2468,6 +2617,11 @@ impl ModelClientSession {
                      continue;
                  }
                  Err(err) => {
@@ -727,7 +756,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
                      let response_debug_context =
                          extract_response_debug_context_from_api_error(&err);
                      let err = self.client.state.provider.map_api_error(err);
-@@ -2488,6 +2628,9 @@ impl ModelClientSession {
+@@ -2511,6 +2665,9 @@ impl ModelClientSession {
          inference_trace: &InferenceTraceContext,
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<WebsocketStreamOutcome> {
@@ -737,7 +766,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
-@@ -2520,6 +2663,7 @@ impl ModelClientSession {
+@@ -2543,6 +2700,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -745,7 +774,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2615,7 +2759,11 @@ impl ModelClientSession {
+@@ -2638,7 +2796,11 @@ impl ModelClientSession {
              if let Some(turn_state) = self.turn_state.get() {
                  client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
              }
@@ -758,7 +787,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a96
              let (mode, reason) = if continuation.is_some() {
                  ("incremental", "incremental")
              } else {
-@@ -2875,6 +3023,10 @@ impl ModelClientSession {
+@@ -2898,6 +3060,10 @@ impl ModelClientSession {
          service_tier: Option<String>,
          responses_metadata: &CodexResponsesMetadata,
      ) -> Result<()> {
@@ -1581,10 +1610,54 @@ index abc8b35fe24d565c484191d70c2465cd1d5120a8..2fc0fa0f2a7160007e49c87b5eda8f4f
          thread_id: Some(session.thread_id()),
          thread_settings: snapshot,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index c85b747beb4ac45b52b06a5f5d60e71e90306e64..82a2aafcacafbc4b3b37d02190ba919a186a5939 100644
+index 36e9a93c39b6dd18e480bdb899dd49d63fb8ed57..40b4e8acc7246ef7cb88174d464520722087297e 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -4455,6 +4455,7 @@ async fn try_run_sampling_request(
+@@ -824,6 +824,11 @@ pub(crate) async fn run_turn(
+                 }
+ 
+                 let should_roll_over = needs_follow_up
++                    && sess
++                        .services
++                        .model_client
++                        .provider_history_selection()
++                        .is_none()
+                     && (sess.take_new_context_window_request().await || token_limit_reached);
+                 let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
+                 super::token_budget::maybe_record(
+@@ -1608,6 +1613,15 @@ async fn run_pre_sampling_compact(
+     cancellation_token: &CancellationToken,
+     prepared_current_step: Option<Arc<StepContext>>,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_selection()
++        .is_some()
++    {
++        return Ok(());
++    }
++
+     maybe_run_previous_model_inline_compact(
+         sess,
+         turn_context,
+@@ -1768,6 +1782,15 @@ async fn run_post_turn_compaction(
+     cancellation_token: &CancellationToken,
+     native_model_threshold: bool,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_selection()
++        .is_some()
++    {
++        return Ok(());
++    }
++
+     let turn_context = &step_context.turn;
+     if turn_context.config.features.enabled(Feature::TokenBudget) {
+         return Ok(());
+@@ -4456,6 +4479,7 @@ async fn try_run_sampling_request(
                      }
  
                      assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
@@ -1592,7 +1665,7 @@ index c85b747beb4ac45b52b06a5f5d60e71e90306e64..82a2aafcacafbc4b3b37d02190ba919a
                      sess.reserve_assistant_message_order(&turn_context, &item)
                          .await;
                      if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
-@@ -5103,6 +5104,18 @@ async fn try_run_sampling_request(
+@@ -5104,6 +5128,18 @@ async fn try_run_sampling_request(
      if timeout_ms.is_some() || model_attempt.is_some() {
          deadline_cleanup_errors.extend(deadline.retire_tasks().await);
      }
@@ -1611,7 +1684,7 @@ index c85b747beb4ac45b52b06a5f5d60e71e90306e64..82a2aafcacafbc4b3b37d02190ba919a
      let mut tool_cleanup = if !in_flight.is_empty() {
          let _tool_blocking_timing_guard = turn_context.turn_timing_state.begin_tool_blocking();
          let _tool_blocking_span = trace_span!(
-@@ -5189,6 +5202,8 @@ async fn try_run_sampling_request(
+@@ -5190,6 +5226,8 @@ async fn try_run_sampling_request(
          release_failed_tool_candidates(&sess, &step_context).await;
      }
      tool_cleanup?;

@@ -444,6 +444,10 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
             if isinstance(value, ToolRef):
                 result["tool_choice"] = "required"
                 controls["named_tool_choice"] = {"name": value.name, "namespace": value.namespace}
+            elif isinstance(value, Mapping):
+                result["tool_choice"] = "required"
+                controls["named_tool_choice"] = None
+                controls["hosted_tool_choice"] = dict(value)
             else:
                 result["tool_choice"] = value or "auto"
                 controls["named_tool_choice"] = None
@@ -536,7 +540,14 @@ def _manual_restore_model_settings(
             "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (
-            ordinary | {"named_tool_choice", "attempt_timeout_ms", "retry", "hosted_prompt"}
+            ordinary
+            | {
+                "named_tool_choice",
+                "hosted_tool_choice",
+                "attempt_timeout_ms",
+                "retry",
+                "hosted_prompt",
+            }
         ):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
         normalized = _native_model_settings(
@@ -553,6 +564,15 @@ def _manual_restore_model_settings(
                 raise ValueError("Manual checkpoint has invalid hosted prompt omission controls")
             # The current Agent supplies the reference for each admitted request.
             normalized["hosted_prompt"] = prompt
+        if "hosted_tool_choice" in controls:
+            target = controls["hosted_tool_choice"]
+            if target is None:
+                normalized["hosted_tool_choice"] = None
+            else:
+                captured_choice = _copy_model_settings({"tool_choice": target}).get("tool_choice")
+                if not isinstance(captured_choice, Mapping):
+                    raise ValueError("Manual checkpoint has invalid hosted tool choice")
+                normalized["hosted_tool_choice"] = dict(captured_choice)
         if "named_tool_choice" in controls:
             target = controls["named_tool_choice"]
             if target is not None:
@@ -8127,11 +8147,12 @@ class Session(Generic[ContextT, OutputT]):
         self._memory_restored = state is not None or resume is not None
 
     async def flush_memory(self) -> None:
-        """Generate memory for the acquired sandbox from a successful settled text turn.
+        """Memory generation for a successful settled source turn.
 
-        Configure memory on sandbox_environment. Concurrent callers share the same
-        flush, and the same history revision generates once. Restored Sessions and
-        non-text histories are outside this generation path.
+        Configuration: sandbox_environment(memory=...). Shared concurrent flushes;
+        one generation per history revision. Input: admitted text messages and
+        retained tool records. Restored Sessions and non-text message content:
+        unsupported.
         """
         self._check_callback_operation("flush sandbox memory on its source Session")
         lease = self._environment_lease
@@ -9287,9 +9308,9 @@ class Session(Generic[ContextT, OutputT]):
         settings = _native_model_settings(model, captured_update_settings)
         controls = settings.get("request_controls", {})
         if (
-            self._provider_history is not None
+            "store" in controls
+            and self._provider_history is not None
             and self._provider_history["type"] == "previous_response"
-            and "store" in controls
             and controls["store"] is not True
         ):
             raise ValueError("Previous-response HTTP history requires current store=True")

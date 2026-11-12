@@ -711,3 +711,108 @@ async def test_lineage_refuses_incompatible_storage_update_before_publication(st
                 await session.update(model_settings={"store": store})
             await (await session.submit("After.")).get_result()
         assert [body["store"] for body in model.requests] == [True, True]
+
+
+@pytest.mark.parametrize("kind", ["conversation", "previous_response"])
+@pytest.mark.parametrize("phase", ["pre_turn", "mid_turn"])
+async def test_lineage_skips_local_automatic_compaction(kind, phase):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        effects = []
+
+        @function_tool
+        def record_effect(value: str) -> str:
+            effects.append(value)
+            return "Accepted."
+
+        async def high_usage(event):
+            if event["type"] == "response.completed" and len(model.requests) == 1:
+                event["response"]["usage"].update(
+                    input_tokens=1_000_000, output_tokens=1, total_tokens=1_000_001
+                )
+
+        model.before_event = high_usage
+        model.respond(
+            function_call("record_effect", {"value": "once"}, "effect-once")
+            if phase == "mid_turn"
+            else assistant_output("Before.")
+        )
+        model.respond(assistant_output("After."))
+        agent = Agent(
+            instructions="Continue.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"store": True},
+            tools=[record_effect],
+        )
+        selected = (
+            {"type": "conversation", "id": "conv_current"}
+            if kind == "conversation"
+            else {"type": "previous_response"}
+        )
+        async with agent.session(provider_history=selected) as session:
+            await (await session.submit("Before.")).get_result()
+            if phase == "pre_turn":
+                await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
+        assert effects == (["once"] if phase == "mid_turn" else [])
+
+
+@pytest.mark.parametrize("kind", ["conversation", "previous_response"])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"provider_compaction": {"type": "static", "threshold": 1024}},
+        {"context_management": [{"type": "compaction", "compact_threshold": 1024}]},
+    ],
+)
+async def test_lineage_refuses_provider_compaction_before_dispatch(kind, settings):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, wire):
+        model.respond(assistant_output("After clear."))
+        agent = Agent(
+            instructions="Continue.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"store": True, **settings},
+        )
+        selected = (
+            {"type": "conversation", "id": "conv_current"}
+            if kind == "conversation"
+            else {"type": "previous_response"}
+        )
+        async with agent.session(provider_history=selected) as session:
+            with pytest.raises(NativeError, match="Provider-side compaction is unavailable"):
+                await (await session.submit("Before.")).get_result()
+            assert wire == []
+            await session.update(model_settings={"context_management": None})
+            await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 1
+        assert "context_management" not in model.requests[0]
+
+
+@pytest.mark.parametrize("kind", ["conversation", "previous_response"])
+@pytest.mark.parametrize("context", [None, []])
+async def test_lineage_allows_explicitly_disabled_provider_compaction(kind, context):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(
+            instructions="Continue.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={
+                "store": True,
+                "provider_compaction": {"type": "static", "threshold": 1024},
+                "context_management": context,
+            },
+        )
+        selected = (
+            {"type": "conversation", "id": "conv_current"}
+            if kind == "conversation"
+            else {"type": "previous_response"}
+        )
+        async with agent.session(provider_history=selected) as session:
+            await (await session.submit("Before.")).get_result()
+            await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
+        for body in model.requests:
+            assert body.get("context_management") == context

@@ -48,7 +48,7 @@ from typing import (
 )
 from urllib.parse import urlsplit as urlsplit
 
-from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar
+from typing_extensions import Required as _Required, TypedDict as TypedDict, TypeVar as TypeVar
 
 from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
 from ._lifecycle import (
@@ -125,6 +125,27 @@ _MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()
 _OBSERVATION_RETENTION_UNSET: Any = object()
 
 
+class HostedToolChoice(TypedDict, total=False, closed=True):
+    """Explicit provider selector within the current admitted catalog."""
+
+    type: _Required[
+        Literal[
+            "web_search",
+            "file_search",
+            "code_interpreter",
+            "image_generation",
+            "computer",
+            "computer_use_preview",
+            "shell",
+            "apply_patch",
+            "tool_search",
+            "mcp",
+        ]
+    ]
+    server_label: str
+    name: str
+
+
 class ModelSettings(TypedDict, total=False, closed=True):
     """Native model overrides. Omission preserves the native default.
 
@@ -168,7 +189,7 @@ class ModelSettings(TypedDict, total=False, closed=True):
     reasoning_effort: str
     reasoning_summary: str
     service_tier: str | None
-    tool_choice: Literal["auto", "none", "required"] | ToolRef | None
+    tool_choice: Literal["auto", "none", "required"] | ToolRef | HostedToolChoice | None
     input_modalities: Sequence[Literal["text", "image", "audio"]] | None
     max_output_tokens: int | None
     temperature: float | None
