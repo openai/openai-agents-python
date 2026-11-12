@@ -61,6 +61,7 @@ impl EngineState {
             restored_creation_times: Mutex::new(HashMap::new()),
             managed_execution: Some(profile),
             runtime_parent: Some(parent),
+            telemetry_lease: None,
         })
     }
 

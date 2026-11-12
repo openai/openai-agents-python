@@ -9,7 +9,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::{async_bridge, py_error};
 mod runtime;
 pub(crate) use runtime::{
-    check_process_runtime_pid, close_process_runtime, close_process_runtime_at_exit,
+    check_process_runtime_pid, close_idle_process_runtime, close_process_runtime,
+    close_process_runtime_at_exit,
 };
 
 type Closing = Shared<BoxFuture<'static, std::result::Result<(), String>>>;

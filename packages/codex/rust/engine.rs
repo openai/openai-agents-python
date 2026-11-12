@@ -47,6 +47,7 @@ enum NativeThreadRegistration {
 pub struct EngineState {
     pub manager: Arc<ThreadManager>,
     runtime_parent: Option<Arc<EngineState>>,
+    telemetry_lease: Option<telemetry::EngineLease>,
     managed_execution: Option<codex_core::config::ManagedExecution>,
     pub context_gate: Arc<AsyncRwLock<()>>,
     pub context_retired: AtomicBool,
@@ -279,7 +280,7 @@ impl EngineState {
             Option<codex_core::config::ManagedExecution>,
         )>,
     ) -> anyhow::Result<Self> {
-        telemetry::engine_starting().await?;
+        let telemetry_lease = telemetry::engine_starting().await?;
         let runtime_json = config::prepare_runtime(&runtime_json)?;
         let (mut config, cloud_config, managed_execution) = match prepared {
             Some(prepared) => prepared,
@@ -310,6 +311,10 @@ impl EngineState {
         let initial_model = initial_models
             .as_ref()
             .and_then(|models| models.root.clone());
+        let verify_current_default = initial_models
+            .as_ref()
+            .is_some_and(|models| models.verify_current_default);
+        let configured_model = config.model.clone();
         if native_agents {
             if let Some(model) = &initial_model {
                 config.model = Some(model.clone());
@@ -466,6 +471,21 @@ impl EngineState {
         models.set_api_key_model_discovery_enabled(
             config.features.enabled(Feature::ApiKeyModelDiscovery),
         );
+        if verify_current_default {
+            // Use the current root selection before admitting checkpoint model names.
+            let default = models
+                .get_default_model(
+                    &configured_model,
+                    false,
+                    RefreshStrategy::OnlineIfUncached,
+                    config.http_client_factory(),
+                )
+                .await;
+            ensure!(
+                initial_model.as_deref() == Some(default.as_str()),
+                "Authorize the saved manual checkpoint default model on the Agent"
+            );
+        }
         let models: SharedModelsManager = if sdk_user_input_enabled == Some(false) {
             Arc::new(ConfiguredModels { inner: models })
         } else {
@@ -644,6 +664,7 @@ impl EngineState {
         let result = Self {
             manager,
             runtime_parent: None,
+            telemetry_lease: Some(telemetry_lease),
             managed_execution,
             context_gate: Arc::new(AsyncRwLock::new(())),
             context_retired: AtomicBool::new(false),
@@ -1496,13 +1517,14 @@ impl EngineState {
                 ForkSelection::BeforeTurn(id) => ForkBoundary::BeforeTurn(id),
                 ForkSelection::ThroughTurn(id) => ForkBoundary::ThroughTurn(id),
             };
-            let prepared = self
+            let mut prepared = self
                 .store
                 .prepare_fork(PrepareForkParams {
                     thread_id: record.thread_id,
                     boundary,
                 })
                 .await?;
+            crate::checkpoint::remove_replayed_mcp_approvals(&mut prepared.model_context);
             (
                 ForkSnapshot::Interrupted,
                 InitialHistory::Resumed(ResumedHistory {
@@ -1521,7 +1543,12 @@ impl EngineState {
             let snapshot = nth_user_message
                 .map(ForkSnapshot::TruncateBeforeNthUserMessage)
                 .unwrap_or(ForkSnapshot::Interrupted);
-            let history = self.history(id_or_path).await?;
+            let mut history = self.history(id_or_path).await?;
+            if let InitialHistory::Resumed(resumed) = &mut history
+                && crate::checkpoint::remove_replayed_mcp_approvals(&mut resumed.history)
+            {
+                resumed.history_revision = None;
+            }
             (snapshot, history, None)
         };
         if let Some(specs) = python_specs {
@@ -1620,7 +1647,11 @@ impl EngineState {
 
     pub async fn close(&self) -> anyhow::Result<()> {
         let _guard = self.lifecycle.lock().await;
-        self.close_locked().await
+        self.close_locked().await?;
+        if let Some(lease) = &self.telemetry_lease {
+            lease.retire();
+        }
+        Ok(())
     }
 
     // Only the package worker's lost control channel calls this, after joining
@@ -1686,6 +1717,9 @@ impl EngineState {
         // Never let a suspend or writer error skip the remaining native roots,
         // state DB or Engine teardown (including on a later Engine::drop).
         self.close_locked().await?;
+        if let Some(lease) = &self.telemetry_lease {
+            lease.retire();
+        }
         if let Some(error) = failure {
             return Err(error);
         }

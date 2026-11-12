@@ -92,6 +92,12 @@ if TYPE_CHECKING:
         OutputGuardrail as OutputGuardrail,
     )
     from .handoffs import Handoff as Handoff
+    from .hosted_mcp import (
+        HostedMCP as HostedMCP,
+        HostedMCPApprovalArguments as HostedMCPApprovalArguments,
+        HostedMCPApprovalRequest as HostedMCPApprovalRequest,
+        HostedMCPApprovalResult as HostedMCPApprovalResult,
+    )
     from .input import (
         AssistantMessage as AssistantMessage,
         ImageDetail as ImageDetail,
@@ -221,6 +227,7 @@ if TYPE_CHECKING:
         FeatureSupport as FeatureSupport,
         InteractionExpiredError as InteractionExpiredError,
         InteractionRequired as InteractionRequired,
+        ManagedAgentToolOrigin as ManagedAgentToolOrigin,
         NativeError as NativeError,
         ProducedItem as ProducedItem,
         ResponseIntegrityReason as ResponseIntegrityReason,
@@ -351,6 +358,10 @@ _MODULES = {
     "Checklist": ".tools",
     "NativeGoals": ".tools",
     "NativeGoal": ".state",
+    "HostedMCP": ".hosted_mcp",
+    "HostedMCPApprovalArguments": ".hosted_mcp",
+    "HostedMCPApprovalRequest": ".hosted_mcp",
+    "HostedMCPApprovalResult": ".hosted_mcp",
     "WebSearch": ".tools",
     "FileSearch": ".tools",
     "CodeInterpreter": ".tools",
@@ -495,6 +506,7 @@ _MODULES = {
     "StaleTurnError": ".session",
     "TurnStoppedError": ".session",
     "InteractionRequired": ".session",
+    "ManagedAgentToolOrigin": ".session",
     "NativeError": ".session",
     "ProducedItem": ".session",
     "RunErrorDetails": ".session",
