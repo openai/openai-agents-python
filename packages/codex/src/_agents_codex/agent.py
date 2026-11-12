@@ -1418,9 +1418,9 @@ class Agent(Generic[ContextT, OutputT]):
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
-        resume_budget has been supplying the original current request-only
-        ceiling for a budgeted manual checkpoint. Prior admissions have been
-        remaining consumed. Other openings have been rejecting this option.
+        resume_budget has been supplying the original current limits and missing-usage
+        policy for a budgeted manual checkpoint. Prior admissions and token usage
+        have been remaining consumed. Other openings have been rejecting this option.
 
         restored_output_type selects only a pending restored turn's output
         decoder, validator and repair policy. It must match the saved contract.
@@ -2024,7 +2024,7 @@ class Agent(Generic[ContextT, OutputT]):
                 state is None
                 and budget is not None
                 and pause_manual
-                and (budget.max_tokens is not None or budget.max_estimated_cost_micros is not None)
+                and budget.max_estimated_cost_micros is not None
             ):
                 raise CapabilityError(
                     "An active run with a budget cannot be captured for manual replies. "
@@ -2234,10 +2234,7 @@ class Agent(Generic[ContextT, OutputT]):
                         if (
                             budget is not None
                             and has_reachable_manual
-                            and (
-                                budget.max_tokens is not None
-                                or budget.max_estimated_cost_micros is not None
-                            )
+                            and budget.max_estimated_cost_micros is not None
                         ):
                             raise CapabilityError(
                                 "An active run with a budget cannot be captured "

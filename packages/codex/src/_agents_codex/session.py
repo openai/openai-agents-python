@@ -279,6 +279,7 @@ from .state import (
     SessionState as SessionState,
     _RememberedApproval,
     _RequestRunBudgetCheckpoint,
+    _TokenRunBudgetCheckpoint,
 )
 from .subagents import Subagent as Subagent, _subagent as _subagent
 from .telemetry import (
@@ -809,34 +810,58 @@ class _RunBudget:
     usage_missing: bool = False
     pending_estimates: list[TokenUsage] = field(default_factory=list)
 
-    def checkpoint(self) -> _RequestRunBudgetCheckpoint:
+    def checkpoint(self) -> _RequestRunBudgetCheckpoint | _TokenRunBudgetCheckpoint:
         limits = self.limits
-        if (
-            limits.max_requests is None
-            or limits.max_tokens is not None
-            or limits.max_estimated_cost_micros is not None
-        ):
-            raise CapabilityError("Only request-only run budgets support portable checkpoints")
+        if limits.max_estimated_cost_micros is not None:
+            raise CapabilityError("Estimated-cost run budgets do not support portable checkpoints")
+        if limits.max_tokens is not None:
+            return _TokenRunBudgetCheckpoint(
+                version=2,
+                max_requests=limits.max_requests,
+                admitted_requests=self.requests if limits.max_requests is not None else None,
+                max_tokens=limits.max_tokens,
+                consumed_tokens=min(self.tokens, limits.max_tokens),
+                usage_missing=self.usage_missing,
+                missing_usage=limits.missing_usage,
+            )
+        assert limits.max_requests is not None
         return _RequestRunBudgetCheckpoint(
             version=1, max_requests=limits.max_requests, admitted_requests=self.requests
         )
 
     @classmethod
     def restore_checkpoint(
-        cls, saved: _RequestRunBudgetCheckpoint | None, current: RunBudget | None
+        cls,
+        saved: _RequestRunBudgetCheckpoint | _TokenRunBudgetCheckpoint | None,
+        current: RunBudget | None,
     ) -> _RunBudget | None:
         if saved is None:
             return None
+        mismatch = (
+            "Restoring a request budget requires the original request-only ceiling"
+            if isinstance(saved, _RequestRunBudgetCheckpoint)
+            else "Restoring a run budget requires the original limits and policy"
+        )
         if not isinstance(current, RunBudget):
-            raise CapabilityError(
-                "Restoring a request budget requires the original request-only ceiling"
-            )
+            raise CapabilityError(mismatch)
         tracker = cls(current)
-        if tracker.checkpoint().max_requests != saved.max_requests:
-            raise CapabilityError(
-                "Restoring a request budget requires the original request-only ceiling"
+        expected = tracker.checkpoint()
+        if (
+            type(expected) is not type(saved)
+            or expected.max_requests != saved.max_requests
+            or (
+                isinstance(saved, _TokenRunBudgetCheckpoint)
+                and (
+                    current.max_tokens != saved.max_tokens
+                    or current.missing_usage != saved.missing_usage
+                )
             )
-        tracker.requests = saved.admitted_requests
+        ):
+            raise CapabilityError(mismatch)
+        tracker.requests = saved.admitted_requests or 0
+        if isinstance(saved, _TokenRunBudgetCheckpoint):
+            tracker.tokens = saved.consumed_tokens
+            tracker.usage_missing = saved.usage_missing
         return tracker
 
     def observe(self, usage: dict[str, Any] | None) -> None:
@@ -5162,12 +5187,12 @@ class Session(Generic[ContextT, OutputT]):
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         self._realtime: RealtimeSession | None = None
         # The sole native reader owns questions during opening publication.
-        self._reader: asyncio.Future[None]
+        self._reader: asyncio.Future[bool]
         if _start_event_reader:
             self._reader = _create_task(self._read_events())
         else:
             self._reader = _future()
-            self._reader.set_result(None)
+            self._reader.set_result(False)
         self._mcp_reader: asyncio.Task[None] | None = None
         if _start_readers:
             self._start_readers()
@@ -6396,8 +6421,8 @@ class Session(Generic[ContextT, OutputT]):
 
         budget limits this logical run's next root sampling admission. A
         queued submission has its own budget. Steering and live replies
-        keep the active run's budget. Only request-only limits have been
-        supporting manual suspension.
+        keep the active run's budget. Request and token limits have been
+        supporting manual suspension with matching trusted limits and policy.
         See RunBudget for the counted usage, errors, and overshoot behavior.
 
         trace_options overrides linkage and adds native tracing restrictions.
@@ -12939,7 +12964,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         prefix: Sequence[tuple[dict[str, Any] | None, bool]] = (),
         prefix_error: BaseException | None = None,
-    ) -> None:
+    ) -> bool:
         pending_prefix = iter(prefix)
         prefix = ()
         preparation_callbacks = {
@@ -12951,6 +12976,7 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_tool_batch_completion": self._propose_tool_completion,
         }
         reader_failure: BaseException | None = None
+        manual_shutdown = False
         pending_callback: dict[str, Any] | None = None
         event_native = self._native
         try:
@@ -12973,6 +12999,13 @@ class Session(Generic[ContextT, OutputT]):
                 if self._realtime is not None and self._realtime._ingest(event):
                     continue
                 message = event.get("msg", {})
+                if (
+                    message.get("type") == "shutdown_complete"
+                    and event.get("subagent_id") is None
+                    and self._sealing
+                ):
+                    manual_shutdown = True
+                    break
                 if (
                     message.get("type") == "agent_profile_changed"
                     and message.get("turn_id") is None
@@ -13500,6 +13533,7 @@ class Session(Generic[ContextT, OutputT]):
                             )
                         )
             self._finish_failed_observations()
+        return manual_shutdown
 
     async def _read_mcp_results(self) -> None:
         try:
@@ -15311,6 +15345,12 @@ class Session(Generic[ContextT, OutputT]):
         probe: bool = False,
         managed_retire: bool = False,
     ) -> str:
+        drain_budget_usage = (
+            active is not None
+            and active.budget is not None
+            and active.budget.limits.max_tokens is not None
+            and not active.restored_pending
+        )
         active_uses_executor = active is not None and (
             active.operation_refs is None
             or not _fixed_tool_refs(
@@ -15337,6 +15377,8 @@ class Session(Generic[ContextT, OutputT]):
                 raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
             if before_seal is not None:
                 before_seal()
+            if drain_budget_usage and self._reader.done():
+                raise NativeError("Native event reader ended before manual capture")
             # Block replies and suppress expected ShutdownComplete/EOF while
             # Core decides whether it can stop the original writer. Readers
             # must keep dispatching until native capture confirms suspension.
@@ -15429,16 +15471,24 @@ class Session(Generic[ContextT, OutputT]):
                                 "thread_id": payload["source_session_id"],
                             }
             else:
+                seal_options = {"drain_events": True} if drain_budget_usage else {}
                 if active.output.mode == "native":
-                    encoded = await self._native._seal_manual(json.dumps(active.output.schema))
+                    encoded = await self._native._seal_manual(
+                        json.dumps(active.output.schema), **seal_options
+                    )
                 else:
-                    encoded = await self._native._seal_manual()
+                    encoded = await self._native._seal_manual(**seal_options)
                 payload = json.loads(encoded)
             native_sealed = active is not None
             if active is not None:
                 if payload is None:
                     pre_seal_refused = True
                     raise RuntimeError("The active submission is not a settled manual boundary")
+                if drain_budget_usage:
+                    # Native seal stops the fresh writer. Drain its final usage
+                    # before saving counters; restored holds still have a reader.
+                    if not await asyncio.shield(self._reader):
+                        raise NativeError("Native manual checkpoint did not drain its final events")
                 active.stopping = True
                 self._model_api_key = None
             # Current launch options are authority. Saved options may hold MCP

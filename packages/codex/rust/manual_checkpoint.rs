@@ -1374,6 +1374,7 @@ pub(crate) async fn capture(
     thread: &crate::engine::ThreadState,
     owner: &Owner,
     output_schema: Option<Value>,
+    drain_events: bool,
 ) -> Result<Option<Value>> {
     let _operation = thread.engine.operation(false)?;
     let _mutation = thread.mutations.lock().await;
@@ -1509,7 +1510,7 @@ pub(crate) async fn capture(
         Err(error) => Err(error.into()),
     };
     if suspended {
-        thread.retire_suspended().await;
+        thread.retire_suspended(drain_events).await;
     }
     outcome?;
     let mut snapshot = snapshot?;

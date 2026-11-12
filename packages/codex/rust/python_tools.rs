@@ -8001,7 +8001,7 @@ pub(crate) mod managed_tests {
             let notice = tools.next_request().await;
             assert_eq!(notice["msg"]["callId"], "call-lookup");
             assert!(manual_checkpoint::ready(&state, &native.manual).await.unwrap());
-            let mut payload = manual_checkpoint::capture(&state, &native.manual, None)
+            let mut payload = manual_checkpoint::capture(&state, &native.manual, None, false)
                 .await.unwrap().unwrap();
             assert_eq!(payload["format_version"], 3);
             assert_eq!(provider.requests.lock().unwrap().len(), 1);
