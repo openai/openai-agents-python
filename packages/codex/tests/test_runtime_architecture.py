@@ -236,7 +236,7 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     importlib.util.resolve_name(name, package) if name.startswith(".") else name
                 ]
             for target in targets:
-                # Only this bridge may depend on the existing sandbox resource owners.
+                # Sandbox bridges share the existing resource and event owners.
                 if relative.as_posix() == "sandbox" and target in {
                     "agents.classic.sandbox._mount_security",
                     "agents.classic.sandbox.errors",
@@ -246,6 +246,19 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     "agents.classic.sandbox.remote_mount_policy",
                     "agents.classic.sandbox.session.sandbox_client",
                     "agents.classic.sandbox.session.sandbox_session",
+                    "agents.classic.sandbox.session.events",
+                    "agents.classic.sandbox.session.sinks",
+                }:
+                    continue
+                # Keep event envelopes, sinks and dispatcher identity shared with
+                # the resource wrappers; do not admit Classic execution engines.
+                if relative.as_posix() == "_sandbox_events" and target in {
+                    "agents.classic.sandbox.errors",
+                    "agents.classic.sandbox.session.base_sandbox_session",
+                    "agents.classic.sandbox.session.events",
+                    "agents.classic.sandbox.session.manager",
+                    "agents.classic.sandbox.session.sandbox_session",
+                    "agents.classic.sandbox.session.sinks",
                 }:
                     continue
                 if target and (target == "agents" or target.startswith("agents.")):
