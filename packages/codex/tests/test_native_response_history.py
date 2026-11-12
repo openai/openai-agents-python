@@ -9,7 +9,17 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, LocalStorage, NativeError, SessionState, TurnStoppedError, function_tool
+from agents import (
+    Agent,
+    LocalStorage,
+    ModelRequest,
+    ModelResponse,
+    NativeError,
+    NativeProvider,
+    SessionState,
+    TurnStoppedError,
+    function_tool,
+)
 from agents.input import UserInput
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -123,6 +133,67 @@ async def test_recorded_cache_write_unknowns_survive_restore_without_changing_li
         async with agent.session(state=state) as restored:
             assert [turn async for turn in restored.turns()] == turns
         assert len(responses.requests) == (2 if mixed else 1)
+
+
+@pytest.mark.parametrize("cache_writes", [0, 2])
+async def test_application_model_cache_writes_survive_restore(cache_writes: int) -> None:
+    class SyntheticModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            self.calls += 1
+            return ModelResponse(
+                output=[assistant_output("done")["item"]],
+                usage={
+                    "input_tokens": 3,
+                    "cache_write_input_tokens": cache_writes,
+                    "output_tokens": 2,
+                    "total_tokens": 5,
+                },
+                response_id="resp_synthetic_cache_write",
+            )
+
+    backend = SyntheticModel()
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url="https://example.invalid/v1", api_key="synthetic", model_backend=backend
+        ) as native_provider,
+    ):
+        agent = Agent(instructions="Answer.", model="gpt-5.5", provider=native_provider)
+        async with agent.session() as session:
+            result = await (await session.submit("Synthetic prompt")).get_result()
+            assert result.final_output == "done"
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.cache_write_input_tokens == cache_writes
+            assert backend.calls == 1
+
+            saved = await session.save_state()
+            [observation] = [
+                row["payload"]
+                for row in saved.history
+                if row["type"] == "response_observation_record"
+            ]
+            [accounting] = [
+                row["payload"] for row in saved.history if row["type"] == "token_usage_record"
+            ]
+            assert observation["id"] is not None
+            assert observation.get("response_id") is None
+            assert observation.get("usage") is None
+            assert accounting["response_observation_id"] == observation["id"]
+            assert accounting["usage"]["cache_write_input_tokens"] == cache_writes
+            assert accounting["turn_token_usage"]["cache_write_input_tokens"] == cache_writes
+
+            state = SessionState.from_json(saved.to_json())
+            [turn] = [turn async for turn in session.turns()]
+            assert turn["usage"] is not None
+            assert turn["usage"]["input_tokens_details"].get("cache_write_tokens") == cache_writes
+        async with agent.session(state=state) as restored:
+            [turn] = [turn async for turn in restored.turns()]
+            assert turn["usage"] is not None
+            assert turn["usage"]["input_tokens_details"].get("cache_write_tokens") == cache_writes
+        assert backend.calls == 1
 
 
 @pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter"])

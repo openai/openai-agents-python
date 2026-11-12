@@ -23,6 +23,7 @@ from _agents_codex.agent import (
     NewOutputT as NewOutputT,
     OutputT as OutputT,
     Path as Path,
+    ProviderCompactionPolicy as ProviderCompactionPolicy,
     RLock as RLock,
     Sequence as Sequence,
     SessionContextT as SessionContextT,
