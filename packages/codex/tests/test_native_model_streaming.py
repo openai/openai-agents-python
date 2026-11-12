@@ -291,9 +291,11 @@ async def test_model_stream_admits_tools_after_one_terminal(terminal: str) -> No
     assert effects == (["once"] if valid_terminal else [])
 
 
-async def test_model_stream_records_completed_usage_when_cleanup_fails() -> None:
+@pytest.mark.parametrize("cleanup", ["failure", "force_cancel", "attempt_timeout"])
+async def test_model_stream_retains_completed_usage_when_cleanup_interrupts(cleanup: str) -> None:
     requests: list[ModelRequest] = []
     effects: list[str] = []
+    blocked, closed = asyncio.Event(), asyncio.Event()
 
     @function_tool
     def record(value: str) -> str:
@@ -321,6 +323,12 @@ async def test_model_stream_records_completed_usage_when_cleanup_fails() -> None
                     },
                 },
             }
+            if cleanup != "failure":
+                blocked.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
             raise RuntimeError("application iterator cleanup failed")
 
     async with timeout(20), NativeProvider(model_backend=Model()) as provider:
@@ -329,11 +337,26 @@ async def test_model_stream_records_completed_usage_when_cleanup_fails() -> None
             model="custom-model",
             provider=provider,
             tools=[record],
-            model_settings={"retry": ModelRetrySettings(max_retries=0)},
+            model_settings={
+                "retry": ModelRetrySettings(max_retries=0),
+                "attempt_timeout_ms": 1500 if cleanup == "attempt_timeout" else None,
+            },
         ).session(include_request_attempts=True) as session:
             turn = await session.submit("Record.")
-            with pytest.raises(RuntimeError, match="application iterator cleanup failed"):
-                await turn.get_result()
+            if cleanup != "failure":
+                await blocked.wait()
+            if cleanup == "force_cancel":
+                await turn.cancel(mode="force")
+                with pytest.raises(TurnStoppedError):
+                    await turn.get_result()
+                assert closed.is_set()
+            elif cleanup == "attempt_timeout":
+                with pytest.raises(NativeError, match="local model attempt deadline exceeded"):
+                    await turn.get_result()
+                assert closed.is_set()
+            else:
+                with pytest.raises(RuntimeError, match="application iterator cleanup failed"):
+                    await turn.get_result()
             assert len(requests) == 1 and effects == []
             usage = turn.run_usage
             assert usage.requests == 1 and usage.missing_usage_requests == 0
