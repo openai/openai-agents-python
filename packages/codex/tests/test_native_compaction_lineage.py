@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 import pytest
 from openai import AsyncOpenAI
 
-from agents import Agent, ResponsesCompaction
+from agents import Agent, NativeError, ResponsesCompaction
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_native_agent import provider
@@ -212,7 +212,12 @@ async def test_auto_compaction_keeps_input_for_a_different_borrowed_endpoint(res
             )
             async with timeout(30), agent.session() as session:
                 await (await session.submit("INPUT_MUST_REACH_BORROWED_ENDPOINT")).get_result()
-                await session.compact()
+                before = (await session.history_snapshot()).items
+                with pytest.raises(
+                    NativeError, match="new or modified instruction or control item"
+                ):
+                    await session.compact()
+                assert (await session.history_snapshot()).items == before
     assert len(calls) == 1
     assert "previous_response_id" not in calls[0]
     assert "ACKNOWLEDGED_NATIVE_ENDPOINT" in json.dumps(calls[0]["input"])
@@ -261,7 +266,12 @@ async def test_compaction_rejects_unproven_borrowed_account_scope(responses, cli
                 assert not calls
                 assert not policy_modes
             else:
-                await session.compact()
+                before = (await session.history_snapshot()).items
+                with pytest.raises(
+                    NativeError, match="new or modified instruction or control item"
+                ):
+                    await session.compact()
+                assert (await session.history_snapshot()).items == before
                 assert policy_modes == ["input"]
                 assert len(calls) == 1
                 assert "previous_response_id" not in calls[0]
@@ -342,7 +352,7 @@ async def test_compaction_falls_back_for_unknown_sdk_private_shape(responses, mo
 
     async def compact(**body):
         calls.append(body)
-        return {"output": [{"type": "compaction", "encrypted_content": "INPUT_WINDOW"}]}
+        return {"output": [assistant_output("INPUT_WINDOW")["item"]]}
 
     responses.respond(assistant_output("UNKNOWN_SDK_SHAPE_WINDOW"))
     async with _matching_compaction_client(responses, compact) as client:
@@ -362,17 +372,18 @@ async def test_compaction_falls_back_for_unknown_sdk_private_shape(responses, mo
         async with timeout(30), agent.session() as session:
             await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
             await session.compact()
+            assert "INPUT_WINDOW" in (await session.save_state()).to_json()
     assert len(calls) == 1
     assert "previous_response_id" not in calls[0]
     assert "UNKNOWN_SDK_SHAPE_WINDOW" in json.dumps(calls[0]["input"])
 
 
-async def test_input_only_compaction_does_not_probe_changed_client_scope(responses):
+async def test_input_only_compaction_keeps_full_input_after_client_scope_rotation(responses):
     calls = []
 
     async def compact(**body):
         calls.append(body)
-        return {"output": [{"type": "compaction", "encrypted_content": "INPUT_WINDOW"}]}
+        return {"output": [assistant_output("INPUT_WINDOW")["item"]]}
 
     responses.respond(assistant_output("UNSTORED_NATIVE_WINDOW"))
     async with _matching_compaction_client(responses, compact) as client:
@@ -388,6 +399,7 @@ async def test_input_only_compaction_does_not_probe_changed_client_scope(respons
         async with timeout(30), agent.session() as session:
             await (await session.submit("EXACT_NATIVE_INPUT")).get_result()
             await session.compact()
+            assert "INPUT_WINDOW" in (await session.save_state()).to_json()
     assert len(calls) == 1
     assert "previous_response_id" not in calls[0]
     assert "UNSTORED_NATIVE_WINDOW" in json.dumps(calls[0]["input"])
@@ -403,7 +415,7 @@ async def test_auto_compaction_uses_input_after_client_scope_rotation(
 
     async def compact(**body):
         calls.append(body)
-        return {"output": [{"type": "compaction", "encrypted_content": "ROTATED_SCOPE_WINDOW"}]}
+        return {"output": [assistant_output("ROTATED_SCOPE_WINDOW")["item"]]}
 
     def should_compact(context):
         modes.append(context.mode)
@@ -427,6 +439,7 @@ async def test_auto_compaction_uses_input_after_client_scope_rotation(
             assert result.final_output == "ACKNOWLEDGED_ROTATED_WINDOW"
             if not automatic:
                 await session.compact()
+            assert "ROTATED_SCOPE_WINDOW" in (await session.save_state()).to_json()
     assert len(calls) == 1
     assert modes == ["input"]
     assert "previous_response_id" not in calls[0]
