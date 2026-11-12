@@ -9,9 +9,10 @@ import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Protocol, TypeAlias, cast
+from typing import Any, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
 
+from pydantic import ValidationError
 from typing_extensions import TypedDict
 
 from agents.config import JsonValue
@@ -275,6 +276,51 @@ class ModelProvider(Protocol):
     def get_model(self, model_name: str) -> NativeModel: ...
 
 
+def _is_workspace_patch_path(path: str) -> bool:
+    return (
+        bool(path)
+        and path == path.rstrip()
+        and not any(character in path for character in ("\r", "\n", "\0"))
+    )
+
+
+def _workspace_operation_patch(value: Any) -> str:
+    from .apply_patch import _EditorPatchArguments
+
+    try:
+        operation = _EditorPatchArguments.model_validate({"operation": value}).operation
+    except ValidationError:
+        return ""
+    if not _is_workspace_patch_path(operation.path):
+        return ""
+
+    lines = ["*** Begin Patch"]
+    if operation.type == "delete_file":
+        lines.append(f"*** Delete File: {operation.path}")
+    else:
+        diff = operation.diff.replace("\r\n", "\n").removesuffix("\n")
+        changes = diff.split("\n") if diff else []
+        if operation.type == "create_file":
+            if not all(line.startswith("+") for line in changes):
+                return ""
+            lines.append(f"*** Add File: {operation.path}")
+        else:
+            lines.append(f"*** Update File: {operation.path}")
+            if operation.move_to is not None:
+                if not _is_workspace_patch_path(operation.move_to):
+                    return ""
+                lines.append(f"*** Move to: {operation.move_to}")
+            # Keep raw hunk and environment directives out of this single operation.
+            if not all(
+                line in ("", "@@", "*** End of File") or line.startswith((" ", "+", "-", "@@ "))
+                for line in changes
+            ):
+                return ""
+        lines.extend(changes)
+    lines.append("*** End Patch")
+    return "\n".join(lines)
+
+
 def _chat_apply_patch_input(arguments: Any) -> str:
     if not isinstance(arguments, str):
         return ""
@@ -284,8 +330,69 @@ def _chat_apply_patch_input(arguments: Any) -> str:
         return arguments
     if isinstance(envelope, str):
         return envelope
-    patch = envelope.get("patch") if isinstance(envelope, dict) else None
-    return patch if isinstance(patch, str) else ""
+    if not isinstance(envelope, dict):
+        return ""
+    patch = envelope.get("patch")
+    return (
+        patch if isinstance(patch, str) else _workspace_operation_patch(envelope.get("operation"))
+    )
+
+
+_PatchWire: TypeAlias = Literal["workspace", "editor"]
+
+
+def _chat_editor_patch_function() -> dict[str, Any]:
+    from .apply_patch import _EditorPatchArguments
+
+    return {
+        "name": "apply_patch",
+        "description": "Apply an operation with the application's workspace editor.",
+        "parameters": _EditorPatchArguments.model_json_schema(),
+        "strict": False,
+    }
+
+
+def _chat_workspace_patch_function() -> dict[str, Any]:
+    function = _chat_editor_patch_function()
+    function["description"] = "Apply a freeform patch or one structured operation in the workspace."
+    parameters = function["parameters"]
+    parameters["properties"]["patch"] = {
+        "type": "string",
+        "description": "An apply_patch patch beginning with *** Begin Patch.",
+    }
+    parameters["required"] = []
+    parameters["oneOf"] = [{"required": ["patch"]}, {"required": ["operation"]}]
+    parameters["additionalProperties"] = False
+    return function
+
+
+def _chat_editor_patch_call(call: Mapping[str, Any]) -> dict[str, Any]:
+    from .apply_patch import _EditorPatchArguments
+
+    arguments = None
+    try:
+        try:
+            arguments = _EditorPatchArguments.model_validate_json(call["function"]["arguments"])
+        except (ValidationError, KeyError, RecursionError, TypeError):
+            pass
+        if arguments is None:
+            raise ValueError("apply_patch requires a valid editor operation")
+        return {
+            "type": "apply_patch_call",
+            "call_id": call["id"],
+            "status": "completed",
+            "operation": arguments.operation.model_dump(exclude_none=True),
+        }
+    finally:
+        del call, arguments
+
+
+def _chat_patch_replay_arguments(kind: str, item: Mapping[str, Any]) -> Any:
+    if kind == "apply_patch_call":
+        return json.dumps({"operation": item["operation"]})
+    if kind == "custom_tool_call":
+        return json.dumps({"patch": item["input"]})
+    return item["arguments"]
 
 
 @dataclass(frozen=True)
@@ -322,8 +429,8 @@ class ChatCompletionsModel:
         object.__setattr__(self, "_request_options_source", source)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        apply_patch_calls: set[str] = set()
-        apply_patch_offered = False
+        apply_patch_calls: dict[str, _PatchWire] = {}
+        apply_patch_wire: _PatchWire | None = None
         audio_data: Any = None
         audio_format: Any = None
         audio_header: Any = None
@@ -419,7 +526,7 @@ class ChatCompletionsModel:
                         messages[-1]["content"] = [*(messages[-1].get("content") or []), *content]
                     else:
                         messages.append({"role": item["role"], "content": content})
-                elif kind == "function_call" or (
+                elif kind in ("function_call", "apply_patch_call") or (
                     kind == "custom_tool_call" and item.get("name") == "apply_patch"
                 ):
                     if item.get("namespace") not in (None, "functions"):
@@ -429,25 +536,38 @@ class ChatCompletionsModel:
                     if not messages or messages[-1].get("role") != "assistant":
                         messages.append({"role": "assistant", "tool_calls": []})
                     if kind == "custom_tool_call":
-                        apply_patch_calls.add(item["call_id"])
+                        apply_patch_calls[item["call_id"]] = "workspace"
+                    elif kind == "apply_patch_call":
+                        apply_patch_calls[item["call_id"]] = "editor"
                     messages[-1].setdefault("tool_calls", []).append(
                         {
                             "id": item["call_id"],
                             "type": "function",
                             "function": {
-                                "name": item["name"],
-                                "arguments": (
-                                    json.dumps({"patch": item["input"]})
-                                    if kind == "custom_tool_call"
-                                    else item["arguments"]
-                                ),
+                                "name": "apply_patch"
+                                if kind == "apply_patch_call"
+                                else item["name"],
+                                "arguments": _chat_patch_replay_arguments(kind, item),
                             },
                         }
                     )
-                elif kind == "function_call_output" or (
-                    kind == "custom_tool_call_output" and item["call_id"] in apply_patch_calls
+                elif (
+                    kind == "function_call_output"
+                    or (
+                        kind == "custom_tool_call_output"
+                        and apply_patch_calls.get(item["call_id"]) == "workspace"
+                    )
+                    or (
+                        kind == "apply_patch_call_output"
+                        and apply_patch_calls.get(item["call_id"]) == "editor"
+                    )
                 ):
-                    output = item["output"]
+                    if kind == "apply_patch_call_output":
+                        output = json.dumps(
+                            {"status": item.get("status"), "output": item.get("output")}
+                        )
+                    else:
+                        output = item["output"]
                     if not isinstance(output, str):
                         if not isinstance(output, list) or any(
                             not isinstance(part, dict)
@@ -485,34 +605,16 @@ class ChatCompletionsModel:
                 for tool in leaves:
                     if tool.get("namespace") not in (None, "functions"):
                         raise ValueError("Chat adapters support the default function namespace")
-                    if tool.get("type") == "custom" and tool.get("name") == "apply_patch":
-                        apply_patch_offered = True
+                    if tool.get("type") == "apply_patch":
+                        apply_patch_wire = "editor"
                         tools.append(
-                            {
-                                "type": "function",
-                                "function": {
-                                    "name": "apply_patch",
-                                    "description": "Apply a patch to files in the workspace.",
-                                    "parameters": {
-                                        "type": "object",
-                                        "properties": {
-                                            "patch": {
-                                                "type": "string",
-                                                "description": (
-                                                    "A patch between *** Begin Patch and "
-                                                    "*** End Patch. "
-                                                    "Use *** Add File:, *** Update File:, or "
-                                                    "*** Delete File: headers, and *** Move to: "
-                                                    "within an update to rename a file."
-                                                ),
-                                            }
-                                        },
-                                        "required": ["patch"],
-                                        "additionalProperties": False,
-                                    },
-                                    "strict": True,
-                                },
-                            }
+                            {"type": "function", "function": _chat_editor_patch_function()}
+                        )
+                        continue
+                    if tool.get("type") == "custom" and tool.get("name") == "apply_patch":
+                        apply_patch_wire = "workspace"
+                        tools.append(
+                            {"type": "function", "function": _chat_workspace_patch_function()}
                         )
                         continue
                     if tool.get("type") != "function":
@@ -610,7 +712,7 @@ class ChatCompletionsModel:
             if isinstance(options.get("tool_choice"), Mapping):
                 declaration = options["tool_choice"]
                 if declaration.get("type") != "function" and not (
-                    apply_patch_offered
+                    apply_patch_wire == "workspace"
                     and declaration.get("type") == "custom"
                     and declaration.get("name") == "apply_patch"
                 ):
@@ -708,7 +810,10 @@ class ChatCompletionsModel:
             for call in message.get("tool_calls") or []:
                 if call.get("type") != "function":
                     raise ValueError("ChatCompletionsModel received an unsupported tool call")
-                if apply_patch_offered and call["function"]["name"] == "apply_patch":
+                if apply_patch_wire == "editor" and call["function"]["name"] == "apply_patch":
+                    output.append(_chat_editor_patch_call(call))
+                    continue
+                if apply_patch_wire == "workspace" and call["function"]["name"] == "apply_patch":
                     output.append(
                         {
                             "type": "custom_tool_call",

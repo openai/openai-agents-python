@@ -112,14 +112,18 @@ def declaration(peer: ExecutorPeer, **kwargs: Any) -> Environment:
 
 
 @pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("structured", [False, True])
 async def test_chat_completions_applies_native_workspace_patch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, structured: bool
 ) -> None:
-    patch = (
-        "*** Begin Patch\n"
-        "*** Add File: first.txt\n+first\n"
-        "*** Add File: second.txt\n+second\n"
-        "*** End Patch"
+    patch = "*** Begin Patch\n*** Add File: first.txt\n+first\n"
+    if not structured:
+        patch += "*** Add File: second.txt\n+second\n"
+    patch += "*** End Patch"
+    arguments = (
+        {"operation": {"type": "create_file", "path": "first.txt", "diff": "+first"}}
+        if structured
+        else {"patch": patch}
     )
     requests: list[dict[str, Any]] = []
     approvals: list[Any] = []
@@ -138,7 +142,7 @@ async def test_chat_completions_applies_native_workspace_patch(
                         "type": "function",
                         "function": {
                             "name": "apply_patch",
-                            "arguments": json.dumps({"patch": patch}),
+                            "arguments": json.dumps(arguments),
                         },
                     }
                 ],
@@ -188,7 +192,11 @@ async def test_chat_completions_applies_native_workspace_patch(
             assert (await turn.get_result()).final_output == "patched"
         assert approvals == [patch]
         assert (peer.root / "first.txt").read_text() == "first\n"
-        assert (peer.root / "second.txt").read_text() == "second\n"
+        second = peer.root / "second.txt"
+        if structured:
+            assert not second.exists()
+        else:
+            assert second.read_text() == "second\n"
     assert len(requests) == 2
 
 

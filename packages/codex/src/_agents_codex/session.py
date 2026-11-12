@@ -97,6 +97,7 @@ from ._managed_workspace import (
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _audio_json, _check_audio_json
 from ._native_async import _NativeCompletionError as _NativeCompletionError
+from ._opening import _capture_opening_agent as _capture_opening_agent
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
@@ -303,6 +304,7 @@ from .tools import (
     WebSearch as WebSearch,
     _capture_application_data,
     _capture_hosted_tools,
+    _capture_tools as _capture_tools,
     _CapturedFunction as _CapturedFunction,
     _hosted_tool_name,
     _ToolCatalog as _ToolCatalog,
@@ -2733,17 +2735,6 @@ def _install_profile_options(
     )
 
 
-def _capture_tools(
-    generation: int,
-    tools: tuple[FunctionTool[Any, Any, Any], ...],
-    context: ContextT | None,
-) -> _ToolCatalog:
-    return _ToolCatalog(
-        generation,
-        tuple(tool._capture(context) for tool in tools),
-    )
-
-
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
     kind = spec.get("type")
     if kind == "applyPatch":
@@ -3534,38 +3525,6 @@ def _configure_child_roles(
             "description": role.description,
             "config_file": str(role_path),
         }
-
-
-def _capture_opening_agent(
-    agent: Agent[ContextT, OutputT],
-    *,
-    provider: NativeProvider | None,
-    model: str | None,
-    model_settings: ModelSettings | None,
-    tool_selection: Sequence[Tool[ContextT]] | None,
-) -> Agent[ContextT, OutputT]:
-    """Detach declaration defaults before native opening can suspend."""
-    return Agent[ContextT, OutputT](
-        instructions=agent.instructions,
-        realtime=agent.realtime,
-        name=agent.name,
-        tools=agent.tools if tool_selection is None else tool_selection,
-        handoffs=agent.handoffs,
-        model=agent.model if model is None else model,
-        model_settings=cast(
-            ModelSettings, {**agent.model_settings, **_copy_model_settings(model_settings)}
-        ),
-        provider=agent.provider if provider is None else provider,
-        decisions=agent.decisions,
-        output_type=cast(OutputSpec[OutputT], agent.output_type),
-        programmatic_tool_calling=agent.programmatic_tool_calling,
-        transform_context=agent.transform_context,
-        before_compact=agent.before_compact,
-        before_complete=agent.before_complete,
-        tool_batch_completion=agent.tool_batch_completion,
-        input_guardrails=agent.input_guardrails,
-        output_guardrails=agent.output_guardrails,
-    )
 
 
 def _private_default_opening_candidates(
