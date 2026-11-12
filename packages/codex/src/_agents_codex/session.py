@@ -1306,6 +1306,7 @@ class _RestoreDeclaration:
     observation_retention: Literal["bounded", "all"]
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
+    verify_remembered_approvals: Callable[[SessionState], bool] | None = None
 
 
 _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
@@ -3681,6 +3682,8 @@ class Session(Generic[ContextT, OutputT]):
                 and (selected.state is state or selected.state == state)
             ):
                 agent = selected.declaration
+                if verify_remembered_approvals is None:
+                    verify_remembered_approvals = selected.verify_remembered_approvals
                 if function_concurrency_omitted:
                     max_function_concurrency = selected.max_function_concurrency
                 if retention_omitted:
