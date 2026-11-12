@@ -36,9 +36,13 @@ class Skills(SkillSet):
     _bounded_metadata = True
 
     def _capture(self) -> Skills:
-        if self.from_ is not None and self.run_as is not None:
-            raise ValueError("Configure the eager Skills reader on the sandbox session")
         source = self.lazy_from
+        local_loader = (
+            isinstance(source, LocalDirLazySkillSource)
+            and type(source).load_skill is LocalDirLazySkillSource.load_skill
+        )
+        if self.run_as is not None and (self.from_ is not None or local_loader):
+            raise ValueError("Configure the Skills reader on the sandbox session")
         memo = {} if isinstance(source, LocalDirLazySkillSource) else {id(source): source}
         return deepcopy(self.model_copy(update={"session": None}), memo)
 
@@ -117,14 +121,14 @@ class _SkillLease:
             session = self.session
             if session is None:
                 raise RuntimeError("Skill loading requires a current sandbox")
-            result = await self.skills.load_skill(skill_name)
-            self._admit(context)
             expected = str(
                 self.skills.workspace_scope.model_resource_path(
                     workspace_root=session.state.manifest.root,
                     workspace_relative_path=matches[0].path,
                 )
             )
+            result = await self.skills._load_skill(skill_name, indexed=matches[0])
+            self._admit(context)
             if result.get("path") != expected:
                 raise ValueError("Skill source returned a path outside its captured index")
             return result

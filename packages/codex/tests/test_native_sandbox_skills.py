@@ -189,6 +189,68 @@ async def test_lazy_native_callback_uses_current_source(tmp_path, monkeypatch, r
         )
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
+async def test_native_local_skill_load_reuses_the_captured_index(tmp_path, monkeypatch, responses):
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    class LocalSource(LocalDirLazySkillSource):
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    selected = tmp_path / "skills/report/SKILL.md"
+    unrelated = tmp_path / "skills/unrelated/SKILL.md"
+    selected.parent.mkdir(parents=True)
+    unrelated.parent.mkdir(parents=True)
+    document = b"---\nname: report\ndescription: CAPTURED_NATIVE_INDEX\n---\n" + b"x" * (
+        1024 * 1024
+    )
+    selected.write_bytes(document)
+    unrelated.write_text("---\nname: unrelated\n---\n", encoding="utf-8")
+    roots: list[Path] = []
+
+    @asynccontextmanager
+    async def connect(sandbox):
+        root = Path(sandbox.state.manifest.root)
+        roots.append(root)
+        async with ExecutorPeer(tmp_path / "executor").serve() as executor:
+            trust(executor, tmp_path, monkeypatch)
+            yield Environment(
+                url=executor.url,
+                headers={"Authorization": "Bearer " + executor.token},
+                cwd=str(root),
+                tools=(),
+                capability_directories=[str(root / ".agents")],
+            )
+
+    source = sandbox_environment(
+        UnixLocalSandboxClient(),
+        manifest=Manifest(),
+        options=UnixLocalSandboxClientOptions(),
+        connect=connect,
+        skills=Skills(lazy_from=LocalSource(source=LocalDir(src=Path("skills")))),
+    )
+    responses.respond(function_call("load_skill", {"skill_name": "report"}, "load-report"))
+    responses.respond(function_call("load_skill", {"skill_name": "report"}, "load-again"))
+    responses.respond(assistant_output("done"))
+    async with Agent(
+        instructions="Load the report.",
+        model="gpt-5.5",
+        provider=provider(responses),
+        tools=source.skill_tools,
+    ).session(environment=source) as session:
+        unrelated.write_bytes(b"\xff")
+        turn = await session.submit("Load the report.")
+        assert (await turn.get_result()).final_output == "done"
+        assert (roots[0] / ".agents/report/SKILL.md").read_bytes() == document
+        assert not (roots[0] / ".agents/unrelated").exists()
+    assert "CAPTURED_NATIVE_INDEX" in str(responses.requests[0])
+    assert "loaded" in str(tool_output(responses.requests[1], "load-report"))
+    assert "already_loaded" in str(tool_output(responses.requests[-1], "load-again"))
+
+
 @pytest.mark.skipif(
     sys.platform not in ("linux", "darwin"), reason="POSIX sandbox resource fixture"
 )

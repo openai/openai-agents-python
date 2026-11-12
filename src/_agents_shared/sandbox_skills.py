@@ -275,6 +275,19 @@ class LocalDirLazySkillSource(LazySkillSource):
         skills_path: str,
         user: str | User | None = None,
     ) -> dict[str, str]:
+        return await self._load_skill(
+            skill_name=skill_name, session=session, skills_path=skills_path, user=user
+        )
+
+    async def _load_skill(
+        self,
+        *,
+        skill_name: str,
+        session: BaseSandboxSession,
+        skills_path: str,
+        user: str | User | None,
+        indexed: SkillMetadata | None = None,
+    ) -> dict[str, str]:
         source_grants = session.state.manifest.extra_path_grants
         src_root = self._src_root(source_grants=source_grants)
         if src_root is None:
@@ -283,43 +296,48 @@ class LocalDirLazySkillSource(LazySkillSource):
                 context={"skill_name": skill_name},
             )
 
-        matches = [
-            skill
-            for skill in self.list_skill_metadata(
-                skills_path=skills_path,
-                source_grants=source_grants,
-            )
-            if skill.name == skill_name or skill.path.name == skill_name
-        ]
-        if not matches:
-            raise SkillsConfigError(
-                message="lazy skill not found",
-                context={"skill_name": skill_name, "skills_path": skills_path},
-            )
-        if len(matches) > 1:
-            raise SkillsConfigError(
-                message="lazy skill name is ambiguous",
-                context={
-                    "skill_name": skill_name,
-                    "matching_paths": [str(skill.path) for skill in matches],
-                },
-            )
-        metadata = matches[0]
+        metadata = indexed
+        if metadata is None:
+            matches = [
+                skill
+                for skill in self.list_skill_metadata(
+                    skills_path=skills_path,
+                    source_grants=source_grants,
+                )
+                if skill.name == skill_name or skill.path.name == skill_name
+            ]
+            if not matches:
+                raise SkillsConfigError(
+                    message="lazy skill not found",
+                    context={"skill_name": skill_name, "skills_path": skills_path},
+                )
+            if len(matches) > 1:
+                raise SkillsConfigError(
+                    message="lazy skill name is ambiguous",
+                    context={
+                        "skill_name": skill_name,
+                        "matching_paths": [str(skill.path) for skill in matches],
+                    },
+                )
+            metadata = matches[0]
 
         workspace_root = Path(session.state.manifest.root)
         skill_dest = workspace_root / metadata.path
         skill_md_path = skill_dest / "SKILL.md"
         try:
-            handle = await _read_with_expected_span_errors(
-                session,
-                skill_md_path,
-                user=user,
-                expected_span_errors=(FileNotFoundError, WorkspaceReadNotFoundError),
-            )
+            if indexed is None:
+                handle = await _read_with_expected_span_errors(
+                    session,
+                    skill_md_path,
+                    user=user,
+                    expected_span_errors=(FileNotFoundError, WorkspaceReadNotFoundError),
+                )
+                handle.close()
+            else:
+                await session.read_bounded(skill_md_path, max_bytes=1)
         except (FileNotFoundError, WorkspaceReadNotFoundError):
-            handle = None
-        if handle is not None:
-            handle.close()
+            pass
+        else:
             return {
                 "status": "already_loaded",
                 "skill_name": metadata.name,
@@ -834,6 +852,11 @@ class SkillSet(BaseModel):
             ) from exc
 
     async def load_skill(self, skill_name: str) -> dict[str, str]:
+        return await self._load_skill(skill_name)
+
+    async def _load_skill(
+        self, skill_name: str, *, indexed: SkillMetadata | None = None
+    ) -> dict[str, str]:
         if self.lazy_from is None:
             raise SkillsConfigError(
                 message="load_skill is only available when lazy_from is configured",
@@ -841,12 +864,25 @@ class SkillSet(BaseModel):
             )
         if self.session is None:
             raise ValueError(f"{type(self).__name__} is not bound to a SandboxSession")
-        result = await self.lazy_from.load_skill(
-            skill_name=skill_name,
-            session=self.session,
-            skills_path=self.skills_path,
-            user=self.run_as,
-        )
+        if (
+            indexed is not None
+            and isinstance(self.lazy_from, LocalDirLazySkillSource)
+            and type(self.lazy_from).load_skill is LocalDirLazySkillSource.load_skill
+        ):
+            result = await self.lazy_from._load_skill(
+                skill_name=skill_name,
+                session=self.session,
+                skills_path=self.skills_path,
+                user=self.run_as,
+                indexed=indexed,
+            )
+        else:
+            result = await self.lazy_from.load_skill(
+                skill_name=skill_name,
+                session=self.session,
+                skills_path=self.skills_path,
+                user=self.run_as,
+            )
         if self.workspace_scope.cwd is None:
             return result
 
@@ -936,7 +972,12 @@ class SkillSet(BaseModel):
                 )
             )
 
-        if budget is not None and type(self.lazy_from) is LocalDirLazySkillSource:
+        if (
+            budget is not None
+            and isinstance(self.lazy_from, LocalDirLazySkillSource)
+            and type(self.lazy_from).list_skill_metadata
+            is LocalDirLazySkillSource.list_skill_metadata
+        ):
             metadata.extend(
                 self.lazy_from._list_skill_metadata(
                     skills_path=self.skills_path,
