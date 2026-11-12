@@ -3,9 +3,11 @@
 import asyncio
 import json
 from collections import deque
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from aiohttp import web
 
 from agents import (
     Agent,
@@ -402,3 +404,52 @@ async def test_native_mcp_uncached_list_failure_precedes_next_provider_request(
                 await (await session.submit("second")).get_result()
             assert len(responses.requests) == 1
             assert peer.calls == []
+
+
+async def test_native_mcp_discovery_retains_all_serialized_standard_fields(
+    responses: ResponsesFixture,
+):
+    fields = {
+        "outputSchema": {"type": "object", "properties": {"value": {"type": "string"}}},
+        "icons": [
+            {"src": "https://example.invalid/tool.png", "mimeType": "image/png", "sizes": ["32x32"]}
+        ],
+        "_meta": {"fixture": "raw-tool"},
+    }
+
+    class ExtendedPeer(Peer):
+        async def handle(self, request):
+            response = await super().handle(request)
+            if response.body:
+                body = json.loads(response.body)
+                if "tools" in body.get("result", {}):
+                    for tool in body["result"]["tools"]:
+                        tool.update(deepcopy(fields))
+                    return web.json_response(body)
+            return response
+
+    seen = []
+
+    def select(_context: MCPDiscoveryContext, definition: MCPToolDefinition):
+        seen.append({key: deepcopy(definition[key]) for key in fields})
+        return True
+
+    peer = ExtendedPeer(names=("search",))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(25),
+        peer.serve() as url,
+        NativeProvider(
+            base_url=responses.url, api_key="synthetic", supports_websockets=False
+        ) as provider,
+    ):
+        agent = Agent(
+            instructions="Read records.",
+            model=selected_model(),
+            provider=provider,
+            tools=[HttpMCP(name="cache", url=url, tools=["search"], tool_filter=select)],
+        )
+        async with agent.session() as session:
+            assert (await (await session.submit("begin")).get_result()).final_output == "done"
+    assert seen == [fields]
+    assert peer.calls == []

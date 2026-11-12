@@ -294,6 +294,9 @@ class MCPMetadataContext(Generic[ContextT_co]):
 class MCPToolDefinition(TypedDict):
     name: str
     inputSchema: dict[str, Any]
+    outputSchema: NotRequired[dict[str, Any]]
+    icons: NotRequired[list[dict[str, Any]]]
+    _meta: NotRequired[dict[str, Any]]
     title: NotRequired[str]
     description: NotRequired[str]
     annotations: NotRequired[dict[str, Any]]
