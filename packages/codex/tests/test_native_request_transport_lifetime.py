@@ -332,7 +332,8 @@ async def test_borrowed_transport_and_async_credentials_are_request_scoped(adapt
         assert marker not in saved
 
 
-async def test_manual_resume_retains_sampling_but_rebinds_transport(monkeypatch):
+@pytest.mark.parametrize("stage_input", [False, True], ids=["manual", "staged-input"])
+async def test_manual_resume_retains_sampling_but_rebinds_transport(monkeypatch, stage_input):
     observed = []
     original = WebSocketPeer.handle
 
@@ -367,6 +368,9 @@ async def test_manual_resume_retains_sampling_but_rebinds_transport(monkeypatch)
             )
             await next_request(session.interactions(), lookup)
             state = await session.suspend()
+        staged_text = "Keep this staged input across restore."
+        if stage_input:
+            state = state.with_pending_input(staged_text)
         encoded = state.to_json()
         assert "SYNTHETIC_MANUAL_SOURCE" not in encoded
         assert "SYNTHETIC_MANUAL_QUERY" not in encoded
@@ -388,6 +392,8 @@ async def test_manual_resume_retains_sampling_but_rebinds_transport(monkeypatch)
             assert restored.restored_turn is not None
             assert (await restored.restored_turn.get_result()).final_output == "resumed result"
             assert server.requests[-1]["temperature"] == 0.2
+            if stage_input:
+                assert staged_text in json.dumps(server.requests[-1]["input"])
             assert observed[-1][0]["x-current"] == "SYNTHETIC_MANUAL_CURRENT"
             assert "x-operation" not in observed[-1][0]
             assert "operation" not in observed[-1][1]

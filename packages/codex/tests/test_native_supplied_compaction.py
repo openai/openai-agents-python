@@ -109,6 +109,69 @@ async def test_graph_compaction_keeps_live_transport(handoff_selected, monkeypat
             assert not wire.replies
 
 
+@pytest.mark.parametrize(
+    ("field", "error"),
+    [
+        ("catalogs", "Invalid native Agent catalog allocation receipt"),
+        ("active_catalog", "Missing native active Agent catalog"),
+    ],
+)
+async def test_invalid_graph_catalog_receipt_keeps_source_usable(monkeypatch, field, error):
+    from agents import _native
+
+    effects: list[str] = []
+
+    @function_tool
+    def probe(ctx: ToolContext[str]) -> str:
+        effects.append(ctx.context)
+        return "source binding"
+
+    async with timeout(30), peer() as wire:
+        provider = wire.provider()
+        worker = Agent(
+            name="Worker", instructions="Worker instructions.", provider=provider, model="gpt-5.5"
+        )
+        root = Agent(
+            name="Root",
+            instructions="Root instructions.",
+            tools=[probe],
+            handoffs=[worker],
+            provider=provider,
+            model="gpt-5.5",
+        )
+        wire.replies.append(message("before compaction"))
+        async with root.session(context="unchanged context") as session:
+            await (await session.submit("Start.")).get_result()
+            source = session._native
+            profiles = session._profiles.copy()
+            catalogs = session._profile_catalogs.copy()
+            bindings = session._catalog_bindings.copy()
+            high_water = session._profile_generation_high_water
+            configure = _native.NativeThread._configure_agent_profiles
+
+            async def invalid_catalog_receipt(candidate, *args, **kwargs):
+                assert candidate is not source
+                receipt = json.loads(await configure(candidate, *args, **kwargs))
+                del receipt[field]
+                return json.dumps(receipt)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    _native.NativeThread, "_configure_agent_profiles", invalid_catalog_receipt
+                )
+                with pytest.raises(NativeError, match=error):
+                    await session.compact(summary="Rejected replacement.")
+            assert session._native is source
+            assert session._profiles == profiles
+            assert session._profile_catalogs == catalogs
+            assert session._catalog_bindings == bindings
+            assert session._profile_generation_high_water == high_water
+            wire.replies.extend((call("probe", "source-still-owned"), message("source survived")))
+            turn = await session.submit("Continue.")
+            assert (await turn.get_result()).final_output == "source survived"
+            assert effects == ["unchanged context"]
+
+
 async def test_supplied_selection_keeps_originals_in_order_and_round_trips():
     effects: list[str] = []
 
