@@ -1,0 +1,204 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 2c4014b9..2a82fb4f 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3944,7 +3944,7 @@ async fn handle_assistant_item_done_in_plan_mode(
+             step_context,
+             item,
+             finalized_facts.as_ref(),
+-            /*application_tool*/ None,
++            /*metadata*/ None,
+         )
+         .await;
+         if let Some(agent_message) = final_last_agent_message {
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 212cbe6a..7113face 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -83,14 +83,14 @@ pub(crate) async fn record_completed_response_item(
+     sess: &Session,
+     step_context: &StepContext,
+     item: &ResponseItem,
+-    application_tool: Option<&str>,
++    metadata: Option<CodexHarnessMetadata>,
+ ) {
+     record_completed_response_item_with_finalized_facts(
+         sess,
+         step_context,
+         item,
+         /*finalized_facts*/ None,
+-        application_tool,
++        metadata,
+     )
+     .await;
+ }
+@@ -100,19 +100,16 @@ pub(crate) async fn record_completed_response_item_with_finalized_facts(
+     step_context: &StepContext,
+     item: &ResponseItem,
+     finalized_facts: Option<&FinalizedTurnItemFacts>,
+-    application_tool: Option<&str>,
++    metadata: Option<CodexHarnessMetadata>,
+ ) {
+     let turn_context = &step_context.turn;
+-    if let Some(tool) = application_tool {
++    if let Some(metadata) = metadata {
+         sess.record_annotated_conversation_items(
+             turn_context,
+             &step_context.settings.model_info,
+             vec![ResponseItemEnvelope {
+                 item: item.clone(),
+-                metadata: Some(CodexHarnessMetadata {
+-                    sdk_application_tool: Some(tool.to_owned()),
+-                    ..Default::default()
+-                }),
++                metadata: Some(metadata),
+             }],
+         )
+         .await;
+@@ -428,11 +425,22 @@ pub(crate) async fn handle_output_item_done(
+                 codex_tools::ToolPayload::ApplyPatch { .. } => Some("apply_patch"),
+                 _ => None,
+             };
++            let managed_agent_tool = ctx
++                .step_context
++                .tool_router
++                .tool_runtime(&call.tool_name)
++                .and_then(|tool| tool.managed_agent_tool_origin());
++            let metadata = (application_tool.is_some() || managed_agent_tool.is_some())
++                .then(|| CodexHarnessMetadata {
++                    sdk_application_tool: application_tool.map(str::to_owned),
++                    sdk_managed_agent_tool: managed_agent_tool,
++                    ..Default::default()
++                });
+             record_completed_response_item(
+                 ctx.sess.as_ref(),
+                 ctx.step_context.as_ref(),
+                 &item,
+-                application_tool,
++                metadata,
+             )
+             .await;
+             if application_tool.is_some() {
+@@ -484,7 +492,7 @@ pub(crate) async fn handle_output_item_done(
+                 ctx.step_context.as_ref(),
+                 &item,
+                 finalized_facts.as_ref(),
+-                /*application_tool*/ None,
++                /*metadata*/ None,
+             )
+             .await;
+ 
+@@ -507,7 +515,7 @@ pub(crate) async fn handle_output_item_done(
+                 ctx.sess.as_ref(),
+                 ctx.step_context.as_ref(),
+                 &item,
+-                /*application_tool*/ None,
++                /*metadata*/ None,
+             )
+             .await;
+             if let Some(response_item) = response_input_to_response_item(&response) {
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 623401a1..d59fba01 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -28,6 +28,7 @@ use crate::tools::registry::ToolArgumentDiffConsumer;
+ use crate::tools::router::ToolCall;
+ use crate::tools::router::ToolCallSource;
+ use crate::unified_exec::PendingLocalExec;
++use codex_history::CodexHarnessMetadata;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::models::ResponseInputItem;
+@@ -269,11 +270,18 @@ impl ToolCallRuntime {
+                 Err(other) if matches!(error_call.payload, ToolPayload::Computer { .. } | ToolPayload::ApplyPatch { .. }) => {
+                     return Err(CodexErr::Fatal(other.to_string()));
+                 }
+-                Err(other) => (
+-                    ResponseItemEnvelope::new(Self::failure_response(error_call, other).into()),
+-                    None,
+-                    false,
+-                ),
++                Err(other) => {
++                    let metadata = retained_step_context
++                        .tool_router
++                        .tool_runtime(&error_call.tool_name)
++                        .and_then(|tool| tool.managed_agent_tool_origin())
++                        .map(|origin| CodexHarnessMetadata {
++                            sdk_managed_agent_tool: Some(origin),
++                            ..Default::default()
++                        });
++                    let item = Self::failure_response(error_call, other).into();
++                    (ResponseItemEnvelope { item, metadata }, None, false)
++                }
+             };
+             if let Some(text) = call_state.delivered_assistant_message.get() {
+                 response
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index a593164d..7be4f9a1 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -31,6 +31,7 @@ use codex_analytics::ControlToolCallStatus;
+ use codex_extension_api::ToolCallOutcome;
+ use codex_extension_api::ToolPolicy;
+ use codex_history::CodexHarnessMetadata;
++use codex_history::ManagedAgentToolOrigin;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::models::FunctionCallOutputPayload;
+ use codex_protocol::models::ResponseInputItem;
+@@ -55,6 +56,14 @@ pub use codex_tools::ToolExposure;
+ /// Implementers provide the shared `ToolExecutor` behavior plus optional
+ /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
+ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> + std::any::Any {
++    fn managed_agent_tool_origin(&self) -> Option<ManagedAgentToolOrigin> {
++        let role = self.managed_agent_role()?;
++        Some(ManagedAgentToolOrigin {
++            name: self.tool_name().name,
++            role: role.to_owned(),
++        })
++    }
++
+     /// Whether this built-in control tool needs a structured tool-call event.
+     fn is_builtin_control_tool(&self) -> bool {
+         false
+@@ -977,7 +986,12 @@ async fn handle_any_tool(
+     let post_tool_use_payload =
+         CoreToolRuntime::post_tool_use_payload(tool, &invocation, output.as_ref());
+     let result = AnyToolResult {
+-        harness_metadata: None,
++        harness_metadata: tool
++            .managed_agent_tool_origin()
++            .map(|origin| CodexHarnessMetadata {
++                sdk_managed_agent_tool: Some(origin),
++                ..Default::default()
++            }),
+         call_id,
+         payload,
+         result: output,
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index 31e88ee4..adad060f 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -59,6 +59,13 @@ pub struct ResponseItemEnvelope {
+     pub metadata: Option<CodexHarnessMetadata>,
+ }
+ 
++/// The declaration selected by a native managed role tool call.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
++pub struct ManagedAgentToolOrigin {
++    pub name: String,
++    pub role: String,
++}
++
+ /// Metadata owned by the Codex harness and persisted with a response item.
+ ///
+ #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+@@ -69,6 +76,9 @@ pub struct CodexHarnessMetadata {
+     /// Accepted SDK handoff outcome; canonical provenance, never execution authority.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_agent_handoff: Option<codex_protocol::agent_profile::AgentProfileHandoff>,
++    /// The native declaration for this tool occurrence, outside provider content.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_managed_agent_tool: Option<ManagedAgentToolOrigin>,
+     /// Host graph declaration fingerprint; never an authority or a serialized graph.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub sdk_agent_graph: Option<String>,

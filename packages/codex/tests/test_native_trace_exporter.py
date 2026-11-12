@@ -618,7 +618,18 @@ async def native_external_parent_case():
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_export_deadline_and_cancellation_close_trickling_connection(cancelled):
+def test_export_deadline_and_cancellation_close_trickling_connection(cancelled):
+    import asyncio
+
+    case = _check_trickling_connection(cancelled)
+    if sys.platform == "win32" and sys.version_info >= (3, 12):
+        # A peer reset can interrupt Proactor transport teardown in this loopback server.
+        asyncio.run(case, loop_factory=asyncio.SelectorEventLoop)
+    else:
+        asyncio.run(case)
+
+
+async def _check_trickling_connection(cancelled):
     import asyncio
     import time
 
@@ -901,7 +912,10 @@ async def test_batch_delivery_preserves_order_and_bounded_descriptor_lifetime():
         for index in range(30)
     ]
     with collector() as (endpoint, received):
-        exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
+        # Let the loopback fixture drain the large batch under parallel CI load.
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-key", endpoint=endpoint, timeout_ms=5000
+        )
         await exporter.on_trace_events(events)
         assert len(received) == 1
         records = received[0]["payload"]["data"]

@@ -1058,12 +1058,21 @@ class _ManualBoundaryLost(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedAgentToolOrigin:
+    """The tool name and declared role for a managed agent invocation."""
+
+    name: str
+    role: str
+
+
+@dataclass(frozen=True, slots=True)
 class ProducedItem:
     """One accepted assistant or tool item and its producing Agent."""
 
     item: SessionItem
     agent: Agent[Any, Any]
     handoff_target: Agent[Any, Any] | None = None
+    tool_origin: ManagedAgentToolOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -8064,11 +8073,19 @@ class Session(Generic[ContextT, OutputT]):
             metadata = entry["record"].get("metadata") or {}
             handoff = metadata.get("sdk_agent_handoff")
             target = self._profiles.get(handoff["target_profile_id"]) if handoff else None
+            origin = metadata.get("sdk_managed_agent_tool")
+            tool_origin = None
+            if isinstance(origin, dict):
+                name = origin.get("name")
+                role = origin.get("role")
+                if isinstance(name, str) and isinstance(role, str):
+                    tool_origin = ManagedAgentToolOrigin(name, role)
             produced.append(
                 ProducedItem(
                     item,
                     self._original_agent_for_profile(entry["agent"]),
                     target.profile.agent if target is not None else None,
+                    tool_origin=tool_origin,
                 )
             )
         return tuple(produced)

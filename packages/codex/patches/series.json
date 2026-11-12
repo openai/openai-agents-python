@@ -817,8 +817,12 @@
       "sha256": "08b0c51af6002bdcdede8bc07ef7dcff9f83a34e774a70d5d3d65c7a52959cd3"
     },
     {
+      "path": "sdk-managed-agent-tool-origin.patch",
+      "sha256": "437ca0793910828086e5bf866fcdd7b9356090119fa99d6eb90fb46cc9acc381"
+    },
+    {
       "path": "sdk-hosted-mcp-approvals.patch",
-      "sha256": "7c6acc015b7141e02227d347cc42e3052266c6296f5206eb7b93ec65d4b2cb81"
+      "sha256": "66e6a32185083e7accc830456d76eee5a04aaf341cbbe6ab8ffdf0046b910f84"
     },
     {
       "path": "sdk-run-model-override.patch",
@@ -829,5 +833,5 @@
       "sha256": "93e8fc471464e573b070b5a972db1861527e94f86de0b64633893786ded2095f"
     }
   ],
-  "result_tree": "6fc69280603e648da978e829453c8a273b2d931f"
+  "result_tree": "895aca323655f697a6f25dd1ea6f1444c1d5a148"
 }
