@@ -2824,19 +2824,40 @@ def _install_profile_options(
     )
 
 
+def _capture_restored_hosted_mcp(
+    state: SessionState | None,
+    tools: Sequence[HostedMCP[Any]] | None,
+) -> tuple[HostedMCP[Any], ...] | None:
+    if tools is None:
+        return None
+    grants = tuple(tools)
+    if state is None or state.native_continuation is None:
+        raise ValueError("restored_hosted_mcp requires a pending restored turn")
+    return grants
+
+
 def _check_restored_hosted_mcp(
     saved: SessionState,
     available: Sequence[Tool[Any]],
-    authorized: Sequence[HostedMCP[Any]],
+    authorized: Sequence[HostedMCP[Any]] | None,
+    selection: _RestoreDeclaration | None = None,
 ) -> None:
     from .hosted_mcp import HostedMCP
 
+    # DeferredTools.start owns the selection in the exact checkpoint it just sealed.
+    if authorized is None and (
+        selection is not None
+        and selection.sealed_checkpoint is not None
+        and saved.to_json() == selection.sealed_checkpoint
+    ):
+        return
+    grants = () if authorized is None else authorized
     selected = None if saved.operation_tools is None else frozenset(saved.operation_tools)
     for tool in available:
         if (
             isinstance(tool, HostedMCP)
             and (selected is None or tool.ref in selected)
-            and not any(tool is grant for grant in authorized)
+            and not any(tool is grant for grant in grants)
         ):
             raise ValueError("Restore selected hosted MCP tools with restored_hosted_mcp")
 
@@ -3721,6 +3742,21 @@ def _prepare_opening_model_settings(
     return model, settings
 
 
+def _capture_opening_model(
+    state: SessionState | None,
+    model: str | None,
+    model_settings: ModelSettings | None,
+) -> tuple[str | None, str | None]:
+    if state is None:
+        return model, None
+    if model_settings is not None or (model is not None and state.native_continuation is None):
+        raise ValueError(
+            "Opening model and model_settings overrides cannot be used with state; "
+            "use update(model=...) after the restored Session is idle"
+        )
+    return None, _capture_model_override(model)
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -3779,9 +3815,7 @@ class Session(Generic[ContextT, OutputT]):
         )
         if state is not None:
             state._check_prompt_references()
-        hosted_restore_grants = () if restored_hosted_mcp is None else tuple(restored_hosted_mcp)
-        if restored_hosted_mcp is not None and (state is None or state.native_continuation is None):
-            raise ValueError("restored_hosted_mcp requires a pending restored turn")
+        hosted_restore_grants = _capture_restored_hosted_mcp(state, restored_hosted_mcp)
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -3819,17 +3853,7 @@ class Session(Generic[ContextT, OutputT]):
             if not isinstance(discover_agents_md, bool):
                 raise TypeError("discover_agents_md must be a bool")
             reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
-            authorized_restore_model = None
-            if state is not None:
-                if model_settings is not None or (
-                    model is not None and state.native_continuation is None
-                ):
-                    raise ValueError(
-                        "Opening model and model_settings overrides cannot be used with state; "
-                        "use update(model=...) after the restored Session is idle"
-                    )
-                authorized_restore_model = _capture_model_override(model)
-                model = None
+            model, authorized_restore_model = _capture_opening_model(state, model, model_settings)
             policy_agent = agent
             selected = _restore_declaration.get()
             if (
@@ -4092,16 +4116,9 @@ class Session(Generic[ContextT, OutputT]):
                     "Run outside that sandboxed environment or remove unused proxy settings."
                 )
             if manual_restore:
-                # DeferredTools.start owns the selection in the exact checkpoint it just sealed.
-                if (
-                    restored_hosted_mcp is not None
-                    or selected is None
-                    or selected.sealed_checkpoint is None
-                    or saved.to_json() != selected.sealed_checkpoint
-                ):
-                    _check_restored_hosted_mcp(
-                        saved, operation_declaration.tools, hosted_restore_grants
-                    )
+                _check_restored_hosted_mcp(
+                    saved, operation_declaration.tools, hosted_restore_grants, selected
+                )
                 _check_restored_tool_context(
                     restored_tools, restored_mcp, saved.operation_tools, context
                 )
@@ -4765,71 +4782,18 @@ class Session(Generic[ContextT, OutputT]):
                 session._native_agents = native_agents
                 session._storage = storage
                 if checkpoint is not None:
-                    session._repair_turns = saved.repair_turns
-                    session._repair_items = saved.repair_items
-                    session._application_tool_outputs = [
-                        record.model_copy(deep=True) for record in saved.application_tool_outputs
-                    ]
-                    recorded_policy = saved.executor_policy_digest
-                    if (
-                        recorded_policy == _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
-                        and restored_operation_refs is not None
-                        and executor is None
-                    ):
-                        # Older checkpoints can carry an implicit policy even
-                        # when the saved subset resolves without an executor.
-                        recorded_policy = None
-                    if recorded_policy is not None and (
-                        recorded_policy not in await session._executor_policy_digests()
-                    ):
-                        raise ValueError(
-                            "Checkpoint and Environment must agree on the applied executor policy"
-                        )
-                if restored_defaults is not None:
-                    session._default_tools = restored_defaults
-                if (
-                    checkpoint is not None
-                    and not manual_restore
-                    and (catalog.tools != bound_tools or saved.step_mcp_tools is not None)
-                ):
-                    # The acknowledged idle catalog is the restored default.
-                    # Other current opening declarations remain explicitly selectable.
-                    restored_fixed_refs: list[ToolRef] = sorted(
-                        _fixed_tool_refs(
-                            restored_available,
-                            programmatic_tool_calling,
-                            executor,
-                            native_agents,
-                            project_guidance=project_guidance,
-                        ),
-                        key=lambda ref: (ref.namespace or "", ref.name),
+                    await session._restore_opening_checkpoint(
+                        saved,
+                        catalog,
+                        restored_available,
+                        restored_mcp,
+                        manual_restore=manual_restore,
+                        restored_defaults=restored_defaults,
+                        restored_operation_refs=restored_operation_refs,
+                        programmatic_tool_calling=programmatic_tool_calling,
                     )
-                    restored_mcp_refs = [
-                        server.tool(name) for server in restored_mcp for name in server.tools
-                    ]
-                    if saved.step_mcp_tools is not None:
-                        current_mcp_refs = {
-                            (server.name, name): server.tool(name)
-                            for server in restored_mcp
-                            for name in server.tools
-                        }
-                        saved_mcp_pairs = [
-                            (item.server, item.name) for item in saved.step_mcp_tools
-                        ]
-                        if len(set(saved_mcp_pairs)) != len(saved_mcp_pairs) or any(
-                            pair not in current_mcp_refs for pair in saved_mcp_pairs
-                        ):
-                            raise ValueError(
-                                "Saved idle MCP tools must name distinct current declarations"
-                            )
-                        restored_mcp_refs = [current_mcp_refs[pair] for pair in saved_mcp_pairs]
-                    if restored_defaults is None:
-                        # Older checkpoints lack exact persistent fixed selectors.
-                        session._default_tools = (
-                            *(tool._ref for tool in catalog.tools),
-                            *restored_mcp_refs,
-                            *restored_fixed_refs,
-                        )
+                elif restored_defaults is not None:
+                    session._default_tools = restored_defaults
                 if resume is not None:
                     await session._reconcile_local_history(reconciliation)
                 await session._publish_opening_configuration(
@@ -5411,6 +5375,74 @@ class Session(Generic[ContextT, OutputT]):
             )
         finally:
             del config
+
+    async def _restore_opening_checkpoint(
+        self,
+        saved: SessionState,
+        catalog: _ToolCatalog,
+        restored_available: Sequence[Tool[Any]],
+        restored_mcp: Sequence[_MCP[Any]],
+        *,
+        manual_restore: bool,
+        restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None,
+        restored_operation_refs: tuple[ToolRef, ...] | None,
+        programmatic_tool_calling: bool,
+    ) -> None:
+        self._repair_turns = saved.repair_turns
+        self._repair_items = saved.repair_items
+        self._application_tool_outputs = [
+            record.model_copy(deep=True) for record in saved.application_tool_outputs
+        ]
+        recorded_policy = saved.executor_policy_digest
+        if (
+            recorded_policy == _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
+            and restored_operation_refs is not None
+            and self._executor is None
+        ):
+            # Older checkpoints can carry an implicit policy even
+            # when the saved subset resolves without an executor.
+            recorded_policy = None
+        if (
+            recorded_policy is not None
+            and recorded_policy not in await self._executor_policy_digests()
+        ):
+            raise ValueError("Checkpoint and Environment must agree on the applied executor policy")
+        if restored_defaults is not None:
+            self._default_tools = restored_defaults
+        if manual_restore or (catalog.tools == self._bound_tools and saved.step_mcp_tools is None):
+            return
+        # The acknowledged idle catalog is the restored default.
+        # Other current opening declarations remain explicitly selectable.
+        restored_fixed_refs = sorted(
+            _fixed_tool_refs(
+                restored_available,
+                programmatic_tool_calling,
+                self._executor,
+                self._native_agents,
+                project_guidance=self._project_guidance,
+            ),
+            key=lambda ref: (ref.namespace or "", ref.name),
+        )
+        restored_mcp_refs = [server.tool(name) for server in restored_mcp for name in server.tools]
+        if saved.step_mcp_tools is not None:
+            current_mcp_refs = {
+                (server.name, name): server.tool(name)
+                for server in restored_mcp
+                for name in server.tools
+            }
+            saved_mcp_pairs = [(item.server, item.name) for item in saved.step_mcp_tools]
+            if len(set(saved_mcp_pairs)) != len(saved_mcp_pairs) or any(
+                pair not in current_mcp_refs for pair in saved_mcp_pairs
+            ):
+                raise ValueError("Saved idle MCP tools must name distinct current declarations")
+            restored_mcp_refs = [current_mcp_refs[pair] for pair in saved_mcp_pairs]
+        if restored_defaults is None:
+            # Older checkpoints lack exact persistent fixed selectors.
+            self._default_tools = (
+                *(tool._ref for tool in catalog.tools),
+                *restored_mcp_refs,
+                *restored_fixed_refs,
+            )
 
     async def _publish_opening_configuration(
         self,
