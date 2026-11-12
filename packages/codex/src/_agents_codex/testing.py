@@ -36,7 +36,7 @@ from http.server import (
 from socketserver import TCPServer as TCPServer
 from threading import Condition as _Condition, Lock as Lock, Thread as Thread
 from types import TracebackType as TracebackType
-from typing import cast as cast
+from typing import TYPE_CHECKING as TYPE_CHECKING, Any as _Any, cast as cast
 from uuid import uuid4 as uuid4
 
 from agents.config import JsonValue as JsonValue
@@ -54,6 +54,20 @@ from .testing_realtime import (
     RealtimeStep as RealtimeStep,
     ScriptedRealtimeAdapter as ScriptedRealtimeAdapter,
 )
+
+if TYPE_CHECKING:
+    from .testing_sandbox import (
+        ExecResult as ExecResult,
+        InvalidSandboxStep as InvalidSandboxStep,
+        SandboxCall as SandboxCall,
+        SandboxCallMatcherError as SandboxCallMatcherError,
+        SandboxScriptError as SandboxScriptError,
+        SandboxStepSpec as SandboxStepSpec,
+        ScriptedSandboxSession as ScriptedSandboxSession,
+        UnconsumedSandboxSteps as UnconsumedSandboxSteps,
+        UnexpectedSandboxCall as UnexpectedSandboxCall,
+        scripted_sandbox_session as scripted_sandbox_session,
+    )
 
 
 @dataclass(frozen=True)
@@ -483,3 +497,27 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 _preserve_module_identity(globals(), "agents.testing")
+
+
+_SANDBOX_EXPORTS = (
+    "ExecResult",
+    "InvalidSandboxStep",
+    "SandboxCall",
+    "SandboxCallMatcherError",
+    "SandboxScriptError",
+    "SandboxStepSpec",
+    "ScriptedSandboxSession",
+    "UnconsumedSandboxSteps",
+    "UnexpectedSandboxCall",
+    "scripted_sandbox_session",
+)
+
+
+def __getattr__(name: str) -> _Any:
+    if name not in _SANDBOX_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from . import testing_sandbox
+
+    value = getattr(testing_sandbox, name)
+    globals()[name] = value
+    return value

@@ -25,6 +25,7 @@ from pydantic import (
     TypeAdapter as TypeAdapter,
 )
 
+from . import tools as _tool_output_types
 from ._function_tools import FunctionTool as FunctionTool, ToolContext as ToolContext
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolOutput as ToolOutput, _CapturedFunction as _CapturedFunction
@@ -487,16 +488,17 @@ def computer_tool(
     def bind(
         context: object, policy_context: object, tool: FunctionTool[Any, Any, Any]
     ) -> _CapturedComputer:
+        output_adapter: TypeAdapter[Any] = TypeAdapter(
+            str | ToolOutput if extract_application_data is not None else str
+        )
+        # ToolOutput's annotations need their implementation namespace on a cold import.
+        output_adapter.rebuild(_types_namespace=vars(_tool_output_types))
         return _CapturedComputer(
             name="computer",
             spec_json=tool._spec_json(),
             model=_ComputerCall,
             field_names=(),
-            output_adapter=(
-                TypeAdapter(str | ToolOutput)
-                if extract_application_data is not None
-                else TypeAdapter(str)
-            ),
+            output_adapter=output_adapter,
             callback=bind,
             context_parameter=inspect.Parameter("context", inspect.Parameter.POSITIONAL_ONLY),
             callback_timeout=None,
