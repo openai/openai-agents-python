@@ -1387,7 +1387,7 @@ async def test_nonseekable_snapshot_persist_retires_private_quota_receipt(tmp_pa
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal snapshot")
-@pytest.mark.parametrize("failure", ["list", "read"])
+@pytest.mark.parametrize("failure", ["list", "read", "read_alias"])
 async def test_eager_restore_metadata_failure_precedes_environment_publication(
     tmp_path, monkeypatch, responses, failure
 ):
@@ -1402,14 +1402,22 @@ async def test_eager_restore_metadata_failure_precedes_environment_publication(
 
     client = UnixLocalSandboxClient()
     options = UnixLocalSandboxClientOptions()
+    explicit_root = None
+    if failure == "read_alias":
+        physical_parent = tmp_path / "physical"
+        physical_parent.mkdir()
+        alias_parent = tmp_path / "alias"
+        alias_parent.symlink_to(physical_parent, target_is_directory=True)
+        explicit_root = str(alias_parent / "workspace")
     original = await client.create(
         manifest=Manifest(
+            **({"root": explicit_root} if explicit_root is not None else {}),
             entries={
                 Path("keep.txt"): File(content=b"unrelated workspace data"),
                 Path(".agents/retired/SKILL.md"): File(
                     content=b"---\nname: retired\ndescription: RETIRED_SKILL\n---\n"
                 ),
-            }
+            },
         ),
         options=options,
         snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
@@ -1419,6 +1427,10 @@ async def test_eager_restore_metadata_failure_precedes_environment_publication(
     await original.aclose()
     saved = original.state.model_copy(deep=True)
     await client.delete(original)
+    if explicit_root is not None and root.exists():
+        import shutil
+
+        shutil.rmtree(root)
 
     attempted = False
     connected = 0
@@ -1428,7 +1440,7 @@ async def test_eager_restore_metadata_failure_precedes_environment_publication(
     async def fail_once(self, path, **kwargs):
         nonlocal attempted
         target = root / ".agents" if failure == "list" else root / ".agents/retired/SKILL.md"
-        if Path(path) == target and not attempted:
+        if Path(path).resolve() == target.resolve() and not attempted:
             attempted = True
             raise OSError("synthetic one-shot skill metadata failure")
         return await previous(self, path, **kwargs)
