@@ -422,6 +422,7 @@ pub fn model_settings(params: Value) -> Result<ThreadSettingsOverrides> {
 #[serde(remote = "TurnStartOptions", default, deny_unknown_fields)]
 pub struct StartOptions {
     turn_trigger: Option<String>,
+    model_override: Option<String>,
     final_output_json_schema: Option<Value>,
     service_tier: Option<String>,
     parent_turn_id: Option<String>,
@@ -506,6 +507,9 @@ fn rejection(reason: NotSubmittedReason) -> Value {
         NotSubmittedReason::ActiveTurnOutputSchemaMismatch => {
             json!({"type": "active_turn_output_schema_mismatch"})
         }
+        NotSubmittedReason::ActiveTurnModelOverrideMismatch => {
+            json!({"type": "active_turn_model_override_mismatch"})
+        }
         NotSubmittedReason::EmptyInput => json!({"type": "empty_input"}),
     };
     json!({"status": "not_submitted", "reason": reason})
@@ -542,10 +546,7 @@ pub(crate) struct InitialTurn {
     pub initialization: std::sync::Arc<codex_core::InitialTurnInitialization>,
 }
 
-pub async fn submit_replaceable(
-    state: &crate::engine::ThreadState,
-    value: Value,
-) -> Result<Value> {
+pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value) -> Result<Value> {
     submit_replaceable_with_attempts(state, value, None).await
 }
 
@@ -559,6 +560,13 @@ pub async fn submit_replaceable_with_attempts(
     let mut mutation = Some(state.mutations.lock().await);
     let thread = &state.thread;
     let mut p: TurnParams = decode(value)?;
+    if let Some(model) = p.start.model_override.as_deref() {
+        if let Err(error) = state.engine.validate_model(model).await {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
+    }
     let initial = state
         .initial_turn
         .lock()
@@ -840,6 +848,7 @@ pub(crate) async fn interrupt_managed_root(
 }
 
 params!(RecoveryOptions {
+    model_override: Option<String>,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     trace: Option<W3cTraceContext>,
     observation_submission_id: Option<String>,
@@ -855,6 +864,13 @@ pub async fn recover_prepared(
     terminal: Option<crate::python_tools::RecoveredToolCompletionSeed>,
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
+    if let Some(model) = p.model_override.as_deref() {
+        if let Err(error) = state.engine.validate_model(model).await {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
+    }
     let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;
     if let Some(submission) = p.observation_submission_id {
@@ -877,6 +893,7 @@ pub async fn recover_prepared(
                 thread_settings: Default::default(),
                 trace: p.trace,
                 cyber_access_program: None,
+                model_override: p.model_override,
                 final_output_json_schema: p.output_schema.map(Value::Object),
             },
             init,
@@ -1104,7 +1121,7 @@ params!(RecoverParams {
     #[serde(default, with = "StartOptions")]
     start_options: TurnStartOptions
 });
-params!(RecoverIdleParams { turn_id: String, #[serde(default, alias = "settings", with = "ThreadSettings")] thread_settings: ThreadSettingsOverrides, trace: Option<W3cTraceContext>, cyber_access_program: Option<CyberAccessProgram>, final_output_json_schema: Option<Value> });
+params!(RecoverIdleParams { turn_id: String, model_override: Option<String>, #[serde(default, alias = "settings", with = "ThreadSettings")] thread_settings: ThreadSettingsOverrides, trace: Option<W3cTraceContext>, cyber_access_program: Option<CyberAccessProgram>, final_output_json_schema: Option<Value> });
 params!(CommunicationParams {
     communication: InterAgentCommunication,
     #[serde(default, with = "StartOptions")]
@@ -1240,6 +1257,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                         thread_settings: p.thread_settings,
                         trace: p.trace,
                         cyber_access_program: p.cyber_access_program,
+                        model_override: p.model_override,
                         final_output_json_schema: p.final_output_json_schema,
                     })
                     .await?,
@@ -1423,6 +1441,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
         "append_rollout_items" => {
             let p: RolloutParams = decode(params)?;
             crate::checkpoint::validate_imported_history(&p.items)?;
+            crate::checkpoint::validate_external_mcp_approvals(&p.items)?;
             thread.append_rollout_items(&p.items).await?;
             return Ok(Value::Null);
         }
@@ -1434,11 +1453,17 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
         }
         "inject_response_items" => {
             let p: ItemsParams = decode(params)?;
+            for item in &p.items {
+                crate::checkpoint::validate_external_response_item(item)?;
+            }
             thread.inject_response_items(p.items).await?;
             return Ok(Value::Null);
         }
         "inject_if_running" => {
             let p: ItemsParams = decode(params)?;
+            for item in &p.items {
+                crate::checkpoint::validate_external_response_item(item)?;
+            }
             return Ok(match thread.inject_if_running(p.items).await {
                 Ok(()) => json!({"injected": true}),
                 Err(items) => json!({"injected": false, "items": items}),

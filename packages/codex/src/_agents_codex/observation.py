@@ -32,7 +32,9 @@ from ._events import (
     ExecutionItem as ExecutionItem,
     FileSearchCallItem,
     FunctionCallStatus as FunctionCallStatus,
+    HostedMcpCallItem,
     ImageGenerationCallItem,
+    McpListToolsItem,
     MessageItem,
     ReasoningItem,
     ShellCallItem,
@@ -178,6 +180,8 @@ class HostedToolCallSummary:
         "image_generation_call",
         "shell_call",
         "shell_call_output",
+        "mcp_list_tools",
+        "mcp_call",
     ]
     id: str
     turn_id: str
@@ -202,6 +206,8 @@ class ModelOutputItemCompleted(_SubmissionEvent):
         MessageItem
         | ReasoningItem
         | WebSearchCallItem
+        | McpListToolsItem
+        | HostedMcpCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ShellCallItem
@@ -402,6 +408,58 @@ Observation: TypeAlias = (
 _ObservationT = TypeVar("_ObservationT", bound=Observation)
 
 
+def _observation_sizes(
+    event: Observation, *, utf8: bool = False, include_raw_payload: bool = True
+) -> tuple[int, int]:
+    """Measure retained event metadata and payload without copying the event."""
+
+    def measure(value: str) -> int:
+        return len(value.encode("utf-8")) if utf8 else len(value)
+
+    def json_size(value: Any) -> int:
+        if not utf8:
+            return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+        return sum(measure(part) for part in encoder.iterencode(value))
+
+    size = sum(
+        measure(value)
+        for definition in fields(event)
+        if isinstance(value := getattr(event, definition.name), str)
+    )
+    payload_size = 0
+    if (
+        isinstance(event, ModelOutputItemCompleted)
+        and not isinstance(event.item, HostedToolCallSummary)
+        and event.item["type"] == "web_search_call"
+        and "results" in event.item
+    ):
+        search_metadata = event.item.copy()
+        results = search_metadata.pop("results")
+        size += json_size(search_metadata)
+        payload_size = json_size(results)
+    elif isinstance(event, (ExecutionItemCompleted, ModelOutputItemCompleted)):
+        size += json_size(event.item)
+    if isinstance(event, ToolFinished) and event.output is not None:
+        size += json_size(event.output.to_native())
+        if event.output.application_data is not None:
+            payload_size += json_size(event.output.application_data)
+    if isinstance(event, ResponseFactReceived):
+        size += json_size(event.record)
+    elif isinstance(event, RawProviderEvent) and include_raw_payload:
+        payload_size = json_size(event.payload)
+    elif isinstance(event, HostedToolCallProgress):
+        metadata = event.event
+        partial = metadata.get("partial_image_b64")
+        if metadata.get("type") == "response.image_generation_call.partial_image" and isinstance(
+            partial, str
+        ):
+            payload_size = measure(partial)
+            metadata = {key: value for key, value in metadata.items() if key != "partial_image_b64"}
+        size += json_size(metadata)
+    return size, payload_size
+
+
 class _ObservationBuffer:
     """One retained event log; publishing never awaits or invokes application code."""
 
@@ -426,6 +484,7 @@ class _ObservationBuffer:
         self.changed = asyncio.Event()
         self._callback_check: weakref.WeakMethod[Callable[[str], None]] | None = None
         self.repair_parent: tuple[_ObservationBuffer, str] | None = None
+        self.on_record: weakref.WeakMethod[Callable[[Observation], None]] | None = None
 
     def _check_read(self) -> None:
         if self._callback_check is not None:
@@ -477,47 +536,22 @@ class _ObservationBuffer:
         event = replace(event, sequence=self.sequence + 1)
         retained_event = event
         details_lost = False
-        payload_size = 0
-        size = sum(
-            len(value)
-            for definition in fields(event)
-            if isinstance(value := getattr(event, definition.name), str)
+        size, payload_size = _observation_sizes(
+            event, include_raw_payload=self.retention == "bounded"
         )
         if (
-            isinstance(event, ModelOutputItemCompleted)
+            self.retention == "bounded"
+            and payload_size > 16 * 1024 * 1024
+            and isinstance(event, ModelOutputItemCompleted)
             and not isinstance(event.item, HostedToolCallSummary)
             and event.item["type"] == "web_search_call"
             and "results" in event.item
         ):
             search_metadata = event.item.copy()
-            results = search_metadata.pop("results")
-            size += len(json.dumps(search_metadata, ensure_ascii=False, separators=(",", ":")))
-            payload_size = len(json.dumps(results, ensure_ascii=False, separators=(",", ":")))
-            if self.retention == "bounded" and payload_size > 16 * 1024 * 1024:
-                retained_event = replace(event, item=search_metadata)
-                payload_size = 0
-                details_lost = True
-        elif isinstance(event, (ExecutionItemCompleted, ModelOutputItemCompleted)):
-            size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
-        if isinstance(event, ToolFinished) and event.output is not None:
-            size += len(
-                json.dumps(event.output.to_native(), ensure_ascii=False, separators=(",", ":"))
-            )
-        if isinstance(event, ResponseFactReceived):
-            size += len(json.dumps(event.record, ensure_ascii=False, separators=(",", ":")))
-        elif isinstance(event, RawProviderEvent) and self.retention == "bounded":
-            payload_size = len(json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")))
-        elif isinstance(event, HostedToolCallProgress):
-            metadata = event.event
-            partial = metadata.get("partial_image_b64")
-            if metadata.get(
-                "type"
-            ) == "response.image_generation_call.partial_image" and isinstance(partial, str):
-                payload_size = len(partial)
-                metadata = {
-                    key: value for key, value in metadata.items() if key != "partial_image_b64"
-                }
-            size += len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
+            search_metadata.pop("results")
+            retained_event = replace(event, item=search_metadata)
+            payload_size = 0
+            details_lost = True
         if self.retention == "bounded" and (size > 65_536 or payload_size > 16 * 1024 * 1024):
             # The parent receives the full event below; this eviction is local.
             self._mark_gap(forward=False)
@@ -563,6 +597,8 @@ class _ObservationBuffer:
         ):
             buffer, parent_id = self.repair_parent
             buffer.append(cast(Observation, replace(event, parent_submission_id=parent_id)))
+        if self.on_record is not None and (observer := self.on_record()) is not None:
+            observer(event)
         return event
 
     def finish(self, reason: Literal["closed", "failed"]) -> None:
@@ -672,7 +708,9 @@ class EventStream(AsyncIterator[Observation]):
                                 not self._include_execution_details
                                 and not isinstance(model_item, HostedToolCallSummary)
                                 and (
-                                    model_item["type"] == "file_search_call"
+                                    model_item["type"] == "mcp_list_tools"
+                                    or model_item["type"] == "mcp_call"
+                                    or model_item["type"] == "file_search_call"
                                     or model_item["type"] == "code_interpreter_call"
                                     or model_item["type"] == "shell_call"
                                     or model_item["type"] == "shell_call_output"

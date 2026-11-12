@@ -6,11 +6,34 @@ import inspect
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import aclosing, asynccontextmanager
 from functools import wraps
+from traceback import clear_frames
 from types import TracebackType
 from typing import Any, TypeVar, cast
 
 _Function = TypeVar("_Function", bound=Callable[..., Any])
 _Declarations = Callable[[Any], Sequence[Any]]
+
+
+def _protect_mcp_initializer(declaration: type[Any]) -> None:
+    """Keep rejected credentials out of generated initializer traceback frames."""
+    initialize = declaration.__init__
+
+    @wraps(initialize)
+    def protected(self: Any, *args: Any, **kwargs: Any) -> None:
+        try:
+            initialize(self, *args, **kwargs)
+        except BaseException as error:
+            clear_frames(error.__traceback__)
+            object.__setattr__(error, "__context__", None)
+            object.__setattr__(error, "__cause__", None)
+            for name in ("env", "headers", "bearer_token", "access_token", "tool_config"):
+                if name in self.__dict__:
+                    object.__setattr__(self, name, None)
+            raise
+        finally:
+            del self, args, kwargs
+
+    declaration.__init__ = protected
 
 
 def _strip_mcp_frames(error: BaseException) -> None:
@@ -58,6 +81,7 @@ def _uses_mcp(
         # Intrinsically MCP boundaries need protection before an owner exists.
         return True
     from .agent import Agent
+    from .hosted_mcp import HostedMCP
     from .mcp import _MCP
 
     tools = kwargs.get("tools")
@@ -67,7 +91,7 @@ def _uses_mcp(
         if not isinstance(tools, (list, tuple)):
             return True
         values = list.__iter__(tools) if isinstance(tools, list) else tuple.__iter__(tools)
-        if any(isinstance(tool, _MCP) for tool in values):
+        if any(isinstance(tool, (HostedMCP, _MCP)) for tool in values):
             return True
     owners = (
         args[0] if args else kwargs.get("self"),
@@ -78,7 +102,9 @@ def _uses_mcp(
             # A lazy handoff can capture MCP declarations outside the opening tools.
             # Protect that graph without evaluating its application-owned resolvers.
             if any(
-                isinstance(value, _MCP) or isinstance(value, Agent) and bool(value.handoffs)
+                isinstance(value, (HostedMCP, _MCP))
+                or isinstance(value, Agent)
+                and bool(value.handoffs)
                 for value in declarations(owner)
             ):
                 return True

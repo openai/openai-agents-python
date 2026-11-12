@@ -774,17 +774,26 @@ async def test_owned_unixlocal_skill_stages_before_relocated_subdirectory_index(
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal snapshot")
 @pytest.mark.parametrize(
-    "kind,seed_old",
+    "kind,seed_old,old_document",
     [
-        ("inline", True),
-        ("from", True),
-        ("local_from", True),
-        ("lazy", False),
-        ("from", False),
+        ("inline", True, "valid"),
+        ("from", True, "valid"),
+        ("local_from", True, "valid"),
+        ("lazy", False, "valid"),
+        ("from", False, "valid"),
+        ("inline", True, "missing"),
+        ("from", True, "missing"),
+        ("local_from", True, "missing"),
+        ("inline", True, "incomplete"),
+        ("from", True, "incomplete"),
+        ("local_from", True, "incomplete"),
+        ("from_file", True, "missing"),
+        ("local_from_file", True, "missing"),
+        ("local_from_fifo", True, "missing"),
     ],
 )
 async def test_owned_cold_resume_uses_current_skill_sources(
-    tmp_path, monkeypatch, responses, kind, seed_old
+    tmp_path, monkeypatch, responses, kind, seed_old, old_document
 ):
     from agents.classic.sandbox.entries import Dir, File
     from agents.classic.sandbox.sandboxes.unix_local import (
@@ -810,6 +819,12 @@ async def test_owned_cold_resume_uses_current_skill_sources(
                 ),
             }
         )
+    if seed_old and old_document == "missing":
+        del entries[Path(".agents/report/SKILL.md")]
+    elif seed_old and old_document == "incomplete":
+        entries[Path(".agents/report/SKILL.md")] = File(
+            content=b"---\nname: report\ndescription: " + b"x" * (64 * 1024)
+        )
     original = await client.create(
         manifest=Manifest(entries=entries),
         options=options,
@@ -822,6 +837,7 @@ async def test_owned_cold_resume_uses_current_skill_sources(
     await client.delete(original)
     assert not root.exists()
     document_bytes = b"new current document"
+    file_source = kind in ("from_file", "local_from_file")
     if kind == "inline":
         skills = Skills(
             skills=[
@@ -832,14 +848,16 @@ async def test_owned_cold_resume_uses_current_skill_sources(
                 )
             ]
         )
-    elif kind in ("from", "local_from"):
+    elif kind in ("from", "local_from", "from_file", "local_from_file", "local_from_fifo"):
         document_bytes = b"---\nname: report\ndescription: COLD_RESUME_INDEX\n---\n" + b"x" * (
             1024 * 1024
         )
         skills = Skills(
             from_=Dir(
                 children={
-                    "report": Dir(children={"SKILL.md": File(content=document_bytes)}),
+                    "report": File(content=document_bytes)
+                    if file_source
+                    else Dir(children={"SKILL.md": File(content=document_bytes)}),
                     "oversized": Dir(
                         children={
                             "SKILL.md": File(
@@ -850,12 +868,17 @@ async def test_owned_cold_resume_uses_current_skill_sources(
                 }
             )
         )
-        if kind == "local_from":
+        if kind in ("local_from", "local_from_file", "local_from_fifo"):
             monkeypatch.chdir(tmp_path)
-            current = tmp_path / "current-source/report/SKILL.md"
+            source_root = tmp_path / "current-source"
+            current = source_root / "report"
+            if not file_source:
+                current /= "SKILL.md"
             current.parent.mkdir(parents=True)
             current.write_bytes(document_bytes)
-            skills = Skills(from_=LocalDir(src=current.parent.parent))
+            skills = Skills(from_=LocalDir(src=source_root))
+            if kind == "local_from_fifo":
+                os.mkfifo(source_root / "config")
 
     else:
         monkeypatch.chdir(tmp_path)
@@ -875,7 +898,10 @@ async def test_owned_cold_resume_uses_current_skill_sources(
         if kind == "lazy":
             assert not (root / ".agents/report/SKILL.md").exists()
         else:
-            assert (root / ".agents/report/SKILL.md").read_bytes() == document_bytes
+            current_path = root / ".agents/report"
+            if not file_source:
+                current_path /= "SKILL.md"
+            assert current_path.read_bytes() == document_bytes
             assert (
                 (root / ".agents/retired").exists(),
                 (root / ".agents/report/scripts/retired.py").exists(),
@@ -922,13 +948,16 @@ async def test_owned_cold_resume_uses_current_skill_sources(
             await (await session.submit("Inspect restored skills")).get_result()
         ).final_output == "done"
         instructions = str(responses.requests)
-        assert ".agents/report" in instructions
-        assert "COLD_RESUME_INDEX" in instructions
+        if not file_source:
+            assert ".agents/report" in instructions
+            assert "COLD_RESUME_INDEX" in instructions
         assert "- oversized:" not in instructions
         assert "RETIRED_SKILL" not in instructions
         assert (root / "keep.txt").read_bytes() == b"original snapshot data"
-        document = root / ".agents/report/SKILL.md"
-        assert document.is_file(), "Missing the current skill document after resume and load"
+        document = root / ".agents/report"
+        if not file_source:
+            document /= "SKILL.md"
+        assert document.is_file(), "Missing the current declared file after resume and load"
         assert document.read_bytes() == document_bytes
 
 

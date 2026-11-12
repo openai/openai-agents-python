@@ -22,6 +22,8 @@ from _agents_shared.sandbox_skills import (
     coerce_posix_path,
     posix_path_as_path,
 )
+from agents.classic.sandbox.entries import Dir, LocalDir
+from agents.classic.sandbox.entries.artifacts import _LocalDirBudget
 
 from ._function_tools import Allow, FunctionTool, ToolContext, function_tool
 from .executor import Environment, _path_uri
@@ -154,19 +156,39 @@ class _SkillLease:
         manifest = self.skills.process_manifest(Manifest(root=session.state.manifest.root))
         root = posix_path_as_path(coerce_posix_path(session.state.manifest.root))
         owner = session._inner
+        base_dir = owner._manifest_base_dir()
         self.skills.bind(session)
         previous = await self.skills._resolve_runtime_metadata(
             session.state.manifest, budget=_MetadataBudget(), strict=True
         )
-        for item in previous:
+        paths = {item.path for item in previous}
+        skills_root = posix_path_as_path(coerce_posix_path(self.skills.skills_path))
+        paths.update(skills_root / skill.name for skill in self.skills.skills)
+        if isinstance(self.skills.from_, Dir):
+            for path, _entry in manifest.iter_entries():
+                relative = path.relative_to(skills_root)
+                if relative.parts:
+                    paths.add(skills_root / relative.parts[0])
+        elif isinstance(self.skills.from_, LocalDir) and self.skills.from_.src is not None:
+            source = self.skills.from_
+            source_grants = session.state.manifest.extra_path_grants
+            src_root = source._resolve_local_dir_src_root(base_dir, source_grants=source_grants)
+            files = source._list_local_dir_files(
+                base_dir=base_dir,
+                src_root=src_root,
+                source_grants=source_grants,
+                budget=_LocalDirBudget(),
+            )
+            paths.update(skills_root / path.parts[0] for path in files)
+        for path in sorted(paths, key=str):
             if _grant_stamp(session.state.manifest) != grants:
                 raise RuntimeError(
                     "Skill staging requires its current sandbox environment and grants"
                 )
-            await owner._remove_workspace_entry_on_resume(root / item.path)
+            await owner._remove_workspace_entry_on_resume(root / path)
         await owner._apply_entry_batch(
             [(root / path, entry) for path, entry in manifest.entries.items()],
-            base_dir=owner._manifest_base_dir(),
+            base_dir=base_dir,
         )
         if _grant_stamp(session.state.manifest) != grants:
             raise RuntimeError("Skill staging requires its current sandbox environment and grants")

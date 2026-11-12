@@ -598,6 +598,22 @@ class _HostedCallItem(TypedDict):
     """The complete provider item, including fields unknown to this SDK."""
 
 
+class McpListToolsItem(_HostedCallItem):
+    type: Literal["mcp_list_tools"]
+    server_label: str
+    tools: list[JsonValue]
+    error: JsonValue | None
+
+
+class HostedMcpCallItem(_HostedCallItem):
+    type: Literal["mcp_call"]
+    server_label: str
+    name: str
+    arguments: str
+    output: JsonValue | None
+    error: JsonValue | None
+
+
 class FileSearchCallItem(_HostedCallItem):
     type: Literal["file_search_call"]
     queries: list[str]
@@ -615,6 +631,17 @@ class ShellCallItem(_HostedCallItem):
     type: Literal["shell_call"]
     call_id: str
     action: dict[str, JsonValue]
+
+
+class LocalShellCallItem(TypedDict):
+    """A historical LocalShell call retained in native history."""
+
+    type: Literal["local_shell_call"]
+    id: str
+    turn_id: str
+    call_id: str | None
+    action: dict[str, JsonValue]
+    status: str
 
 
 class ShellCallOutputItem(_HostedCallItem):
@@ -775,9 +802,12 @@ OutputItem = _PublicTypeAliasType(
         | CloseSubagentCallItem
         | WaitForSubagentsCallItem
         | WebSearchCallItem
+        | McpListToolsItem
+        | HostedMcpCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ShellCallItem
+        | LocalShellCallItem
         | ShellCallOutputItem
         | ImageGenerationCallItem
     ),

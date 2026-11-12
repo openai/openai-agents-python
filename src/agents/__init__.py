@@ -92,6 +92,12 @@ if TYPE_CHECKING:
         OutputGuardrail as OutputGuardrail,
     )
     from .handoffs import Handoff as Handoff
+    from .hosted_mcp import (
+        HostedMCP as HostedMCP,
+        HostedMCPApprovalArguments as HostedMCPApprovalArguments,
+        HostedMCPApprovalRequest as HostedMCPApprovalRequest,
+        HostedMCPApprovalResult as HostedMCPApprovalResult,
+    )
     from .input import (
         AssistantMessage as AssistantMessage,
         ImageDetail as ImageDetail,
@@ -169,6 +175,9 @@ if TYPE_CHECKING:
         NativeAgents as NativeAgents,
         NativeRole as NativeRole,
         NativeRoleTool as NativeRoleTool,
+        NativeRoleToolInvocation as NativeRoleToolInvocation,
+        NativeRoleToolResult as NativeRoleToolResult,
+        NativeRoleToolStreamEvent as NativeRoleToolStreamEvent,
     )
     from .native_interception import (
         Allow as Allow,
@@ -221,6 +230,7 @@ if TYPE_CHECKING:
         FeatureSupport as FeatureSupport,
         InteractionExpiredError as InteractionExpiredError,
         InteractionRequired as InteractionRequired,
+        ManagedAgentToolOrigin as ManagedAgentToolOrigin,
         NativeError as NativeError,
         ProducedItem as ProducedItem,
         ResponseIntegrityReason as ResponseIntegrityReason,
@@ -344,6 +354,9 @@ _MODULES = {
     "NativeAgents": ".native_agents",
     "NativeRole": ".native_agents",
     "NativeRoleTool": ".native_agents",
+    "NativeRoleToolInvocation": ".native_agents",
+    "NativeRoleToolResult": ".native_agents",
+    "NativeRoleToolStreamEvent": ".native_agents",
     "Environment": ".executor",
     "LocalStorageMount": ".executor",
     "EnvironmentSource": ".executor",
@@ -351,6 +364,10 @@ _MODULES = {
     "Checklist": ".tools",
     "NativeGoals": ".tools",
     "NativeGoal": ".state",
+    "HostedMCP": ".hosted_mcp",
+    "HostedMCPApprovalArguments": ".hosted_mcp",
+    "HostedMCPApprovalRequest": ".hosted_mcp",
+    "HostedMCPApprovalResult": ".hosted_mcp",
     "WebSearch": ".tools",
     "FileSearch": ".tools",
     "CodeInterpreter": ".tools",
@@ -495,6 +512,7 @@ _MODULES = {
     "StaleTurnError": ".session",
     "TurnStoppedError": ".session",
     "InteractionRequired": ".session",
+    "ManagedAgentToolOrigin": ".session",
     "NativeError": ".session",
     "ProducedItem": ".session",
     "RunErrorDetails": ".session",

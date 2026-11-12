@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from .sandbox_memory import _MEMORY_OWNER_ATTRIBUTE, _SandboxMemoryOwner
+
 if TYPE_CHECKING:
     from .executor import Environment
     from .state import SessionState
@@ -143,6 +145,12 @@ class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
     @property
     def skill_tools(self) -> Any:
         return getattr(self._source, "skill_tools", ())
+
+    @property
+    def _sdk_sandbox_memory(self) -> _SandboxMemoryOwner | None:
+        return cast(
+            _SandboxMemoryOwner | None, getattr(self._source, _MEMORY_OWNER_ATTRIBUTE, None)
+        )
 
     def validate_resume(self, checkpoint: ManagedWorkspaceCheckpoint) -> ManagedWorkspaceCheckpoint:
         # Association validation precedes resource acquisition and native restore.

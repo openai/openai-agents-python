@@ -97,6 +97,12 @@ from ._managed_workspace import (
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._sandbox_events import Instrumentation as Instrumentation, _OperationObserver
 from .executor import Environment
+from .sandbox_memory import (
+    _MEMORY_OWNER_ATTRIBUTE,
+    MemoryLayoutConfig as MemoryLayoutConfig,
+    SandboxMemoryOptions as SandboxMemoryOptions,
+    _capture_sandbox_memory,
+)
 from .sandbox_skills import (
     LazySkillSource as LazySkillSource,
     LocalDirLazySkillSource as LocalDirLazySkillSource,
@@ -173,12 +179,13 @@ def sandbox_environment(
     archive_limits: SandboxArchiveLimits | None = None,
     managed_workspace: bool = False,
     authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None = None,
+    memory: SandboxMemoryOptions | None = None,
 ) -> SandboxEnvironmentSource[_ContextT]:
     """Own a provider-selected sandbox and its native gateway for one native Session.
 
     Each prepared acquisition has been supplying filesystem and mount guidance to
     the native Session. Entry descriptions have been appearing in model context,
-    requiring text without secrets.
+    requiring text without secrets. Set memory to enable explicit Session.flush_memory.
 
     The connect manager must connect to the supplied sandbox and own gateway cleanup.
     The provider validates and materializes the captured manifest for create and
@@ -210,6 +217,7 @@ def sandbox_environment(
     except (ValueError, TypeError) as error:
         raise _configuration_error(error, "options") from None
 
+    create_memory = None if memory is None else _capture_sandbox_memory(memory)
     if type(managed_workspace) is not bool:
         raise TypeError("managed_workspace must be a bool")
     if managed_workspace and session is not None:
@@ -386,6 +394,8 @@ def sandbox_environment(
                     )
                     instructions = _append_skill_instructions(instructions, skill_instructions)
                 setattr(source_manager, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, instructions)
+                if create_memory is not None:
+                    setattr(source_manager, _MEMORY_OWNER_ATTRIBUTE, create_memory(selected))
                 observer = (
                     _OperationObserver(selected)
                     if isinstance(selected._instrumentation, Instrumentation)

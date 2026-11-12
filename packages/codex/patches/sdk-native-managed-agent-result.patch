@@ -1,0 +1,765 @@
+diff --git a/codex-rs/core/src/agent/api.rs b/codex-rs/core/src/agent/api.rs
+index eb520594..15cbdbf5 100644
+--- a/codex-rs/core/src/agent/api.rs
++++ b/codex-rs/core/src/agent/api.rs
+@@ -22,6 +22,8 @@ use codex_protocol::error::Result;
+ use codex_protocol::protocol::AgentStatus;
+ use codex_protocol::protocol::CodexErrorInfo;
+ use codex_protocol::protocol::MultiAgentVersion;
++use codex_protocol::protocol::SdkManagedToolOrigin;
++use codex_protocol::protocol::SdkManagedToolStarted;
+ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::ToolTurnCompletion;
+@@ -68,6 +70,7 @@ pub trait AgentControl: Send + Sync {
+     fn spawn_managed_tool(
+         &self,
+         _request: SpawnRequest,
++        _origin: SdkManagedToolOrigin,
+     ) -> BoxFuture<'_, Result<ManagedAgentTool>> {
+         Box::pin(async {
+             Err(CodexErr::UnsupportedOperation(
+@@ -76,6 +79,24 @@ pub trait AgentControl: Send + Sync {
+         })
+     }
+ 
++    /// Capture the opted-in child's accepted result without changing default calls.
++    fn spawn_managed_tool_with_control(
++        &self,
++        request: SpawnRequest,
++        origin: SdkManagedToolOrigin,
++        result_control: bool,
++        capture_items: bool,
++    ) -> BoxFuture<'_, Result<ManagedAgentTool>> {
++        if !capture_items && !result_control {
++            return self.spawn_managed_tool(request, origin);
++        }
++        Box::pin(async {
++            Err(CodexErr::UnsupportedOperation(
++                "this agent controller does not support managed result control".into(),
++            ))
++        })
++    }
++
+     /// Resolve, reload if needed and accept input. Agent messages retain their attribution
+     /// and wake mode: queue-only messages do not start work and follow-ups cannot target
+     /// the root. Legacy user input can address loaded threads outside the agent registry.
+@@ -270,11 +291,13 @@ pub struct ManagedAgentToolResult {
+     pub turn_id: String,
+     pub status: AgentStatus,
+     pub output: Option<ToolTurnCompletion>,
++    pub items: Option<crate::managed_agent_result::ManagedAgentProducedItems>,
+ }
+ 
+ /// Ephemeral destination for the first turn admitted by a managed tool. The
+ /// initializer is inherited, so retain the first turn's ID after consuming the reply.
+ pub(crate) struct ManagedToolCompletion {
++    pub(crate) capture_items: bool,
+     state: Mutex<ManagedToolCompletionState>,
+     pub(crate) abandonment: CancellationToken,
+     pub(crate) finished: CancellationToken,
+@@ -283,6 +306,7 @@ pub(crate) struct ManagedToolCompletion {
+ struct ManagedToolCompletionState {
+     reply: Option<oneshot::Sender<ManagedAgentToolResult>>,
+     turn_id: Option<String>,
++    origin: Option<SdkManagedToolOrigin>,
+ }
+ 
+ pub(crate) enum ManagedToolTerminal {
+@@ -292,17 +316,38 @@ pub(crate) enum ManagedToolTerminal {
+ }
+ 
+ impl ManagedToolCompletion {
+-    pub(crate) fn new(reply: oneshot::Sender<ManagedAgentToolResult>) -> Self {
++    pub(crate) fn new(
++        reply: oneshot::Sender<ManagedAgentToolResult>,
++        origin: Option<SdkManagedToolOrigin>,
++    ) -> Self {
+         Self {
++            capture_items: false,
+             state: Mutex::new(ManagedToolCompletionState {
+                 reply: Some(reply),
+                 turn_id: None,
++                origin,
+             }),
+             abandonment: CancellationToken::new(),
+             finished: CancellationToken::new(),
+         }
+     }
+ 
++    pub(crate) fn take_start(
++        &self,
++        thread_id: ThreadId,
++        turn_id: &str,
++    ) -> Option<SdkManagedToolStarted> {
++        let mut state = self.state.lock().expect("managed tool completion lock");
++        if state.turn_id.is_some() {
++            return None;
++        }
++        Some(SdkManagedToolStarted {
++            origin: state.origin.take()?,
++            child_thread_id: thread_id,
++            child_turn_id: turn_id.to_owned(),
++        })
++    }
++
+     pub(crate) fn claim(&self, turn_id: &str) -> ManagedToolTerminal {
+         let mut state = self.state.lock().expect("managed tool completion lock");
+         match state.turn_id.as_deref() {
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index 85f77fed..b4a04709 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -314,6 +314,9 @@ impl LocalAgentControl {
+             let abandoned = completion.abandonment.clone();
+             let finished = completion.finished.clone();
+             let mut data = ExtensionDataInit::new();
++            if completion.capture_items {
++                thread.sdk_start_produced_items();
++            }
+             data.insert(completion);
+             let request = TurnInputRequest::new(TurnInput::InterAgentCommunication(communication))
+                 .on_start(start_options);
+diff --git a/codex-rs/core/src/agent/control/api.rs b/codex-rs/core/src/agent/control/api.rs
+index 51be411f..1f724a55 100644
+--- a/codex-rs/core/src/agent/control/api.rs
++++ b/codex-rs/core/src/agent/control/api.rs
+@@ -26,6 +26,7 @@ use codex_protocol::ThreadId;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::Result;
+ use codex_protocol::protocol::MultiAgentVersion;
++use codex_protocol::protocol::SdkManagedToolOrigin;
+ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::SubAgentSource;
+ use codex_protocol::protocol::TokenUsage;
+@@ -78,6 +79,17 @@ impl AgentControl for LocalAgentControl {
+     fn spawn_managed_tool(
+         &self,
+         request: SpawnRequest,
++        origin: SdkManagedToolOrigin,
++    ) -> BoxFuture<'_, Result<crate::ManagedAgentTool>> {
++        self.spawn_managed_tool_with_control(request, origin, false, false)
++    }
++
++    fn spawn_managed_tool_with_control(
++        &self,
++        request: SpawnRequest,
++        origin: SdkManagedToolOrigin,
++        result_control: bool,
++        capture_items: bool,
+     ) -> BoxFuture<'_, Result<crate::ManagedAgentTool>> {
+         Box::pin(async move {
+             let SpawnRequest {
+@@ -89,6 +101,8 @@ impl AgentControl for LocalAgentControl {
+             } = request;
+             if options.spawning_source.is_none()
+                 || options.parent_thread_id != Some(caller)
++                || origin.parent_thread_id != caller
++                || options.parent_turn_id.as_ref() != Some(&origin.parent_turn_id)
+                 || !matches!(
+                     &source,
+                     SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+@@ -102,7 +116,11 @@ impl AgentControl for LocalAgentControl {
+                 ));
+             }
+             let (reply, completion) = tokio::sync::oneshot::channel();
+-            let destination = crate::agent::api::ManagedToolCompletion::new(reply);
++            let mut destination = crate::agent::api::ManagedToolCompletion::new(
++                reply,
++                result_control.then_some(origin),
++            );
++            destination.capture_items = capture_items;
+             let retire_on_drop = destination.abandonment.clone().drop_guard();
+             let input = spawn_initial_input(caller, input, &source, Some(destination))?;
+             let (agent, _, turn_id) =
+diff --git a/codex-rs/core/src/agent/control/completion.rs b/codex-rs/core/src/agent/control/completion.rs
+index cb52dcc0..1f545f3a 100644
+--- a/codex-rs/core/src/agent/control/completion.rs
++++ b/codex-rs/core/src/agent/control/completion.rs
+@@ -89,11 +89,22 @@ impl LocalAgentControl {
+         }
+ 
+         if let Some(reply) = outcome.managed_tool_reply {
++            let items = if let Ok(runtime) = self.runtime.upgrade() {
++                runtime
++                    .get_thread(outcome.thread_id)
++                    .await
++                    .ok()
++                    .and_then(|thread| thread.sdk_take_managed_produced_items())
++            } else {
++                None
++            };
++
+             let _ = reply.send(ManagedAgentToolResult {
+                 thread_id: outcome.thread_id,
+                 turn_id: outcome.turn_id,
+                 status,
+                 output: outcome.tool_completion,
++                items,
+             });
+             return;
+         }
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index cf39953f..6658db68 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -6254,7 +6254,7 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
+         error_info: None,
+     };
+     let (reply, received) = tokio::sync::oneshot::channel();
+-    let slot = crate::agent::api::ManagedToolCompletion::new(reply);
++    let slot = crate::agent::api::ManagedToolCompletion::new(reply, None);
+     let mut managed = outcome("managed");
+     let child_id = managed.thread_id;
+     let typed = codex_protocol::protocol::ToolTurnCompletion {
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index b8d87220..44a2364e 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -352,6 +352,14 @@ impl CodexThread {
+             .finish(turn_id)
+     }
+ 
++    pub(crate) fn sdk_take_managed_produced_items(
++        &self,
++    ) -> Option<crate::managed_agent_result::ManagedAgentProducedItems> {
++        self.thread_extension_data()
++            .remove::<crate::session::sdk_produced_items::SdkProducedItems>()
++            .map(|capture| capture.finish_managed())
++    }
++
+     /// Starts ephemeral provider usage capture for one owned SDK run.
+     pub fn sdk_start_raw_usage(&self) -> crate::SdkRawUsageLink {
+         let capture = crate::session::sdk_raw_usage::SdkRawUsage::default();
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index fda0a57e..6c8461d9 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -278,3 +278,6 @@ mod file_admission;
+ mod project_read_path;
+ #[doc(hidden)]
+ pub use project_read_path::ProjectReadPathMapping;
++
++/// Opt-in managed child result admission.
++pub mod managed_agent_result;
+diff --git a/codex-rs/core/src/managed_agent_result.rs b/codex-rs/core/src/managed_agent_result.rs
+new file mode 100644
+index 00000000..224c8d41
+--- /dev/null
++++ b/codex-rs/core/src/managed_agent_result.rs
+@@ -0,0 +1,36 @@
++//! Process-local result admission for explicitly opted-in managed role tools.
++use codex_extension_api::ExtensionData;
++use codex_tools::ToolName;
++use futures::future::BoxFuture;
++use std::sync::Arc;
++use tokio_util::sync::CancellationToken;
++
++pub struct ManagedAgentProducedItems {
++    pub root_turn_id: Option<String>,
++    pub items: Result<String, String>,
++}
++
++pub struct ManagedAgentResultInput<'a> {
++    pub step_store: &'a ExtensionData,
++    pub thread_store: &'a ExtensionData,
++    pub parent_thread_id: &'a str,
++    pub parent_turn_id: &'a str,
++    pub call_id: &'a str,
++    pub tool_name: &'a ToolName,
++    pub role: &'a str,
++    pub source: serde_json::Value,
++    pub result: &'a crate::ManagedAgentToolResult,
++    pub cancellation: CancellationToken,
++}
++
++pub trait ManagedAgentResultCallback: Send + Sync {
++    /// None preserves native output. Err withholds this tool result, not the parent run.
++    fn settle<'a>(
++        &'a self,
++        input: ManagedAgentResultInput<'a>,
++    ) -> BoxFuture<'a, Result<Option<String>, ()>>;
++}
++
++/// A live registration, never a checkpoint or model-declared capability.
++#[derive(Clone)]
++pub struct ManagedAgentResultGate(pub Arc<dyn ManagedAgentResultCallback>);
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 1584d4ad..94c8d7b6 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2514,6 +2514,18 @@ impl Session {
+     }
+ 
+     pub(crate) async fn emit_turn_started(&self, turn_context: &TurnContext) {
++        // The child event queue orders registration before any observations of its run.
++        if let Some(start) = turn_context
++            .extension_data
++            .get::<crate::agent::api::ManagedToolCompletion>()
++            .and_then(|completion| completion.take_start(self.thread_id, &turn_context.sub_id))
++        {
++            self.deliver_event_raw(Event {
++                id: turn_context.sub_id.clone(),
++                msg: EventMsg::SdkManagedToolStarted(start),
++            })
++            .await;
++        }
+         let event = TurnStartedEvent {
+             turn_id: turn_context.sub_id.clone(),
+             root_turn_id: Some(
+@@ -2847,7 +2859,7 @@ impl Session {
+         self.deliver_event_raw(event).await;
+     }
+ 
+-    async fn deliver_event_raw(&self, event: Event) {
++    pub(crate) async fn deliver_event_raw(&self, event: Event) {
+         // Reduction and canonical persistence already ran. Only live playback publication is fenced.
+         if let EventMsg::RealtimeConversationRealtime(realtime) = &event.msg
+             && realtime.payload.is_output_retired()
+diff --git a/codex-rs/core/src/session/sdk_produced_items.rs b/codex-rs/core/src/session/sdk_produced_items.rs
+index 0965eaa5..00202906 100644
+--- a/codex-rs/core/src/session/sdk_produced_items.rs
++++ b/codex-rs/core/src/session/sdk_produced_items.rs
+@@ -115,6 +115,22 @@ impl SdkProducedItems {
+         }
+     }
+ 
++    pub(crate) fn finish_managed(&self) -> crate::managed_agent_result::ManagedAgentProducedItems {
++        let root_turn_id = self
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .turn_id
++            .clone();
++        let items = self
++            .finish(root_turn_id.as_deref().unwrap_or(""))
++            .map_err(|_| "Managed child item capture failed or exceeded its bound".to_owned());
++        crate::managed_agent_result::ManagedAgentProducedItems {
++            root_turn_id,
++            items,
++        }
++    }
++
+     pub(crate) fn finish(&self, turn_id: &str) -> Result<String, CodexErr> {
+         let mut capture = self
+             .0
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index d35ab88c..86835dc7 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3605,6 +3605,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
+     match msg {
+         EventMsg::ResponseFact(_)
+         | EventMsg::SdkRawProviderEvent(_)
++        | EventMsg::SdkManagedToolStarted(_)
+         | EventMsg::SdkModelAttempt(_) => None,
+         EventMsg::ElicitationRequest(request)
+             if matches!(
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index fd3409ba..d3755803 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -54,6 +54,9 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+     fn managed_agent_role(&self) -> Option<&str> {
+         self.0.managed_agent_role()
+     }
++    fn managed_agent_result_options(&self) -> (bool, bool) {
++        self.0.managed_agent_result_options()
++    }
+ 
+     fn supports_parallel_tool_calls(&self) -> bool {
+         self.0.supports_parallel_tool_calls()
+@@ -69,7 +72,12 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+     {
+         Box::pin(async move {
+             if let Some(role) = self.0.managed_agent_role() {
+-                return super::multi_agents_v2::managed_tool::run(invocation, role).await;
++                return super::multi_agents_v2::managed_tool::run(
++                    invocation,
++                    role,
++                    self.0.managed_agent_result_options(),
++                )
++                .await;
+             }
+             let environment_accessors = invocation.step_context.environments();
+             let environments = environment_accessors
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs
+index fe351b22..49e1e065 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/managed_tool.rs
+@@ -8,6 +8,7 @@ use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+ use codex_protocol::items::SubAgentActivityItem;
+ use codex_protocol::protocol::AgentStatus;
+ use codex_protocol::protocol::MultiAgentVersion;
++use codex_protocol::protocol::SdkManagedToolOrigin;
+ use codex_protocol::protocol::SubAgentActivityKind;
+ use codex_tools::ResponsesApiNamespace;
+ use codex_tools::ResponsesApiNamespaceTool;
+@@ -45,6 +46,10 @@ pub struct ManagedAgentToolSpec {
+     pub name: String,
+     pub role: String,
+     pub description: String,
++    #[serde(default)]
++    pub result_control: bool,
++    #[serde(default)]
++    pub capture_items: bool,
+ }
+ 
+ /// Declared SDK role tools for a thread and its verified native descendants.
+@@ -56,6 +61,9 @@ impl ManagedAgentToolCatalog {
+         let mut names = HashSet::new();
+         let mut tools = Vec::with_capacity(declarations.len());
+         for declaration in declarations {
++            if declaration.capture_items && !declaration.result_control {
++                return Err("Managed item capture requires result control".into());
++            }
+             AgentPath::root().join(&declaration.name)?;
+             AgentPath::root().join(&declaration.role)?;
+             if matches!(
+@@ -98,6 +106,8 @@ impl ManagedAgentToolCatalog {
+             tools.push(Arc::new(ManagedRoleTool {
+                 name,
+                 role: declaration.role,
++                result_control: declaration.result_control,
++                capture_items: declaration.capture_items,
+                 spec: ToolSpec::Namespace(ResponsesApiNamespace {
+                     name: "collaboration".to_owned(),
+                     description: default_namespace_description("collaboration"),
+@@ -130,6 +140,8 @@ impl ToolContributor for ManagedAgentToolContributor {
+ }
+ 
+ struct ManagedRoleTool {
++    result_control: bool,
++    capture_items: bool,
+     name: ToolName,
+     role: String,
+     spec: ToolSpec,
+@@ -144,6 +156,10 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ManagedRoleTool {
+         self.spec.clone()
+     }
+ 
++    fn managed_agent_result_options(&self) -> (bool, bool) {
++        (self.result_control, self.capture_items)
++    }
++
+     fn managed_agent_role(&self) -> Option<&str> {
+         Some(&self.role)
+     }
+@@ -173,15 +189,49 @@ struct ManagedToolInput {
+ pub(crate) async fn run(
+     invocation: ToolInvocation,
+     role: &str,
++    (result_control, capture_items): (bool, bool),
+ ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++    let outer_call_id = if result_control {
++        invocation
++            .originating_call()
++            .await
++            .map(|origin| origin.call_id)
++    } else {
++        None
++    };
++    let result_source = match &invocation.source {
++        crate::tools::context::ToolCallSource::CodeMode {
++            cell_id,
++            runtime_tool_call_id,
++        } => serde_json::json!({"route":"code_mode", "cell_id":cell_id,
++                "runtime_tool_call_id":runtime_tool_call_id, "outer_call_id":outer_call_id}),
++        _ => serde_json::json!({"route":"direct"}),
++    };
+     let ToolInvocation {
+         session,
+         step_context,
+         payload,
+         call_id,
++        tool_name,
++        cancellation_token,
+         ..
+     } = invocation;
+     let turn = &step_context.turn;
++    let gate = if result_control {
++        Some(
++            session
++                .services
++                .thread_extension_data
++                .get::<crate::managed_agent_result::ManagedAgentResultGate>()
++                .ok_or_else(|| {
++                    FunctionCallError::RespondToModel(
++                        "Managed result control requires a live SDK callback".into(),
++                    )
++                })?,
++        )
++    } else {
++        None
++    };
+     if turn.multi_agent_version != MultiAgentVersion::V2 {
+         return Err(FunctionCallError::RespondToModel(
+             "Managed agent tools require native multi-agent V2".to_owned(),
+@@ -217,30 +267,51 @@ pub(crate) async fn run(
+     let agent_path = source.get_agent_path().ok_or_else(|| {
+         FunctionCallError::Fatal("managed child is missing its canonical agent path".to_owned())
+     })?;
++    let origin = SdkManagedToolOrigin {
++        tool_name: tool_name.name.clone(),
++        role: role.to_owned(),
++        native_call_id: call_id.clone(),
++        parent_thread_id: session.thread_id,
++        parent_turn_id: turn.sub_id.clone(),
++        cell_id: result_source
++            .get("cell_id")
++            .and_then(|v| v.as_str())
++            .map(str::to_owned),
++        runtime_tool_call_id: result_source
++            .get("runtime_tool_call_id")
++            .and_then(|v| v.as_str())
++            .map(str::to_owned),
++        input: result_control.then(|| args.input.clone()),
++    };
+     let managed = session
+         .services
+         .agent_control
+-        .spawn_managed_tool(SpawnRequest {
+-            caller: session.thread_id,
+-            config: prepared.config,
+-            input: AgentInput::Message {
+-                message: AgentMessage::Plaintext(args.input),
+-                mode: MessageDeliveryMode::TriggerTurn,
+-            },
+-            source,
+-            options: SpawnAgentOptions {
+-                spawning_source: Some(AgentSpawnSource::from_step_context(Arc::clone(
+-                    &step_context,
+-                ))),
+-                parent_thread_id: Some(session.thread_id),
+-                parent_turn_id: Some(turn.sub_id.clone()),
+-                root_turn_id: turn.turn_metadata_state.root_turn_id(),
+-                turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
+-                environments: Some(step_context.environments.clone()),
+-                cyber_access_program: turn.cyber_access_program,
+-                ..Default::default()
++        .spawn_managed_tool_with_control(
++            SpawnRequest {
++                caller: session.thread_id,
++                config: prepared.config,
++                input: AgentInput::Message {
++                    message: AgentMessage::Plaintext(args.input),
++                    mode: MessageDeliveryMode::TriggerTurn,
++                },
++                source,
++                options: SpawnAgentOptions {
++                    spawning_source: Some(AgentSpawnSource::from_step_context(Arc::clone(
++                        &step_context,
++                    ))),
++                    parent_thread_id: Some(session.thread_id),
++                    parent_turn_id: Some(turn.sub_id.clone()),
++                    root_turn_id: turn.turn_metadata_state.root_turn_id(),
++                    turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
++                    environments: Some(step_context.environments.clone()),
++                    cyber_access_program: turn.cyber_access_program,
++                    ..Default::default()
++                },
+             },
+-        })
++            origin,
++            result_control,
++            capture_items,
++        )
+         .await
+         .map_err(collab_spawn_error)?;
+     let thread_id = managed.agent.thread_id;
+@@ -249,7 +320,7 @@ pub(crate) async fn run(
+         &session,
+         turn,
+         SubAgentActivityItem {
+-            id: call_id,
++            id: call_id.clone(),
+             agent_thread_id: thread_id,
+             agent_path,
+             kind: SubAgentActivityKind::Started,
+@@ -264,15 +335,54 @@ pub(crate) async fn run(
+             "managed child delivered an unrelated terminal outcome".to_owned(),
+         ));
+     }
++    let replacement = if let Some(gate) = gate {
++        gate.0
++            .settle(crate::managed_agent_result::ManagedAgentResultInput {
++                step_store: &step_context.extension_data,
++                thread_store: &session.services.thread_extension_data,
++                parent_thread_id: &session.thread_id.to_string(),
++                parent_turn_id: &turn.sub_id,
++                call_id: &call_id,
++                tool_name: &tool_name,
++                role,
++                source: result_source,
++                result: &result,
++                cancellation: cancellation_token.clone(),
++            })
++            .await
++            .map_err(|_| {
++                FunctionCallError::RespondToModel(
++                    "Managed agent result withheld by application policy".into(),
++                )
++            })?
++    } else {
++        None
++    };
++    if cancellation_token.is_cancelled() {
++        return Err(FunctionCallError::RespondToModel(
++            "Managed agent invocation cancelled".into(),
++        ));
++    }
++    if capture_items
++        && result
++            .items
++            .as_ref()
++            .is_none_or(|capture| capture.items.is_err())
++    {
++        return Err(FunctionCallError::RespondToModel(
++            "Managed child items unavailable".into(),
++        ));
++    }
+     let AgentStatus::Completed(message) = result.status else {
+         return Err(FunctionCallError::RespondToModel(
+             "Managed agent did not complete its turn".to_owned(),
+         ));
+     };
+-    let text = match result.output.map(|output| output.final_output) {
+-        Some(serde_json::Value::String(text)) => text,
+-        Some(value) => value.to_string(),
+-        None => message.unwrap_or_default(),
+-    };
++    let text =
++        replacement.unwrap_or_else(|| match result.output.map(|output| output.final_output) {
++            Some(serde_json::Value::String(text)) => text,
++            Some(value) => value.to_string(),
++            None => message.unwrap_or_default(),
++        });
+     Ok(Box::new(FunctionToolOutput::from_text(text, Some(true))))
+ }
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 5a9db99b..435ac9ba 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1938,6 +1938,24 @@ impl Event {
+                 },
+             }));
+         }
++        if let EventMsg::SdkManagedToolStarted(event) = &self.msg {
++            return Ok(serde_json::json!({
++                "id": &self.id,
++                "msg": {
++                    "type": "sdk_managed_tool_started",
++                    "tool_name": &event.origin.tool_name,
++                    "role": &event.origin.role,
++                    "input": &event.origin.input,
++                    "native_call_id": &event.origin.native_call_id,
++                    "parent_thread_id": event.origin.parent_thread_id,
++                    "parent_turn_id": &event.origin.parent_turn_id,
++                    "child_thread_id": event.child_thread_id,
++                    "child_turn_id": &event.child_turn_id,
++                    "cell_id": &event.origin.cell_id,
++                    "runtime_tool_call_id": &event.origin.runtime_tool_call_id,
++                },
++            }));
++        }
+         serde_json::to_value(self)
+     }
+ }
+@@ -1973,6 +1991,37 @@ impl std::fmt::Debug for SdkRawProviderEvent {
+     }
+ }
+ 
++/// The parent invocation that owns the initial turn of a managed child.
++#[derive(Clone)]
++pub struct SdkManagedToolOrigin {
++    pub tool_name: String,
++    pub role: String,
++    pub native_call_id: String,
++    pub parent_thread_id: ThreadId,
++    pub parent_turn_id: String,
++    pub cell_id: Option<String>,
++    pub runtime_tool_call_id: Option<String>,
++    pub input: Option<String>,
++}
++
++impl std::fmt::Debug for SdkManagedToolOrigin {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("SdkManagedToolOrigin")
++            .field("tool_name", &self.tool_name)
++            .field("role", &self.role)
++            .field("native_call_id", &self.native_call_id)
++            .finish_non_exhaustive()
++    }
++}
++
++/// The exact child admitted by one managed tool call, for live SDK observers.
++#[derive(Debug, Clone)]
++pub struct SdkManagedToolStarted {
++    pub origin: SdkManagedToolOrigin,
++    pub child_thread_id: ThreadId,
++    pub child_turn_id: String,
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct EnvironmentConnectionEvent {
+     pub environment_id: String,
+@@ -1992,6 +2041,11 @@ pub enum EventMsg {
+     #[schemars(skip)]
+     #[ts(skip)]
+     SdkRawProviderEvent(SdkRawProviderEvent),
++    /// A managed child registration for a live SDK subscriber only.
++    #[serde(skip)]
++    #[schemars(skip)]
++    #[ts(skip)]
++    SdkManagedToolStarted(SdkManagedToolStarted),
+     /// Error while executing a submission
+     Error(ErrorEvent),
+ 
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index 3f713d68..616b338c 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -268,6 +268,7 @@ impl<'a> From<&'a ExecCommandEndEvent> for ExecCommandEndTracePayload<'a> {
+ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTraceEvent<'_>> {
+     match event {
+         EventMsg::ResponseFact(_)
++        | EventMsg::SdkManagedToolStarted(_)
+         | EventMsg::SdkRawProviderEvent(_)
+         | EventMsg::SdkModelAttempt(_) => None,
+         EventMsg::ExecCommandBegin(event) if event.source != ExecCommandSource::UserShell => {
+@@ -434,6 +435,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static str> {
+     match event {
+         EventMsg::ResponseFact(_)
++        | EventMsg::SdkManagedToolStarted(_)
+         | EventMsg::SdkRawProviderEvent(_)
+         | EventMsg::SdkModelAttempt(_) => None,
+         EventMsg::SessionConfigured(_) => Some("session_configured"),
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index b6fe962c..54880ef0 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -237,6 +237,7 @@ pub fn persisted_event_msg(
+         | EventMsg::HookStarted(_)
+         | EventMsg::HookCompleted(_)
+         | EventMsg::ResponseFact(_)
++        | EventMsg::SdkManagedToolStarted(_)
+         | EventMsg::SdkRawProviderEvent(_)
+         | EventMsg::AgentMessageContentDelta(_)
+         | EventMsg::PlanDelta(_)
+diff --git a/codex-rs/tools/src/tool_executor.rs b/codex-rs/tools/src/tool_executor.rs
+index 1a76893f..50a5e740 100644
+--- a/codex-rs/tools/src/tool_executor.rs
++++ b/codex-rs/tools/src/tool_executor.rs
+@@ -144,6 +144,11 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
+         None
+     }
+ 
++    /// Captured opt-in flags for native managed-role settlement and item capture.
++    fn managed_agent_result_options(&self) -> (bool, bool) {
++        (false, false)
++    }
++
+     /// Observes the final native result after all output policies accept it.
+     /// The host records this disposition outside model-visible tool content.
+     fn on_result_accepted(

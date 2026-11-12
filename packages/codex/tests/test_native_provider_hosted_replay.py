@@ -305,3 +305,105 @@ async def test_borrowed_provider_bounds_first_dispatch_without_mutating_client(m
             if mode == "empty":
                 assert all(request["tools"] == [] for request in requests)
         assert not http_client.is_closed
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_explicit_hosted_mcp_before_effect_frame_needs_safe_advice(started):
+    from pathlib import Path
+
+    from agents import HostedMCP
+
+    catalog = Path(__file__).parent / "fixtures" / "request-control-models.json"
+    model = next(
+        entry["slug"]
+        for entry in json.loads(catalog.read_text())["models"]
+        if entry.get("supported_in_api")
+        and not entry.get("use_responses_lite")
+        and entry.get("tool_mode") != "code_mode_only"
+    )
+    declaration = HostedMCP(
+        tool_config={
+            "type": "mcp",
+            "server_label": "remote",
+            "server_url": "https://hosted-mcp.invalid/remote",
+            "require_approval": "never",
+        }
+    )
+    decisions = []
+    async with (
+        timeout(20),
+        peer([created()] if started else [], effectful=True) as (provider, attempts, effects, _),
+    ):
+        agent = Agent(
+            model=model,
+            instructions="Use the provider tool.",
+            tools=[declaration],
+            provider=provider,
+            model_settings=settings(True, decisions),
+        )
+        failure = None
+        try:
+            await agent.run("run")
+        except NativeError as error:
+            failure = error
+    assert len(attempts) == 1
+    assert effects == ["provider-effect"]
+    assert failure is not None
+    assert attempts[0]["tools"][0]["type"] == "mcp"
+    assert attempts[0]["tools"][0]["server_label"] == "remote"
+
+
+@pytest.mark.parametrize("safety", ["safe", "unknown", "unsafe"])
+async def test_explicit_hosted_mcp_replay_needs_captured_safe_advice(safety):
+    from pathlib import Path
+
+    from agents import HostedMCP
+
+    catalog = Path(__file__).parent / "fixtures" / "request-control-models.json"
+    model = next(
+        entry["slug"]
+        for entry in json.loads(catalog.read_text())["models"]
+        if entry.get("supported_in_api")
+        and not entry.get("use_responses_lite")
+        and entry.get("tool_mode") != "code_mode_only"
+    )
+    declaration = HostedMCP(
+        tool_config={
+            "type": "mcp",
+            "server_label": "remote",
+            "server_url": "https://hosted-mcp.invalid/remote",
+            "require_approval": "never",
+        }
+    )
+    calls, decisions = [], []
+    original = RuntimeError("opaque explicit MCP dispatch")
+    original.status_code = 503
+    original.code = "server_error"
+
+    class Model:
+        def get_retry_advice(self, request):
+            assert request.error is original
+            return RetryAdvice(suggested=True, replay_safety=safety)
+
+        def complete(self, request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise original
+            return ModelResponse([assistant_output("recovered")["item"]])
+
+    async with timeout(20), NativeProvider(model_backend=Model()) as provider:
+        agent = Agent(
+            model=model,
+            instructions="Answer.",
+            tools=[declaration],
+            provider=provider,
+            model_settings=settings(True, decisions),
+        )
+        if safety == "safe":
+            assert (await agent.run("run")).final_output == "recovered"
+            assert len(calls) == 2
+        else:
+            with pytest.raises(RuntimeError) as stopped:
+                await agent.run("run")
+            assert stopped.value is original
+            assert len(calls) == 1
