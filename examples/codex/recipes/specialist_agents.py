@@ -40,7 +40,9 @@ async def consult(context: ToolContext[Application], question: str) -> Summary:
     """Ask the catalog specialist and return its validated summary."""
     app = context.context
     # agent.run owns and closes its separate Session, including cancellation.
-    result = await app.specialist.run(question, context=app.catalog)
+    result = await app.specialist.run(
+        question, context=app.catalog, parent_trace=context.trace_context
+    )
     return result.final_output
 
 

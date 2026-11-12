@@ -542,7 +542,18 @@ pub(crate) struct InitialTurn {
     pub initialization: std::sync::Arc<codex_core::InitialTurnInitialization>,
 }
 
-pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value) -> Result<Value> {
+pub async fn submit_replaceable(
+    state: &crate::engine::ThreadState,
+    value: Value,
+) -> Result<Value> {
+    submit_replaceable_with_attempts(state, value, None).await
+}
+
+pub async fn submit_replaceable_with_attempts(
+    state: &crate::engine::ThreadState,
+    value: Value,
+    model_attempts: Option<std::sync::Arc<crate::model_attempts::Capture>>,
+) -> Result<Value> {
     let mut value = value;
     codex_otel::sdk_trace::prepare_submission(&mut value).map_err(anyhow::Error::msg)?;
     let mut mutation = Some(state.mutations.lock().await);
@@ -629,9 +640,18 @@ pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value
     } else {
         None
     };
-    let turn_init = if let Some(initial) = &initial {
+    let turn_init = if initial.is_some() || model_attempts.is_some() {
         let mut init = thread.config_snapshot().await.turn_extension_init;
-        init.insert(initial.initialization.clone());
+        if let Some(initial) = &initial {
+            init.insert(initial.initialization.clone());
+        }
+        if let Some(capture) = model_attempts {
+            ensure!(
+                matches!(p.mode, Mode::StartIfIdle),
+                "Model attempt capture requires a new managed turn"
+            );
+            capture.seed(&mut init);
+        }
         Some(init)
     } else {
         None

@@ -21,6 +21,12 @@ The fulfillment handler has been passing those headers through `Agent.run(..., p
 
 ## Metadata and service policy
 
+The `stages` receipt has been keeping an ordered record of authorized routing, specialist tool work, validation, and in-memory delivery. Each stage has been carrying its outcome and elapsed nanoseconds. The failed scenario has been recording rejected validation and suppressed delivery. The successful scenario has been keeping one public outcome in `delivered`.
+
+The `supervisory` receipts have been mapping typed stops to the fixed span categories `cancelled` and `run_budget_exceeded`. The cancellation probe has been joining local tool cleanup before recording the stage. The zero-request budget probe has been stopping before any provider send or tool effect. Both probes have been checking the categories in ended-span receipts.
+
+The `usage` receipt has been keeping reported totals, observed completions, and the number of completions without usage. It has also been keeping a separately labeled fixture estimate. Worker tokens have been marked unavailable.
+
 Both services have been calling `telemetry.set_sensitive_data_logging_enabled(False)` before admitting work. They have also been disabling native prompt and response logs, retaining a zero tool-result text limit, and selecting `include_sensitive_data=False` for their roots. W3C headers have been carrying identity across services; each process has been applying its own privacy policy.
 
 The example has been choosing these application attributes from fixed constants, outcome enums, and a local count:
@@ -60,3 +66,9 @@ This local fixture has not been diagnosing missing exports in a production backe
 In `success`, fulfillment has been completing. In `failure`, the fulfillment tool has been raising a controlled synthetic exception, the worker has been returning `stopped`, and checkout has been recording an error outcome. The failure scenario has also been adding a processor that deliberately rejects deliveries. The example has been asserting `flush.failed_deliveries > 0` for checkout while checking a successful worker flush and retained native sink receipts. The deliberately failed processor has been demonstrating known delivery loss separately from the business-stage failure.
 
 `force_flush()` has been waiting through a delivery barrier for completed records. A successful flush has been reporting no known loss through that barrier; it has not been proving durable storage or viewer visibility. This example has been checking local receiver receipt separately. Its JSON artifact has been retaining `flush`, `worker.flush`, `replacement_flush`, lifecycle events, and OTLP batches, allowing inspection of delivery and application outcome as separate evidence.
+
+## Diagnosing missing trace records
+
+Comparing records for one trace ID has been separating four questions. The local processor has been showing creation and ancestry. `force_flush()` has been showing known queue drops and failed deliveries. A receiver receipt has been showing transport arrival. A separate lookup in the destination has been establishing whether the trace is stored and visible.
+
+The native OpenAI exporter has been requiring a known native root descriptor. The local exporter fixture has been recording an externally parented child in a separate processor while reporting failed delivery and no matching trace at the loopback ingest endpoint. The same exporter has been delivering a locally rooted trace. [Exporter fixture](../../../packages/codex/tests/test_native_trace_exporter.py)

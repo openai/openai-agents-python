@@ -129,6 +129,18 @@ class TurnFinished(_SubmissionEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class OutputAccepted(_SubmissionEvent):
+    """One successful logical root result after typed validation and owned cleanup.
+
+    submission_id identifies the original root; turn_id identifies its final native
+    step. Content remains on Turn.get_result(). Application approval and delivery
+    stay separate. Passive retention can report gaps; this is not a durable receipt.
+    """
+
+    type: Literal["output_accepted"] = field(default="output_accepted", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class OutputTextDelta(_SubmissionEvent):
     """A native output-text delta with its original native item identity."""
 
@@ -376,6 +388,7 @@ Observation: TypeAlias = (
     | ModelRequestDispatching
     | ModelResponseLinked
     | TurnFinished
+    | OutputAccepted
     | SubagentLifecycle
     | OutputTextDelta
     | ResponseFactReceived
@@ -549,7 +562,11 @@ class _ObservationBuffer:
                 self.characters -= removed
                 self.payload_characters -= removed_payload
             self.notify()
-        if self.repair_parent is not None and isinstance(event, _SubmissionEvent):
+        if (
+            self.repair_parent is not None
+            and isinstance(event, _SubmissionEvent)
+            and not isinstance(event, OutputAccepted)
+        ):
             buffer, parent_id = self.repair_parent
             buffer.append(cast(Observation, replace(event, parent_submission_id=parent_id)))
         return event
