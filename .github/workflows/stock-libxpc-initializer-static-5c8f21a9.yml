@@ -1,0 +1,248 @@
+name: Stock libxpc initializer static inspection
+
+on:
+  push:
+    branches:
+      - diagnostics/nov9-stock-libxpc-initializer-static-5c8f21a9
+    paths:
+      - .github/workflows/stock-libxpc-initializer-static-5c8f21a9.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-owned-stock-image:
+    runs-on: macos-15
+    timeout-minutes: 4
+    steps:
+      - name: Check out the exact diagnostic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Read one initializer body from the owned stopped fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_parent=993d09b848c6c4e181b614cb384d70001238e872
+          expected_path=.github/workflows/stock-libxpc-initializer-static-5c8f21a9.yml
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/diagnostics/nov9-stock-libxpc-initializer-static-5c8f21a9
+          test "$(/usr/bin/git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(/usr/bin/git rev-list --parents --no-walk HEAD)" = "$GITHUB_SHA $expected_parent"
+          test "$(/usr/bin/git diff-tree --no-commit-id --name-only -r HEAD)" = "$expected_path"
+          /usr/bin/sw_vers
+          /usr/bin/uname -m
+          test "$(/usr/bin/sw_vers -productVersion)" = 15.8.2
+          test "$(/usr/bin/sw_vers -buildVersion)" = 24H232
+          test "$(/usr/bin/uname -m)" = arm64
+          test "$(/usr/bin/id -u)" -ne 0
+          /usr/bin/python3 - "$GITHUB_SHA" "$GITHUB_REF" "$expected_parent" "$expected_path" <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          print(json.dumps({"source_admission": "accepted", "head": sys.argv[1],
+                            "ref": sys.argv[2], "parent": sys.argv[3],
+                            "workflow": sys.argv[4], "uid": os.getuid(),
+                            "workflow_sha256": hashlib.sha256(Path(sys.argv[4]).read_bytes()).hexdigest(),
+                            "os_version": "15.8.2", "os_build": "24H232", "arch": "arm64"}))
+          PY
+          temp_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-atfork-static.XXXXXXXX")"
+          trap '/bin/rm -rf -- "$temp_dir"' EXIT
+          cat > "$temp_dir/probe.c" <<'C'
+          #include <xpc/xpc.h>
+          int main(void) {
+              xpc_object_t value = xpc_bool_create(true);
+              xpc_release(value);
+              return 0;
+          }
+          C
+          cat > "$temp_dir/observer.py" <<'PY'
+          import json
+          import re
+          import lldb
+
+          UUID = "D3682603-AC67-3242-82EB-1226B435BFF4"
+          IMAGE = "/usr/lib/system/libxpc.dylib"
+          ROOT = "_libxpc_initializer"
+          MAX_SYMBOLS = 1
+          MAX_INSTRUCTIONS = 768
+          MAX_PER_SYMBOL = 384
+          MAX_DEPTH = 0
+          DIRECT = re.compile(r"#?(0x[0-9a-f]+)", re.I)
+
+          def emit(result, **fields):
+              result.AppendMessage(json.dumps(fields, sort_keys=True))
+
+          def observe(debugger, command, result, internal_dict):
+              target = debugger.GetSelectedTarget()
+              process = target.GetProcess()
+              frame = process.GetSelectedThread().GetFrameAtIndex(0)
+              if (
+                  process.GetState() != lldb.eStateStopped
+                  or frame.GetFunctionName() != "main"
+                  or frame.GetModule().GetFileSpec() != target.GetExecutable()
+              ):
+                  emit(result, outcome="inconclusive", reason="owned_main_admission_failed")
+                  return
+              module = target.FindModule(lldb.SBFileSpec(IMAGE))
+              if (
+                  not module.IsValid()
+                  or module.GetUUIDString() != UUID
+                  or not module.GetTriple().startswith("arm64")
+              ):
+                  emit(result, outcome="inconclusive", reason="image_admission_failed")
+                  return
+              emit(result, admission="accepted", image=IMAGE, uuid=UUID,
+                   triple=module.GetTriple(), owned_stopped_main=True,
+                   instruction_only=True, live_data_reads=False,
+                   live_right_operations=False, private_calls=False)
+              root = module.FindSymbol(ROOT, lldb.eSymbolTypeCode)
+              if not root.IsValid():
+                  root = module.FindSymbol("_" + ROOT, lldb.eSymbolTypeCode)
+              pending = [(root, ROOT, 0)]
+              seen = set()
+              remaining = MAX_INSTRUCTIONS
+              incomplete = False
+              root_complete = False
+              while pending and len(seen) < MAX_SYMBOLS:
+                  symbol, name, depth = pending.pop(0)
+                  if not symbol.IsValid():
+                      emit(result, symbol=name, status="unavailable")
+                      incomplete = True
+                      continue
+                  start, end = symbol.GetStartAddress(), symbol.GetEndAddress()
+                  if not start.IsValid() or not end.IsValid():
+                      emit(result, symbol=name, status="unknown_extent")
+                      incomplete = True
+                      continue
+                  address = start.GetFileAddress()
+                  if address in seen:
+                      continue
+                  size = end.GetFileAddress() - address
+                  if start.GetSection() != end.GetSection() or size < 4 or size % 4:
+                      emit(result, symbol=name, status="unknown_extent")
+                      incomplete = True
+                      continue
+                  expected = size // 4
+                  if expected > min(MAX_PER_SYMBOL, remaining):
+                      emit(result, symbol=name, status="instruction_bound", expected=expected)
+                      incomplete = True
+                      continue
+                  instructions = target.ReadInstructions(start, expected)
+                  if instructions.GetSize() != expected:
+                      emit(result, symbol=name, status="incomplete_listing",
+                           inspected=instructions.GetSize(), expected=expected)
+                      incomplete = True
+                      continue
+                  seen.add(address)
+                  remaining -= expected
+                  root_complete |= depth == 0
+                  emit(result, symbol=name, depth=depth, instructions=expected, complete=True)
+                  for ins in instructions:
+                      offset = ins.GetAddress().GetFileAddress() - address
+                      mnemonic = ins.GetMnemonic(target) or ""
+                      operands = ins.GetOperands(target) or ""
+                      # No GetComment, expression evaluation, global lookup or ReadMemory.
+                      result.AppendMessage(f"  +0x{offset:x} {mnemonic} {operands}".rstrip())
+                      if mnemonic.startswith(("blr", "br")):
+                          emit(result, edge_from=name, offset=offset, unresolved="indirect")
+                          incomplete = True
+                      if mnemonic not in {"b", "bl"}:
+                          continue
+                      match = DIRECT.fullmatch(operands.strip())
+                      if not match:
+                          emit(result, edge_from=name, offset=offset, unresolved="operand")
+                          incomplete = True
+                          continue
+                      destination = target.ResolveLoadAddress(int(match.group(1), 16))
+                      callee = destination.GetSymbol() if destination.IsValid() else lldb.SBSymbol()
+                      callee_name = callee.GetName() if callee.IsValid() else None
+                      if not callee_name:
+                          emit(result, edge_from=name, offset=offset, unresolved="symbol")
+                          incomplete = True
+                          continue
+                      if destination.GetModule() == module and callee == symbol:
+                          continue
+                      emit(result, edge_from=name, offset=offset, destination=callee_name)
+                      if destination.GetModule() == module and callee.GetType() == lldb.eSymbolTypeCode:
+                          if depth < MAX_DEPTH:
+                              pending.append((callee, callee_name, depth + 1))
+                          else:
+                              emit(result, edge_from=name, destination=callee_name,
+                                   boundary="immediate_callee_depth_bound")
+                              incomplete = True
+                      else:
+                          emit(result, edge_from=name, destination=callee_name,
+                               boundary="external_code_not_followed")
+                  if remaining == 0:
+                      break
+              if pending:
+                  incomplete = True
+              emit(result, outcome="inconclusive" if incomplete or not root_complete else "bounded_listing_complete",
+                   root_complete=root_complete, symbols=len(seen),
+                   instructions=MAX_INSTRUCTIONS - remaining, pending=len(pending),
+                   dataflow_classification="manual_review_required",
+                   runtime_cache_value="unobserved", slot_identity="unproven",
+                   authority="unproven", dynamic_calls=False)
+              result.AppendMessage("stock_atfork_static_observer_finished")
+
+          def __lldb_init_module(debugger, internal_dict):
+              debugger.HandleCommand("command script add -f observer.observe observe-stock-atfork")
+          PY
+          cat > "$temp_dir/run.py" <<'PY'
+          import json
+          import os
+          import signal
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          workdir = Path(sys.argv[1])
+          command = [
+              "/usr/bin/xcrun", "lldb", "--batch", "--no-lldbinit", "--no-use-colors",
+              "-o", "settings set target.disable-aslr false",
+              "-o", "breakpoint set --name main --shlib probe",
+              "-o", "run",
+              "-o", "command script import ./observer.py",
+              "-o", "observe-stock-atfork",
+              "-o", "process kill",
+              "--", str(workdir / "probe"),
+          ]
+          log = workdir / "lldb.log"
+          with log.open("w") as output, subprocess.Popen(
+              command, cwd=workdir, start_new_session=True,
+              stdout=output, stderr=subprocess.STDOUT,
+          ) as proc:
+              try:
+                  status = proc.wait(timeout=25)
+              except subprocess.TimeoutExpired:
+                  try:
+                      os.killpg(proc.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+                  proc.wait()
+                  status = 124
+          if log.stat().st_size > 524288:
+              print(json.dumps({"outcome": "inconclusive", "reason": "log_bound_exceeded"}))
+              sys.exit(1)
+          receipt = log.read_text(errors="replace")
+          for line in receipt.splitlines():
+              if line.startswith(("{", "  +0x")) or line == "stock_atfork_static_observer_finished":
+                  print(line)
+          finished = "stock_atfork_static_observer_finished" in receipt.splitlines()
+          if status != 0 or not finished:
+              print(json.dumps({"outcome": "inconclusive", "reason": "observer_incomplete",
+                                "lldb_exit": status, "completion_marker": finished}))
+              sys.exit(1)
+          PY
+          developer_dir="$(/usr/bin/xcode-select -p)"
+          /usr/bin/env -i HOME="$temp_dir" TMPDIR="$temp_dir" LC_ALL=C \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin DEVELOPER_DIR="$developer_dir" \
+            /usr/bin/xcrun --sdk macosx clang -std=c11 -arch arm64 -g -O0 \
+            -Wall -Wextra -Werror "$temp_dir/probe.c" -o "$temp_dir/probe"
+          /usr/bin/env -i HOME="$temp_dir" TMPDIR="$temp_dir" LC_ALL=C \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin DEVELOPER_DIR="$developer_dir" \
+            /usr/bin/python3 "$temp_dir/run.py" "$temp_dir"
