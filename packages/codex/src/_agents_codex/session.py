@@ -3423,6 +3423,7 @@ async def _opening_provider_config(
     base_url = provider.base_url or "https://api.openai.com/v1"
     routing: dict[str, Any] = provider._routing_config()
     for name in (
+        "websocket_base_url",
         "request_max_retries",
         "stream_max_retries",
         "stream_idle_timeout_ms",
@@ -3508,6 +3509,7 @@ def _default_private_tls_profile(
     return (
         provider_config["model_provider"] == "native_agent"
         and provider.supports_websockets is None
+        and provider.websocket_base_url is None
         and websockets_enabled
         and not provider._routing_config()
         and sys.platform == "linux"

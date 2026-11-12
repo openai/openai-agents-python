@@ -891,7 +891,11 @@
     {
       "path": "sdk-native-custom-string-tools.patch",
       "sha256": "cb1835cce8e8926674ac438a8b6713ec71053c73db1270dd88ee27d763c3322f"
+    },
+    {
+      "path": "sdk-independent-websocket-base.patch",
+      "sha256": "b29ef217c5eb88d94fc48bb6d6ef2b06c458e6ab6df5ca5cdbfd9e94bb52385a"
     }
   ],
-  "result_tree": "c4f7bda5e22fa172767cca2219b79505a1823d8e"
+  "result_tree": "77c9434152d30d760551f17d6ee0dfdc5249f6f7"
 }
