@@ -100,6 +100,7 @@ from ._media import _audio_json, _check_audio_json
 from ._model_retry import _is_model_abort, _ModelFailure, _normalized_error, _resolve_retry
 from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._opening import _capture_opening_agent as _capture_opening_agent
+from ._opening_compatibility import _validate_custom_storage_capabilities
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
@@ -308,8 +309,12 @@ from .tools import (
     _capture_application_data,
     _capture_hosted_tools,
     _capture_tools as _capture_tools,
+    _capture_web_search_config as _capture_web_search_config,
     _CapturedFunction as _CapturedFunction,
     _hosted_tool_name,
+    _restore_operation_slots as _restore_operation_slots,
+    _restore_python_catalog as _restore_python_catalog,
+    _saved_python_ref as _saved_python_ref,
     _ToolCatalog as _ToolCatalog,
 )
 from .turn import (
@@ -2086,7 +2091,6 @@ def _fixed_tool_refs(
     project_guidance: bool = False,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
-    from .native_agents import _COLLABORATION_TOOLS
 
     fixed: set[ToolRef] = set()
     for tool in tools:
@@ -2113,7 +2117,9 @@ def _fixed_tool_refs(
     if project_guidance:
         fixed.update(ToolRef(name, "functions") for name in _PROJECT_GUIDANCE_TOOL_NAMES)
     if native_agents is not None:
-        fixed.update(ToolRef(name, "collaboration") for name in _COLLABORATION_TOOLS)
+        fixed.update(
+            ToolRef(name, "collaboration") for name in native_agents._collaboration_tool_names
+        )
     return fixed
 
 
@@ -2843,57 +2849,6 @@ def _install_profile_options(
     )
 
 
-def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
-    kind = spec.get("type")
-    if kind == "applyPatch":
-        return ToolRef("apply_patch")
-    if kind in ("computer", "shell"):
-        return ToolRef(kind)
-    if kind == "toolSearch":
-        return ToolRef("tool_search")
-    if kind == "namespace":
-        tools = spec.get("tools")
-        if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
-            return None
-        namespace = spec.get("name")
-        name = tools[0].get("name")
-        if isinstance(namespace, str) and isinstance(name, str):
-            return ToolRef(name, namespace)
-    else:
-        name = spec.get("name")
-        if isinstance(name, str):
-            return ToolRef(name)
-    return None
-
-
-def _restore_python_catalog(
-    catalog: _ToolCatalog, specs: Sequence[Mapping[str, Any]]
-) -> _ToolCatalog:
-    # Use saved order with current bindings. Native rejects unknown or duplicate
-    # specs when comparing the complete catalogs.
-    by_ref = {tool._ref: tool for tool in catalog.tools}
-    refs = dict.fromkeys(map(_saved_python_ref, specs))
-    return _ToolCatalog(
-        catalog.generation, tuple(by_ref[ref] for ref in refs if ref is not None and ref in by_ref)
-    )
-
-
-def _restore_operation_slots(
-    catalog: _ToolCatalog,
-    selected: Sequence[FunctionTool[Any, Any, Any]],
-    pending_names: Sequence[str],
-) -> tuple[int, ...]:
-    available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
-    if any(tool.ref not in available for tool in selected):
-        raise ValueError("Saved operation names tools outside its native generation")
-    manual_names = {
-        tool.name for tool in selected if tool._bind is None or tool.needs_approval is not False
-    }
-    if any(name not in manual_names for name in pending_names):
-        raise ValueError("Saved operation does not admit its pending manual tools")
-    return tuple(available[tool.ref] for tool in selected)
-
-
 def _restore_operation_tools(
     saved: SessionState,
     catalog: _ToolCatalog,
@@ -3361,34 +3316,6 @@ def _validate_storage_opening(
     return reconciliation
 
 
-def _validate_custom_storage_capabilities(
-    storage: LocalStorage | CustomStorage | None,
-    *,
-    native_agents: NativeAgents[Any] | None,
-    goals: bool,
-    programmatic_tool_calling: bool,
-    checklist: bool,
-    mcp_tools: Sequence[_MCP[Any]],
-    has_environment: bool,
-    available: Sequence[Tool[Any]],
-    tools: Sequence[FunctionTool[Any, Any, Any]],
-) -> None:
-    if isinstance(storage, CustomStorage) and (
-        native_agents is not None
-        or goals
-        or programmatic_tool_calling
-        or checklist
-        or mcp_tools
-        or has_environment
-        or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
-        or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
-    ):
-        raise ValueError(
-            "CustomStorage preview does not support children, goals, checklist, "
-            "code mode, manual tools, standalone native tools or environments"
-        )
-
-
 def _capture_project_guidance(
     enabled: bool,
 ) -> tuple[dict[str, bool], dict[str, bool], list[dict[str, str]]]:
@@ -3489,35 +3416,6 @@ def _configure_storage_runtime(
             runtime["_sdk_resume_thread_id"] = resume
         if goals:
             runtime["native_goal_store"] = str(storage.path)
-
-
-def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
-    config: dict[str, Any] = {}
-    if search is not None:
-        if search.search_context_size is not None:
-            config["tools.web_search.context_size"] = search.search_context_size
-        if search.allowed_domains is not None:
-            config["tools.web_search.allowed_domains"] = list(search.allowed_domains)
-        if search.blocked_domains is not None:
-            config["tools.web_search.blocked_domains"] = list(search.blocked_domains)
-        if search.location is not None:
-            config["tools.web_search.location"] = dict(search.location)
-        if search.search_content_types is not None:
-            config["tools.web_search.search_content_types"] = list(search.search_content_types)
-        if search.image_settings is not None:
-            image_settings = search.image_settings.copy()
-            # Native configuration uses signed 64-bit TOML integers.
-            max_results = image_settings.get("max_results")
-            if max_results is not None and (
-                isinstance(max_results, bool)
-                or not isinstance(max_results, int)
-                or not 0 <= max_results < 2**63
-            ):
-                raise ValueError(
-                    "WebSearch image max_results must be a non-negative integer below 2**63"
-                )
-            config["tools.web_search.image_settings"] = dict(image_settings)
-    return config
 
 
 def _validate_siwc_opening_tools(
@@ -4523,6 +4421,20 @@ class Session(Generic[ContextT, OutputT]):
                                 role.name for role in native_agents.additional_roles
                             ],
                             "_native_agent_max_depth": native_agents.max_depth,
+                            **(
+                                {
+                                    "_native_agent_tools": [
+                                        {
+                                            "name": tool.name,
+                                            "role": tool.role,
+                                            "description": tool.description,
+                                        }
+                                        for tool in native_agents.managed_tools
+                                    ],
+                                }
+                                if native_agents.managed_tools
+                                else {}
+                            ),
                         }
                         if native_agents is not None
                         else {}
@@ -4571,7 +4483,7 @@ class Session(Generic[ContextT, OutputT]):
                         + (
                             [
                                 {"name": name, "namespace": "collaboration"}
-                                for name in _COLLABORATION_TOOLS
+                                for name in native_agents._collaboration_tool_names
                             ]
                             if native_agents is not None
                             else []
@@ -15787,10 +15699,19 @@ class Session(Generic[ContextT, OutputT]):
         assert active is not None
         # Waiting precedes checkpoint ownership: cancellation or close can
         # still stop a callback that has not reached a safe sealing boundary.
-        if self._child_admissions or any(
-            not child.completion.done() for child in self._child_callbacks.values()
-        ):
+        if self._child_admissions:
             raise RuntimeError("Cannot save while native child work or callbacks remain active")
+        children = tuple(
+            child.completion
+            for child in self._child_callbacks.values()
+            if not child.completion.done()
+        )
+        if children:
+            # Native settlement can precede delivery of the host terminal
+            # receipt. Join those owners before taking the checkpoint.
+            if not await self._native._manual_children_settled():
+                raise RuntimeError("Cannot save while native child work or callbacks remain active")
+            await asyncio.gather(*(asyncio.shield(child) for child in children))
         if not await self._wait_manual_boundary(active, require_request=True):
             raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
         self._check_open()
