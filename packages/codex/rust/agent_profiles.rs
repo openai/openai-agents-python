@@ -179,18 +179,6 @@ impl OpeningProfiles {
     /// A serialized source can only claim permissions the fresh graph
     /// grants without running a callback.
     pub(crate) fn validate_pending_source(&self, source: &AgentProfileReceipt) -> Result<()> {
-        self.validate_source(source, false)
-    }
-
-    fn validate_completed_source(&self, source: &AgentProfileReceipt) -> Result<()> {
-        self.validate_source(source, true)
-    }
-
-    fn validate_source(
-        &self,
-        source: &AgentProfileReceipt,
-        completed_decisions: bool,
-    ) -> Result<()> {
         let mut candidates = vec![self.root_id.as_str()];
         let mut visited = HashSet::new();
         while let Some(id) = candidates.pop() {
@@ -208,16 +196,6 @@ impl OpeningProfiles {
                         .filter(|(name, _)| !profile.handoff_callbacks.contains_key(*name))
                         .map(|(_, target)| target.as_str()),
                 );
-                if completed_decisions {
-                    // Fresh captured targets grant settled restore authority. A
-                    // pending callback still needs a new live selection.
-                    candidates.extend(
-                        profile
-                            .decision_handoffs
-                            .values()
-                            .flat_map(|declaration| declaration.targets.iter().map(String::as_str)),
-                    );
-                }
             }
         }
         anyhow::bail!("Restored Agent profile requires live callback acceptance")
@@ -626,7 +604,7 @@ pub(crate) fn restore_source(
         profile_id: source.profile_id,
         epoch: source.epoch,
     };
-    opening.validate_completed_source(&source)?;
+    opening.validate_pending_source(&source)?;
     Ok(source)
 }
 
@@ -2114,7 +2092,6 @@ mod tests {
         builtin.validate_pending_source(&destination).unwrap();
         let error = callback.validate_pending_source(&destination).unwrap_err();
         assert!(error.to_string().contains("live callback acceptance"));
-        assert!(callback.validate_completed_source(&destination).is_err());
         let name = ToolName::new(None, "transfer_to_b");
         let saved = codex_protocol::agent_profile::AgentProfileHandoff {
             source: AgentProfileReceipt {
@@ -2201,17 +2178,11 @@ mod tests {
                 .validate_restored_handoff(&name, &saved, true)
                 .is_err()
         );
-        let destination = AgentProfileReceipt {
-            profile_id: "b".into(),
-            epoch: 1,
-        };
-        assert!(opening.validate_pending_source(&destination).is_err());
-        opening.validate_completed_source(&destination).unwrap();
         assert!(
             opening
-                .validate_completed_source(&AgentProfileReceipt {
-                    profile_id: "outside".into(),
-                    epoch: 1,
+                .validate_pending_source(&AgentProfileReceipt {
+                    profile_id: "b".into(),
+                    epoch: 1
                 })
                 .is_err()
         );

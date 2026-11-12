@@ -31,7 +31,7 @@ class Decisions:
         return DecisionResponse(value=self.value)
 
 
-def graph(provider, decisions):
+def graph(provider, decisions, *, static_billing=False):
     billing = Agent(name="billing", instructions="Billing specialist.", model="gpt-5.5")
     technical = Agent(name="technical", instructions="Technical specialist.", model="gpt-5.5")
     route = DecisionHandoff(
@@ -46,7 +46,7 @@ def graph(provider, decisions):
         model="gpt-5.5",
         provider=provider,
         decisions=decisions,
-        handoffs=[route],
+        handoffs=[route, billing] if static_billing else [route],
     )
     return source, billing
 
@@ -121,19 +121,26 @@ async def test_unoffered_decision_tool_never_invokes_decisions(responses):
             assert await session.get_active_agent() is source
 
 
-async def test_completed_handoff_checkpoint_uses_fresh_captured_targets(responses):
+@pytest.mark.parametrize("static_billing", [False, True])
+async def test_portable_decision_destination_requires_static_authority(responses, static_billing):
     from agents import SessionState
 
     responses.respond(function_call("delegate", {"input": "Billing."}, "route-checkpoint"))
     responses.respond(assistant_output("Billing answer."))
     responses.respond(assistant_output("Billing continues."))
     async with timeout(30), provider(responses) as backend:
-        source, billing = graph(backend, Decisions())
+        source, billing = graph(backend, Decisions(), static_billing=static_billing)
         async with source.session() as session:
             await (await session.submit("Route.")).get_result()
             assert await session.get_active_agent() is billing
             state = SessionState.from_json((await session.save_state()).to_json())
-        fresh_source, fresh_billing = graph(backend, Decisions())
+        fresh_source, fresh_billing = graph(backend, Decisions(), static_billing=static_billing)
+        if not static_billing:
+            with pytest.raises(RuntimeError, match="live callback acceptance"):
+                async with fresh_source.session(state=state):
+                    pass
+            assert len(responses.requests) == 2
+            return
         async with fresh_source.session(state=state) as restored:
             assert await restored.get_active_agent() is fresh_billing
             turn = await restored.submit("Continue.")

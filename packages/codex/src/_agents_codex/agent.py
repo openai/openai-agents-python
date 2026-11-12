@@ -1008,6 +1008,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, str]
             | Handoff[ContextT, str]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, str]]
         ]
         | None = None,
@@ -1072,6 +1073,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, OutputT]
             | Handoff[ContextT, OutputT]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, OutputT]]
         ]
         | None = None,
