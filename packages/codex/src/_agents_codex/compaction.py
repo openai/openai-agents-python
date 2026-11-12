@@ -92,8 +92,10 @@ class ResponsesCompaction(Generic[ContextT]):
     ``auto`` uses input unless an acknowledged provider anchor covers that exact
     input. Configuration and callbacks never become checkpoint authority.
 
-    Current native sessions have been supplying input windows. Explicit previous
-    response mode has been rejecting without a native acknowledged-window receipt.
+    Auto mode has been selecting an acknowledged, unchanged native provider window
+    for a matching plain SDK client and account and otherwise supplying input.
+    Custom routing and transports have been using input. Explicit previous-response
+    mode has been rejecting without that native receipt and matching client scope.
     Hosted prompts omitting the model have been requiring an explicit compaction model.
     """
 
@@ -102,6 +104,10 @@ class ResponsesCompaction(Generic[ContextT]):
     mode: Literal["auto", "input", "previous_response_id"] = "auto"
     should_compact: _ShouldCompact[ContextT] | None = field(default=None, repr=False)
     _compact: Callable[..., Awaitable[Any]] = field(init=False, repr=False, compare=False)
+
+    _client_scope: tuple[str, str, str | None, str | None] | None = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.model is not None and (not isinstance(self.model, str) or not self.model.strip()):
@@ -114,6 +120,26 @@ class ResponsesCompaction(Generic[ContextT]):
         if not callable(compact):
             raise TypeError("compaction client must provide responses.compact")
         object.__setattr__(self, "_compact", compact)
+        object.__setattr__(self, "_client_scope", _responses_client_scope(self.client))
+
+    def _matches_provider(self, api_key: str | None, config: Mapping[str, Any]) -> bool:
+        scope = self._client_scope
+        if scope is None:
+            return False
+        if _responses_client_scope(self.client) != scope:
+            return False
+        provider = config.get("model_providers." + str(config.get("model_provider")))
+        if not isinstance(provider, dict) or provider.get("query_params"):
+            return False
+        headers = {name.lower(): value for name, value in provider.get("http_headers", {}).items()}
+        if headers.keys() - {"openai-organization", "openai-project"}:
+            return False
+        return scope == (
+            str(provider.get("base_url", "")).rstrip("/"),
+            api_key,
+            headers.get("openai-organization"),
+            headers.get("openai-project"),
+        )
 
     def _context(
         self,
@@ -202,6 +228,53 @@ class ResponsesCompaction(Generic[ContextT]):
                 observe(None)
             del self, request, provider_response, observe, response, body, value, window, usage
             del model, control_echoes, original_controls
+
+
+def _responses_client_scope(client: Any) -> tuple[str, str, str | None, str | None] | None:
+    try:
+        from openai import AsyncOpenAI
+        from openai._base_client import AsyncHttpxClientWrapper
+        from openai.resources.responses import AsyncResponses
+
+        # No response-store attestation for unknown clients or request rewriting.
+        if type(client) is not AsyncOpenAI or type(client._client) is not AsyncHttpxClientWrapper:
+            return None
+        if (
+            type(client.responses) is not AsyncResponses
+            or client.responses._client is not client
+            or getattr(client.responses.compact, "__func__", None) is not AsyncResponses.compact
+        ):
+            return None
+        transport = client._client._transport
+        if type(transport).__name__ != "AsyncHTTPTransport" or type(transport).__module__ not in (
+            "httpx",
+            "httpx2",
+            "httpx._transports.default",
+            "httpx2._transports.default",
+        ):
+            return None
+        if (
+            client._custom_headers
+            or client._custom_query
+            or client._client._auth is not None
+            or client._client.params
+            or client._client.cookies
+            or set(client._client.headers)
+            - {"accept", "accept-encoding", "connection", "user-agent"}
+            or any(client._client.event_hooks.values())
+            or getattr(client, "_api_key_provider", None) is not None
+            or not isinstance(client.api_key, str)
+            or not client.api_key
+        ):
+            return None
+        return (
+            str(client.base_url).rstrip("/"),
+            client.api_key,
+            client.organization,
+            client.project,
+        )
+    except (AttributeError, ImportError, TypeError, ValueError):
+        return None
 
 
 def _compaction_instruction_messages(

@@ -2820,7 +2820,7 @@ impl PythonTools {
                     "type": "_sdk_before_compact_policy", "turn_id": input.turn_id,
                     "thread": input.thread_id, "instance": self.instance,
                     "step_id": id, "model": input.model, "trigger": "auto",
-                    "candidate_indexes": input.candidate_indexes, "model_omitted": input.model_omitted, "items": input.items,
+                    "candidate_indexes": input.candidate_indexes, "model_omitted": input.model_omitted, "items": input.items, "provider_response": input.provider_response,
                 }});
                 request["msg"]
                     .as_object_mut()
@@ -2885,7 +2885,7 @@ impl PythonTools {
                         "step_id": id, "model": input.model,
                         "trigger": if input.automatic { "auto" } else { "manual" },
                         "optional": input.optional, "candidate_indexes": input.candidate_indexes, "model_omitted": input.model_omitted,
-                        "items": input.items,
+                        "items": input.items, "provider_response": input.provider_response,
                     }
                 });
                 request["msg"]

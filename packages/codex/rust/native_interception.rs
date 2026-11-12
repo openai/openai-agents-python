@@ -2776,6 +2776,12 @@ struct AdmissionOnly {
     owner: Arc<DirectTurn>,
 }
 impl ModelResponseInterceptor for AdmissionOnly {
+    fn preserves_provider_message_window(&self) -> bool {
+        // Native admission preserves messages, reasoning and response IDs.
+        // Core excludes all other newly emitted item kinds from lineage.
+        true
+    }
+
     fn admit_request(&self) -> Result<(), String> {
         self.control.admit_model_request(&self.owner)
     }
@@ -3178,6 +3184,12 @@ impl DirectRequest {
 }
 
 impl ModelResponseInterceptor for DirectRequest {
+    fn preserves_provider_message_window(&self) -> bool {
+        // Native admission preserves messages, reasoning and response IDs.
+        // Core excludes all other newly emitted item kinds from lineage.
+        true
+    }
+
     fn admit_request(&self) -> Result<(), String> {
         self.control.admit_model_request(&self.owner)
     }
