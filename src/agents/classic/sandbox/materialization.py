@@ -17,7 +17,8 @@ class MaterializationResult:
 
 
 class _SkillCopyBudget:
-    def __init__(self) -> None:
+    def __init__(self, *, trusted: bool = True) -> None:
+        self.trusted = trusted
         self.lock = asyncio.Lock()
         self.members = 0
         self.bytes = 0
@@ -28,6 +29,10 @@ class _SkillCopyBudget:
         return self
 
     def reserve(self, *, members: int = 0, bytes: int = 0) -> None:
+        if not self.trusted:
+            raise ValueError(
+                "Skill materialization requires trusted quota continuity or a fresh workspace"
+            )
         if self.members + members > 4096:
             raise ValueError("Skill materialization exceeds the sandbox member limit")
         if self.bytes + bytes > 64 * 1024 * 1024:

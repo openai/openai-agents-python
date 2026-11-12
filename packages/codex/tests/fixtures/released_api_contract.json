@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "36eea09a3123d326e14071639ec854f599c584f7",
+  "baseline_commit": "85a327bb1c264796e4efe87df6b7b3f2688566cc",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -2890,7 +2890,7 @@
       "_agents_shared.sandbox_session_state": {
         "declarations": [
           "SessionStateClass = type['SandboxSessionState']",
-          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
+          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _native_skill_copy_budget: _SkillCopyBudget = PrivateAttr(default_factory=_SkillCopyBudget)\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -2900,11 +2900,13 @@
           "from typing_extensions import Self",
           "from agents.classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from agents.classic.sandbox.manifest import Manifest",
+          "from agents.classic.sandbox.materialization import _SkillCopyBudget",
           "from agents.classic.sandbox.snapshot import SnapshotBase"
         ],
         "references": {
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
+          "_SkillCopyBudget": "agents.classic.sandbox.materialization._SkillCopyBudget",
           "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync"
         }
       },
@@ -4515,7 +4517,8 @@
       "agents.classic.sandbox.materialization": {
         "declarations": [
           "@dataclass(frozen=True)\nclass MaterializedFile:\n    path: Path\n    sha256: str",
-          "@dataclass(frozen=True)\nclass MaterializationResult:\n    files: list[MaterializedFile]"
+          "@dataclass(frozen=True)\nclass MaterializationResult:\n    files: list[MaterializedFile]",
+          "class _SkillCopyBudget:\n\n    def __init__(self, *, trusted: bool=True) -> None:\n        pass\n\n    def reserve(self, *, members: int=0, bytes: int=0) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -4712,7 +4715,7 @@
       "agents.classic.sandbox.session.sandbox_session_state": {
         "declarations": [
           "SessionStateClass = type['SandboxSessionState']",
-          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
+          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _native_skill_copy_budget: _SkillCopyBudget = PrivateAttr(default_factory=_SkillCopyBudget)\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -4722,11 +4725,13 @@
           "from typing_extensions import Self",
           "from agents.classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from agents.classic.sandbox.manifest import Manifest",
+          "from agents.classic.sandbox.materialization import _SkillCopyBudget",
           "from agents.classic.sandbox.snapshot import SnapshotBase"
         ],
         "references": {
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
+          "_SkillCopyBudget": "agents.classic.sandbox.materialization._SkillCopyBudget",
           "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync"
         }
       },

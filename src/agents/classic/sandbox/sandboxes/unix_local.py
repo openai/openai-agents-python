@@ -315,8 +315,19 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
+
+        def prepare() -> bool:
+            try:
+                workspace.mkdir(parents=True)
+            except FileExistsError:
+                workspace.mkdir(parents=True, exist_ok=True)
+                return False
+            return True
+
         try:
-            await run_blocking_workspace_io(partial(workspace.mkdir, parents=True, exist_ok=True))
+            created = await run_blocking_workspace_io(prepare)
+            if created:
+                self._reset_skill_copy_budget_for_fresh_workspace()
         except OSError as e:
             raise WorkspaceStartError(path=workspace, cause=e) from e
 

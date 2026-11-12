@@ -245,6 +245,7 @@ class SandboxSessionState(BaseModel):
             update={"extra_path_grants": persistent_grants},
         )
         marked = state.model_copy(update={"manifest": sanitized_manifest})
+        marked._native_skill_copy_budget = _SkillCopyBudget(trusted=False)
         marked._path_grants_require_rebind = tuple(
             dict.fromkeys(
                 (

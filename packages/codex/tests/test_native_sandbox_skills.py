@@ -773,8 +773,8 @@ async def test_owned_unixlocal_skill_stages_before_relocated_subdirectory_index(
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal snapshot")
-@pytest.mark.parametrize("kind", ["inline", "from"])
-async def test_owned_cold_resume_stages_current_eager_skills_only(
+@pytest.mark.parametrize("kind", ["inline", "from", "lazy"])
+async def test_owned_cold_resume_uses_current_skill_sources(
     tmp_path, monkeypatch, responses, kind
 ):
     from agents.classic.sandbox.entries import Dir, File
@@ -808,7 +808,7 @@ async def test_owned_cold_resume_stages_current_eager_skills_only(
                 )
             ]
         )
-    else:
+    elif kind == "from":
         document_bytes = b"---\nname: report\ndescription: COLD_RESUME_INDEX\n---\n" + b"x" * (
             1024 * 1024
         )
@@ -827,11 +827,25 @@ async def test_owned_cold_resume_stages_current_eager_skills_only(
             )
         )
 
+    else:
+        monkeypatch.chdir(tmp_path)
+        saved = client.deserialize_session_state(client.serialize_session_state(saved))
+        local = tmp_path / "lazy-source/report/SKILL.md"
+        local.parent.mkdir(parents=True)
+        document_bytes = b"---\nname: report\ndescription: COLD_RESUME_INDEX\n---\n" + b"x" * (
+            1024 * 1024
+        )
+        local.write_bytes(document_bytes)
+        skills = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=local.parent.parent)))
+
     @asynccontextmanager
     async def connect(selected):
         assert selected is not original
         assert (root / "keep.txt").read_bytes() == b"original snapshot data"
-        assert (root / ".agents/report/SKILL.md").read_bytes() == document_bytes
+        if kind == "lazy":
+            assert not (root / ".agents/report/SKILL.md").exists()
+        else:
+            assert (root / ".agents/report/SKILL.md").read_bytes() == document_bytes
         async with ExecutorPeer(tmp_path / "executor").serve() as peer:
             trust(peer, tmp_path, monkeypatch)
             yield Environment(
@@ -853,9 +867,14 @@ async def test_owned_cold_resume_stages_current_eager_skills_only(
         connect=connect,
         skills=skills,
     )
+    if kind == "lazy":
+        responses.respond(function_call("load_skill", {"skill_name": "report"}, "cold-load"))
     responses.respond(assistant_output("done"))
     async with Agent(
-        instructions="Inspect.", model="gpt-5.5", provider=provider(responses)
+        instructions="Inspect.",
+        model="gpt-5.5",
+        provider=provider(responses),
+        tools=source.skill_tools,
     ).session(
         environment=source,
         discover_agents_md=False,
@@ -869,7 +888,7 @@ async def test_owned_cold_resume_stages_current_eager_skills_only(
         assert "- oversized:" not in instructions
         assert (root / "keep.txt").read_bytes() == b"original snapshot data"
         document = root / ".agents/report/SKILL.md"
-        assert document.is_file(), "Published eager skill index without restored skill files"
+        assert document.is_file(), "Missing the current skill document after resume and load"
         assert document.read_bytes() == document_bytes
 
 
@@ -948,7 +967,7 @@ async def test_native_lazy_index_rejects_swapped_source(
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
 @pytest.mark.parametrize("limit", ["bytes", "members"])
-@pytest.mark.parametrize("state_mode", ["shared", "resumed"])
+@pytest.mark.parametrize("state_mode", ["shared", "resumed", "serialized"])
 async def test_native_skill_budget_survives_environment_lease_retirement(
     tmp_path, monkeypatch, responses, limit, state_mode
 ):
@@ -974,7 +993,14 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
     borrowed = await client.create(manifest=Manifest(), options=options)
     await borrowed.start()
     root = Path(borrowed.state.manifest.root)
-    saved = borrowed.state.model_copy(deep=True)
+    saved = (
+        client.serialize_session_state(borrowed.state)
+        if state_mode == "serialized"
+        else borrowed.state.model_copy(deep=True)
+    )
+    if state_mode == "serialized":
+        assert "_native_skill_copy_budget" not in saved
+        saved["_native_skill_copy_budget"] = {"trusted": True, "bytes": 0, "members": 0}
     alias = None
     current = borrowed
     try:
@@ -993,8 +1019,13 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
                 )
 
             for name in ("alpha", "beta"):
-                if name == "beta" and state_mode == "resumed":
-                    alias = await client.resume(saved)
+                if name == "beta" and state_mode != "shared":
+                    restored = (
+                        client.deserialize_session_state(saved)
+                        if state_mode == "serialized"
+                        else saved
+                    )
+                    alias = await client.resume(restored)
                     await alias.start()
                     current = alias
                 source = sandbox_environment(
@@ -1021,7 +1052,12 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
                         ).final_output == "done"
                     else:
                         error = "byte" if limit == "bytes" else "member"
-                        with pytest.raises(ValueError, match=f"sandbox {error} limit"):
+                        message = (
+                            "quota continuity"
+                            if state_mode == "serialized"
+                            else f"sandbox {error} limit"
+                        )
+                        with pytest.raises(ValueError, match=message):
                             await (await session.submit("Load beta.")).get_result()
             assert (root / ".agents/alpha/SKILL.md").exists()
             assert not (root / ".agents/beta").exists()

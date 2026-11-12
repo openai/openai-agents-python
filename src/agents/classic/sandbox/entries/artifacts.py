@@ -307,6 +307,7 @@ class LocalDir(BaseEntry):
     ) -> list[MaterializedFile]:
         sandbox = session._skill_copy_budget()
         async with sandbox.lock:
+            sandbox.reserve()
             return await self._apply(session, dest, base_dir, user=user, budget=_LocalDirBudget())
 
     async def _apply(
