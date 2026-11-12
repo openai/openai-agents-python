@@ -928,6 +928,7 @@ pub async fn restore(
     };
     let profile_transport = agent_profiles
         .as_ref()
+        .filter(|_| source.is_none())
         .map(|profiles| {
             crate::agent_profiles::restored_request_transport(profiles, &checkpoint.history)
         })

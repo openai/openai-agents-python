@@ -1275,7 +1275,7 @@ pub(crate) async fn configure(
         model
             .request_controls
             .request_transport
-            .clone_from(&prepared.model.request_controls.request_transport);
+            .clone_from(&settings.request_controls.request_transport);
         let mut target = AgentProfile {
             profile_id: receipt.profile_id,
             model,

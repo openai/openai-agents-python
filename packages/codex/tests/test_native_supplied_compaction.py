@@ -14,6 +14,7 @@ from agents import (
     Agent,
     FunctionTool,
     ModelContextSnapshot,
+    ModelSettings,
     NativeError,
     RunBudget,
     ToolContext,
@@ -23,12 +24,89 @@ from agents.observation import SessionEnded
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import responses as responses
-from tests.test_native_agent_checkpoints import call, message, peer
+from tests.test_native_agent_checkpoints import Peer, call, message, peer
 from tests.test_native_instruction_updates import application_texts
 
 
 def has_text(item, text):
     return any(part.get("text") == text for part in item.get("content", []))
+
+
+@pytest.mark.parametrize("handoff_selected", [False, True], ids=["opening", "handoff"])
+async def test_graph_compaction_keeps_live_transport(handoff_selected, monkeypatch):
+    effects = []
+    transport = []
+    original_handle = Peer.handle
+
+    async def record(wire, request):
+        transport.append((request.headers.get("x-graph-state"), request.query.get("graph_state")))
+        return await original_handle(wire, request)
+
+    monkeypatch.setattr(Peer, "handle", record)
+    opening: ModelSettings = {
+        "extra_headers": {"x-graph-state": "opening"},
+        "extra_query": {"graph_state": "opening"},
+    }
+    live: ModelSettings = {
+        "extra_headers": {"x-graph-state": "acknowledged"},
+        "extra_query": {"graph_state": "acknowledged"},
+    }
+
+    @function_tool(name="profile_probe")
+    def root_probe(ctx: ToolContext[str]) -> str:
+        effects.append(("root", ctx.context))
+        return "root binding"
+
+    @function_tool(name="profile_probe")
+    def worker_probe(ctx: ToolContext[str]) -> str:
+        effects.append(("worker", ctx.context))
+        return "worker binding"
+
+    async with timeout(30), peer() as wire:
+        provider = wire.provider()
+        worker = Agent(
+            name="Worker",
+            instructions="Worker instructions.",
+            tools=[worker_probe],
+            provider=provider,
+            model="gpt-5.5",
+            model_settings=opening,
+        )
+        root = Agent(
+            name="Root",
+            instructions="Root instructions.",
+            tools=[root_probe],
+            handoffs=[worker],
+            provider=provider,
+            model="gpt-5.5",
+            model_settings=opening,
+        )
+        if handoff_selected:
+            wire.replies.append(call("transfer_to_worker", "selected-worker"))
+        wire.replies.append(message("before compaction"))
+        expected = worker if handoff_selected else root
+        label = "worker" if handoff_selected else "root"
+        async with root.session(context="same application context") as session:
+            turn = await session.submit("Start.")
+            assert (await turn.get_result()).final_output == "before compaction"
+            assert await session.get_active_agent() is expected
+            await session.update(model_settings=live)
+            wire.replies.append(message("live transport acknowledged"))
+            turn = await session.submit("Use the live settings.")
+            assert (await turn.get_result()).final_output == "live transport acknowledged"
+            assert transport[-1] == ("acknowledged", "acknowledged")
+            offset = len(transport)
+            await session.compact(summary="SYNTHETIC_GRAPH_SUMMARY")
+            wire.replies.extend(
+                (call("profile_probe", "after-compact-probe"), message("after compaction"))
+            )
+            turn = await session.submit("Continue.")
+            assert (await turn.get_result()).final_output == "after compaction"
+            assert await session.get_active_agent() is expected
+            assert effects == [(label, "same application context")]
+            assert "SYNTHETIC_GRAPH_SUMMARY" in json.dumps(wire.requests[-2]["input"])
+            assert transport[offset:] == [("acknowledged", "acknowledged")] * 2
+            assert not wire.replies
 
 
 async def test_supplied_selection_keeps_originals_in_order_and_round_trips():

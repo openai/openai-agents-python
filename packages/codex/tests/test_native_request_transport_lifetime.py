@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, cast
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from aiohttp import web
@@ -26,6 +27,42 @@ from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
 from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_provider_websockets import WebSocketPeer, peer
+
+
+async def test_request_override_stays_on_independent_websocket_endpoint():
+    async with (
+        timeout(30),
+        peer(base_path="/http/provider") as http,
+        peer(base_path="/socket/provider") as websocket,
+        NativeProvider(
+            base_url=http.url + "?origin=http",
+            websocket_base_url=websocket.url.replace("http://", "ws://", 1) + "?origin=socket",
+            api_key="synthetic-transport-owner",
+            supports_websockets=True,
+        ) as provider,
+        Agent(instructions="Answer briefly.", provider=provider).session() as session,
+    ):
+        for label in ("first", "second"):
+            websocket.respond(assistant_output(label))
+            turn = await session.submit(
+                "Answer.",
+                model_settings_override={
+                    "extra_headers": {"x-operation": label},
+                    "extra_query": {"operation": label},
+                },
+            )
+            assert (await turn.get_result()).final_output == label
+
+        assert not http.request_paths
+        admitted = [
+            (urlsplit(target), headers["x-operation"])
+            for (_, target), headers in zip(websocket.request_paths, websocket.request_headers)
+            if "x-operation" in headers
+        ]
+        assert [label for _, label in admitted] == ["first", "second"]
+        for target, label in admitted:
+            assert target.path == "/socket/provider/responses"
+            assert parse_qs(target.query) == {"origin": ["socket"], "operation": [label]}
 
 
 @pytest.mark.parametrize("websocket", [False, True])
@@ -510,4 +547,76 @@ async def test_prompted_repair_keeps_the_operation_retry_policy_owner(monkeypatc
             assert len(result.repair_attempts) == 1
 
     assert request_count == 3
+    assert len(retry_calls) == 1
+
+
+@pytest.mark.parametrize("restore", [False, True])
+async def test_operation_retry_policy_keeps_its_owner_after_handoff(monkeypatch, restore):
+    request_count = 0
+    retry_calls = []
+    original = WebSocketPeer.handle
+
+    async def fail_first_worker_request(self, request):
+        nonlocal request_count
+        request_count += 1
+        if request_count == (3 if restore else 2):
+            return web.json_response(
+                {"error": {"type": "server_error", "message": "synthetic worker failure"}},
+                status=503,
+            )
+        return await original(self, request)
+
+    def retry(context):
+        retry_calls.append(context)
+        return RetryDecision(True, delay_ms=0)
+
+    monkeypatch.setattr(WebSocketPeer, "handle", fail_first_worker_request)
+
+    async with timeout(30), peer() as server:
+        lookup = FunctionTool(
+            name="lookup", description="Look up a record.", input_type=LookupArgs, output_type=str
+        )
+        server.respond(function_call("transfer_to_worker", {}, "handoff"))
+        if restore:
+            server.respond(function_call("lookup", {"key": "record"}, "manual"))
+        server.respond(assistant_output("Worker finished."))
+        provider = NativeProvider(
+            base_url=server.url,
+            api_key="synthetic-handoff-retry-owner",
+            supports_websockets=False,
+            request_max_retries=0,
+            stream_max_retries=0,
+        )
+        worker = Agent(
+            name="Worker", instructions="Finish the task.", tools=[lookup] if restore else []
+        )
+        root = Agent(
+            name="Root",
+            instructions="Transfer the task.",
+            provider=provider,
+            handoffs=[worker],
+            model_settings={"retry": ModelRetrySettings(max_retries=0, policy=retry)},
+        )
+        async with provider:
+            async with root.session() as session:
+                turn = await session.submit(
+                    "Start the task.",
+                    model_settings_override={
+                        "retry": ModelRetrySettings(max_retries=1, policy=retry),
+                    },
+                )
+                if restore:
+                    await next_request(session.interactions(), lookup)
+                    saved = SessionState.from_json((await session.suspend()).to_json())
+                else:
+                    assert (await turn.get_result()).final_output == "Worker finished."
+            if restore:
+                async with root.session(state=saved) as session:
+                    request = await next_request(session.interactions(), lookup)
+                    turn = session.active_turn
+                    assert turn is not None
+                    await request.respond("found")
+                    assert (await turn.get_result()).final_output == "Worker finished."
+
+    assert request_count == (4 if restore else 3)
     assert len(retry_calls) == 1

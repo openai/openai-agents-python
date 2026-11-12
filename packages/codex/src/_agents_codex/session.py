@@ -289,7 +289,7 @@ from .recovery import (
     _application_shell_recovery,
 )
 from .response_facts import _response_fact_record
-from .retry import ModelRetrySettings, _CombinedRetryPolicy
+from .retry import ModelRetrySettings, RetryPolicy, _CombinedRetryPolicy
 from .sandbox_memory import (
     _MAX_RECORDS as _MAX_MEMORY_RECORDS,
     _MEMORY_OWNER_ATTRIBUTE,
@@ -2908,6 +2908,12 @@ def _restore_profile_sources(
     return profiles[source["profile_id"]], origin, receipt
 
 
+def _has_operation_retry_policy(settings: Mapping[str, Any] | None) -> bool:
+    controls = settings.get("request_controls") if settings is not None else None
+    retry = controls.get("retry") if isinstance(controls, dict) else None
+    return isinstance(retry, dict) and retry.get("has_policy") is True
+
+
 def _restore_operation_origin(
     native: Any,
     profiles: Mapping[str, _ProfileRuntime],
@@ -2915,15 +2921,20 @@ def _restore_operation_origin(
     saved: SessionState,
     context: Any,
 ) -> tuple[_ProfileRuntime | None, dict[str, Any] | None]:
-    if not profiles or not saved.operation_tools:
+    continuation = saved.native_continuation
+    if not profiles or not (
+        saved.operation_tools
+        or continuation is not None
+        and _has_operation_retry_policy(continuation.model_settings_override)
+    ):
         return None, None
-    assert saved.native_continuation is not None
+    assert continuation is not None
     receipt = json.loads(
         native._agent_profiles_operation_source(
             json.dumps(roster),
             roster[0]["id"],
             json.dumps(saved.history),
-            saved.native_continuation.turn_id,
+            continuation.turn_id,
         )
     )
     if (
@@ -2934,10 +2945,11 @@ def _restore_operation_origin(
     ):
         raise NativeError("Checkpoint has no admitted operation declaration source")
     profile = profiles[receipt["profile_id"]]
-    tools, mcp, _ = _split_tools(
-        profile.profile.declaration.tools, profile.profile.declaration.programmatic_tool_calling
-    )
-    _check_restored_tool_context(tools, mcp, saved.operation_tools, context)
+    if saved.operation_tools:
+        tools, mcp, _ = _split_tools(
+            profile.profile.declaration.tools, profile.profile.declaration.programmatic_tool_calling
+        )
+        _check_restored_tool_context(tools, mcp, saved.operation_tools, context)
     return profile, receipt
 
 
@@ -4001,11 +4013,26 @@ class Session(Generic[ContextT, OutputT]):
                 context,
             )
             operation_declaration = (
-                operation_profile.profile.declaration if operation_profile is not None else agent
+                operation_profile.profile.declaration
+                if operation_profile is not None and saved.operation_tools
+                else agent
             )
             operation_handoffs = (
-                operation_profile.profile.handoffs if operation_profile is not None else None
+                operation_profile.profile.handoffs
+                if operation_profile is not None and saved.operation_tools
+                else None
             )
+            restored_retry_policy = None
+            if continuation is not None and _has_operation_retry_policy(
+                continuation.model_settings_override
+            ):
+                retry_owner = (
+                    operation_profile.profile.declaration if operation_profile is not None else agent
+                )
+                retry = retry_owner.model_settings.get("retry")
+                if retry is None or retry.policy is None:
+                    raise ValueError("Checkpoint retry policy has no captured application owner")
+                restored_retry_policy = retry.policy
             restored_declaration = (
                 restored_profile.profile.declaration if restored_profile is not None else agent
             )
@@ -4794,6 +4821,7 @@ class Session(Generic[ContextT, OutputT]):
                         restored_output,
                         model_override=continuation.model_override,
                         model_settings_override=continuation.model_settings_override,
+                        retry_policy_override=restored_retry_policy,
                         guardrail_results=session._restore_guardrail_records(saved),
                         run_usage=_UsageCollector(saved.run_usage),
                         original_input=saved.original_input,
@@ -4806,7 +4834,7 @@ class Session(Generic[ContextT, OutputT]):
                         operation_refs=restored_operation_refs,
                         operation_declarations=restored_operation_declarations,
                         operation_agent=operation_declaration
-                        if operation_source is not None
+                        if saved.operation_tools and operation_source is not None
                         else None,
                         operation_declaration_source=operation_source,
                     )
@@ -6688,6 +6716,7 @@ class Session(Generic[ContextT, OutputT]):
                 if model_settings_override is None
                 else _copy_model_settings(model_settings_override)
             )
+            retry_policy_override = None
             if captured_settings is not None:
                 requested_retry = captured_settings.get("retry")
                 if requested_retry is not None and requested_retry.policy is not None:
@@ -6700,6 +6729,7 @@ class Session(Generic[ContextT, OutputT]):
                             "model_settings_override cannot install a different "
                             "retry policy callable"
                         )
+                    retry_policy_override = requested_retry.policy
             encoded_settings = (
                 None
                 if captured_settings is None
@@ -6778,6 +6808,7 @@ class Session(Generic[ContextT, OutputT]):
                 budget=_RunBudget(budget) if budget is not None else None,
                 model_override=model_override,
                 model_settings_override=encoded_settings,
+                retry_policy_override=retry_policy_override,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -8482,6 +8513,7 @@ class Session(Generic[ContextT, OutputT]):
         engine = None
         thread = None
         retiring = False
+        profile_receipt = None
         try:
             encoded = change.context()
             # Both native reads serialize the same full snapshot, including revisions.
@@ -8574,6 +8606,16 @@ class Session(Generic[ContextT, OutputT]):
             if self._model_backend is not None:
                 thread._enable_model_producer(True)
             await change.validate_candidate(thread)
+            if self._profiles:
+                graph = options["_agent_profiles"]
+                profile_receipt = json.loads(
+                    await self._publish_startup(
+                        thread._configure_agent_profiles(
+                            json.dumps(graph["roster"]), graph["root_id"], None, None
+                        ),
+                        candidate=thread,
+                    )
+                )
             available = opening
             _, allowed_mcp, _ = _split_tools(available)
             if allowed_mcp:
@@ -8610,6 +8652,8 @@ class Session(Generic[ContextT, OutputT]):
             await self._engine.close()
             self._engine = engine
             self._native = thread
+            if profile_receipt is not None:
+                self._accept_profile_catalogs(profile_receipt)
             self._model_context_snapshots.clear()
             engine = thread = None
             self._reader = _create_task(self._read_events())
@@ -9071,6 +9115,7 @@ class Session(Generic[ContextT, OutputT]):
         budget: _RunBudget | None = None,
         model_override: str | None = None,
         model_settings_override: dict[str, Any] | None = None,
+        retry_policy_override: RetryPolicy | None = None,
         run_usage: _UsageCollector | None = None,
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
@@ -9201,6 +9246,7 @@ class Session(Generic[ContextT, OutputT]):
                 budget=budget,
                 model_override=model_override,
                 model_settings_override=model_settings_override,
+                retry_policy_override=retry_policy_override,
                 tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
@@ -9213,7 +9259,8 @@ class Session(Generic[ContextT, OutputT]):
                 operation_agent=self._effective_agent() if tools is not None else None,
                 operation_declaration_source=(
                     {"profile_id": self._profile_current[0], "epoch": self._profile_current[1]}
-                    if tools and self._profile_current is not None
+                    if self._profile_current is not None
+                    and (tools or retry_policy_override is not None)
                     else None
                 ),
             )
@@ -11225,6 +11272,7 @@ class Session(Generic[ContextT, OutputT]):
                     budget=state.budget,
                     model_override=state.model_override,
                     model_settings_override=state.model_settings_override,
+                    retry_policy_override=state.retry_policy_override,
                     run_usage=state.run_usage,
                     submission_request_attempts=state.submission_request_attempts,
                     original_input=state.original_input,
@@ -11445,15 +11493,11 @@ class Session(Generic[ContextT, OutputT]):
             if isinstance(controls, dict):
                 for key in ("named_tool_choice", "hosted_tool_choice", "reset_tool_choice"):
                     controls.pop(key, None)
-                native_retry = controls.get("retry")
-                source_retry = source_agent.model_settings.get("retry")
                 if (
-                    isinstance(native_retry, dict)
-                    and native_retry.get("has_policy") is True
-                    and source_retry is not None
-                    and source_retry.policy is not None
+                    _has_operation_retry_policy(repair_model_settings)
+                    and state.retry_policy_override is not None
                 ):
-                    settings["retry"] = ModelRetrySettings(policy=source_retry.policy)
+                    settings["retry"] = ModelRetrySettings(policy=state.retry_policy_override)
         declaration = Agent[ContextT, str](
             instructions="Correct the supplied JSON to match its schema. Return only JSON.",
             provider=provider,
@@ -11522,6 +11566,7 @@ class Session(Generic[ContextT, OutputT]):
                         budget=state.budget,
                         model_override=state.model_override,
                         model_settings_override=repair_model_settings,
+                        retry_policy_override=state.retry_policy_override,
                         run_usage=state.run_usage,
                     )
                 except NativeError as error:
@@ -12471,7 +12516,10 @@ class Session(Generic[ContextT, OutputT]):
                 return
             declaration = self._agent_for_message(message)
             retry = declaration.model_settings.get("retry")
-            policy = retry.policy if retry is not None else None
+            if isinstance(state, _Submission) and state.retry_policy_override is not None:
+                policy = state.retry_policy_override
+            else:
+                policy = retry.policy if retry is not None else None
 
             async def invoke(callback: Callable[..., Any], argument: Any) -> Any:
                 if not active():
