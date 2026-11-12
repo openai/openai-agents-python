@@ -21,6 +21,7 @@ from agents.sandbox import (
     EventSink,
     HttpProxySink,
     Instrumentation,
+    JsonlOutboxSink,
     Manifest,
     SandboxSessionFinishEvent,
     SandboxSessionStartEvent,
@@ -523,3 +524,55 @@ async def test_native_inline_operation_sink_rejects_same_session_close(
     await asyncio.gather(*close_tasks, return_exceptions=True)
     assert attempts == ["A tool callback cannot close its own Session"]
     assert output == "done"
+
+
+@unix
+async def test_native_jsonl_budget_retains_physical_append_until_resource_cleanup(
+    tmp_path: Path,
+):
+    release = threading.Event()
+    appended = []
+
+    class BlockedOutbox(JsonlOutboxSink):
+        def _append_line(self, line):
+            appended.append(line)
+            release.wait(timeout=10)
+            super()._append_line(line)
+
+    path = tmp_path / "events.jsonl"
+    instrumentation = Instrumentation(
+        sinks=[BlockedOutbox(path, on_error="ignore")],
+        max_pending_events=1,
+        delivery_timeout_s=0.01,
+    )
+    client = UnixLocalSandboxClient(instrumentation=instrumentation, inherit_host_environment=False)
+    resources = []
+
+    @asynccontextmanager
+    async def connect(resource):
+        resources.append(resource)
+        yield Environment(url="wss://executor.invalid", cwd=resource.state.manifest.root)
+
+    manager = sandbox_environment(client, manifest=Manifest(), options=None, connect=connect)
+    try:
+        async with timeout(5):
+            await manager.__aenter__()
+            while not appended:
+                await asyncio.sleep(0.001)
+            event = SandboxSessionStartEvent(
+                session_id=resources[0].state.session_id, seq=10, op="exec", span_id="append"
+            )
+            for _ in range(3):
+                await asyncio.sleep(0.03)
+                for _ in range(100):
+                    await instrumentation.emit(event)
+            await asyncio.sleep(0.03)
+            assert len(appended) == 1
+            await manager.__aexit__(None, None, None)
+            assert not release.is_set()
+            assert not Path(resources[0].state.manifest.root).exists()
+    finally:
+        release.set()
+        await manager.__aexit__(None, None, None)
+        await instrumentation.flush()
+    assert len(path.read_text().splitlines()) == 1

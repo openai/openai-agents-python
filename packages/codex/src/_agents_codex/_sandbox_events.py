@@ -22,6 +22,7 @@ from agents.classic.sandbox.session.sinks import (
     ChainedSink,
     EventSink,
     HttpProxySink,
+    JsonlOutboxSink,
     SandboxSessionBoundSink,
     WorkspaceJsonlSink,
 )
@@ -59,8 +60,8 @@ class _BoundSink(EventSink):
             await sink.handle(event)
 
 
-class _PhysicalHttpSink(EventSink):
-    def __init__(self, source: HttpProxySink) -> None:
+class _PhysicalThreadSink(EventSink):
+    def __init__(self, source: HttpProxySink | JsonlOutboxSink) -> None:
         self.source = source
         self.mode = source.mode
         self.on_error = source.on_error
@@ -68,7 +69,7 @@ class _PhysicalHttpSink(EventSink):
         self.name = source.name
 
     async def handle(self, event: SandboxSessionEvent) -> None:
-        # Retain the existing dispatch slot until the blocking send has joined.
+        # Retain the existing dispatch slot until the blocking I/O has joined.
         # Resource cleanup cancels optional delivery without awaiting this join.
         physical = asyncio.create_task(self.source.handle(event))
         cancelled = False
@@ -97,8 +98,8 @@ def _prepare_sink(sink: EventSink) -> EventSink:
         return _SinkChain(sink)
     if isinstance(sink, SandboxSessionBoundSink):
         return _BoundSink(sink)
-    if isinstance(sink, HttpProxySink):
-        return _PhysicalHttpSink(sink)
+    if isinstance(sink, (HttpProxySink, JsonlOutboxSink)):
+        return _PhysicalThreadSink(sink)
     return sink
 
 
@@ -152,7 +153,7 @@ class Instrumentation(_Instrumentation):
     @property
     def sinks(self) -> list[EventSink]:
         return [
-            sink.source if isinstance(sink, (_BoundSink, _SinkChain, _PhysicalHttpSink)) else sink
+            sink.source if isinstance(sink, (_BoundSink, _SinkChain, _PhysicalThreadSink)) else sink
             for sink in self._sinks
         ]
 
@@ -173,7 +174,7 @@ class Instrumentation(_Instrumentation):
         for current in self._sinks:
             source = (
                 current.source
-                if isinstance(current, (_BoundSink, _SinkChain, _PhysicalHttpSink))
+                if isinstance(current, (_BoundSink, _SinkChain, _PhysicalThreadSink))
                 else current
             )
             if source is sink or current is sink:
