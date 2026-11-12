@@ -327,13 +327,15 @@ async def test_function_tool_callers_follow_the_restored_handoff_profile(
     assert calls == ["code"]
 
 
+@pytest.mark.parametrize("deferred", [False, True])
 async def test_function_tool_callers_apply_to_custom_string_tools(
     responses: ResponsesFixture,
+    deferred: bool,
 ) -> None:
     raw_input = "  unquoted string  "
     calls: list[tuple[str, str]] = []
 
-    @function_tool(allowed_callers=("code",))
+    @function_tool(allowed_callers=("code",), defer_loading=deferred)
     def raw_editor(ctx: ToolContext[None], source: str) -> str:
         calls.append((ctx.call.route, source))
         return "raw string accepted"

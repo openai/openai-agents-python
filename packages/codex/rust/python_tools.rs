@@ -6564,6 +6564,15 @@ struct PythonExecutor {
     code_mode_enabled: bool,
 }
 
+impl PythonExecutor {
+    fn explicitly_allows_code(&self) -> bool {
+        self.generation
+            .specs
+            .caller_limits(self.slot)
+            .is_some_and(|callers| callers.contains(codex_tools::ToolExposures::CODE_MODE))
+    }
+}
+
 impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
     fn on_result_accepted(
         &self,
@@ -6591,14 +6600,15 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
 
     fn exposure(&self) -> ToolExposure {
         let exposure = self.generation.entries[self.slot].exposure;
-        let custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_));
-        if custom && exposure == ToolExposure::Direct {
+        let model_only_custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_))
+            && !self.explicitly_allows_code();
+        if model_only_custom && exposure == ToolExposure::Direct {
             return ToolExposure::DirectModelOnly;
         }
         match (
             exposure,
             self.use_deferred_specs,
-            self.code_mode_enabled && !custom,
+            self.code_mode_enabled && !model_only_custom,
         ) {
             (ToolExposure::Deferred, true, false) => ToolExposure::DeferredModelOnly,
             (ToolExposure::Deferred, false, false) => ToolExposure::DirectModelOnly,
@@ -6640,7 +6650,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
             let declaration = &self.generation.specs[self.slot];
             let (arguments, argument_error) = match (declaration, &call.payload) {
                 (DynamicToolSpec::Custom(custom), ToolPayload::Custom { input })
-                    if call.source == ToolCallSource::Direct =>
+                    if call.source == ToolCallSource::Direct
+                        || (matches!(&call.source, ToolCallSource::CodeMode { .. })
+                            && self.explicitly_allows_code()) =>
                 {
                     (json!({ (&custom.input_field): input }), None)
                 }
