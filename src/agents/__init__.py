@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         ApplyPatchEditor as ApplyPatchEditor,
         ApplyPatchOperation as ApplyPatchOperation,
         ApplyPatchResult as ApplyPatchResult,
+        apply_patch_batch_tool as apply_patch_batch_tool,
         apply_patch_tool as apply_patch_tool,
     )
     from .canonical_storage import (
@@ -417,6 +418,7 @@ _MODULES = {
     "ApplyPatchEditor": ".apply_patch",
     "ApplyPatchOperation": ".apply_patch",
     "ApplyPatchResult": ".apply_patch",
+    "apply_patch_batch_tool": ".apply_patch",
     "apply_patch_tool": ".apply_patch",
     "Computer": ".computer",
     "ComputerProvider": ".computer",

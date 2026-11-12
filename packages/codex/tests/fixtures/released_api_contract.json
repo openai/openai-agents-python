@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "ab3cc92034600cf786e9de675767bf7243381878",
+  "baseline_commit": "812e21de1bf556ec7bc89de81aee19861ee38192",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -113,12 +113,14 @@
           "@dataclass(frozen=True)\nclass ApplyPatchOperation:\n    type: Literal['create_file', 'update_file', 'delete_file']\n    path: str\n    diff: str | None = None\n    move_to: str | None = None\n    ctx_wrapper: ToolContext[Any] | None = field(default=None, repr=False, compare=False)",
           "@dataclass(frozen=True)\nclass ApplyPatchResult:\n    status: Literal['completed', 'failed'] | None = None\n    output: str | None = None",
           "class ApplyPatchEditor(Protocol):\n\n    def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass\n\n    def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass\n\n    def delete_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult | str | None | Awaitable[ApplyPatchResult | str | None]:\n        pass",
-          "def apply_patch_tool(editor: ApplyPatchEditor, *, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False) -> FunctionTool[Any, ToolOutput, Any]:\n    pass"
+          "def apply_patch_tool(editor: ApplyPatchEditor, *, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False) -> FunctionTool[Any, ToolOutput, Any]:\n    pass",
+          "def apply_patch_batch_tool(editor: ApplyPatchEditor, *, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False) -> FunctionTool[Any, ToolOutput, Any]:\n    pass"
         ],
         "exports": {
           "ApplyPatchEditor": "agents.apply_patch.ApplyPatchEditor",
           "ApplyPatchOperation": "agents.apply_patch.ApplyPatchOperation",
           "ApplyPatchResult": "agents.apply_patch.ApplyPatchResult",
+          "apply_patch_batch_tool": "agents.apply_patch.apply_patch_batch_tool",
           "apply_patch_tool": "agents.apply_patch.apply_patch_tool"
         },
         "imports": [
@@ -2234,6 +2236,7 @@
       "VerificationProof": "agents.manual.VerificationProof",
       "VerificationRequest": "agents.manual.VerificationRequest",
       "WebSearch": "agents.tools.WebSearch",
+      "apply_patch_batch_tool": "agents.apply_patch.apply_patch_batch_tool",
       "apply_patch_tool": "agents.apply_patch.apply_patch_tool",
       "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
@@ -5086,6 +5089,7 @@
       "VerificationProof",
       "VerificationRequest",
       "WebSearch",
+      "apply_patch_batch_tool",
       "apply_patch_tool",
       "computer_tool",
       "function_tool",
@@ -5098,7 +5102,7 @@
       "from ._tool_errors import ToolErrorContext as ToolErrorContext, ToolErrorFormatter as ToolErrorFormatter",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider, SignInWithChatGPT as SignInWithChatGPT, SignInWithChatGPTCredentials as SignInWithChatGPTCredentials",
-      "from .apply_patch import ApplyPatchEditor as ApplyPatchEditor, ApplyPatchOperation as ApplyPatchOperation, ApplyPatchResult as ApplyPatchResult, apply_patch_tool as apply_patch_tool",
+      "from .apply_patch import ApplyPatchEditor as ApplyPatchEditor, ApplyPatchOperation as ApplyPatchOperation, ApplyPatchResult as ApplyPatchResult, apply_patch_batch_tool as apply_patch_batch_tool, apply_patch_tool as apply_patch_tool",
       "from .canonical_storage import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore, CustomStorage as CustomStorage, DaprSessionStore as DaprSessionStore, EncryptedSessionStore as EncryptedSessionStore, MongoDBSessionStore as MongoDBSessionStore, RedisSessionStore as RedisSessionStore, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLAlchemySessionStore as SQLAlchemySessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn, FinishToolBatch as FinishToolBatch, ToolBatchCompletionContext as ToolBatchCompletionContext, ToolBatchResult as ToolBatchResult",
