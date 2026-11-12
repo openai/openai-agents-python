@@ -922,6 +922,7 @@ class DeferredTools:
             active.output,
             session._max_function_concurrency,
             session._observations.retention,
+            resume_budget=active.budget.limits if active.budget is not None else None,
         )
         try:
             selection.state = await self.prepare(session, request, timeout_seconds=timeout_seconds)
