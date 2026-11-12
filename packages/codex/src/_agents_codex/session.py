@@ -442,6 +442,10 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
             if isinstance(value, ToolRef):
                 result["tool_choice"] = "required"
                 controls["named_tool_choice"] = {"name": value.name, "namespace": value.namespace}
+            elif isinstance(value, Mapping):
+                result["tool_choice"] = "required"
+                controls["named_tool_choice"] = None
+                controls["hosted_tool_choice"] = dict(value)
             else:
                 result["tool_choice"] = value or "auto"
                 controls["named_tool_choice"] = None
@@ -544,7 +548,14 @@ def _manual_restore_model_settings(
             "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (
-            ordinary | {"named_tool_choice", "attempt_timeout_ms", "retry", "hosted_prompt"}
+            ordinary
+            | {
+                "named_tool_choice",
+                "hosted_tool_choice",
+                "attempt_timeout_ms",
+                "retry",
+                "hosted_prompt",
+            }
         ):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
         normalized = _native_model_settings(
@@ -561,6 +572,15 @@ def _manual_restore_model_settings(
                 raise ValueError("Manual checkpoint has invalid hosted prompt omission controls")
             # The current Agent supplies the reference for each admitted request.
             normalized["hosted_prompt"] = prompt
+        if "hosted_tool_choice" in controls:
+            target = controls["hosted_tool_choice"]
+            if target is None:
+                normalized["hosted_tool_choice"] = None
+            else:
+                captured_choice = _copy_model_settings({"tool_choice": target})["tool_choice"]
+                if not isinstance(captured_choice, Mapping):
+                    raise ValueError("Manual checkpoint has invalid hosted tool choice")
+                normalized["hosted_tool_choice"] = dict(captured_choice)
         if "named_tool_choice" in controls:
             target = controls["named_tool_choice"]
             if target is not None:
