@@ -339,6 +339,30 @@
         ],
         "references": {}
       },
+      "agents.conversations": {
+        "declarations": [
+          "OutputT = TypeVar('OutputT')",
+          "class ConversationsWriteError(RuntimeError):\n\n    def __init__(self, conversation_id: str, items: tuple[dict[str, Any], ...], acknowledged: int) -> None:\n        pass",
+          "class ConversationsHistory:\n\n    def __init__(self, client: AsyncOpenAI, *, conversation_id: str | None=None) -> None:\n        pass\n\n    @property\n    def conversation_id(self) -> str | None:\n        pass\n\n    async def get_conversation_id(self) -> str:\n        pass\n\n    async def get_items(self, limit: int | None=None) -> list[dict[str, Any]]:\n        pass\n\n    async def add_items(self, items: Sequence[Mapping[str, Any]]) -> None:\n        pass\n\n    async def pop_item(self) -> dict[str, Any] | None:\n        pass\n\n    async def clear(self) -> None:\n        pass\n\n    async def run(self, agent: Agent[Any, OutputT], input: UserInput, **session_options: Any) -> Completed[OutputT]:\n        pass"
+        ],
+        "exports": {
+          "ConversationsHistory": "_agents_codex.conversations.ConversationsHistory",
+          "ConversationsWriteError": "_agents_codex.conversations.ConversationsWriteError"
+        },
+        "imports": [
+          "from collections.abc import Mapping, Sequence",
+          "from typing import Any, TypeVar",
+          "from openai import AsyncOpenAI",
+          "from .agent import Agent",
+          "from .input import UserInput",
+          "from .session import Completed"
+        ],
+        "references": {
+          "Agent": "agents.agent.Agent",
+          "Completed": "agents.session.Completed",
+          "UserInput": "agents.input.UserInput"
+        }
+      },
       "agents.decisions": {
         "declarations": [
           "DecisionInput = str | Sequence[dict[str, Any]]",
@@ -1749,7 +1773,8 @@
           "@dataclass(frozen=True, kw_only=True)\nclass OtlpHttp:\n    endpoint: str = field(repr=False)\n    protocol: Literal['binary', 'json'] = 'binary'\n    headers: Mapping[str, str] | None = field(default=None, repr=False)\n    tls: OtelTlsConfig | None = None",
           "Exporter: TypeAlias = OtlpGrpc | OtlpHttp",
           "@dataclass(frozen=True, kw_only=True)\nclass ConsoleDiagnostics:\n    level: Literal['error', 'warn', 'info', 'debug', 'trace'] = 'warn'\n    targets: tuple[str, ...] = ()\n    include_fields: bool = False",
-          "async def configure(*, traces: Exporter | None=None, logs: Exporter | None=None, metrics: Exporter | None=None, environment: str='dev', span_attributes: Mapping[str, str] | None=None, log_user_prompt: bool=False, log_agent_responses: bool=False, tool_result_max_bytes: int=0, processors: Sequence[TraceProcessor]=(), diagnostics: ConsoleDiagnostics | None=None) -> None:\n    pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass TraceDeliveryConfig:\n    max_queue_size: int = 2048\n    max_queue_bytes: int = 4 * 1024 * 1024\n    max_batch_size: int = 64\n    schedule_delay_ms: int = 0\n    export_trigger_ratio: float = 0.7\n    callback_timeout_ms: int | None = 1000",
+          "async def configure(*, traces: Exporter | None=None, logs: Exporter | None=None, metrics: Exporter | None=None, environment: str='dev', span_attributes: Mapping[str, str] | None=None, log_user_prompt: bool=False, log_agent_responses: bool=False, tool_result_max_bytes: int=0, processors: Sequence[TraceProcessor]=(), diagnostics: ConsoleDiagnostics | None=None, trace_delivery: TraceDeliveryConfig | Mapping[str, Any] | None=None) -> None:\n    pass",
           "async def shutdown(*, timeout_ms: int | None=None) -> None:\n    pass",
           "@dataclass(frozen=True, kw_only=True)\nclass TraceExportCredentials:\n    headers: Mapping[str, str] = field(repr=False)\n\n    def __init__(self, *, headers: Mapping[str, str]) -> None:\n        pass",
           "@dataclass(frozen=True, kw_only=True)\nclass SpanContext:\n    trace_id: str\n    span_id: str\n    parent_span_id: str | None\n    disabled: bool\n    include_sensitive_data: bool\n    _handle: str = field(repr=False, compare=False)\n\n    @property\n    def trace_metadata(self) -> Mapping[str, Any] | None:\n        pass",
@@ -1783,6 +1808,7 @@
           "OtlpHttp": "agents.telemetry.OtlpHttp",
           "SpanContext": "agents.telemetry.SpanContext",
           "TraceContext": "agents._trace_context.TraceContext",
+          "TraceDeliveryConfig": "agents.telemetry.TraceDeliveryConfig",
           "TraceExportCredentials": "agents.telemetry.TraceExportCredentials",
           "TraceLifecycleEvent": "agents.telemetry.TraceLifecycleEvent",
           "TraceOptions": "agents.telemetry.TraceOptions",
@@ -2127,6 +2153,8 @@
       "ComputerProvider": "agents.computer.ComputerProvider",
       "ComputerSafetyError": "agents.computer.ComputerSafetyError",
       "ContinueTurn": "agents.completion.ContinueTurn",
+      "ConversationsHistory": "agents.conversations.ConversationsHistory",
+      "ConversationsWriteError": "agents.conversations.ConversationsWriteError",
       "CustomStorage": "agents.canonical_storage.CustomStorage",
       "DaprSessionStore": "agents.canonical_storage.DaprSessionStore",
       "DecisionError": "agents.decisions.DecisionError",
@@ -2365,7 +2393,7 @@
       },
       "_agents_codex._trace_export": {
         "declarations": [
-          "class OpenAITraceExporter:\n\n    def __init__(self, *, api_key: str, endpoint: str='https://api.openai.com/v1/traces/ingest', organization: str | None=None, project: str | None=None, timeout_ms: int=750, max_retries: int=0) -> None:\n        pass\n\n    def set_api_key(self, api_key: str) -> None:\n        pass\n\n    async def on_trace_event(self, event: Mapping[str, Any]) -> None:\n        pass\n\n    async def on_trace_events(self, events: Sequence[Mapping[str, Any]]) -> None:\n        pass",
+          "class OpenAITraceExporter:\n\n    def __init__(self, *, api_key: str, endpoint: str='https://api.openai.com/v1/traces/ingest', organization: str | None=None, project: str | None=None, timeout_ms: int=750, max_retries: int=0, retry_delay_ms: int=0, max_retry_delay_ms: int=30000) -> None:\n        pass\n\n    def set_api_key(self, api_key: str) -> None:\n        pass\n\n    async def on_trace_event(self, event: Mapping[str, Any]) -> None:\n        pass\n\n    async def on_trace_events(self, events: Sequence[Mapping[str, Any]]) -> None:\n        pass",
           "class ConsoleTraceProcessor:\n\n    def __init__(self, *, stream: TextIO | None=None) -> None:\n        pass\n\n    def on_trace_event(self, event: Mapping[str, Any]) -> None:\n        pass"
         ],
         "exports": {},
@@ -2505,8 +2533,8 @@
         "declarations": [
           "class NativeRealtimeTranscription(TypedDict, total=False):\n    model: str\n    language: str\n    prompt: str\n    keywords: list[str]\n    languages: list[str]\n    delay: Literal['minimal', 'low', 'medium', 'high', 'xhigh']",
           "class NativeRealtimeNoiseReduction(TypedDict):\n    type: Literal['near_field', 'far_field']",
-          "class NativeRealtimeServerVad(TypedDict, total=False):\n    type: Required[Literal['server_vad']]\n    create_response: bool\n    interrupt_response: bool\n    threshold: float\n    prefix_padding_ms: int\n    silence_duration_ms: int\n    idle_timeout_ms: int\n    model_version: str",
-          "class NativeRealtimeSemanticVad(TypedDict, total=False):\n    type: Required[Literal['semantic_vad']]\n    create_response: bool\n    interrupt_response: bool\n    eagerness: Literal['auto', 'low', 'medium', 'high']\n    model_version: str",
+          "class NativeRealtimeServerVad(TypedDict, total=False):\n    type: Required[Literal['server_vad']]\n    create_response: bool\n    interrupt_response: bool\n    threshold: float\n    prefix_padding_ms: int\n    silence_duration_ms: int\n    idle_timeout_ms: int\n    model_version: str\n    provider_data: dict[str, Any] | None",
+          "class NativeRealtimeSemanticVad(TypedDict, total=False):\n    type: Required[Literal['semantic_vad']]\n    create_response: bool\n    interrupt_response: bool\n    eagerness: Literal['auto', 'low', 'medium', 'high']\n    model_version: str\n    provider_data: dict[str, Any] | None",
           "class NativeRealtimeCustomVoice(TypedDict):\n    id: str",
           "class NativeRealtimePromptText(TypedDict):\n    type: Literal['input_text']\n    text: str",
           "class NativeRealtimePromptImage(TypedDict, total=False):\n    type: Required[Literal['input_image']]\n    image_url: str\n    file_id: str\n    detail: Literal['auto', 'low', 'high', 'original']",
@@ -5009,6 +5037,8 @@
       "ComputerProvider",
       "ComputerSafetyError",
       "ContinueTurn",
+      "ConversationsHistory",
+      "ConversationsWriteError",
       "CustomStorage",
       "DaprSessionStore",
       "DecisionError",
@@ -5196,6 +5226,7 @@
       "from .compaction import CompactionContext as CompactionContext, ResponsesCompaction as ResponsesCompaction, ResponsesCompactionContext as ResponsesCompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn, FinishToolBatch as FinishToolBatch, ToolBatchCompletionContext as ToolBatchCompletionContext, ToolBatchResult as ToolBatchResult",
       "from .computer import Computer as Computer, ComputerProvider as ComputerProvider, ComputerSafetyError as ComputerSafetyError, computer_tool as computer_tool",
+      "from .conversations import ConversationsHistory as ConversationsHistory, ConversationsWriteError as ConversationsWriteError",
       "from .decisions import DecisionError as DecisionError, DecisionInput as DecisionInput, DecisionProvider as DecisionProvider, DecisionRequest as DecisionRequest, DecisionResponse as DecisionResponse, OpenAIDecisions as OpenAIDecisions",
       "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",
       "from .guardrails import GuardrailRecord as GuardrailRecord, GuardrailResult as GuardrailResult, GuardrailTripwire as GuardrailTripwire, InputGuardrail as InputGuardrail, OutputGuardrail as OutputGuardrail",

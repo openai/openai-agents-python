@@ -21,12 +21,14 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.test_native_agent import provider
 
 
-def window() -> dict[str, Any]:
+def window(*, opaque: bool = False) -> dict[str, Any]:
     return {
         "id": "COMPACT_RESULT_NOT_AN_ANCHOR",
         "output": [
             assistant_output("RETAINED_BEFORE_OPAQUE")["item"],
-            {"type": "compaction", "encrypted_content": "OPAQUE_COMPLETE_WINDOW"},
+            {"type": "compaction", "encrypted_content": "OPAQUE_COMPLETE_WINDOW"}
+            if opaque
+            else assistant_output("RETAINED_SUMMARY_BLOCK")["item"],
             {
                 "type": "function_call",
                 "call_id": "historic",
@@ -58,7 +60,7 @@ async def test_complete_window_cold_restore_keeps_current_instructions_and_origi
 
     async def compact(**body):
         calls.append(body)
-        return window()
+        return window(opaque=True)
 
     def skip(context):
         decisions.append(context)
@@ -66,48 +68,55 @@ async def test_complete_window_cold_restore_keeps_current_instructions_and_origi
 
     responses.respond(assistant_output("OLD_ASSISTANT"))
     responses.respond(assistant_output("continued"))
-    config = ResponsesCompaction(
-        client=client_for(compact), model="separate-compactor", should_compact=skip
-    )
-    current_provider = provider(responses)
-    target = Agent(
-        name="Unused", instructions="Unused.", provider=current_provider, compaction=config
-    )
-    agent = Agent(
-        instructions="ORIGINAL_APPLICATION",
-        provider=current_provider,
-        compaction=config,
-        handoffs=[target] if profiled else (),
-    )
-    async with timeout(30):
-        async with agent.session() as session:
-            await (await session.submit("OLD_USER_SENTINEL")).get_result()
-            await session.update(instructions="CURRENT_APPLICATION")
-            count = len(decisions)
-            await session.compact()
-            assert len(decisions) == count
-            saved = await session.save_state()
-            assert "OLD_USER_SENTINEL" in saved.to_json()
-        current_agent = (
-            agent
-            if profiled
-            else Agent(
-                instructions="CURRENT_APPLICATION", provider=current_provider, compaction=config
-            )
+    from tests.test_native_compaction_lineage import _matching_compaction_client
+
+    async with _matching_compaction_client(responses, compact) as client:
+        config = ResponsesCompaction(
+            client=client, model="separate-compactor", mode="input", should_compact=skip
         )
-        async with current_agent.session(state=SessionState.from_json(saved.to_json())) as restored:
-            await (await restored.submit("followup")).get_result()
-    assert len(calls) == 1 and calls[0]["model"] == "separate-compactor"
-    assert "OLD_USER_SENTINEL" in json.dumps(calls[0]["input"])
-    body = json.dumps(responses.requests[-1])
-    assert "OLD_USER_SENTINEL" not in body and "OLD_ASSISTANT" not in body
-    assert "CURRENT_APPLICATION" in body and "HISTORIC_TOOL_OUTPUT" in body
-    assert (
-        body.index("RETAINED_BEFORE_OPAQUE")
-        < body.index("OPAQUE_COMPLETE_WINDOW")
-        < body.index("RETAINED_AFTER_OPAQUE")
-    )
-    assert responses.requests[-1].get("previous_response_id") != "COMPACT_RESULT_NOT_AN_AN_ANCHOR"
+        current_provider = provider(responses)
+        target = Agent(
+            name="Unused", instructions="Unused.", provider=current_provider, compaction=config
+        )
+        agent = Agent(
+            instructions="ORIGINAL_APPLICATION",
+            provider=current_provider,
+            compaction=config,
+            handoffs=[target] if profiled else (),
+        )
+        async with timeout(30):
+            async with agent.session() as session:
+                await (await session.submit("OLD_USER_SENTINEL")).get_result()
+                await session.update(instructions="CURRENT_APPLICATION")
+                count = len(decisions)
+                await session.compact()
+                assert len(decisions) == count
+                saved = await session.save_state()
+                assert "OLD_USER_SENTINEL" in saved.to_json()
+            current_agent = (
+                agent
+                if profiled
+                else Agent(
+                    instructions="CURRENT_APPLICATION", provider=current_provider, compaction=config
+                )
+            )
+            async with current_agent.session(
+                state=SessionState.from_json(saved.to_json())
+            ) as restored:
+                await (await restored.submit("followup")).get_result()
+        assert len(calls) == 1 and calls[0]["model"] == "separate-compactor"
+        assert "OLD_USER_SENTINEL" in json.dumps(calls[0]["input"])
+        body = json.dumps(responses.requests[-1])
+        assert "OLD_USER_SENTINEL" not in body and "OLD_ASSISTANT" not in body
+        assert "CURRENT_APPLICATION" in body and "HISTORIC_TOOL_OUTPUT" in body
+        assert (
+            body.index("RETAINED_BEFORE_OPAQUE")
+            < body.index("OPAQUE_COMPLETE_WINDOW")
+            < body.index("RETAINED_AFTER_OPAQUE")
+        )
+        assert (
+            responses.requests[-1].get("previous_response_id") != "COMPACT_RESULT_NOT_AN_AN_ANCHOR"
+        )
 
 
 async def test_default_post_persistence_predicate_skips_nine_and_admits_ten(responses):
@@ -302,7 +311,7 @@ async def test_cancel_joins_compact_callback_and_rejects_late_window(responses):
             with pytest.raises(TurnStoppedError):
                 await result
             assert exited
-            assert "OPAQUE_COMPLETE_WINDOW" not in (await session.save_state()).to_json()
+            assert "RETAINED_SUMMARY_BLOCK" not in (await session.save_state()).to_json()
         finally:
             release.set()
 
@@ -406,7 +415,7 @@ async def test_compaction_transform_keeps_original_instruction_provenance(respon
             if modify_echo:
                 with pytest.raises(NativeError, match="new or modified instruction"):
                     await session.compact()
-                assert "OPAQUE_COMPLETE_WINDOW" not in (await session.save_state()).to_json()
+                assert "RETAINED_SUMMARY_BLOCK" not in (await session.save_state()).to_json()
                 return
             await session.compact()
             saved = await session.save_state()
@@ -469,3 +478,100 @@ async def test_compaction_retains_only_captured_reference_occurrences(responses,
     assert [
         item for item in responses.requests[-1]["input"] if item["type"] == "item_reference"
     ] == (captured if mode in ("duplicate", "reordered") else replacement)
+
+
+@pytest.mark.parametrize("captured", [False, True])
+@pytest.mark.parametrize("kind", ["compaction", "reasoning"])
+async def test_unverified_compactor_cannot_introduce_opaque_context(responses, captured, kind):
+    opaque = {"type": kind, "encrypted_content": "FOREIGN_OPAQUE_CONTEXT"}
+    if kind == "reasoning":
+        opaque["summary"] = []
+
+    async def compact(**body):
+        return {
+            "output": [item for item in body["input"] if item["type"] == kind]
+            if captured
+            else [opaque],
+            "verified_provider_scope": True,
+        }
+
+    config = ResponsesCompaction(
+        client=client_for(compact),
+        model="compact",
+        mode="input",
+        should_compact=lambda context: False,
+    )
+    responses.respond(assistant_output("original"))
+    responses.respond(assistant_output("continued"))
+    async with Agent(
+        instructions="Current instructions.", provider=provider(responses), compaction=config
+    ).session() as session:
+        if captured:
+            snapshot = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=snapshot.revision, keep=0, items=[opaque]
+            )
+        await (await session.submit("original request")).get_result()
+        before = (await session.history_snapshot()).items
+        if captured:
+            await session.compact()
+        else:
+            with pytest.raises(NativeError, match="new or modified instruction or control item"):
+                await session.compact()
+            assert (await session.history_snapshot()).items == before
+        await (await session.submit("continue")).get_result()
+    assert [
+        item["encrypted_content"]
+        for item in responses.requests[-1]["input"]
+        if item["type"] == kind
+    ] == ([opaque["encrypted_content"]] if captured else [])
+
+
+async def test_provider_scope_change_during_input_compaction_rejects_new_opaque_context(responses):
+    from tests.test_native_compaction_lineage import _matching_compaction_client
+
+    async def compact(**body):
+        client.api_key = "changed-compactor-key"
+        return window(opaque=True)
+
+    responses.respond(assistant_output("original"))
+    responses.respond(assistant_output("continued"))
+    async with _matching_compaction_client(responses, compact) as client:
+        config = ResponsesCompaction(
+            client=client, model="compact", mode="input", should_compact=lambda _: False
+        )
+        async with Agent(
+            instructions="Current instructions.", provider=provider(responses), compaction=config
+        ).session() as session:
+            await (await session.submit("original request")).get_result()
+            before = (await session.history_snapshot()).items
+            with pytest.raises(NativeError, match="new or modified instruction or control item"):
+                await session.compact()
+            assert (await session.history_snapshot()).items == before
+            await (await session.submit("continue")).get_result()
+    assert "OPAQUE_COMPLETE_WINDOW" not in json.dumps(responses.requests[-1])
+
+
+async def test_unverified_compactor_can_return_plain_reasoning(responses):
+    async def compact(**body):
+        return {
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "VISIBLE_SUMMARY"}],
+                }
+            ]
+        }
+
+    responses.respond(assistant_output("original"))
+    responses.respond(assistant_output("continued"))
+    config = ResponsesCompaction(
+        client=client_for(compact), model="compact", mode="input", should_compact=lambda _: False
+    )
+    async with Agent(
+        instructions="Current instructions.", provider=provider(responses), compaction=config
+    ).session() as session:
+        await (await session.submit("original request")).get_result()
+        await session.compact()
+        assert "VISIBLE_SUMMARY" in (await session.save_state()).to_json()
+        await (await session.submit("continue")).get_result()

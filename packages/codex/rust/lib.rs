@@ -2622,7 +2622,7 @@ impl NativeThread {
             .map_err(py_error)
     }
 
-    #[pyo3(signature = (id, summary, thread=None, instance=None, *, error=false, window_json=None))]
+    #[pyo3(signature = (id, summary, thread=None, instance=None, *, error=false, window_json=None, verified_provider_scope=false))]
     fn _reply_compaction(
         &self,
         id: u64,
@@ -2631,14 +2631,16 @@ impl NativeThread {
         instance: Option<&str>,
         error: bool,
         window_json: Option<&str>,
+        verified_provider_scope: bool,
     ) -> PyResult<()> {
         if summary.is_some() && window_json.is_some() {
             return Err(py_error("Conflicting compaction reply"));
         }
         let result = if let Some(window) = window_json {
-            Some(codex_extension_api::CompactionResult::Window(
-                serde_json::from_str(window).map_err(|_| py_error("Invalid compaction window"))?,
-            ))
+            let mut window: codex_extension_api::CompactionWindow = serde_json::from_str(window)
+                .map_err(|_| py_error("Invalid compaction window"))?;
+            window.verified_provider_scope = verified_provider_scope;
+            Some(codex_extension_api::CompactionResult::Window(window))
         } else {
             summary.map(codex_extension_api::CompactionResult::Summary)
         };

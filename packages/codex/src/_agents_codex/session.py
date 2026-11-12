@@ -12756,17 +12756,23 @@ class Session(Generic[ContextT, OutputT]):
                             ):
                                 raise TypeError("transform_context must return input items or None")
                             prepared = replace(prepared, items=tuple(replacement))
-                    if prepared.mode == "previous_response_id" and not factory._matches_provider(
+                    verified_provider_scope = factory._matches_provider(
                         self._model_api_key,
                         json.loads(self._native_options or "{}").get("config", {}),
-                    ):
+                    )
+                    if prepared.mode == "previous_response_id" and not verified_provider_scope:
                         raise ValueError("Compaction client provider scope changed before dispatch")
-                    return await factory._window(
+                    window = await factory._window(
                         prepared,
                         provider_response=provider_response,
                         observe=observe,
                         original_controls=original_controls,
                     )
+                    verified_provider_scope = verified_provider_scope and factory._matches_provider(
+                        self._model_api_key,
+                        json.loads(self._native_options or "{}").get("config", {}),
+                    )
+                    return window, verified_provider_scope
                 except Exception:
                     if policy or message.get("optional", False):
                         if tracing is not None:
@@ -12790,12 +12796,14 @@ class Session(Generic[ContextT, OutputT]):
             elif result is failed:
                 reject()
             elif self._agent_for_message(message).compaction is not None:
+                window, verified_provider_scope = result
                 self._native._reply_compaction(
                     message["step_id"],
                     None,
                     message["thread"],
                     message["instance"],
-                    window_json=json.dumps(result, allow_nan=False),
+                    window_json=json.dumps(window, allow_nan=False),
+                    verified_provider_scope=verified_provider_scope,
                 )
             else:
                 if result is not None:
