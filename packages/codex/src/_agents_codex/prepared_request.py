@@ -146,6 +146,8 @@ def _check_tools(tools: Sequence[Any], refs: Sequence[ToolRef] | None = None) ->
     allowed: set[ToolRef] = set()
     for tool in tools:
         if isinstance(tool, FunctionTool):
+            if tool.allowed_callers is not None and "direct" not in tool.allowed_callers:
+                raise ValueError("prepare_request requires tools that allow direct calls")
             allowed.add(tool.ref)
         elif type(tool) in (HttpMCP, StdioMCP):
             allowed.update(tool.tool(name) for name in tool.tools)

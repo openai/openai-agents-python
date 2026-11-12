@@ -3607,6 +3607,7 @@ def _supports_atomic_first_turn(
             and tool._bind is not None
             and tool.needs_approval is False
             and not tool.defer_loading
+            and (tool.allowed_callers is None or "direct" in tool.allowed_callers)
             for tool in tools
         )
     )
@@ -5718,6 +5719,9 @@ class Session(Generic[ContextT, OutputT]):
             specification = json.loads(bound.spec_json)
             if specification.pop("type", None) != "function":
                 raise CapabilityError("Realtime tools require bare function declarations")
+            callers = specification.pop("allowedCallers", None)
+            if callers is not None and "direct" not in callers:
+                continue
             selected.append(specification)
         return selected, selection_id
 

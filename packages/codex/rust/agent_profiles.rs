@@ -15,8 +15,8 @@ use codex_protocol::dynamic_tools::{DynamicToolFunctionSpec, DynamicToolSpec};
 use codex_protocol::model_request_transport::RequestTransportOverrides;
 use codex_thread_store::PersistContext;
 use codex_tools::{
-    FunctionCallError, ToolCall, ToolExecutor, ToolExecutorFuture, ToolName, ToolOutput, ToolSpec,
-    dynamic_tool_to_responses_api_tool,
+    FunctionCallError, ToolCall, ToolExecutor, ToolExecutorFuture, ToolExposures, ToolName,
+    ToolOutput, ToolSpec, dynamic_tool_to_responses_api_tool,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 
 use crate::application_instructions::{Accepted, InstructionFile};
 use crate::python_tools::{ProfileCatalog, PythonTools};
+use crate::tool_callers::ToolDeclarations;
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,7 +40,7 @@ pub(crate) struct ProfileSpec {
     id: String,
     model: AgentProfileModelSettings,
     instructions: String,
-    tools: Vec<DynamicToolSpec>,
+    tools: ToolDeclarations,
     #[serde(default)]
     manual_slots: Vec<usize>,
     #[serde(default)]
@@ -240,7 +241,7 @@ impl OpeningProfiles {
     pub(crate) fn manual_restore_declaration(
         &self,
         profile_id: &str,
-    ) -> Result<(&str, &[DynamicToolSpec], &[usize])> {
+    ) -> Result<(&str, &ToolDeclarations, &[usize])> {
         let profile = self
             .roster
             .iter()
@@ -254,7 +255,7 @@ impl OpeningProfiles {
         &self,
         history: &[RolloutItem],
         saved: &Value,
-    ) -> Result<(Vec<DynamicToolSpec>, Vec<usize>)> {
+    ) -> Result<(ToolDeclarations, Vec<usize>)> {
         ensure!(
             roster_fingerprint(&self.roster, &self.root_id)? == self.fingerprint,
             "Captured Agent graph fingerprint does not match its declarations"
@@ -265,6 +266,7 @@ impl OpeningProfiles {
         let (_, declarations, manual) = self.manual_restore_declaration(&source.profile_id)?;
         let mut seen = HashSet::new();
         let mut slots = Vec::new();
+        let mut rebound = ToolDeclarations::default();
         for (slot, spec) in saved.iter().enumerate() {
             let value = serde_json::to_value(spec)?;
             let original = declarations
@@ -280,8 +282,12 @@ impl OpeningProfiles {
             if manual.contains(&original) {
                 slots.push(slot);
             }
+            rebound.push(
+                declarations[original].clone(),
+                declarations.caller_limits(original),
+            );
         }
-        Ok((saved, slots))
+        Ok((rebound, slots))
     }
 
     pub(crate) fn capabilities(&self) -> [bool; 6] {
@@ -321,14 +327,17 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
             if profile.handoff_callbacks.contains_key(name) {
                 continue;
             }
-            all_declarations.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
-                strict: false,
-                output_schema: None,
-                name: name.clone(),
-                description: "Native handoff".into(),
-                input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
-                defer_loading: false,
-            }));
+            all_declarations.push(
+                DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                    strict: false,
+                    output_schema: None,
+                    name: name.clone(),
+                    description: "Native handoff".into(),
+                    input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+                    defer_loading: false,
+                }),
+                None,
+            );
         }
         crate::python_tools::validate_declarations(&all_declarations)?;
         for (name, slot) in &profile.handoff_callbacks {
@@ -338,6 +347,13 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
                     && !profile.manual_slots.contains(slot)
                     && !profile.terminal_slots.contains(slot),
                 "Handoff callback must name its exact automatic catalog slot"
+            );
+            ensure!(
+                profile
+                    .tools
+                    .caller_limits(*slot)
+                    .is_none_or(|callers| callers.contains(ToolExposures::DIRECT)),
+                "Handoff callback must allow direct model calls"
             );
         }
         for (name, declaration) in &profile.decision_handoffs {
@@ -1461,7 +1477,7 @@ async fn bind_accepted_mcp(
 pub(crate) async fn replace_tools(
     thread: &CodexThread,
     requested: u64,
-    specs: Vec<DynamicToolSpec>,
+    specs: ToolDeclarations,
     manual_slots: &[usize],
     default_slots: Option<&[usize]>,
     profile_update: Option<&ProfileToolUpdate>,
@@ -1769,6 +1785,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
     }
     fn spec(&self) -> ToolSpec {
         self.spec.clone()
+    }
+    fn allowed_callers(&self) -> Option<ToolExposures> {
+        self.callback
+            .as_ref()
+            .and_then(|callback| callback.allowed_callers())
+            .map(|callers| callers & ToolExposures::DIRECT)
     }
     fn exposure(&self) -> codex_tools::ToolExposure {
         codex_tools::ToolExposure::DirectModelOnly
