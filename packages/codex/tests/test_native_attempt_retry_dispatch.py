@@ -280,6 +280,7 @@ async def test_producer_captures_its_complete_property_once_before_callback_entr
         _native=native,
         _catalog_for_message=lambda *args: None,
         _context=None,
+        _include_raw_provider_events=False,
         id="session",
     )
     await Session._produce_model_response(
@@ -437,6 +438,7 @@ async def test_revoked_producer_retains_expected_abort_only_for_advice(error_kin
         _native=object(),
         _catalog_for_message=lambda *args: None,
         _context=None,
+        _include_raw_provider_events=False,
         id="session",
     )
     token = _invocation.set(_Invocation(owner, native_callback=(state, callback)))
