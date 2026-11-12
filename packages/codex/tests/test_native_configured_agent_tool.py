@@ -31,6 +31,7 @@ from agents import (
     PendingRequests,
     SignInWithChatGPT,
     ToolContext,
+    ToolRef,
     TurnStoppedError,
     function_tool,
 )
@@ -38,6 +39,7 @@ from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 
 CATALOG = Path(__file__).parent / "fixtures/request-control-models.json"
+ROLE_CATALOG = Path(__file__).parent / "fixtures/configured-agent-role-models.json"
 MODEL = next(
     item["slug"]
     for item in json.loads(CATALOG.read_text())["models"]
@@ -209,11 +211,14 @@ async def test_configured_child_has_been_retaining_effective_wss_root_receipts(
             )
             for directory in (work, opening, replacement):
                 directory.mkdir()
+            opening_roots = [opening]
+            if sys.platform == "darwin" and roots != "opening":
+                opening_roots = [] if roots == "clear" else [replacement]
             environment = Environment(
                 url=executor.url,
                 headers={"Authorization": "Bearer " + executor.token},
                 cwd=str(work),
-                writable_roots=[opening],
+                writable_roots=opening_roots,
                 tools=["exec_command"],
             )
             child_receipts = []
@@ -238,7 +243,7 @@ async def test_configured_child_has_been_retaining_effective_wss_root_receipts(
                 ]
                 child_receipts.append(recorded[0]["receipt"]["executors"][0]["writable_roots"])
                 async with child.session(environment=environment):
-                    assert set(child_openings[-1]) == {opening.as_uri()}
+                    assert set(child_openings[-1]) == {path.as_uri() for path in opening_roots}
                 return result.final_output
 
             root_provider = NativeProvider(
@@ -274,7 +279,7 @@ async def test_configured_child_has_been_retaining_effective_wss_root_receipts(
                         )
                         child_model.respond(assistant_output("child complete"))
                         overrides = {}
-                        if index == 0 and roots != "opening":
+                        if index == 0 and roots != "opening" and sys.platform != "darwin":
                             overrides["writable_roots"] = [] if roots == "clear" else [replacement]
                         turn = await session.submit("Run the child probe.", **overrides)
                         assert (await turn.get_result()).final_output == "parent complete"
@@ -301,6 +306,169 @@ async def test_configured_child_has_been_retaining_effective_wss_root_receipts(
                     assert len(executor.synthetic_process_starts) == 2
                     assert len(child_openings) == 4
                     assert len(root_model.requests) == len(child_model.requests) == 4
+            finally:
+                await child_provider.aclose()
+                await root_provider.aclose()
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "operation",
+        "before_step",
+        "environment",
+        "partial",
+        "forced",
+        "callback_alias",
+        "legacy",
+        "default",
+        "search",
+        "search_narrow",
+        "search_alias",
+    ],
+)
+async def test_configured_child_has_been_preserving_issuing_executor_tools(
+    tmp_path, monkeypatch, native_executor_binary, selection
+):
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import trust
+
+    def offered(rows):
+        names = set()
+        for row in rows:
+            if row.get("type") == "namespace":
+                names.update(offered(row["tools"]))
+            elif row.get("name"):
+                names.add(row["name"])
+        return names
+
+    async with timeout(45), peer() as root_model, peer() as child_model:
+        async with ExecutorPeer(
+            tmp_path / "remote", synthetic_process_output="executed"
+        ).serve() as executor:
+            trust(executor, tmp_path, monkeypatch)
+            (executor.root / "search-hit.txt").write_text("owned search witness")
+            search_case = selection in {"search", "search_narrow", "search_alias"}
+            environment = Environment(
+                url=executor.url,
+                headers={"Authorization": "Bearer " + executor.token},
+                cwd=str(executor.root),
+                tools=["exec_command", "write_stdin", "apply_patch"]
+                + (["project_glob", "project_grep"] if search_case else []),
+                write_policy="legacy" if selection == "legacy" else "strict",
+            )
+            effects = []
+
+            @function_tool
+            def declared_child_tool() -> str:
+                effects.append("declared-child-tool")
+                return "child declaration executed"
+
+            root_provider = NativeProvider(
+                base_url=root_model.url, api_key="synthetic-ceiling-parent"
+            )
+            child_provider = NativeProvider(
+                base_url=child_model.url, api_key="synthetic-ceiling-child"
+            )
+            child = Agent(
+                instructions="Run the child declaration and executor probe.",
+                model=MODEL,
+                provider=child_provider,
+                tools=[declared_child_tool],
+            )
+            child_tool = child.as_tool("ceiling_child")
+
+            @function_tool(name="project_glob" if selection == "search_alias" else "exec_command")
+            def callback_alias() -> str:
+                effects.append("parent-callback-alias")
+                return "application callback"
+
+            parent = Agent(
+                instructions="Run the child.",
+                model=MODEL,
+                provider=root_provider,
+                tools=[child_tool, callback_alias]
+                if selection in {"callback_alias", "search_alias"}
+                else [child_tool],
+                model_settings={"tool_choice": ToolRef("ceiling_child")}
+                if selection == "forced"
+                else None,
+            )
+            root_model.respond(
+                function_call("ceiling_child", {"input": "Run the probes."}, "ceiling-parent")
+            )
+            root_model.respond(assistant_output("parent complete"))
+            child_model.respond(function_call("declared_child_tool", {}, "child-declared"))
+            if search_case:
+                child_model.respond(
+                    function_call("project_glob", {"pattern": "**/*.txt"}, "child-search")
+                )
+            child_model.respond(
+                function_call(
+                    "exec_command",
+                    {"cmd": "printf executor-probe", "login": False},
+                    "child-executor",
+                )
+            )
+            child_model.respond(assistant_output("child complete"))
+            try:
+                if selection in {"callback_alias", "search_alias"}:
+                    rejection = (
+                        "reserved name: exec_command"
+                        if selection == "callback_alias"
+                        else "collides with enabled environment tool: project_glob"
+                    )
+                    with pytest.raises(ValueError, match=rejection):
+                        async with parent.session(environment=environment):
+                            pytest.fail("Reserved application callback has been admitted")
+                    assert not root_model.requests and not child_model.requests
+                    assert not effects and not executor.synthetic_process_starts
+                    return
+                async with parent.session(environment=environment) as session:
+                    options = {"tools": [child_tool]}
+                    if selection == "default":
+                        options = {}
+                    elif selection == "search":
+                        options["tools"].append(ToolRef("project_glob", "functions"))
+                    elif selection == "environment":
+                        options["tools"].append(environment)
+                    elif selection == "forced":
+                        options["tools"].append(environment)
+                    elif selection == "partial":
+                        options["tools"].append(ToolRef("exec_command", "functions"))
+                    elif selection == "before_step":
+                        options = {"before_step": lambda *_args, **_kwargs: [child_tool]}
+                    result = await (await session.submit("Run the child.", **options)).get_result()
+                    assert result.final_output == "parent complete"
+                    names = offered(child_model.requests[0]["tools"])
+                    if selection == "forced":
+                        assert offered(root_model.requests[0]["tools"]) == {"ceiling_child"}
+                    expected = (
+                        set(environment.tools)
+                        if selection in {"environment", "default"}
+                        else {"project_glob"}
+                        if selection == "search"
+                        else {"exec_command"}
+                        if selection == "partial"
+                        else set()
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "selection": selection,
+                                "offered_executor_tools": sorted(names & set(environment.tools)),
+                                "executor_starts": len(executor.synthetic_process_starts),
+                            }
+                        )
+                    )
+                    assert effects == ["declared-child-tool"]
+                    assert "declared_child_tool" in names
+                    assert names & set(environment.tools) == expected
+                    assert len(executor.synthetic_process_starts) == int("exec_command" in expected)
+                    if search_case:
+                        assert ("search-hit.txt" in json.dumps(child_model.requests[2])) is (
+                            selection == "search"
+                        )
             finally:
                 await child_provider.aclose()
                 await root_provider.aclose()
@@ -691,7 +859,7 @@ async def test_configured_child_inside_native_role_has_been_failing_its_one_shot
 
     role_model = next(
         item["slug"]
-        for item in json.loads(CATALOG.read_text())["models"]
+        for item in json.loads(ROLE_CATALOG.read_text())["models"]
         if item.get("supported_in_api") and item.get("multi_agent_version") == "v2"
     )
     async with timeout(30), fixture() as values:

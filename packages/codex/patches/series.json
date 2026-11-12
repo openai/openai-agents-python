@@ -887,7 +887,11 @@
     {
       "path": "sdk-mcp-discovery-cache.patch",
       "sha256": "f70e4a2e85f8928eb8f37a1bfe31a62d647ac08a8a2c9ca8d3c2482ba5712c20"
+    },
+    {
+      "path": "sdk-final-step-builtin-tools.patch",
+      "sha256": "61b69736dfbba375ba595e35ee4eeaa43edf606691ef47654dfe20d34d3f4ebb"
     }
   ],
-  "result_tree": "34342524058268a18065a773d4b145dd26893322"
+  "result_tree": "00fd29f50ce1bca584fc2005559f97da849b0fa0"
 }

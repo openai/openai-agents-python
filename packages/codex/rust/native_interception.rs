@@ -4646,6 +4646,9 @@ enum Projected {
     Json(Value),
 }
 impl<'call> ToolExecutor<ToolCall<'call>> for Executor {
+    fn is_native_environment_tool(&self) -> bool {
+        self.inner.is_native_environment_tool()
+    }
     fn tool_name(&self) -> ToolName {
         self.inner.tool_name()
     }

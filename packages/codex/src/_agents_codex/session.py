@@ -1371,6 +1371,7 @@ class _ConfiguredOpening:
     environment: Environment[Any] | None
     writable_roots: tuple[str, ...] | None
     admitted: Callable[[], bool]
+    executor_tools: tuple[str, ...]
 
 
 @dataclass
@@ -3112,6 +3113,7 @@ def _prepare_native_checkpoint(
         restored_override = True
         payload["agent_options"].pop("_sdk_output_override")
     payload.pop("original_input", None)
+    payload.pop("continuation_trace_id", None)
     payload.pop("codex_login_binding", None)
     payload.pop("executor_read_only", None)
     if saved.format_version in (8, 9):
@@ -3759,6 +3761,7 @@ class Session(Generic[ContextT, OutputT]):
         _captured_siwc_provider: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
+        _tracing_context_policy_only: bool = False,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
@@ -4219,6 +4222,7 @@ class Session(Generic[ContextT, OutputT]):
                 }
             _configure_storage_runtime(runtime, storage, resume, goals)
             inherited_writable_roots = None
+            inherited_executor_tools: tuple[str, ...] | None = None
             if executor is not None:
                 native_environment = cast(dict[str, Any], executor._to_native())
                 invocation = _invocation.get()
@@ -4235,6 +4239,7 @@ class Session(Generic[ContextT, OutputT]):
                     if not invocation.active or not configured_opening.admitted():
                         raise InteractionExpiredError("Configured parent invocation is expired")
                     inherited_writable_roots = configured_opening.writable_roots
+                    inherited_executor_tools = configured_opening.executor_tools
                     if inherited_writable_roots is not None:
                         native_environment["writable_roots"] = list(inherited_writable_roots)
                 native_environment["local_mcp"] = has_host_mcp
@@ -4499,7 +4504,12 @@ class Session(Generic[ContextT, OutputT]):
                             else []
                         )
                         + (
-                            [{"name": name, "namespace": "functions"} for name in executor.tools]
+                            [
+                                {"name": name, "namespace": "functions"}
+                                for name in executor.tools
+                                if inherited_executor_tools is None
+                                or name in inherited_executor_tools
+                            ]
                             if executor is not None
                             else []
                         )
@@ -4858,7 +4868,13 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     )
                     # The native reader can receive restored requests during preparation.
-                    active.tracing = _capture(fallback=_tracing_context)
+                    active.tracing = _capture(
+                        fallback=_tracing_context,
+                        fallback_policy_only=_tracing_context_policy_only,
+                        continuation_trace_id=(
+                            saved.continuation_trace_id if parent_trace is None else None
+                        ),
+                    )
                     await thread._prepare_manual_restore()
                     session._validate_pending_manual(active)
                     session._observations.append(
@@ -6868,7 +6884,7 @@ class Session(Generic[ContextT, OutputT]):
             }
             if expected_turn_id is not None:
                 request["exact_steering"] = True
-            captured = _CapturedTrace(None, None)
+            captured = _CapturedTrace(None, None, policy_only=False)
             if state.tracing is not None and state.tracing.context is not None:
                 # Steering belongs to the admitted root, even if the caller's
                 # ambient workflow changed. Retain it through native acceptance.
@@ -15387,9 +15403,33 @@ class Session(Generic[ContextT, OutputT]):
         invocation = _invocation.get()
         if invocation is None or invocation.session is not self:
             raise InteractionExpiredError("Configured parent invocation is expired")
+        selected_tools = message.get("_sdk_builtin_tools")
+        if selected_tools is not None and not isinstance(selected_tools, list):
+            raise NativeError("Configured child has invalid issuing tool selection")
+        selected_refs = {
+            ToolRef(ref["name"], ref.get("namespace") or "functions")
+            for ref in selected_tools or ()
+        }
+        executor_tools = (
+            tuple(
+                name
+                for name in context._environment.tools
+                if ToolRef(name, "functions") in selected_refs
+                or (
+                    name == "exec_command"
+                    and ToolRef("shell_command", "functions") in selected_refs
+                )
+            )
+            if context._environment is not None
+            else ()
+        )
         previous_opening = invocation.configured_opening
         invocation.configured_opening = _ConfiguredOpening(
-            declaration.agent, context._environment, self._writable_roots, admitted
+            declaration.agent,
+            context._environment,
+            self._writable_roots,
+            admitted,
+            executor_tools,
         )
         handler = self._interaction_handler
 
@@ -16932,6 +16972,7 @@ class Session(Generic[ContextT, OutputT]):
         )
         executor_policy_digest = None
         guardrail_records: list[dict[str, Any]] = []
+        continuation_trace_id = None
         if (
             active_uses_executor
             or self._strict_executor_writes
@@ -16946,6 +16987,8 @@ class Session(Generic[ContextT, OutputT]):
             if drain_budget_usage and self._reader.done():
                 raise NativeError("Native event reader ended before manual capture")
             guardrail_records = self._checkpoint_guardrail_records(active)
+            if active.tracing is not None:
+                continuation_trace_id = active.tracing.correlation_id()
             # Block replies and suppress expected ShutdownComplete/EOF while
             # Core decides whether it can stop the original writer. Readers
             # must keep dispatching until native capture confirms suspension.
@@ -17161,6 +17204,8 @@ class Session(Generic[ContextT, OutputT]):
             if active is not None:
                 if active.original_input is not None:
                     payload["original_input"] = active.original_input
+                if continuation_trace_id is not None:
+                    payload["continuation_trace_id"] = continuation_trace_id
                 usage = active.run_usage.snapshot()
                 payload["guardrail_results"] = guardrail_records
                 payload["run_usage"] = {

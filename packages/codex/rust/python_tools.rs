@@ -3757,7 +3757,9 @@ impl PythonTools {
         {
             return false;
         }
-        let Ok(Some(item)) = self.response_receipt(&grant.key, response.clone()) else { return false; };
+        let Ok(Some(item)) = self.response_receipt(&grant.key, response.clone()) else {
+            return false;
+        };
         let mut pending = self.pending.lock().expect("Python replies poisoned");
         if !pending.get(&grant.key).is_some_and(|call| {
             call.invocation == grant.invocation
@@ -3788,7 +3790,13 @@ impl PythonTools {
                 .and_then(|owner| owner.upgrade())
             {
                 if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
-                    frame.record(&grant.key, grant.invocation, generation.clone(), &receipt, item);
+                    frame.record(
+                        &grant.key,
+                        grant.invocation,
+                        generation.clone(),
+                        &receipt,
+                        item,
+                    );
                 }
             }
         }
@@ -3904,7 +3912,11 @@ impl PythonTools {
         Ok(true)
     }
 
-    pub(crate) fn record_approved_result(&self, key: &PendingKey, response: &DynamicToolResponse) -> Result<()> {
+    pub(crate) fn record_approved_result(
+        &self,
+        key: &PendingKey,
+        response: &DynamicToolResponse,
+    ) -> Result<()> {
         let Some(generation) = self.resolve_generation(key.reply.generation) else {
             return Ok(());
         };
@@ -3918,8 +3930,12 @@ impl PythonTools {
         let Some((invocation, payload)) = captured else {
             return Ok(());
         };
-        let owner = self.manual_restore.lock().expect("Manual restore poisoned")
-            .as_ref().and_then(|owner| owner.upgrade());
+        let owner = self
+            .manual_restore
+            .lock()
+            .expect("Manual restore poisoned")
+            .as_ref()
+            .and_then(|owner| owner.upgrade());
         if let Some(owner) = owner {
             let item = Self::response_receipt_from_payload(key, response.clone(), payload)?;
             if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
@@ -3968,7 +3984,8 @@ impl PythonTools {
             .iter()
             .position(|entry| {
                 entry.manual
-                    && entry.name.clone().with_default_namespace() == name.clone().with_default_namespace()
+                    && entry.name.clone().with_default_namespace()
+                        == name.clone().with_default_namespace()
                     && (matches!(entry.spec, ToolSpec::ApplyPatch {}) == patch)
                     && (matches!(entry.spec, ToolSpec::ApplicationShell { .. }) == shell)
             })
@@ -3985,6 +4002,7 @@ impl PythonTools {
             model,
             true,
             profile.as_ref(),
+            None,
             None,
             None,
         )
@@ -4326,7 +4344,7 @@ impl PythonTools {
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
             thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
-            media, None,
+            media, None, None,
         )
     }
 
@@ -4345,6 +4363,7 @@ impl PythonTools {
         profile: Option<&codex_extension_api::AgentProfileReceipt>,
         media: Option<NativeMediaContext>,
         realtime_tool_call: Option<Value>,
+        builtin_tools: Option<&HashSet<ToolName>>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         let entry = &generation.entries[slot];
         let key = PendingKey {
@@ -4388,6 +4407,7 @@ impl PythonTools {
                 "_sdk_invocation": invocation, "_sdk_manual": entry.manual,
                 "_sdk_code_origin": code_origin, "_sdk_model": model,
                 "_sdk_realtime_tool_call": realtime_tool_call,
+                "_sdk_builtin_tools": builtin_tools,
                 "_sdk_realtime_tool_name": codex_extension_api::realtime_tool_wire_name(&entry.name),
                 "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
@@ -5792,6 +5812,7 @@ impl PythonContributor {
         slots: &[usize],
         profile: Option<codex_extension_api::AgentProfileReceipt>,
         accepted: Option<AcceptedToolCalls>,
+        builtin_tools: Option<Arc<codex_extension_api::FinalStepBuiltinTools>>,
     ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         slots
             .iter()
@@ -5806,6 +5827,7 @@ impl PythonContributor {
                     decision_selection: decision_selection.clone(),
                     managed_calls: self.managed_calls.clone(),
                     accepted: accepted.clone(),
+                    builtin_tools: builtin_tools.clone(),
                     thread: thread.level_id().to_string(),
                     tools: tools.clone(),
                     generation: generation.clone(),
@@ -6197,6 +6219,7 @@ impl ToolContributor for PythonContributor {
             &slots,
             None,
             None,
+            None,
         )
     }
 
@@ -6261,6 +6284,7 @@ impl ToolContributor for PythonContributor {
             &snapshot.slots,
             profile,
             Some(snapshot.accepted.clone()),
+            Some(step.get_or_init(codex_extension_api::FinalStepBuiltinTools::default)),
         )
     }
 
@@ -6473,6 +6497,7 @@ impl ToolContributor for PythonContributor {
 struct PythonExecutor {
     decision_selection: Option<Arc<crate::agent_profiles::DecisionHandoffSelection>>,
     accepted: Option<AcceptedToolCalls>,
+    builtin_tools: Option<Arc<codex_extension_api::FinalStepBuiltinTools>>,
     managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     thread: String,
     tools: Arc<PythonTools>,
@@ -6595,6 +6620,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     profile: call.provider_reference_profile,
                 }),
                 call.conversation_history.realtime_tool_call().cloned(),
+                self.builtin_tools
+                    .as_ref()
+                    .and_then(|receipt| receipt.names()),
             );
             let (key, invocation, receiver) = match pending {
                 Ok(pending) => pending,
@@ -9407,6 +9435,7 @@ pub(crate) mod managed_tests {
             managed_calls: None,
             profile: None,
             accepted: None,
+            builtin_tools: None,
             thread: "owner".into(),
             generation: tools.snapshot(),
             tools,
