@@ -170,8 +170,11 @@ class ModelResponse:
     usage: dict[str, int] | None = None
     response_id: str = field(default_factory=lambda: "resp_" + uuid4().hex)
 
-    def _capture(self, *, capture_raw_usage: bool = False) -> str:
+    def _capture(
+        self, *, capture_raw_usage: bool = False, capture_raw_provider_events: bool = False
+    ) -> str:
         usage: Any = None
+        raw: Any = None
         rendered: str | None = None
         try:
             if not isinstance(self.response_id, str) or not self.response_id.strip():
@@ -195,12 +198,15 @@ class ModelResponse:
                 usage = {key: self.usage.get(key, 0) for key in fields}
                 if "total_tokens" not in self.usage:
                     usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+            if capture_raw_provider_events:
+                raw = getattr(self, "_raw_chat_completion", None)
             try:
                 rendered = json.dumps(
                     {
                         "response_id": self.response_id,
                         "output": self.output,
                         "usage": usage,
+                        **({"raw_chat_completion": raw} if raw is not None else {}),
                         **(
                             {"original_usage": _capture_responses_usage(self)}
                             if capture_raw_usage
@@ -217,7 +223,7 @@ class ModelResponse:
             return rendered
         finally:
             # Invalid provider counters must not retain output through this frame.
-            del self, usage, rendered
+            del self, usage, raw, rendered
 
 
 def _capture_responses_usage(response: ModelResponse) -> dict[str, Any] | None:
@@ -354,6 +360,7 @@ class ChatCompletionsModel:
         reason: Any = None
         reasoning: Any = None
         response: Any = None
+        returned: ModelResponse | None = None
         text: Any = None
         text_part: dict[str, Any] | None = None
         tool: Any = None
@@ -652,6 +659,10 @@ class ChatCompletionsModel:
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
             choice = value["choices"][0]
             message = choice["message"]
+            if isinstance(self, LitellmModel) and message.get("refusal") is None:
+                provider_data = (message.get("provider_specific_fields") or {}).get("refusal")
+                if provider_data is not None:
+                    message = {**message, "refusal": provider_data}
             if (
                 choice.get("finish_reason") == "content_filter"
                 and not message.get("content")
@@ -756,7 +767,10 @@ class ChatCompletionsModel:
                     else counter
                     for key, counter in usage.items()
                 }
-            return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+            returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+            if getattr(request, "_observe_raw_provider_events", False):
+                object.__setattr__(returned, "_raw_chat_completion", deepcopy(value))
+            return returned
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
             del (
@@ -789,6 +803,7 @@ class ChatCompletionsModel:
                 reason,
                 reasoning,
                 response,
+                returned,
                 text,
                 text_part,
                 tool,
@@ -827,9 +842,6 @@ class LitellmModel(ChatCompletionsModel):
     """
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
-        choice: Any = None
-        message: Any = None
-        refusal: Any = None
         response: Any = None
         value: Any = None
         try:
@@ -842,15 +854,10 @@ class LitellmModel(ChatCompletionsModel):
                 }
             response = await self.client.acompletion(**options)
             value = response.model_dump()
-            for choice in value["choices"]:
-                message = choice["message"]
-                refusal = (message.get("provider_specific_fields") or {}).get("refusal")
-                if message.get("refusal") is None and refusal is not None:
-                    message["refusal"] = refusal
             return value
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
-            del request, options, choice, message, refusal, response, value
+            del request, options, response, value
 
 
 @dataclass(frozen=True)
