@@ -713,8 +713,16 @@
       "sha256": "28b476d55f92c8b7eb619eedb3ee34d80eaccb512f23e3a6b084668f8b15ebad"
     },
     {
+      "path": "sdk-model-attempt-accounting.patch",
+      "sha256": "36d245c076fdae420316ecd26218c7039307ec4877b385a30e769cda0cfc02f9"
+    },
+    {
+      "path": "sdk-tracing-id-annotations.patch",
+      "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
-      "sha256": "6b4bb517e325c7f9853f6b43cf931529165caef7b787b058243cc282e140d5fa"
+      "sha256": "487a2e788517874133ef1d0aef8366cbcbd885fdb57783c1d569d374aed14220"
     },
     {
       "path": "sdk-native-hosted-prompts-request-ownership.patch",
@@ -726,7 +734,7 @@
     },
     {
       "path": "sdk-native-model-attempt-retry.patch",
-      "sha256": "f77247de799d0167f14453e0d57b5de61ecf88f41fec90b392378c253c61f507"
+      "sha256": "6c200a67f90681f5bdb77df080ecd85524e92598f9d1d21d7c6c7b3db3b8d207"
     },
     {
       "path": "sdk-realtime-incarnation-ownership.patch",
@@ -762,8 +770,8 @@
     },
     {
       "path": "sdk-trace-delivery-controls.patch",
-      "sha256": "a5e59a6f6dbed9003978f4d108172097671ef3e58a854c55fc4545a73ca00c0d"
+      "sha256": "f8840b7a511ea755e2368b6d2ac8a3e27df50dd583908935e4ccd714fee12277"
     }
   ],
-  "result_tree": "54ea0c91297f182208608411bd998deae5312131"
+  "result_tree": "e8145961681ac2126a14bbfe20a1eec3018d8b78"
 }

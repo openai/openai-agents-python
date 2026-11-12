@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio as asyncio
 import importlib as importlib
+import inspect as _inspect
 import json as json
 from collections import deque as _deque
 from collections.abc import (
+    Callable as Callable,
     Callable as _Callable,
     Coroutine as Coroutine,
     Iterator as Iterator,
@@ -522,12 +524,110 @@ class TraceOptions:
     disabled: bool | None = None
     include_sensitive_data: bool | None = None
     export_credentials: TraceExportCredentials | None = field(default=None, repr=False)
+    span_id: str | None = None
 
 
 _current: ContextVar[SpanContext | None] = ContextVar("agents_trace_context", default=None)
 _in_processor: ContextVar[bool] = ContextVar("agents_trace_processor", default=False)
 _tracing_disabled = False
 _sensitive_data_logging_enabled = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class TracingIdGenerator:
+    """Synchronous ID policy for newly admitted SDK scopes.
+
+    Trace IDs contain 32 hexadecimal digits; span IDs contain 16. Neither may
+    be zero. Omitted callbacks preserve native generation. Native engine spans
+    retain their native ID policy.
+    """
+
+    generate_trace_id: _Callable[[], str] | None = None
+    generate_span_id: _Callable[[], str] | None = None
+
+
+_id_generator = TracingIdGenerator()
+
+
+def set_tracing_id_generator(generator: TracingIdGenerator | None = None) -> None:
+    """Replace the policy for future SDK scope admissions; None restores defaults."""
+    callback = None
+    try:
+        if generator is not None and not isinstance(generator, TracingIdGenerator):
+            raise TypeError("generator must be TracingIdGenerator or None")
+        if generator is None:
+            generator = TracingIdGenerator()
+        for callback in (generator.generate_trace_id, generator.generate_span_id):
+            if callback is not None and (
+                not callable(callback) or _inspect.iscoroutinefunction(callback)
+            ):
+                raise TypeError("Tracing ID generators must be synchronous callables")
+        global _id_generator
+        _id_generator = generator
+    finally:
+        del generator, callback
+
+
+def _generated_id(callback: _Callable[[], str], digits: int) -> str:
+    value: Any = None
+    try:
+        value = callback()
+        if not isinstance(value, str):
+            if _inspect.iscoroutine(value):
+                value.close()
+            raise TypeError("Tracing ID generators must return strings")
+        if (
+            len(value) != digits
+            or any(char not in "0123456789abcdefABCDEF" for char in value)
+            or not int(value, 16)
+        ):
+            raise ValueError("Tracing ID generator returned an invalid identifier")
+        return value
+    finally:
+        del callback, value
+
+
+def _generated_scope_ids(
+    options: TraceOptions,
+    parent: SpanContext | None,
+    ambient: SpanContext | None,
+    restrictions: tuple[str, ...],
+    native: Any,
+) -> dict[str, str]:
+    generator = _id_generator
+    token = None
+    try:
+        if generator.generate_trace_id is None and generator.generate_span_id is None:
+            return {}
+        if (
+            _tracing_disabled
+            or _in_processor.get()
+            or options.disabled
+            or (parent is not None and parent.disabled)
+            or (ambient is not None and ambient.disabled)
+            or any(
+                json.loads(native.trace_span_context(restriction))["disabled"]
+                for restriction in restrictions
+            )
+        ):
+            return {}
+        # The same suppression used for processor callbacks prevents recursive
+        # scopes from entering another application ID generator.
+        token = _in_processor.set(True)
+        ids = {}
+        if (
+            options.trace_id is None
+            and (parent is None or options.detached)
+            and generator.generate_trace_id is not None
+        ):
+            ids["trace_id"] = _generated_id(generator.generate_trace_id, 32)
+        if options.span_id is None and generator.generate_span_id is not None:
+            ids["span_id"] = _generated_id(generator.generate_span_id, 16)
+        return ids
+    finally:
+        if token is not None:
+            _in_processor.reset(token)
+        del generator, options, parent, ambient, restrictions, native
 
 
 def set_tracing_disabled(disabled: bool) -> None:
@@ -726,6 +826,9 @@ class TraceScope:
                 "credential_ref": None,
                 **_admission_policy(),
             }
+            if value.span_id is not None:
+                wire["span_id"] = value.span_id
+            wire.update(_generated_scope_ids(value, parent, ambient, self._restrictions, native))
             if self._restrictions:
                 wire["restrictions_parents"] = list(self._restrictions)
             json.dumps(wire, allow_nan=False)
@@ -824,7 +927,12 @@ class TraceScope:
         failed = False
         try:
             assert self._span_handle is not None
-            native.end_trace_span(self._span_handle, json.dumps(outcome))
+            native.end_trace_span(
+                self._span_handle,
+                json.dumps(outcome, ensure_ascii=False, separators=(",", ":"))
+                .encode("utf-8", "backslashreplace")
+                .decode("utf-8"),
+            )
         except Exception:
             failed = True
             # Native payload validation can reject before ending the recording

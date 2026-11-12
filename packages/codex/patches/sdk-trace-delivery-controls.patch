@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index 9edd3ca7ef9f2fe0c59de68d45a3f273c2101ac2..3bd4be0a37deb92eb44ddc661cfaa166cbfb18e5 100644
+index 72f25f3a..05d903fd 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -13,6 +13,50 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -63,7 +63,7 @@ index 9edd3ca7ef9f2fe0c59de68d45a3f273c2101ac2..3bd4be0a37deb92eb44ddc661cfaa166
      pending: BTreeSet<u64>,
      dispatch_waiters: BTreeMap<u64, tokio::sync::oneshot::Sender<()>>,
      bytes: usize,
-@@ -296,10 +343,19 @@ fn enqueue_event(
+@@ -320,10 +367,19 @@ fn enqueue_event(
          }
          value["__root_descriptor"] = descriptor;
      }
@@ -85,15 +85,15 @@ index 9edd3ca7ef9f2fe0c59de68d45a3f273c2101ac2..3bd4be0a37deb92eb44ddc661cfaa166
      }
      s.bytes += bytes;
      s.pending.insert(sequence);
-@@ -355,6 +411,7 @@ pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
-         if !enqueue_event(&mut s, sequence, value, descriptor, None) {
+@@ -379,6 +435,7 @@ pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
+         if !enqueue_event(&mut s, sequence, value, descriptor, None, 65_536) {
              return Err("Trace event exceeds processor queue capacity".into());
          }
 +        s.draining = true;
          let (sender, acknowledged) = tokio::sync::oneshot::channel();
          s.dispatch_waiters.insert(sequence, sender);
          acknowledged
-@@ -380,7 +437,20 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+@@ -404,7 +461,20 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
          .flush_snapshot
          .map(|(barrier, _, _)| barrier)
          .filter(|barrier| s.pending.range(..=*barrier).next().is_some());
@@ -115,7 +115,7 @@ index 9edd3ca7ef9f2fe0c59de68d45a3f273c2101ac2..3bd4be0a37deb92eb44ddc661cfaa166
          if s.queue
              .front()
              .is_some_and(|(seq, _, _, _)| cutoff.is_some_and(|cutoff| *seq > cutoff))
-@@ -410,6 +480,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+@@ -434,6 +504,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
          }
          events.push(value);
      }
@@ -135,7 +135,7 @@ index 9edd3ca7ef9f2fe0c59de68d45a3f273c2101ac2..3bd4be0a37deb92eb44ddc661cfaa166
      let through = cutoff.unwrap_or(s.sequence);
      if s.queue.front().is_none_or(|(seq, _, _, _)| *seq > through) {
          s.delivered = s.delivered.max(through);
-@@ -1101,6 +1184,12 @@ mod tests {
+@@ -1125,6 +1208,12 @@ mod tests {
  
          let _test = TEST_LOCK.lock().unwrap();
          *lock() = Routes::default();
@@ -148,7 +148,7 @@ index 9edd3ca7ef9f2fe0c59de68d45a3f273c2101ac2..3bd4be0a37deb92eb44ddc661cfaa166
          set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
          let encoded = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
          let first_wakes = Arc::new(WakeCounter::default());
-@@ -1113,7 +1202,14 @@ mod tests {
+@@ -1137,7 +1226,14 @@ mod tests {
          let mut second = std::pin::pin!(dispatch_trace_event(encoded));
  
          assert!(first.as_mut().poll(&mut first_context).is_pending());
@@ -163,7 +163,7 @@ index 9edd3ca7ef9f2fe0c59de68d45a3f273c2101ac2..3bd4be0a37deb92eb44ddc661cfaa166
          drain_trace_events(2).unwrap();
          ack_trace_events(1, 0).unwrap();
          assert_eq!(first_wakes.0.load(Ordering::Relaxed), 1);
-@@ -1130,6 +1226,173 @@ mod tests {
+@@ -1154,6 +1250,173 @@ mod tests {
          );
      }
  

@@ -17,6 +17,7 @@ from agents import (
     CustomStorage,
     FunctionTool,
     Interaction,
+    InteractionRequired,
     LocalStorage,
     NativeError,
     NativeProvider,
@@ -55,10 +56,12 @@ async def test_budget_follows_live_managed_approval(responses, max_requests):
         responses.respond(assistant_output("Done"))
     agent = Agent(instructions="Record and answer.", provider=provider(responses), tools=[record])
     async with timeout(20), agent.session() as session:
-        turn = await session.submit("begin", budget=RunBudget(max_requests=max_requests))
+        turn = await session.submit(
+            "begin", budget=RunBudget(max_requests=max_requests, max_tokens=1000)
+        )
         request = await next_request(session.interactions(), record)
         assert effects == []
-        with pytest.raises(CapabilityError, match="Cannot checkpoint an active run with a budget"):
+        with pytest.raises(CapabilityError, match="Only request-only"):
             await session.suspend()
         await request.approve()
         if max_requests == 1:
@@ -379,7 +382,7 @@ async def test_budgeted_idle_restore_uses_saved_default_selection(
 ) -> None:
     lookup = lookup_tool()
     agent = Agent(instructions="Answer.", provider=provider(responses), tools=[lookup])
-    budget = RunBudget(max_requests=1)
+    budget = RunBudget(max_requests=1, max_tokens=1000)
     async with timeout(15):
         async with agent.session() as session:
             await session.update(tools=[lookup.ref] if manual_selected else [])
@@ -401,7 +404,7 @@ async def test_budget_keeps_live_manual_boundary_but_refuses_capture(
 ) -> None:
     lookup = lookup_tool()
     agent = Agent(instructions="Look up the key.", provider=provider(responses), tools=[lookup])
-    budget = RunBudget(max_requests=1)
+    budget = RunBudget(max_requests=1, max_tokens=1000)
     async with timeout(20):
         with pytest.raises(CapabilityError, match="cannot be captured"):
             await agent.run("no automatic capture", budget=budget)
@@ -411,7 +414,7 @@ async def test_budget_keeps_live_manual_boundary_but_refuses_capture(
             turn = await session.submit("look up A", budget=budget)
             request = await next_request(session.interactions(), lookup)
             assert (await session.checkpoint_status(kind="manual_wait")).status == "not_ready"
-            with pytest.raises(CapabilityError, match="active run with a budget"):
+            with pytest.raises(CapabilityError, match="Only request-only"):
                 await session.suspend()
             await request.respond("result from the live application")
             with pytest.raises(NativeError) as stopped:
@@ -547,3 +550,118 @@ async def test_budget_stop_is_a_supervisory_outcome(
             await turn.get_result()
         assert original.value is outcome.error
         assert len(responses.requests) == expected_requests
+
+
+@pytest.mark.parametrize("approval", [False, True])
+@pytest.mark.parametrize("max_requests", [1, 2])
+async def test_request_budget_survives_portable_same_turn_restart(
+    responses, approval, max_requests
+):
+    effects = []
+
+    @function_tool
+    def accepted() -> str:
+        effects.append("sibling")
+        return "recorded sibling"
+
+    @function_tool(needs_approval=True)
+    def approved() -> str:
+        effects.append("approved")
+        return "recorded approval"
+
+    lookup = lookup_tool()
+    pending = approved if approval else lookup
+    arguments = {} if approval else {"key": "A"}
+    responses.respond(
+        function_call("accepted", {}, "sibling"), function_call(pending.name, arguments, "pending")
+    )
+    if max_requests == 2:
+        responses.respond(assistant_output("Done"))
+    agent = Agent(
+        instructions="Use tools and answer.",
+        provider=provider(responses),
+        tools=[accepted, pending],
+    )
+    limits = RunBudget(max_requests=max_requests)
+    async with timeout(20):
+        async with agent.session() as source:
+            await source.submit("begin", budget=limits)
+            await next_request(source.interactions(), pending)
+            saved = await source.suspend()
+            assert (await source.suspend()).to_json() == saved.to_json()
+        assert saved.format_version == 8
+        assert saved.run_budget is not None
+        assert saved.run_budget.admitted_requests == 1
+        assert effects == ["sibling"]
+        for invalid in (
+            None,
+            RunBudget(max_requests=max_requests + 1),
+            RunBudget(max_requests=max_requests, max_tokens=1000),
+        ):
+            with pytest.raises(CapabilityError):
+                async with agent.session(state=saved, resume_budget=invalid):
+                    pytest.fail("Invalid trusted ceiling opened a Session")
+        assert len(responses.requests) == 1
+        async with agent.session(state=saved, resume_budget=limits) as restored:
+            request = await next_request(restored.interactions(), pending)
+            if approval:
+                await request.approve()
+            else:
+                await request.respond("live result")
+            if max_requests == 1:
+                with pytest.raises(NativeError) as stopped:
+                    await restored.restored_turn.get_result()
+                assert stopped.value.code == "run_budget_exceeded"
+            else:
+                assert (await restored.restored_turn.get_result()).final_output == "Done"
+        assert effects == (["sibling", "approved"] if approval else ["sibling"])
+        assert len(responses.requests) == max_requests
+
+
+@pytest.mark.parametrize("version", [True, 1.0, 2])
+def test_request_budget_checkpoint_requires_an_exact_version(version):
+    from _agents_codex.state import _RequestRunBudgetCheckpoint
+
+    with pytest.raises(ValueError):
+        _RequestRunBudgetCheckpoint.model_validate(
+            {"version": version, "max_requests": 2, "admitted_requests": 1}
+        )
+
+
+async def test_request_budget_one_shot_manual_resume(responses):
+    lookup = lookup_tool()
+    responses.respond(function_call("lookup", {"key": "A"}, "pending"))
+    responses.respond(assistant_output("Done"))
+    agent = Agent(instructions="Use lookup.", provider=provider(responses), tools=[lookup])
+    async with timeout(20):
+        with pytest.raises(InteractionRequired) as pending:
+            await agent.run("begin", budget=RunBudget(max_requests=2))
+        state = pending.value.state
+        assert state is not None and state.run_budget is not None
+        result = await agent.run(
+            None,
+            state=state,
+            budget=RunBudget(max_requests=2),
+            on_interaction=lambda event: lookup.match(event).reply("result"),
+        )
+        assert result.final_output == "Done"
+    assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"max_requests": True, "admitted_requests": 0},
+        {"max_requests": 2, "admitted_requests": True},
+        {"max_requests": 2, "admitted_requests": 1.0},
+        {"max_requests": 2, "admitted_requests": 3},
+        {"max_requests": -1, "admitted_requests": 0},
+        {"max_requests": 2**53, "admitted_requests": 0},
+        {"max_requests": 2, "admitted_requests": 0, "max_tokens": 10},
+    ],
+)
+def test_request_budget_checkpoint_rejects_malformed_admissions(fields):
+    from _agents_codex.state import _RequestRunBudgetCheckpoint
+
+    with pytest.raises(ValueError):
+        _RequestRunBudgetCheckpoint.model_validate({"version": 1, **fields})
