@@ -72,6 +72,8 @@ pub(crate) struct ProfileSpec {
     mcp_result_tools: BTreeMap<String, BTreeMap<String, f64>>,
     #[serde(default)]
     mcp_metadata_tools: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    mcp_discovery_tools: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     mcp_tools: BTreeMap<String, McpToolDeclaration>,
 }
@@ -652,6 +654,7 @@ async fn prepare_profile(
     let result_selection: crate::mcp_result_control::Selection = serde_json::from_value(json!({
         "generation": catalog.generation.id, "servers": descriptor.mcp_result_tools,
         "metadata_servers": descriptor.mcp_metadata_tools,
+        "discovery_servers": descriptor.mcp_discovery_tools,
     }))?;
     result_selection.validate(&servers)?;
     let (mcp, plugins) = thread.prepare_agent_profile_mcp(servers).await?;

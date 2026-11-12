@@ -35,6 +35,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef
 
 if TYPE_CHECKING:
+    from .agent import Agent
     from .executor import Environment
     from .native_agents import ChildInvocation
     from .native_interception import Allow, NativeToolCall, ReplaceArguments, StopTurn
@@ -290,6 +291,25 @@ class MCPMetadataContext(Generic[ContextT_co]):
     arguments: Mapping[str, Any] = field(repr=False)
 
 
+class MCPToolDefinition(TypedDict):
+    name: str
+    inputSchema: dict[str, Any]
+    title: NotRequired[str]
+    description: NotRequired[str]
+    annotations: NotRequired[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class MCPDiscoveryContext(Generic[ContextT_co]):
+    """Current admitted discovery owner, without a synthetic tool call."""
+
+    context: ContextT_co = field(repr=False)
+    submission: Turn[Any] | ChildInvocation
+    agent: Agent[Any, Any]
+    server_name: str
+    step_index: int
+
+
 @dataclass(frozen=True, kw_only=True)
 class _MCP(Generic[ContextT_contra]):
     """Shared options; use StdioMCP or HttpMCP to declare a server.
@@ -355,10 +375,29 @@ class _MCP(Generic[ContextT_contra]):
         | None
     ) = field(default=None, repr=False)
     defer_loading: bool = False
+    # Raw listing cache, independent of per-step narrowing.
+    cache_tools_list: bool | None = None
+    # Text-step discovery only; no filtered server tools in Realtime/SIP catalogs.
+    # Separate MCP declarations with approval callbacks for Realtime authorization.
+    tool_filter: (
+        Callable[
+            [MCPDiscoveryContext[ContextT_contra], MCPToolDefinition],
+            bool | Awaitable[bool],
+        ]
+        | None
+    ) = field(default=None, repr=False)
 
     _name_tools: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self.cache_tools_list is not None and type(self.cache_tools_list) is not bool:
+            raise TypeError("MCP cache_tools_list must be a bool or None")
+        if self.tool_filter is not None and not callable(self.tool_filter):
+            raise TypeError("MCP tool_filter must be callable")
+        if self.name == "codex_apps" and (
+            self.tool_filter is not None or self.cache_tools_list is not None
+        ):
+            raise ValueError("MCP discovery requires an ordinary StdioMCP or HttpMCP declaration")
         if self.request_metadata is not None and self.name == "codex_apps":
             raise ValueError(
                 "MCP request_metadata requires an ordinary StdioMCP or HttpMCP declaration"
@@ -434,6 +473,7 @@ class _MCP(Generic[ContextT_contra]):
         from ._function_tools import _policy_hints, _requires_context
 
         for name, context_type in (
+            ("tool_filter", MCPDiscoveryContext),
             ("transform_result", MCPResultContext),
             ("extract_application_data", MCPResultContext),
             ("request_metadata", MCPMetadataContext),
@@ -465,6 +505,8 @@ class _MCP(Generic[ContextT_contra]):
             "startup_timeout_sec": self.startup_timeout,
             "tool_timeout_sec": self.execution_timeout,
         }
+        if self.cache_tools_list is not None:
+            config["sdk_cache_tools_list"] = self.cache_tools_list
         if self.approval_mode == "preapproved":
             config["tools"] = {name: {"approval_mode": "approve"} for name in self.tools}
         return config
@@ -680,6 +722,8 @@ class HostedVerificationMCP(HttpMCP[ContextT_contra]):
     """
 
     name: Literal["codex_apps"] = field(default="codex_apps", init=False)
+    cache_tools_list: ClassVar[None] = None  # type: ignore[misc]
+    tool_filter: ClassVar[None] = None  # type: ignore[misc]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -694,6 +738,8 @@ class ChatGPTAppsMCP(HttpMCP[ContextT_contra]):
     """
 
     name: Literal["codex_apps"] = field(default="codex_apps", init=False)
+    cache_tools_list: ClassVar[None] = None  # type: ignore[misc]
+    tool_filter: ClassVar[None] = None  # type: ignore[misc]
     url: str = field(default="https://chatgpt.com/backend-api/ps/mcp", init=False, repr=False)
     bearer_token: None = field(default=None, init=False, repr=False)
     # ClassVar removes the inherited field; Apps accepts no custom headers.
@@ -818,6 +864,17 @@ def _result_policies(servers: tuple[_MCP[Any], ...], generation: int) -> str:
     return json.dumps(
         {
             "generation": generation,
+            **(
+                {
+                    "discovery_servers": {
+                        server.name: list(server.tools)
+                        for server in servers
+                        if server.tool_filter is not None
+                    }
+                }
+                if any(server.tool_filter is not None for server in servers)
+                else {}
+            ),
             "metadata_servers": {
                 server.name: list(server.tools)
                 for server in servers

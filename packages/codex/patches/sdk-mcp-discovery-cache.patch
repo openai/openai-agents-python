@@ -1,0 +1,863 @@
+diff --git a/codex-rs/cli/src/mcp_cmd.rs b/codex-rs/cli/src/mcp_cmd.rs
+index ac4b0154b36ea7db008ce3e47de2d3ac06320b4e..393b0d1ab9c57fb80fe030420baaea2797822489 100644
+--- a/codex-rs/cli/src/mcp_cmd.rs
++++ b/codex-rs/cli/src/mcp_cmd.rs
+@@ -428,6 +428,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+diff --git a/codex-rs/codex-mcp/src/binding.rs b/codex-rs/codex-mcp/src/binding.rs
+index f455bef2d1ad16ecf7b872fa4f19414b4e63d146..e843d89579fb999ed0233506c43cd7ff97d77f9d 100644
+--- a/codex-rs/codex-mcp/src/binding.rs
++++ b/codex-rs/codex-mcp/src/binding.rs
+@@ -82,6 +82,7 @@ impl McpBinding {
+                 "Required MCP server {server} is absent from the captured Agent binding"
+             );
+         }
++        self.connections.refresh_uncached_tool_catalogs().await?;
+         self.connections.validate_required_servers().await?;
+         let captured = self
+             .connections
+diff --git a/codex-rs/codex-mcp/src/catalog_tests.rs b/codex-rs/codex-mcp/src/catalog_tests.rs
+index eaf50e79b816a425226475e9f5639cf003d2abf8..4d9dd6aa9130828842d6f326878399382835a6c2 100644
+--- a/codex-rs/codex-mcp/src/catalog_tests.rs
++++ b/codex-rs/codex-mcp/src/catalog_tests.rs
+@@ -41,6 +41,7 @@ fn server(url: &str) -> McpServerConfig {
+         enabled: true,
+         required: true,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: true,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+diff --git a/codex-rs/codex-mcp/src/client_tool_catalog.rs b/codex-rs/codex-mcp/src/client_tool_catalog.rs
+index 0501f1c782d6906656a81ee6be3047c7b5313347..986cb6db00d42a83848f6b95c74a48c411fbaf71 100644
+--- a/codex-rs/codex-mcp/src/client_tool_catalog.rs
++++ b/codex-rs/codex-mcp/src/client_tool_catalog.rs
+@@ -172,6 +172,30 @@ impl ClientToolCatalog {
+         Ok(result)
+     }
+ 
++    /// Automatic discovery preserves unchanged prepared calls and the explicit refresh fence.
++    pub(crate) async fn refresh_for_discovery<F, Fut>(&self, fetch: F) -> Result<()>
++    where
++        F: FnOnce() -> Fut,
++        Fut: Future<Output = Result<Vec<ToolInfo>>>,
++    {
++        let _refresh = self.refresh_lock.lock().await;
++        let tools = fetch().await?;
++        let (current, snapshot) = self.read_current().await;
++        if catalogs_match(&snapshot.tools, &tools) {
++            return Ok(());
++        }
++        drop(current);
++        let mut current = self.current.write().await;
++        match &mut current.source {
++            CatalogSource::Local(current_tools) => *current_tools = tools.into(),
++            CatalogSource::Live { .. } => {
++                anyhow::bail!("SDK fresh discovery requires an ordinary MCP client");
++            }
++        }
++        current.revision += 1;
++        Ok(())
++    }
++
+     /// Reject stale calls before preparation and hold catalog authority until execution finishes.
+     #[expect(
+         clippy::await_holding_invalid_type,
+diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
+index d5d7bf3f9cd17cc543390a2fe8aee4a515d3ca14..1352033819bbea615f8f361e9c7bbae0c740d3f1 100644
+--- a/codex-rs/codex-mcp/src/connection_manager.rs
++++ b/codex-rs/codex-mcp/src/connection_manager.rs
+@@ -169,6 +169,7 @@ struct McpServerView {
+     connection: Arc<McpServerConnection>,
+     protocol_mode: crate::McpProtocolMode,
+     startup_readiness: McpStartupReadiness,
++    cache_tools_list: bool,
+     metadata: McpServerMetadata,
+     tool_filter: ToolFilter,
+     tool_timeout: Option<Duration>,
+@@ -587,6 +588,7 @@ impl McpConnectionSet {
+                             connection,
+                             protocol_mode,
+                             startup_readiness: configured_config.startup_readiness,
++                            cache_tools_list: configured_config.sdk_cache_tools_list.unwrap_or(true),
+                             metadata,
+                             tool_filter: configured_tool_filter,
+                             tool_timeout: configured_tool_timeout,
+@@ -648,6 +650,7 @@ impl McpConnectionSet {
+             let tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME
+                 || server.requires_read_only_mcp_tools()
+                 || (runtime_context.owned_stdio_mode && is_stdio)
++                || configured_config.sdk_cache_tools_list == Some(false)
+             {
+                 None
+             } else if let Ok(environment) = resolved_environment.as_ref() {
+@@ -728,6 +731,7 @@ impl McpConnectionSet {
+                     }),
+                     protocol_mode,
+                     startup_readiness: configured_config.startup_readiness,
++                            cache_tools_list: configured_config.sdk_cache_tools_list.unwrap_or(true),
+                     metadata,
+                     tool_filter: configured_tool_filter,
+                     tool_timeout: configured_tool_timeout,
+diff --git a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
+index 73fb1dc720c5cad86718eedc76f06d644c1a3b9d..e9fba162d9fafee1e8f37ad5b265d5eb9688271a 100644
+--- a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
++++ b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
+@@ -197,6 +197,45 @@ impl McpConnectionSet {
+     }
+ 
+     /// Returns all tools with model-visible names normalized.
++    pub(crate) async fn refresh_uncached_tool_catalogs(&self) -> Result<()> {
++        let refreshes = self
++            .servers
++            .iter()
++            .filter(|(_, view)| !view.cache_tools_list)
++            .map(|(server_name, view)| async move {
++                anyhow::ensure!(
++                    server_name != CODEX_APPS_MCP_SERVER_NAME,
++                    "SDK fresh discovery requires an ordinary MCP server"
++                );
++                view.connection.client.reconnect_failed_startup().await;
++                let client = view
++                    .connection
++                    .client()
++                    .await
++                    .with_context(|| format!("MCP discovery client unavailable: {server_name}"))?;
++                client
++                    .tool_catalog
++                    .refresh_for_discovery(|| async {
++                        list_tools_for_client_uncached(
++                            server_name,
++                            false,
++                            "sdk_discovery",
++                            &client.client,
++                            view.tool_timeout,
++                            view.catalog_item_limit,
++                            client.server_instructions.as_deref(),
++                        )
++                        .await
++                    })
++                    .await
++                    .with_context(|| format!("MCP discovery failed: {server_name}"))
++            });
++        for result in join_all(refreshes).await {
++            result?;
++        }
++        Ok(())
++    }
++
+     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
+         Box::pin(self.list_tools_with_errors(|_| true)).await.0
+     }
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+index 4f5aaa809334cca2292d0844d9caf73989e5dc30..ca17bce68e603caacf232e046b712d5f5156175d 100644
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -4713,6 +4713,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+@@ -4743,6 +4744,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+@@ -4856,6 +4858,7 @@ fn mcp_init_error_display_prompts_for_github_pat() {
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+@@ -5018,6 +5021,7 @@ fn mcp_init_error_display_reports_generic_errors() {
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+@@ -5099,6 +5103,7 @@ fn reusable_server_config(url: &str) -> McpServerConfig {
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+diff --git a/codex-rs/codex-mcp/src/mcp/mod.rs b/codex-rs/codex-mcp/src/mcp/mod.rs
+index 3b1d475d51c682be94b8861ac7e5159bf3742386..2cf7966ae3db35da3493454eb0397366a2c9bcb9 100644
+--- a/codex-rs/codex-mcp/src/mcp/mod.rs
++++ b/codex-rs/codex-mcp/src/mcp/mod.rs
+@@ -681,6 +681,7 @@ fn mcp_server_config_for_url(
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+diff --git a/codex-rs/codex-mcp/src/mcp/mod_tests.rs b/codex-rs/codex-mcp/src/mcp/mod_tests.rs
+index 803d142826fe7fdeaa385cfe974cbbda90cf6ceb..414dc484675f173bfdf8b46585fe397210628374 100644
+--- a/codex-rs/codex-mcp/src/mcp/mod_tests.rs
++++ b/codex-rs/codex-mcp/src/mcp/mod_tests.rs
+@@ -652,6 +652,7 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -682,6 +683,7 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/codex-mcp/src/plugin_config_tests.rs b/codex-rs/codex-mcp/src/plugin_config_tests.rs
+index 3c572267093239ebaf7023ddcb69a131f0dfe6d7..6951fce9acde7ec451d914675e5dfcee36ef4e2d 100644
+--- a/codex-rs/codex-mcp/src/plugin_config_tests.rs
++++ b/codex-rs/codex-mcp/src/plugin_config_tests.rs
+@@ -536,6 +536,7 @@ fn stdio_server(
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+@@ -574,6 +575,7 @@ fn declared_placement_preserves_local_plugin_normalization() {
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+@@ -896,6 +898,7 @@ fn local_environment_placement_preserves_http_env_references() {
+                     enabled: true,
+                     required: false,
+                     startup_readiness: Default::default(),
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index 2dffb8b5446c818bea1704fcad01c1c92eb530a7..4b3b733470ee756bcf416d100adbd167a0ce0e01 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -619,13 +619,26 @@ impl McpRuntime {
+         required_servers: &[String],
+         required_plugins: &HashSet<String>,
+     ) -> Option<Arc<McpBinding>> {
++        self.try_current_binding_with_requirements(required_servers, required_plugins)
++            .await
++            .ok()
++            .flatten()
++    }
++
++    /// Checked model discovery keeps uncached-list failures ahead of provider dispatch.
++    pub async fn try_current_binding_with_requirements(
++        &self,
++        required_servers: &[String],
++        required_plugins: &HashSet<String>,
++    ) -> anyhow::Result<Option<Arc<McpBinding>>> {
+         let current = self.current.load_full();
++        current.connections.refresh_uncached_tool_catalogs().await?;
+         current.connections.record_startup_readiness(
+             "model_binding",
+             required_servers,
+             required_plugins,
+         );
+-        Self::binding_from_published_runtime(current, required_servers, required_plugins).await
++        Ok(Self::binding_from_published_runtime(current, required_servers, required_plugins).await)
+     }
+ 
+     async fn binding_from_published_runtime(
+@@ -1408,6 +1421,7 @@ mod tests {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/config/src/mcp_requirements_tests.rs b/codex-rs/config/src/mcp_requirements_tests.rs
+index 5ae1c242b413ee710d83c89e158a474cbb07476d..0ecd184c96bf303b942f296ae18650d3ba65dd5f 100644
+--- a/codex-rs/config/src/mcp_requirements_tests.rs
++++ b/codex-rs/config/src/mcp_requirements_tests.rs
+@@ -18,6 +18,7 @@ fn stdio_server(command: &str, args: &[&str]) -> McpServerConfig {
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+diff --git a/codex-rs/config/src/mcp_types.rs b/codex-rs/config/src/mcp_types.rs
+index c85e7c99b85f8e0b9bcf2a43d8de0c2a986699bd..87960299a1cca77b7f71820390f28621edba681a 100644
+--- a/codex-rs/config/src/mcp_types.rs
++++ b/codex-rs/config/src/mcp_types.rs
+@@ -224,6 +224,10 @@ pub struct McpServerConfig {
+     #[serde(flatten)]
+     pub transport: McpServerTransportConfig,
+ 
++    /// SDK list-cache override; omission retains native discovery caching.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_cache_tools_list: Option<bool>,
++
+     /// Authentication flow, including an explicit no-fallback EMA mode.
+     #[serde(default, skip_serializing_if = "is_default")]
+     pub auth: McpServerAuth,
+@@ -365,6 +369,8 @@ impl McpServerConfig {
+ #[derive(Deserialize, Clone, JsonSchema)]
+ #[schemars(deny_unknown_fields)]
+ pub struct RawMcpServerConfig {
++    #[serde(default)]
++    pub sdk_cache_tools_list: Option<bool>,
+     // stdio
+     pub command: Option<String>,
+     #[serde(default)]
+@@ -439,6 +445,7 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
+ 
+     fn try_from(raw: RawMcpServerConfig) -> Result<Self, Self::Error> {
+         let RawMcpServerConfig {
++            sdk_cache_tools_list,
+             command,
+             args,
+             env,
+@@ -571,6 +578,7 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
+         }
+ 
+         Ok(Self {
++            sdk_cache_tools_list,
+             transport,
+             auth,
+             environment_id,
+diff --git a/codex-rs/config/src/mcp_types_tests.rs b/codex-rs/config/src/mcp_types_tests.rs
+index baae2e8549e7e31a2f1113216ca67d711b1d5959..c4171a450577197f9c56ab73614396f7e924156f 100644
+--- a/codex-rs/config/src/mcp_types_tests.rs
++++ b/codex-rs/config/src/mcp_types_tests.rs
+@@ -641,6 +641,7 @@ fn deserialize_ignores_unknown_server_fields() {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/core-plugins/src/manager_tests.rs b/codex-rs/core-plugins/src/manager_tests.rs
+index 2ae390470d8d260b51db340d2d2d34b6910ebc52..44b434336350290ad52d72c8397631b4b36a0358 100644
+--- a/codex-rs/core-plugins/src/manager_tests.rs
++++ b/codex-rs/core-plugins/src/manager_tests.rs
+@@ -982,6 +982,7 @@ async fn load_plugins_loads_default_skills_and_mcp_servers() {
+                     enabled: true,
+                     required: false,
+                     startup_readiness: Default::default(),
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+@@ -1086,6 +1087,7 @@ enabled = true
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+@@ -2193,6 +2195,7 @@ async fn load_plugins_uses_manifest_configured_component_paths() {
+                     enabled: true,
+                     required: false,
+                     startup_readiness: Default::default(),
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+@@ -2534,6 +2537,7 @@ async fn load_plugins_ignores_manifest_component_paths_without_dot_slash() {
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+@@ -2791,6 +2795,7 @@ fn capability_index_filters_inactive_and_zero_capability_plugins() {
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index ddd5afc0244b63a6ddced469f5f8581a2ffb023b..45570284e3b0493ee664bb590cd7aee65ec73128 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -142,6 +142,7 @@ fn stdio_mcp_with_args(command: &str, args: &[&str]) -> McpServerConfig {
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+@@ -172,6 +173,7 @@ fn http_mcp(url: &str) -> McpServerConfig {
+         enabled: true,
+         required: false,
+         startup_readiness: Default::default(),
++        sdk_cache_tools_list: None,
+         supports_parallel_tool_calls: false,
+         tool_input_schema_max_bytes: None,
+         omit_tools_from: None,
+@@ -6873,6 +6875,7 @@ async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: std::num::NonZeroUsize::new(8_000),
+             omit_tools_from: None,
+@@ -7314,6 +7317,7 @@ async fn replace_mcp_servers_serializes_env_sorted() -> anyhow::Result<()> {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -7394,6 +7398,7 @@ async fn replace_mcp_servers_serializes_env_vars() -> anyhow::Result<()> {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -7459,6 +7464,7 @@ async fn replace_mcp_servers_serializes_sourced_env_vars() -> anyhow::Result<()>
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -7515,6 +7521,7 @@ async fn replace_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -7574,6 +7581,7 @@ async fn replace_mcp_servers_streamable_http_serializes_bearer_token() -> anyhow
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -7650,6 +7658,7 @@ async fn replace_mcp_servers_streamable_http_serializes_custom_headers() -> anyh
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -7737,6 +7746,7 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -7777,6 +7787,7 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -7853,6 +7864,7 @@ async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers()
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+@@ -7883,6 +7895,7 @@ async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers()
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+@@ -7975,6 +7988,7 @@ async fn replace_mcp_servers_serializes_disabled_flag() -> anyhow::Result<()> {
+             enabled: false,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -8029,6 +8043,7 @@ async fn replace_mcp_servers_serializes_required_flag() -> anyhow::Result<()> {
+             enabled: true,
+             required: true,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -8083,6 +8098,7 @@ async fn replace_mcp_servers_serializes_tool_filters() -> anyhow::Result<()> {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -8142,6 +8158,7 @@ async fn replace_mcp_servers_streamable_http_serializes_oauth_resource() -> anyh
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/core/src/config/edit_tests.rs b/codex-rs/core/src/config/edit_tests.rs
+index 09c5eb0211e3efee954e3f69b66b73eb1a242424..305a112ba2f82a7d32f6c5ffe9223d0c8bf36390 100644
+--- a/codex-rs/core/src/config/edit_tests.rs
++++ b/codex-rs/core/src/config/edit_tests.rs
+@@ -1081,6 +1081,7 @@ fn blocking_replace_mcp_servers_round_trips() {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: true,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -1116,6 +1117,7 @@ fn blocking_replace_mcp_servers_round_trips() {
+             enabled: false,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -1210,6 +1212,7 @@ fn blocking_replace_mcp_servers_serializes_tool_approval_overrides(output_token_
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -1288,6 +1291,7 @@ foo = { command = "cmd" }
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -1342,6 +1346,7 @@ foo = { command = "cmd" } # keep me
+             enabled: false,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -1395,6 +1400,7 @@ foo = { command = "cmd", args = ["--flag"] } # keep me
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -1449,6 +1455,7 @@ foo = { command = "cmd" }
+             enabled: false,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/core/src/mcp_skill_dependencies.rs b/codex-rs/core/src/mcp_skill_dependencies.rs
+index 5931da9100e86cae45c5527c876265fbbb258563..f7f93bc442f4b17b8bfbe9a0c365872f9d836c67 100644
+--- a/codex-rs/core/src/mcp_skill_dependencies.rs
++++ b/codex-rs/core/src/mcp_skill_dependencies.rs
+@@ -417,6 +417,7 @@ fn mcp_dependency_to_server_config(
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+@@ -458,6 +459,7 @@ fn mcp_dependency_to_server_config(
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
+index c06c65d59a9476f304caa659db7944e7334b3957..5cc30612911f51a3bc96acacabc2c5f14524adea 100644
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -453,7 +453,7 @@ impl Session {
+         selected_capability_roots: &[ResolvedSelectedCapabilityRoot],
+         required_servers: &[String],
+         required_plugins: &HashSet<String>,
+-    ) -> Arc<codex_mcp::McpBinding> {
++    ) -> CodexResult<Arc<codex_mcp::McpBinding>> {
+         let ready_selected_capability_roots =
+             Self::ready_selected_capability_roots(selected_capability_roots);
+         if self
+@@ -492,13 +492,14 @@ impl Session {
+         if let Some(binding) = self
+             .services
+             .mcp_runtime
+-            .current_binding_with_requirements(&required_servers, required_plugins)
++            .try_current_binding_with_requirements(&required_servers, required_plugins)
+             .await
++            .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?
+         {
+-            return binding;
++            return Ok(binding);
+         }
+         let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
+-        Arc::new(codex_mcp::McpBinding::empty(config))
++        Ok(Arc::new(codex_mcp::McpBinding::empty(config)))
+     }
+ 
+     #[tracing::instrument(
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 51493b00ae817a8ee0bd3c54f36c1532889e5b3c..82d26e0b56551028bd220d61fa0782da505bc053 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4394,14 +4394,14 @@ impl Session {
+                                 ),
+                             ))))
+                         } else {
+-                            Ok(self
++                            self
+                                 .mcp_runtime_for_step(
+                                     turn_context.as_ref(),
+                                     &selected_capability_roots,
+                                     required_servers,
+                                     required_plugins,
+                                 )
+-                                .await)
++                                .await
+                         }
+                     }),
+                     turn::prepare_tool_recommendations(self.as_ref(), turn_context.as_ref()),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 57f672f56ab4e0a8c6a04eb52b4603a2dc415dcd..a37bfa5097dae5624fb0c6f454b3054d17e121d7 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -9558,7 +9558,8 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
+             /*required_servers*/ &[],
+             /*required_plugins*/ &HashSet::new(),
+         )
+-        .await;
++        .await
++        .expect("MCP binding discovery");
+ 
+     let configured_servers = codex_mcp::configured_mcp_servers(new_step.mcp.config());
+     assert_eq!(
+@@ -10197,6 +10198,7 @@ async fn step_context_keeps_its_mcp_runtime_for_tools() -> anyhow::Result<()> {
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
+index 69d4e815bacd3fcb6ba2234c471ba517d6d16003..16d6c032e0ac8621ea10258f0d1a7cff4b40aa3a 100644
+--- a/codex-rs/core/tests/suite/code_mode.rs
++++ b/codex-rs/core/tests/suite/code_mode.rs
+@@ -734,6 +734,7 @@ async fn run_code_mode_turn_with_rmcp_config(
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/hooks_mcp.rs b/codex-rs/core/tests/suite/hooks_mcp.rs
+index 62056b2bb0fe6428f2d32bbf7bfb2b142f79954a..cf8ea6113abc7ed2f30a92bf415466d6f6c1d7ed 100644
+--- a/codex-rs/core/tests/suite/hooks_mcp.rs
++++ b/codex-rs/core/tests/suite/hooks_mcp.rs
+@@ -292,6 +292,7 @@ fn insert_rmcp_test_server(
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: false,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/mcp_refresh_cleanup.rs b/codex-rs/core/tests/suite/mcp_refresh_cleanup.rs
+index 9a278f88bea93a26fc661d952b83b9a7cd5f9a9a..32b3e15a156dc0b5b4ea11936bbfc59d70eff1d5 100644
+--- a/codex-rs/core/tests/suite/mcp_refresh_cleanup.rs
++++ b/codex-rs/core/tests/suite/mcp_refresh_cleanup.rs
+@@ -151,6 +151,7 @@ async fn refresh_keeps_superseded_mcp_server_alive_for_in_flight_calls() -> anyh
+                     enabled: true,
+                     required: false,
+                     startup_readiness: Default::default(),
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/mcp_startup_refresh_http_proxy.rs b/codex-rs/core/tests/suite/mcp_startup_refresh_http_proxy.rs
+index 04dfcb48de1d00bacc9ac703105dc372e73a8bc0..b6b56eb7292c4ad922620e7f38e0da89a7c6f66b 100644
+--- a/codex-rs/core/tests/suite/mcp_startup_refresh_http_proxy.rs
++++ b/codex-rs/core/tests/suite/mcp_startup_refresh_http_proxy.rs
+@@ -136,6 +136,7 @@ async fn local_mcp_startup_and_refresh_use_configured_http_client() -> Result<()
+                     enabled: true,
+                     required: false,
+                     startup_readiness: Default::default(),
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/rmcp_client.rs b/codex-rs/core/tests/suite/rmcp_client.rs
+index 598da1df8fa02c8b9fbef87558fede2a29d7eb37..8c9d3e315445b2b337d36a28e7515c84700cee2e 100644
+--- a/codex-rs/core/tests/suite/rmcp_client.rs
++++ b/codex-rs/core/tests/suite/rmcp_client.rs
+@@ -383,6 +383,7 @@ fn insert_mcp_server(
+             enabled: true,
+             required: false,
+             startup_readiness: Default::default(),
++            sdk_cache_tools_list: None,
+             supports_parallel_tool_calls: options.supports_parallel_tool_calls,
+             tool_input_schema_max_bytes: None,
+             omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/search_tool.rs b/codex-rs/core/tests/suite/search_tool.rs
+index b81f6ac7c7d97ab379b4b1a10c9b2c38a66a4f5d..77aee18ede9979ea97b354c59b5725d2b540ff3b 100644
+--- a/codex-rs/core/tests/suite/search_tool.rs
++++ b/codex-rs/core/tests/suite/search_tool.rs
+@@ -1340,6 +1340,7 @@ async fn tool_search_indexes_only_enabled_non_app_mcp_tools() -> Result<()> {
+                     scopes: None,
+                     oauth: None,
+                     oauth_resource: None,
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+@@ -1475,6 +1476,7 @@ async fn tool_search_surfaced_mcp_tool_errors_are_returned_to_model() -> Result<
+                     scopes: None,
+                     oauth: None,
+                     oauth_resource: None,
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+@@ -1626,6 +1628,7 @@ async fn tool_search_uses_non_app_mcp_server_instructions_as_namespace_descripti
+                     scopes: None,
+                     oauth: None,
+                     oauth_resource: None,
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/sqlite_state.rs b/codex-rs/core/tests/suite/sqlite_state.rs
+index 738587ecbbd0118823d5d2347fe4a0a1ddf85c8a..7b087ed678686538114eec87201cde0757a3ed81 100644
+--- a/codex-rs/core/tests/suite/sqlite_state.rs
++++ b/codex-rs/core/tests/suite/sqlite_state.rs
+@@ -886,6 +886,7 @@ async fn mcp_call_marks_thread_memory_mode_polluted_when_configured() -> Result<
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/token_budget.rs b/codex-rs/core/tests/suite/token_budget.rs
+index a0b23a1db77e15fc593198104696eb5047acfd05..72f3d16bb726045abe01c5340415b3bb1c141011 100644
+--- a/codex-rs/core/tests/suite/token_budget.rs
++++ b/codex-rs/core/tests/suite/token_budget.rs
+@@ -773,6 +773,7 @@ async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
+                     enabled: true,
+                     required: false,
+                     startup_readiness: Default::default(),
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+diff --git a/codex-rs/core/tests/suite/truncation.rs b/codex-rs/core/tests/suite/truncation.rs
+index 665e49361a626945faaf28c76b581d7f13b17d9a..5b13cd6340f3dc5b44827ff96f12860bf24f64f6 100644
+--- a/codex-rs/core/tests/suite/truncation.rs
++++ b/codex-rs/core/tests/suite/truncation.rs
+@@ -414,6 +414,7 @@ async fn mcp_tool_call_output_exceeds_limit_truncated_for_model() -> Result<()>
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+@@ -519,6 +520,7 @@ async fn mcp_image_output_preserves_image_and_no_text_summary() -> Result<()> {
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
+diff --git a/codex-rs/ext/mcp/src/plugin/provider_tests.rs b/codex-rs/ext/mcp/src/plugin/provider_tests.rs
+index 83f764083e17be404ad98616344d1e77ec368f68..f70e1256057eb1cb6765493f979cd774de350c4d 100644
+--- a/codex-rs/ext/mcp/src/plugin/provider_tests.rs
++++ b/codex-rs/ext/mcp/src/plugin/provider_tests.rs
+@@ -196,6 +196,7 @@ async fn reads_declared_config_only_through_executor_file_system() {
+                     enabled: true,
+                     required: false,
+                     startup_readiness: Default::default(),
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+@@ -226,6 +227,7 @@ async fn reads_declared_config_only_through_executor_file_system() {
+                     enabled: true,
+                     required: false,
+                     startup_readiness: Default::default(),
++                    sdk_cache_tools_list: None,
+                     supports_parallel_tool_calls: false,
+                     tool_input_schema_max_bytes: None,
+                     omit_tools_from: None,
+@@ -286,6 +288,7 @@ async fn reads_manifest_object_config_without_executor_file_system_access() {
+                 enabled: true,
+                 required: false,
+                 startup_readiness: Default::default(),
++                sdk_cache_tools_list: None,
+                 supports_parallel_tool_calls: false,
+                 tool_input_schema_max_bytes: None,
+                 omit_tools_from: None,
