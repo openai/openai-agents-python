@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, JsonValue, ValidationError
 
+from _agents_codex import _media
 from agents import (
     Agent,
     FunctionTool,
@@ -97,6 +98,38 @@ def test_portable_pending_input_keeps_order_and_detaches_changes():
     ]
     assert SessionState.from_json(staged.to_json()).pending_input == original_items
     assert staged.without_pending_input().to_json() == saved.to_json()
+
+
+@pytest.mark.parametrize(
+    "item_type", ["message", "function_call_output", "custom_tool_call_output"]
+)
+def test_portable_pending_input_enforces_audio_capacity(
+    monkeypatch: pytest.MonkeyPatch, item_type: str
+):
+    saved = checkpoint("manual")
+    part: dict[str, JsonValue] = {
+        "type": "input_audio",
+        "audio_url": "data:audio/wav;base64,AA==",
+    }
+    item: dict[str, JsonValue]
+    if item_type == "message":
+        item = {"type": item_type, "role": "user", "content": [part]}
+    else:
+        item = {"type": item_type, "call_id": "staged-audio-output", "output": [part]}
+    monkeypatch.setattr(_media, "_MAX_AUDIO_INPUT_BYTES", len(json.dumps([item])))
+
+    staged = saved.with_pending_input([item])
+    assert SessionState.from_json(staged.to_json()).pending_input == [item]
+    with pytest.raises(ValueError, match="Audio input exceeds"):
+        saved.with_pending_input([item, item])
+    with pytest.raises(ValueError, match="Audio input exceeds"):
+        staged.with_pending_input([item])
+
+    data = json.loads(staged.to_json())
+    data["native_continuation"]["pending_input"].append(item)
+    with pytest.raises(ValueError, match="Audio input exceeds"):
+        SessionState.from_json(json.dumps(data))
+    assert staged.pending_input == [item]
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])

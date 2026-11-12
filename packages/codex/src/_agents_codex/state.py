@@ -20,6 +20,7 @@ from pydantic import (
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
 from ._events import RequiredAction as RequiredAction, SessionItem as SessionItem
+from ._media import _check_audio_json
 from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .input import UserInput, _native_input
@@ -240,7 +241,9 @@ class _ManualContinuation(BaseModel):
     @_field_validator("pending_input", mode="before")
     @classmethod
     def _validate_pending_input(cls, value: object) -> list[dict[str, JsonValue]]:
-        return _PENDING_INPUT.validate_python(value)
+        items = _PENDING_INPUT.validate_python(value)
+        _check_audio_json(items)
+        return items
 
     @model_validator(mode="after")
     def validate_manual_boundary(self) -> "_ManualContinuation":
@@ -518,9 +521,9 @@ class SessionState(BaseModel):
             ]
         else:
             items = _PENDING_INPUT.validate_python(list(input))
-        staged = continuation.model_copy(
-            update={"pending_input": [*self.pending_input, *deepcopy(items)]}
-        )
+        pending = [*continuation.pending_input, *items]
+        _check_audio_json(pending)
+        staged = continuation.model_copy(update={"pending_input": deepcopy(pending)})
         return self.model_copy(update={"native_continuation": staged})
 
     def without_pending_input(self) -> "SessionState":
