@@ -383,7 +383,7 @@ index cf39953fcfeefa606263eeaa98b1800b2fc6a755..09202f13f81b1e605af46a7ca072c8bd
                          invocation_timeout_ms: None,
                          tool_choice: None,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a15e2da5d7 100644
+index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..8e5a5b50654595fd10725b81d76dc9630c910a72 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -34,6 +34,7 @@ use std::sync::atomic::Ordering;
@@ -517,7 +517,19 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
      pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
          let source = &self.client.state.session_source;
          // ThreadSpawn children expose the same attention API as root turns.
-@@ -2235,6 +2303,7 @@ impl ModelClientSession {
+@@ -1951,6 +2019,11 @@ impl ModelClientSession {
+         if !self.client.responses_websocket_enabled() {
+             return Ok(());
+         }
++        if self.client.provider_history.is_some() {
++            return Err(CodexErr::InvalidRequest(
++                "Provider history WebSocket cursor integration is pending".into(),
++            ));
++        }
+         let provider = Arc::clone(&self.client.state.provider);
+         let auth_manager = provider.auth_manager();
+         let mut auth_recovery = auth_manager
+@@ -2235,6 +2308,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -525,7 +537,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2273,16 +2342,6 @@ impl ModelClientSession {
+@@ -2273,16 +2347,6 @@ impl ModelClientSession {
                  prompt.cyber_access_program,
                  self.client.api_key_cyber_access_programs,
              )?;
@@ -542,7 +554,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
              let observation_is_reviewer = is_guardian_reviewer(&responses_headers);
              options.extra_headers.extend(responses_headers);
              let interceptors = crate::model_request::prepare(
-@@ -2294,6 +2353,31 @@ impl ModelClientSession {
+@@ -2294,6 +2358,31 @@ impl ModelClientSession {
                  &mut request.client_metadata,
                  prompt.tool_admission.clone(),
              );
@@ -574,7 +586,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
              let inference_trace_attempt = inference_trace.start_attempt();
              inference_trace_attempt.add_request_headers(&mut options.extra_headers);
              if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
-@@ -2302,7 +2386,13 @@ impl ModelClientSession {
+@@ -2302,7 +2391,13 @@ impl ModelClientSession {
                  }
                  request.input = input;
              }
@@ -589,7 +601,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
              let request_transport = if prompt.prefer_buffered_response {
                  codex_extension_api::ModelRequestTransport::HttpJson
              } else {
-@@ -2412,8 +2502,13 @@ impl ModelClientSession {
+@@ -2412,8 +2507,13 @@ impl ModelClientSession {
                      stream.producer_task = producer_task;
                      stream.producer_stop = producer_stop;
                      stream.request_observation = request_observation;
@@ -605,7 +617,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
                      return Ok(stream);
                  }
                  Err(ApiError::Transport(unauthorized_transport))
-@@ -2430,6 +2525,7 @@ impl ModelClientSession {
+@@ -2430,6 +2530,7 @@ impl ModelClientSession {
                          response_debug_context.request_id.as_deref(),
                          /*output_items*/ &[],
                      );
@@ -613,7 +625,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
                      auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
                          handle_unauthorized(
                              unauthorized_transport,
-@@ -2488,6 +2584,9 @@ impl ModelClientSession {
+@@ -2488,6 +2589,9 @@ impl ModelClientSession {
          inference_trace: &InferenceTraceContext,
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<WebsocketStreamOutcome> {
@@ -623,7 +635,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
-@@ -2520,6 +2619,7 @@ impl ModelClientSession {
+@@ -2520,6 +2624,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -631,7 +643,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2615,7 +2715,11 @@ impl ModelClientSession {
+@@ -2615,7 +2720,11 @@ impl ModelClientSession {
              if let Some(turn_state) = self.turn_state.get() {
                  client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
              }
@@ -644,7 +656,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..2e21e8245634a4ae8e57207ecce372a1
              let (mode, reason) = if continuation.is_some() {
                  ("incremental", "incremental")
              } else {
-@@ -2875,6 +2979,10 @@ impl ModelClientSession {
+@@ -2875,6 +2984,10 @@ impl ModelClientSession {
          service_tier: Option<String>,
          responses_metadata: &CodexResponsesMetadata,
      ) -> Result<()> {
