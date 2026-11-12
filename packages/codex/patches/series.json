@@ -889,6 +889,10 @@
       "sha256": "f70e4a2e85f8928eb8f37a1bfe31a62d647ac08a8a2c9ca8d3c2482ba5712c20"
     },
     {
+      "path": "sdk-native-custom-string-tools.patch",
+      "sha256": "cb1835cce8e8926674ac438a8b6713ec71053c73db1270dd88ee27d763c3322f"
+    },
+    {
       "path": "sdk-request-transport-overrides.patch",
       "sha256": "ff262396ca0159c9f18d837ada626be2b9587fd6a6796b3bf8b3a252531718f3"
     },
@@ -909,5 +913,5 @@
       "sha256": "88239361fd2891f6e4234209d90482848034ecc836e5fc30742e18379c4333f1"
     }
   ],
-  "result_tree": "ae08e162e94d04d0bb6849baf300dc5cf5d2e318"
+  "result_tree": "a17364d66a66273e8f5fc350d7084f41ac7106a7"
 }

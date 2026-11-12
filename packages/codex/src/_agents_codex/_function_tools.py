@@ -12,7 +12,7 @@ from collections.abc import (
     Mapping as Mapping,
     Sequence as Sequence,
 )
-from dataclasses import dataclass as dataclass, field as field, fields as fields
+from dataclasses import dataclass as dataclass, field as field, fields as fields, replace
 from functools import partial as partial
 from types import UnionType as UnionType
 from typing import (
@@ -408,6 +408,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     _allow_run_error_formatter: bool | _RunErrorFormatterInheritance = field(
         default=True, repr=False
     )
+    _custom_format: tuple[str, str, str] | None = field(default=None, repr=False)
 
     def __init__(
         self,
@@ -452,6 +453,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]]
         | None = _UNSET_ERROR_FUNCTION,
         _allow_run_error_formatter: bool | _RunErrorFormatterInheritance | None = None,
+        _custom_format: tuple[str, str, str] | None = None,
     ) -> None:
         omitted = error_function is _UNSET_ERROR_FUNCTION
         if omitted:
@@ -563,8 +565,53 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         """Select this function by its declared qualified identity."""
         return ToolRef(self.name, self.namespace)
 
+    def as_custom(
+        self,
+        *,
+        grammar: str | None = None,
+        syntax: Literal["lark", "regex"] = "lark",
+    ) -> FunctionTool[InputT, ResultT, BinderT_co]:
+        """Declare a Responses custom tool backed by this one-string callback.
+
+        Omit grammar for free text. The provider applies a supplied grammar and
+        passes the resulting string to the callback's single parameter.
+        """
+        if (
+            self._bind is None
+            or self.namespace is not None
+            or self.strict
+            or self.output_schema is not None
+        ):
+            raise ValueError(
+                "Custom string tools require an unnamespaced callback with default schema settings"
+            )
+        properties = self.input_type.model_json_schema().get("properties", {})
+        if len(properties) != 1 or next(iter(properties.values())).get("type") != "string":
+            raise ValueError("Custom string tools require exactly one string parameter")
+        if grammar is None:
+            return replace(self, _custom_format=("text", "", ""))
+        if not isinstance(grammar, str) or not grammar.strip() or syntax not in ("lark", "regex"):
+            raise ValueError("Custom tool grammar requires a nonempty Lark or regex definition")
+        return replace(self, _custom_format=("grammar", syntax, grammar))
+
     def _spec_json(self) -> str:
         input_schema = self.input_type.model_json_schema()
+        if self._custom_format is not None:
+            kind, syntax, definition = self._custom_format
+            format_data = {"type": kind}
+            if kind == "grammar":
+                format_data.update(syntax=syntax, definition=definition)
+            return json.dumps(
+                {
+                    "type": "custom",
+                    "name": self.name,
+                    "description": self.description,
+                    "format": format_data,
+                    "inputField": next(iter(input_schema["properties"])),
+                    "inputSchema": input_schema,
+                    "deferLoading": self.defer_loading,
+                }
+            )
         function: dict[str, Any] = {
             "type": "function",
             "name": self.name,
