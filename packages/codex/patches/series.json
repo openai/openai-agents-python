@@ -701,8 +701,12 @@
       "sha256": "a6e10d1e8a347c5a8623ffd275b858738b848380460cfbdace7f567fa1905705"
     },
     {
+      "path": "0163-sdk-followup-mailbox-trace.patch",
+      "sha256": "3b4b270ab86c1f76b39d1d49f8e1c17e1896c6e4c6fdecba17a011a0a97ffbaf"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
-      "sha256": "68668e758695b7f95164852c62a310cf0fd9bc78d310145ebe81b17fa8aa1eb9"
+      "sha256": "b827bfb98abc06304fd0febf2710bb7cb881ebce3f5a6d7519059869bae4c5ed"
     },
     {
       "path": "sdk-native-hosted-prompts-request-ownership.patch",
@@ -714,7 +718,7 @@
     },
     {
       "path": "sdk-native-model-attempt-retry.patch",
-      "sha256": "5e4aa4e1cada9c42c47a4fa13900329c15aec286036c7734b1b2b097a7fcee1a"
+      "sha256": "f77247de799d0167f14453e0d57b5de61ecf88f41fec90b392378c253c61f507"
     },
     {
       "path": "sdk-realtime-incarnation-ownership.patch",
@@ -749,5 +753,5 @@
       "sha256": "a6732ddaadb5a8caab18e88c6c46fa3c4efebada534e32a7c0ed91b7bcf8b279"
     }
   ],
-  "result_tree": "4cf655400d91eabc79d99933aba9fd3b5870a42a"
+  "result_tree": "90db81f7e05df8fd03e5cd1c88103763c2229f20"
 }
