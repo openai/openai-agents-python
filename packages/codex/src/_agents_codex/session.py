@@ -7174,7 +7174,7 @@ class Session(Generic[ContextT, OutputT]):
             object.__setattr__(
                 context,
                 "_sandbox_source",
-                self._environment_lease.source if self._environment_lease else None,
+                self._environment_lease.source if self._environment_lease is not None else None,
             )
             object.__setattr__(context, "_usage_reporter", self._tool_usage_reporter(state, admit))
 
@@ -7214,7 +7214,9 @@ class Session(Generic[ContextT, OutputT]):
                     object.__setattr__(
                         context,
                         "_sandbox_source",
-                        self._environment_lease.source if self._environment_lease else None,
+                        self._environment_lease.source
+                        if self._environment_lease is not None
+                        else None,
                     )
                     object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
                 elif not isinstance(decision, Allow):
@@ -14273,7 +14275,7 @@ class Session(Generic[ContextT, OutputT]):
                 object.__setattr__(
                     tool_context,
                     "_sandbox_source",
-                    self._environment_lease.source if self._environment_lease else None,
+                    self._environment_lease.source if self._environment_lease is not None else None,
                 )
                 object.__setattr__(
                     tool_context,
@@ -14341,7 +14343,7 @@ class Session(Generic[ContextT, OutputT]):
                 object.__setattr__(
                     context,
                     "_sandbox_source",
-                    self._environment_lease.source if self._environment_lease else None,
+                    self._environment_lease.source if self._environment_lease is not None else None,
                 )
             if context is not None and context._usage_reporter is None:
                 object.__setattr__(

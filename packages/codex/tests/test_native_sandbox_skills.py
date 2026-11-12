@@ -1,5 +1,6 @@
 """Current sandbox ownership for inline and lazy native skills."""
 
+import os
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -9,6 +10,7 @@ import pytest
 
 from agents import Agent, Environment
 from agents.classic.sandbox.entries import LocalDir
+from agents.classic.sandbox.errors import LocalDirReadError
 from agents.sandbox import (
     LazySkillSource,
     LocalDirLazySkillSource,
@@ -267,6 +269,84 @@ async def test_native_local_skill_load_reuses_the_captured_index(tmp_path, monke
     assert "CAPTURED_NATIVE_INDEX" in str(responses.requests[0])
     assert "loaded" in str(tool_output(responses.requests[1], "load-report"))
     assert "already_loaded" in str(tool_output(responses.requests[-1], "load-again"))
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
+@pytest.mark.parametrize("limit", ["members", "depth", "bytes", "growth", "fifo"])
+async def test_native_lazy_skill_materialization_is_bounded(
+    tmp_path, monkeypatch, responses, limit
+):
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    selected = tmp_path / "skills/report/SKILL.md"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("---\nname: report\n---\n", encoding="utf-8")
+    if limit == "members":
+        for index in range(4096):
+            (selected.parent / str(index)).touch()
+    elif limit == "depth":
+        (selected.parent.joinpath(*["nested"] * 33)).mkdir(parents=True)
+    elif limit == "bytes":
+        with (selected.parent / "large.bin").open("wb") as handle:
+            handle.truncate(64 * 1024 * 1024 + 1)
+    elif limit in ("growth", "fifo"):
+        original = LocalDir._copy_local_dir_file
+
+        async def grow_before_copy(self, **kwargs):
+            if limit == "fifo":
+                selected.unlink()
+                os.mkfifo(selected)
+            else:
+                with selected.open("r+b") as handle:
+                    handle.truncate(64 * 1024 * 1024 + 1)
+            return await original(self, **kwargs)
+
+        monkeypatch.setattr(LocalDir, "_copy_local_dir_file", grow_before_copy)
+    roots = []
+
+    @asynccontextmanager
+    async def connect(sandbox):
+        root = Path(sandbox.state.manifest.root)
+        roots.append(root)
+        async with ExecutorPeer(tmp_path / "executor").serve() as executor:
+            trust(executor, tmp_path, monkeypatch)
+            yield Environment(
+                url=executor.url,
+                headers={"Authorization": "Bearer " + executor.token},
+                cwd=str(root),
+                tools=(),
+                capability_directories=[str(root / ".agents")],
+            )
+
+    source = sandbox_environment(
+        UnixLocalSandboxClient(),
+        manifest=Manifest(),
+        options=UnixLocalSandboxClientOptions(),
+        connect=connect,
+        skills=Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path("skills")))),
+    )
+    responses.respond(function_call("load_skill", {"skill_name": "report"}, "bounded-load"))
+    responses.respond(assistant_output("done"))
+    async with Agent(
+        instructions="Load report.",
+        model="gpt-5.5",
+        provider=provider(responses),
+        tools=source.skill_tools,
+    ).session(environment=source) as session:
+        expected_limit = "byte" if limit in ("bytes", "growth") else limit.removesuffix("s")
+        with pytest.raises(
+            LocalDirReadError if limit == "fifo" else ValueError,
+            match=None
+            if limit == "fifo"
+            else f"materialization exceeds the {expected_limit} limit",
+        ):
+            await (await session.submit("Load report.")).get_result()
+        assert not (roots[0] / ".agents/report/SKILL.md").exists()
+    assert len(responses.requests) == 1
 
 
 @pytest.mark.skipif(

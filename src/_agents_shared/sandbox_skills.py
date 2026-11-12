@@ -350,7 +350,12 @@ class LocalDirLazySkillSource(LazySkillSource):
             update={"src": src_root / metadata.path.name},
             deep=True,
         )
-        await skill_source.apply(
+        apply = (
+            skill_source._apply_bounded
+            if indexed is not None and type(skill_source).apply is LocalDir.apply
+            else skill_source.apply
+        )
+        await apply(
             session,
             skill_dest,
             base_dir=Path.cwd(),
