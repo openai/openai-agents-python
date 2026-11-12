@@ -57,7 +57,7 @@ from ..errors import (
 )
 from ..manifest import Manifest
 from ..session import SandboxSession, SandboxSessionState
-from ..session.base_sandbox_session import BaseSandboxSession
+from ..session.base_sandbox_session import _MEMORY_FILE_SCRIPT, BaseSandboxSession
 from ..session.dependencies import Dependencies
 from ..session.manager import Instrumentation
 from ..session.pty_output import collect_pty_output
@@ -760,7 +760,9 @@ class DockerSandboxSession(BaseSandboxSession):
         stream: io.IOBase,
         error_path: Path,
         user: str | User | None = None,
-    ) -> None:
+        system_tools: bool = False,
+        append_input_length: bool = False,
+    ) -> int | None:
         # Frame the payload by length so the in-container reader terminates on a
         # byte count rather than a stdin half-close. Docker's exec-attach stream
         # does not carry a reliable stdin EOF over a TLS DOCKER_HOST: the
@@ -781,12 +783,14 @@ class DockerSandboxSession(BaseSandboxSession):
             payload_length, read_stream, spool = _measure_stream(stream)
             try:
                 framed_cmd = [
-                    "sh",
+                    "/bin/sh" if system_tools else "sh",
                     "-c",
-                    _LENGTH_FRAMED_STDIN_SCRIPT,
+                    ("PATH=/usr/bin:/bin; export PATH; " if system_tools else "")
+                    + _LENGTH_FRAMED_STDIN_SCRIPT,
                     "sh",
                     str(payload_length),
                     *cmd,
+                    *([str(payload_length)] if append_input_length else []),
                 ]
                 resp = api.exec_create(
                     self._container.id,
@@ -873,6 +877,7 @@ class DockerSandboxSession(BaseSandboxSession):
                     "exit_code": str(exit_code),
                 },
             )
+        return exit_code
 
     async def _write_stream_via_exec(
         self,
@@ -940,6 +945,59 @@ class DockerSandboxSession(BaseSandboxSession):
                 user=user,
             )
         return io.BytesIO(res.stdout)
+
+    async def _mkdir_memory_directory(self, path: Path) -> None:
+        await self._memory_file_operation(path, io.BytesIO(b""), operation="directory")
+
+    async def _ensure_memory_file(self, path: Path) -> None:
+        await self._memory_file_operation(path, io.BytesIO(b""), operation="ensure")
+
+    async def _write_memory_file(self, path: Path, data: io.IOBase) -> None:
+        await self._memory_file_operation(path, data, operation="file")
+
+    async def _memory_file_operation(self, path: Path, data: io.IOBase, *, operation: str) -> None:
+        policy = self._workspace_path_policy()
+        relative = policy.relative_path(path)
+        interpreter_path = self._memory_interpreter_path()
+        if interpreter_path is None:
+            raise WorkspaceArchiveWriteError(path=path)
+        command = [
+            "/bin/sh",
+            "-c",
+            f'PATH={interpreter_path}; export PATH; exec python3 -I -S -c "$@"',
+            "sh",
+            _MEMORY_FILE_SCRIPT,
+            policy.sandbox_root().as_posix(),
+            relative.as_posix(),
+            operation,
+        ]
+        task = asyncio.create_task(
+            self._stream_into_exec(
+                cmd=command,
+                stream=data,
+                error_path=path,
+                system_tools=True,
+                append_input_length=True,
+            )
+        )
+        try:
+            exit_code = await asyncio.shield(task)
+            if exit_code != 0:
+                raise WorkspaceArchiveWriteError(path=path)
+        except asyncio.CancelledError as cancelled:
+            # Keep the memory phase owner until the actual provider write settles.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    break
+            try:
+                task.result()
+            except BaseException as cleanup:
+                cancelled.__context__ = cleanup
+            raise
 
     async def write(
         self,

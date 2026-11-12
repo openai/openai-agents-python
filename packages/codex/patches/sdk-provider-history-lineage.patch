@@ -371,7 +371,7 @@ index 0000000000000000000000000000000000000000..bf2ec0377bc7675b8181cb059591c624
 +    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index cf39953fcfeefa606263eeaa98b1800b2fc6a755..09202f13f81b1e605af46a7ca072c8bda1b9b9b5 100644
+index 6658db6865ca01f887b791209b5e47300b0f3cf0..b6bfd1710a925092c7fc119ad3c346b121c445f8 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -1891,6 +1891,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
@@ -1190,7 +1190,7 @@ index 74dcc9a2c084b62a1ab066ffdf63c549b8339d39..abd835011afa94e67e8dccfa18c8e578
              model_context_window: cfg.model_context_window,
              model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 1af3f87c00caa6d8bbc290083d5e1f62d4e21fc3..8194d645f855586e598a5e0715d2b53285726f41 100644
+index 51493b00ae817a8ee0bd3c54f36c1532889e5b3c..3d4746a0e08f05ea92858ca54f09dc9d4dfd397b 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -691,6 +691,11 @@ impl Session {
@@ -1331,10 +1331,10 @@ index abc8b35fe24d565c484191d70c2465cd1d5120a8..2fc0fa0f2a7160007e49c87b5eda8f4f
          thread_id: Some(session.thread_id()),
          thread_settings: snapshot,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 5f779a134474e7a68cfe3a6b852b3573cd657b59..911feae87bb648dc9532412fa7050474f4d69718 100644
+index c85b747beb4ac45b52b06a5f5d60e71e90306e64..82a2aafcacafbc4b3b37d02190ba919a186a5939 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -4454,6 +4454,7 @@ async fn try_run_sampling_request(
+@@ -4455,6 +4455,7 @@ async fn try_run_sampling_request(
                      }
  
                      assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
@@ -1342,7 +1342,7 @@ index 5f779a134474e7a68cfe3a6b852b3573cd657b59..911feae87bb648dc9532412fa7050474
                      sess.reserve_assistant_message_order(&turn_context, &item)
                          .await;
                      if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
-@@ -5102,6 +5103,18 @@ async fn try_run_sampling_request(
+@@ -5103,6 +5104,18 @@ async fn try_run_sampling_request(
      if timeout_ms.is_some() || model_attempt.is_some() {
          deadline_cleanup_errors.extend(deadline.retire_tasks().await);
      }
@@ -1361,7 +1361,7 @@ index 5f779a134474e7a68cfe3a6b852b3573cd657b59..911feae87bb648dc9532412fa7050474
      let mut tool_cleanup = if !in_flight.is_empty() {
          let _tool_blocking_timing_guard = turn_context.turn_timing_state.begin_tool_blocking();
          let _tool_blocking_span = trace_span!(
-@@ -5188,6 +5201,8 @@ async fn try_run_sampling_request(
+@@ -5189,6 +5202,8 @@ async fn try_run_sampling_request(
          release_failed_tool_candidates(&sess, &step_context).await;
      }
      tool_cleanup?;
@@ -1932,10 +1932,10 @@ index 4b9c7f1538691710ea18d87e7cd57fe2be07b2f1..5ee35fc092dcaaf69f6dabaacca0d9ea
  pub mod local_media;
  pub mod mcp;
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index e38f4d3900d6abbec61dece998d6b8d698bbce27..fe08d997a4328f1f825edb4f011ab21d8f092ad0 100644
+index 004e40e65d0132198fd128f460ec4c25a770cb85..4b90d105b781ba503d57f32c3cecf1faf5d6e2d1 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -2929,6 +2929,9 @@ pub struct ThreadSettingsAppliedEvent {
+@@ -2983,6 +2983,9 @@ pub struct ThreadSettingsAppliedEvent {
  
  #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
  pub struct ThreadSettingsSnapshot {

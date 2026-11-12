@@ -24,6 +24,7 @@ from agents.classic.sandbox.manifest import Manifest
 from agents.classic.sandbox.snapshot import SnapshotBase
 
 from ._identity import _preserve_legacy_module
+from .sandbox_memory_artifacts import _MemoryFlushLock
 
 SessionStateClass = type["SandboxSessionState"]
 REDACTED_HOST_PATH_GRANT_PATHS_KEY = "__openai_agents_redacted_host_path_grant_paths"
@@ -41,6 +42,7 @@ class SandboxSessionState(BaseModel):
     workspace_root_ready: bool = False
 
     _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}
+    _native_memory_flush_lock: _MemoryFlushLock = PrivateAttr(default_factory=_MemoryFlushLock)
     _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())
     _mount_authority_redacted: bool = PrivateAttr(default=False)
     _mount_authority_rebound: bool = PrivateAttr(default=False)

@@ -869,9 +869,13 @@
       "sha256": "97969b9079517f3ec4fc6e3ecfcb158d8d994384de19b646801174d1c9d050bc"
     },
     {
+      "path": "sdk-native-managed-agent-result.patch",
+      "sha256": "c4a96bdf440d6796107f96fd57b48d5b9648751ad287740c846dfced2a60341e"
+    },
+    {
       "path": "sdk-provider-history-lineage.patch",
-      "sha256": "dee82f3bae3fe716a543b62bc9b587f75ab308def64fb3c1889d6218273fa1e0"
+      "sha256": "1bf324c50a0daf67a8e44eb056f62c9cf9403c94ea0634c305c83fdf363da3f8"
     }
   ],
-  "result_tree": "affbdd858eea01c37f507f531cca671b540ee4bd"
+  "result_tree": "eb9d62dd5b1dd00dd6fb8976d5d64f1ef8d311ce"
 }

@@ -3,7 +3,7 @@ import asyncio
 import io
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Literal, NoReturn, TypeVar
 
 from typing_extensions import Self
@@ -56,6 +56,112 @@ _PtyEntryT = TypeVar("_PtyEntryT")
 _RUNTIME_HELPER_CACHE_KEY_UNSET = object()
 _WORKSPACE_ROOT_PROBE_TIMEOUT_S = 10.0
 _READ_PATH_PROBE_TIMEOUT_S = 10.0
+_MEMORY_FILE_SCRIPT = """
+import os
+import secrets
+import stat
+import sys
+
+root, path, operation, length = sys.argv[1:]
+parts = [] if operation == "directory" and path == "." else path.split("/")
+if any(part in ("", ".", "..") for part in parts):
+    sys.exit(45)
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+parent = None
+try:
+    parent = os.open(root, flags)
+    for part in parts if operation == "directory" else parts[:-1]:
+        try:
+            child = os.open(part, flags, dir_fd=parent)
+        except FileNotFoundError:
+            try:
+                os.mkdir(part, 0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+            child = os.open(part, flags, dir_fd=parent)
+        os.close(parent)
+        parent = child
+    if operation == "directory":
+        sys.exit(0)
+    try:
+        existing = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        if not (stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode)):
+            sys.exit(45)
+    if operation == "ensure":
+        try:
+            fd = os.open(
+                parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600, dir_fd=parent,
+            )
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
+        sys.exit(0)
+    temporary = ".memory-" + secrets.token_hex(16)
+    fd = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600, dir_fd=parent,
+    )
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as output:
+            remaining = int(length)
+            while remaining:
+                chunk = sys.stdin.buffer.read(min(65536, remaining))
+                if not chunk:
+                    sys.exit(45)
+                output.write(chunk)
+                remaining -= len(chunk)
+            output.flush()
+        os.fsync(fd)
+        os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+except OSError:
+    sys.exit(45)
+finally:
+    if parent is not None:
+        os.close(parent)
+"""
+_READ_MEMORY_FILE_SCRIPT = """
+import os
+import stat
+import sys
+
+root, path, max_bytes = sys.argv[1:]
+parts = path.split("/")
+if any(part in ("", ".", "..") for part in parts):
+    sys.exit(45)
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+try:
+    parent = os.open(root, directory_flags)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, directory_flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        fd = os.open(
+            parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+        )
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                sys.exit(45)
+            payload = stream.read(int(max_bytes))
+    finally:
+        os.close(parent)
+except FileNotFoundError:
+    sys.exit(44)
+except OSError:
+    sys.exit(45)
+sys.stdout.buffer.write(payload)
+"""
 _READ_PATH_PROBE_SCRIPT = """
 # READ_PATH_PROBE_V3
 LC_ALL=C
@@ -1006,6 +1112,78 @@ class BaseSandboxSession(abc.ABC):
         finally:
             stream.close()
 
+    def _check_memory_write_support(self) -> None:
+        if (
+            type(self)._write_memory_file is BaseSandboxSession._write_memory_file
+            or type(self)._mkdir_memory_directory is BaseSandboxSession._mkdir_memory_directory
+            or type(self)._ensure_memory_file is BaseSandboxSession._ensure_memory_file
+        ):
+            raise ValueError("Native sandbox memory requires provider-owned atomic file operations")
+
+    async def _mkdir_memory_directory(self, path: Path) -> None:
+        raise WorkspaceArchiveWriteError(path=path)
+
+    async def _ensure_memory_file(self, path: Path) -> None:
+        raise WorkspaceArchiveWriteError(path=path)
+
+    async def _write_memory_file(self, path: Path, data: io.IOBase) -> None:
+        raise WorkspaceArchiveWriteError(path=path)
+
+    def _memory_interpreter_path(self) -> str | None:
+        policy = self._workspace_path_policy()
+        writable_roots = (policy.sandbox_root(),) + tuple(
+            root for root, read_only in policy.extra_path_grant_rules() if not read_only
+        )
+
+        def overlaps_writable(paths: tuple[str, ...]) -> bool:
+            return any(
+                root.is_relative_to(PurePosixPath(candidate))
+                or PurePosixPath(candidate).is_relative_to(root)
+                for root in writable_roots
+                for candidate in paths
+            )
+
+        # The shell and its system libraries must remain image-owned too.
+        if overlaps_writable(("/bin", "/usr/bin", "/lib", "/lib64", "/usr/lib", "/usr/lib64")):
+            return None
+        interpreter_path = "/usr/bin:/bin"
+        if not overlaps_writable(("/usr/local/bin", "/usr/local/lib", "/usr/local/lib64")):
+            interpreter_path = "/usr/local/bin:" + interpreter_path
+        return interpreter_path
+
+    async def _read_memory_file(self, path: Path, *, max_bytes: int) -> bytes:
+        """Read a bounded regular file beneath the workspace without following links."""
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        policy = self._workspace_path_policy()
+        relative = policy.relative_path(path)
+        interpreter_path = self._memory_interpreter_path()
+        if interpreter_path is None:
+            raise WorkspaceArchiveReadError(path=path)
+        result = None
+        try:
+            # Use image-owned Python and disable workspace and environment import paths.
+            result = await self.exec(
+                "/bin/sh",
+                "-c",
+                f'PATH={interpreter_path}; export PATH; exec python3 -I -S -c "$@"',
+                "sh",
+                _READ_MEMORY_FILE_SCRIPT,
+                policy.sandbox_root().as_posix(),
+                relative.as_posix(),
+                str(max_bytes),
+                shell=False,
+                timeout=30.0,
+            )
+        except Exception:
+            # Provider exceptions can retain output. Use the payload-free error below.
+            pass
+        if result is not None and result.exit_code == 44:
+            raise WorkspaceReadNotFoundError(path=path)
+        if result is None or not result.ok() or len(result.stdout) > max_bytes:
+            raise WorkspaceArchiveReadError(path=path)
+        return result.stdout
+
     @abc.abstractmethod
     async def write(
         self,
@@ -1200,6 +1378,52 @@ class BaseSandboxSession(abc.ABC):
         :param data: A readable byte stream as produced by `persist_workspace`.
             Portable tar streams are extracted underneath this session's workspace root.
         """
+
+    async def _ls_bounded(
+        self,
+        path: Path | str,
+        *,
+        max_entries: int,
+        user: str | User | None = None,
+    ) -> list[FileEntry]:
+        # Custom providers retain their application-owned acquisition behavior.
+        if type(self).ls is not BaseSandboxSession.ls:
+            return (await self.ls(path, user=user))[:max_entries]
+        path = await self._validate_path_access(path)
+        path_arg = sandbox_path_str(path)
+        byte_limit = 4 * 1024 * 1024
+        result = await self.exec(
+            "sh",
+            "-c",
+            '{ LC_ALL=C ls -laU -- "$1" 2>/dev/null; listing_exit=$?; '
+            'printf "\\n__sdk_bounded_ls_exit__:%s\\n" "$listing_exit"; } | head -c "$2"',
+            "sh",
+            path_arg,
+            str(byte_limit + 1),
+            shell=False,
+            user=user,
+            timeout=30.0,
+        )
+        if not result.ok():
+            raise ExecNonZeroError(result, command=("ls", "--", path_arg))
+        if len(result.stdout) > byte_limit:
+            raise OverflowError("Bounded directory listing exceeds the byte limit")
+        listing, marker, exit_status = result.stdout.rpartition(b"\n__sdk_bounded_ls_exit__:")
+        if not marker:
+            raise RuntimeError("Bounded directory listing did not complete")
+        listing_exit = int(exit_status.strip())
+        if listing_exit:
+            raise ExecNonZeroError(
+                ExecResult(
+                    stdout=listing, stderr=b"Directory listing failed", exit_code=listing_exit
+                ),
+                command=("ls", "--", path_arg),
+            )
+        return parse_ls_la(
+            listing.decode("utf-8", errors="replace"),
+            base=path_arg,
+            max_entries=max_entries,
+        )
 
     async def ls(
         self,
