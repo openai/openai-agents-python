@@ -202,3 +202,49 @@ async def test_native_pending_custom_string_call_remains_nonportable(responses):
         assert (await next_request(session.interactions(), tool)).call_id == "raw"
         with pytest.raises(RuntimeError, match="nonportable native work"):
             await session.suspend()
+
+
+@pytest.mark.parametrize("payload", ["custom", "function", "unknown"])
+async def test_native_agents_admits_granted_sdk_custom_callback(
+    responses, tmp_path, monkeypatch, payload
+):
+    from agents import NativeAgents
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import trust
+    from tests.test_native_executor_tools import declaration
+
+    calls = []
+
+    @function_tool
+    def raw_editor(source: str) -> str:
+        calls.append(source)
+        return source.upper()
+
+    call = custom_call()
+    if payload == "function":
+        call = function_call("raw_editor", {"source": RAW_INPUT}, "raw")
+    elif payload == "unknown":
+        call["item"]["name"] = "unowned_editor"
+    responses.respond(call)
+    responses.respond(assistant_output("done"))
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        async with Agent(
+            instructions="Use raw_editor.",
+            model="gpt-5.5",
+            tools=[NativeAgents(), raw_editor.as_custom()],
+            provider=provider(responses),
+        ).session(environment=declaration(executor)) as session:
+            assert (await (await session.submit("begin")).get_result()).final_output == "done"
+    assert calls == ([RAW_INPUT] if payload == "custom" else [])
+    output = tool_output(
+        responses.requests[1],
+        "raw",
+        "function_call_output" if payload == "function" else "custom_tool_call_output",
+    )
+    if payload == "custom":
+        assert output == RAW_INPUT.upper()
+    elif payload == "function":
+        assert "direct provider call payload" in output
+    else:
+        assert "unowned_editor" in output

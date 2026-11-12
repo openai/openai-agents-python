@@ -4832,6 +4832,40 @@ struct StepCatalog {
     slots: Vec<usize>,
 }
 
+/// Only a live SDK callback in this issuing request can extend child policy.
+pub(crate) fn admits_custom_call(
+    admission: &dyn codex_extension_api::ModelToolAdmission,
+    item: &ResponseItem,
+) -> bool {
+    let ResponseItem::CustomToolCall {
+        name, namespace, ..
+    } = item
+    else {
+        return false;
+    };
+    let Some(receipt) = admission.turn_store().get::<Arc<TurnAdmission>>() else {
+        return false;
+    };
+    let Some(tools) = receipt.callback_tools() else {
+        return false;
+    };
+    let Some(step) = admission
+        .step_store()
+        .and_then(|step| step.get::<StepCatalog>())
+    else {
+        return false;
+    };
+    let qualified = ToolName::new(namespace.clone(), name.clone()).with_default_namespace();
+    receipt.thread_id == admission.thread_id()
+        && tools.admitted_turn(admission.turn_store()).is_some()
+        && tools.admits_generation(&step.generation)
+        && admission.admits(item)
+        && step.generation.entries.iter().any(|entry| {
+            entry.name.clone().with_default_namespace() == qualified
+                && matches!(entry.spec, ToolSpec::Freeform(_))
+        })
+}
+
 impl ToolLifecycleContributor for PythonContributor {
     fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move { sandbox_events::on_start(&input) })
