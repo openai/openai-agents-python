@@ -327,6 +327,51 @@ async def test_function_tool_callers_follow_the_restored_handoff_profile(
     assert calls == ["code"]
 
 
+async def test_function_tool_callers_apply_to_custom_string_tools(
+    responses: ResponsesFixture,
+) -> None:
+    raw_input = "  unquoted string  "
+    calls: list[tuple[str, str]] = []
+
+    @function_tool(allowed_callers=("code",))
+    def raw_editor(ctx: ToolContext[None], source: str) -> str:
+        calls.append((ctx.call.route, source))
+        return "raw string accepted"
+
+    agent = Agent(
+        instructions="Use the raw editor.",
+        model="gpt-5.5",
+        tools=[raw_editor.as_custom()],
+        provider=provider(responses),
+        programmatic_tool_calling=True,
+    )
+    responses.respond(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "custom_tool_call",
+                "name": "raw_editor",
+                "call_id": "forged-raw",
+                "input": raw_input,
+            },
+        }
+    )
+    responses.respond(assistant_output("Direct call blocked."))
+    responses.respond(code_call(f"text(await tools.raw_editor({json.dumps(raw_input)}));", "cell"))
+    responses.respond(assistant_output("Code call finished."))
+
+    async with timeout(45), agent.session() as session:
+        direct = await session.submit("Try direct.")
+        assert (await direct.get_result()).final_output == "Direct call blocked."
+        assert "raw_editor" not in declared_names(responses.requests[0])
+        assert calls == []
+        code = await session.submit("Use a code cell.")
+        assert (await code.get_result()).final_output == "Code call finished."
+        assert "raw string accepted" in code_output(responses.requests[3], "cell")
+
+    assert calls == [("code", raw_input)]
+
+
 async def test_async_native_mcp_policy_precedes_code_and_preserves_unselected_tools(
     responses: ResponsesFixture,
 ) -> None:

@@ -621,6 +621,9 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
 
     def _spec_json(self) -> str:
         input_schema = self.input_type.model_json_schema()
+        caller_options = (
+            {} if self.allowed_callers is None else {"allowedCallers": self.allowed_callers}
+        )
         if self._custom_format is not None:
             kind, syntax, definition = self._custom_format
             format_data = {"type": kind}
@@ -635,6 +638,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                     "inputField": next(iter(input_schema["properties"])),
                     "inputSchema": input_schema,
                     "deferLoading": self.defer_loading,
+                    **caller_options,
                 }
             )
         function: dict[str, Any] = {
@@ -656,9 +660,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                 "description": self.namespace_description or "",
                 "tools": [function],
             }
-        if self.allowed_callers is not None:
-            declaration["allowedCallers"] = self.allowed_callers
-        return json.dumps(declaration)
+        return json.dumps(declaration | caller_options)
 
     def _capture(self, context: object) -> _CapturedFunction | _CapturedManual:
         if self._bind is not None:
