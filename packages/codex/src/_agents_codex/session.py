@@ -28,7 +28,7 @@ from contextlib import (
     contextmanager as contextmanager,
     suppress as suppress,
 )
-from contextvars import ContextVar as ContextVar, copy_context as copy_context
+from contextvars import Context as Context, ContextVar as ContextVar, copy_context as copy_context
 from copy import deepcopy as deepcopy
 from dataclasses import asdict as asdict, dataclass as dataclass, field as field, replace as replace
 from functools import partial as partial
@@ -283,6 +283,12 @@ from .recovery import (
 )
 from .response_facts import _response_fact_record
 from .retry import _CombinedRetryPolicy
+from .sandbox_memory import (
+    _MAX_RECORDS as _MAX_MEMORY_RECORDS,
+    _MEMORY_OWNER_ATTRIBUTE,
+    _current_memory_owner,
+    _SandboxMemoryOwner,
+)
 from .schema import (
     OutputSpec as OutputSpec,
     OutputValidationError as OutputValidationError,
@@ -3124,6 +3130,8 @@ class _EnvironmentLease:
         self.interrupted = False
         self._workspace_instructions: str | None = None
         self._sandbox_events: _OperationObserver | None = None
+        self._sandbox_memory: _SandboxMemoryOwner | None = None
+        self._sandbox_memory_scope: Context | None = None
         self._owner = _create_task(self._hold(source))
 
     async def _hold(self, source: AbstractAsyncContextManager[Environment[Any]]) -> None:
@@ -3145,6 +3153,12 @@ class _EnvironmentLease:
                         "Native sandbox observations require a sandbox_environment source"
                     )
             self._sandbox_events = observer
+            memory = getattr(source, _MEMORY_OWNER_ATTRIBUTE, None)
+            if memory is not None:
+                if not isinstance(memory, _SandboxMemoryOwner):
+                    raise TypeError("Sandbox memory requires a native sandbox acquisition")
+                self._sandbox_memory = memory
+                self._sandbox_memory_scope = copy_context()
             self._ready.set_result(environment)
             try:
                 await asyncio.shield(self._retired)
@@ -4804,7 +4818,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._restore_remembered_approvals(remembered_approvals)
                 session._start_readers()
                 opening.disown(session)
-                session._environment_lease = lease
+                session._attach_environment_lease(lease, state=state, resume=resume)
                 return session
             except BaseException as error:
                 _normalize_opening_error(error, opening.api_key)
@@ -5004,6 +5018,8 @@ class Session(Generic[ContextT, OutputT]):
         self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
         self._sandbox_events: _OperationObserver | None = None
+        self._memory_flush: asyncio.Task[None] | None = None
+        self._memory_restored = False
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
@@ -6346,6 +6362,11 @@ class Session(Generic[ContextT, OutputT]):
             if invocation.active and invocation.session is self:
                 raise RuntimeError(f"A tool callback cannot {operation}")
             invocation = invocation.parent
+        memory = _current_memory_owner()
+        if memory is not None:
+            lease = self._environment_lease
+            if lease is not None and lease._sandbox_memory is memory:
+                raise RuntimeError(f"A sandbox memory phase cannot {operation}")
 
     def _check_graph_admission(self) -> None:
         if self._graph_interrupts:
@@ -8056,6 +8077,60 @@ class Session(Generic[ContextT, OutputT]):
             )
         return tuple(produced)
 
+    def _attach_environment_lease(
+        self,
+        lease: _EnvironmentLease | None,
+        *,
+        state: SessionState | ManagedWorkspaceCheckpoint | None,
+        resume: str | None,
+    ) -> None:
+        self._environment_lease = lease
+        self._memory_restored = state is not None or resume is not None
+
+    async def flush_memory(self) -> None:
+        """Generate memory for the acquired sandbox from a successful settled text turn.
+
+        Configure memory on sandbox_environment. Concurrent callers share the same
+        flush, and the same history revision generates once. Restored Sessions and
+        non-text histories are outside this generation path.
+        """
+        self._check_callback_operation("flush sandbox memory on its source Session")
+        lease = self._environment_lease
+        memory = lease._sandbox_memory if lease is not None else None
+        active_memory = _current_memory_owner()
+        if (
+            memory is not None
+            and active_memory is not None
+            and active_memory._flush_lock is memory._flush_lock
+        ):
+            raise NativeError("A memory phase cannot flush another Session in the same sandbox")
+        pending = self._memory_flush
+        if pending is not None:
+            await asyncio.shield(pending)
+            return
+        self._check_idle_update()
+        if lease is None or memory is None:
+            raise TypeError("Configure memory on sandbox_environment before flushing")
+        if self._memory_restored:
+            raise NativeError("Native sandbox memory is unavailable on restored Sessions")
+        turn = self._last_turn
+        if turn is None:
+            raise NativeError("Native sandbox memory requires a successful source turn")
+        scope = lease._sandbox_memory_scope
+        assert scope is not None
+
+        async def flush() -> None:
+            await turn.get_result()
+            snapshot = await self._read_canonical_history(_MAX_MEMORY_RECORDS, for_replay=True)
+            await memory.flush(self.id, snapshot)
+
+        pending = scope.copy().run(_create_task, flush())
+        self._memory_flush = pending
+        try:
+            await self._join_mutation(pending)
+        finally:
+            self._memory_flush = None
+
     async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
         """Original JSON object records from an idle Session.
 
@@ -8076,15 +8151,19 @@ class Session(Generic[ContextT, OutputT]):
         ):
             raise ValueError("limit must be a nonnegative integer or None")
 
-        async def capture() -> CanonicalHistorySnapshot:
-            value = json.loads(await self._native._canonical_history(limit, for_replay))
-            return CanonicalHistorySnapshot(
-                value["revision"],
-                value["total"],
-                tuple(json.loads(item) for item in value["items"]),
-            )
+        return await self._join_mutation(
+            asyncio.create_task(self._read_canonical_history(limit, for_replay=for_replay))
+        )
 
-        return await self._join_mutation(asyncio.create_task(capture()))
+    async def _read_canonical_history(
+        self, limit: int | None, *, for_replay: bool
+    ) -> CanonicalHistorySnapshot:
+        value = json.loads(await self._native._canonical_history(limit, for_replay))
+        return CanonicalHistorySnapshot(
+            value["revision"],
+            value["total"],
+            tuple(json.loads(item) for item in value["items"]),
+        )
 
     def _start_raw_usage_on_restore(
         self, agent: Agent[Any, Any] | None, state: SessionState | None
@@ -15838,7 +15917,11 @@ class Session(Generic[ContextT, OutputT]):
         return await self._join_mutation(asyncio.create_task(write()))
 
     async def suspend_workspace(self) -> ManagedWorkspaceCheckpoint:
-        """Retire this owned sandbox Session and capture its paired workspace."""
+        """Retire this owned sandbox Session and capture its paired workspace.
+
+        Configured memory finishes generating for a successful settled turn
+        before workspace capture begins.
+        """
         self._check_loop()
         self._check_callback_operation("suspend its managed workspace")
         managed = self._managed_workspace
@@ -15859,10 +15942,33 @@ class Session(Generic[ContextT, OutputT]):
             for child in self._child_callbacks.values()
         ):
             raise SessionBusyError("Managed capture requires settled child continuations")
+        lease = self._environment_lease
+        memory_turn = (
+            self._last_turn
+            if active is None
+            and not self._memory_restored
+            and lease is not None
+            and lease._sandbox_memory is not None
+            else None
+        )
         # Intent precedes export, so racing close cannot skip provider serialization.
-        managed.capture_requested = True
+        managed.capture_requested = memory_turn is None
 
         async def retire() -> ManagedWorkspaceCheckpoint:
+            if memory_turn is not None:
+                try:
+                    try:
+                        await memory_turn.get_result()
+                    except Exception:
+                        # A failed source turn has no completed memory to generate.
+                        pass
+                    else:
+                        await self.flush_memory()
+                    self._check_open()
+                except BaseException:
+                    managed.capture_task = None
+                    raise
+                managed.capture_requested = True
             try:
                 state = await self._checkpoint(active, managed_retire=True)
             except BaseException as error:
@@ -16584,7 +16690,7 @@ class Session(Generic[ContextT, OutputT]):
             engine_closed = False
             try:
                 if self._mutation is not None:
-                    if self._mutation_cancellable:
+                    if self._mutation_cancellable or self._mutation is self._memory_flush:
                         cancel_once(self._mutation)
                     await asyncio.gather(self._mutation, return_exceptions=True)
                 if self._checkpoint_task is not None:
