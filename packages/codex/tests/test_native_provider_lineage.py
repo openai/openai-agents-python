@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import pytest
 from aiohttp import web
@@ -317,3 +317,134 @@ async def test_native_rewritten_mcp_arguments_do_not_certify_remote_history():
                 with pytest.raises(NativeError):
                     await (await session.submit("Do not replay.")).get_result()
                 assert len(model.requests) == 1
+
+
+@pytest.mark.parametrize("restore,legacy", [(False, False), (True, False), (True, True)])
+async def test_native_history_replacement_preserves_acknowledged_lineage(restore, legacy):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(instructions="Continue.", model="gpt-5.5", provider=provider)
+        mode = {"type": "conversation", "id": "conv_current"}
+        async with agent.session(provider_history=mode) as initial:
+            await (await initial.submit("Before.")).get_result()
+            state = await initial.save_state() if restore else None
+            if legacy:
+                import json
+
+                saved = json.loads(state.to_json())
+                removed = 0
+
+                def without_boundary(value):
+                    nonlocal removed
+                    if isinstance(value, dict):
+                        if "canonical_input" in value:
+                            del value["canonical_input"]
+                            removed += 1
+                        for child in value.values():
+                            without_boundary(child)
+                    elif isinstance(value, list):
+                        for child in value:
+                            without_boundary(child)
+
+                without_boundary(saved["history"])
+                assert removed > 0
+                state = type(state).from_json(json.dumps(saved))
+            if restore:
+                await initial.aclose()
+            async with AsyncExitStack() as stack:
+                session = (
+                    await stack.enter_async_context(
+                        agent.session(state=state, provider_history=mode)
+                    )
+                    if restore
+                    else initial
+                )
+                before = await session.history_snapshot()
+                with pytest.raises(RuntimeError, match="acknowledged provider history"):
+                    await session.transact_history(
+                        expected_revision=before.revision, keep=0, items=[]
+                    )
+                after = await session.history_snapshot()
+                assert after.items == before.items
+                assert after.revision == before.revision
+                # An unsent addition may be appended and removed without rewriting
+                # the acknowledged provider window.
+                revision = await session.transact_history(
+                    expected_revision=after.revision,
+                    keep=after.total,
+                    items=[
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Unsent draft."}],
+                        }
+                    ],
+                )
+                appended = await session.history_snapshot()
+                assert appended.total == before.total + 1
+                assert appended.revision == revision
+                if legacy:
+                    with pytest.raises(RuntimeError, match="acknowledged provider history"):
+                        await session.transact_history(
+                            expected_revision=revision, keep=before.total, items=[]
+                        )
+                else:
+                    await session.transact_history(
+                        expected_revision=revision, keep=before.total, items=[]
+                    )
+                    assert (await session.history_snapshot()).items == before.items
+                await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
+
+
+async def test_native_history_append_preserves_metadata_filtered_from_provider_input():
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(instructions="Continue.", model="gpt-5.5", provider=provider)
+        prior = {
+            "type": "message",
+            "id": "msg_prior",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Prior.",
+                    "annotations": [{"type": "future_annotation", "value": "retained"}],
+                }
+            ],
+        }
+        async with agent.session(
+            provider_history={"type": "conversation", "id": "conv_current"}
+        ) as session:
+            initial = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=initial.revision, keep=initial.total, items=[prior]
+            )
+            await (await session.submit("Before.")).get_result()
+            before = await session.history_snapshot()
+            assert any(
+                item.get("id") == "msg_prior"
+                and item["content"][0]["annotations"] == prior["content"][0]["annotations"]
+                for item in before.items
+            )
+            wire_prior = next(
+                item for item in model.requests[0]["input"] if item.get("id") == "msg_prior"
+            )
+            assert wire_prior["content"][0].get("annotations", []) == []
+            await session.transact_history(
+                expected_revision=before.revision,
+                keep=before.total,
+                items=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Unsent draft."}],
+                    }
+                ],
+            )
+            after = await session.history_snapshot()
+            assert after.items[: before.total] == before.items
+            await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
