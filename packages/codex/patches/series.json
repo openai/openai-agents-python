@@ -770,7 +770,7 @@
     },
     {
       "path": "sdk-trace-delivery-controls.patch",
-      "sha256": "88c8d0246f8a91414ecb4cec28beb91eb2503aa249d9ff8852f0527d755ec35f"
+      "sha256": "6c5e3c6cc3c9106c85b6e740f2ef76e1a18f5f89f48bdaeda91fb4b6f21c979b"
     }
   ],
   "result_tree": "e8145961681ac2126a14bbfe20a1eec3018d8b78"

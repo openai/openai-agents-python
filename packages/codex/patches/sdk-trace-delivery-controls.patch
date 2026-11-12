@@ -1,11 +1,11 @@
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2180507e0 100644
+index 72f25f3a708658780e4d0324f750319a00681ee9..76816513dc961af42bdaa1c1ddd3ce0b03edf988 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -13,6 +13,50 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
  const MAX_EVENTS: usize = 2048;
  const MAX_BYTES: usize = 4 * 1024 * 1024;
- 
+
 +/// Process-wide settings for the existing native-to-host lifecycle queue.
 +#[derive(Clone, Debug, Deserialize)]
 +#[serde(default, deny_unknown_fields)]
@@ -63,29 +63,35 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
      pending: BTreeSet<u64>,
      dispatch_waiters: BTreeMap<u64, tokio::sync::oneshot::Sender<()>>,
      bytes: usize,
-@@ -320,10 +367,19 @@ fn enqueue_event(
+@@ -320,11 +367,20 @@ fn enqueue_event(
          }
          value["__root_descriptor"] = descriptor;
      }
 -    let bytes = serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len());
 -    if s.pending.len() >= MAX_EVENTS || s.bytes + bytes > MAX_BYTES {
 +    let Ok(encoded) = serde_json::to_vec(&value) else {
-         dropped(s, sequence);
-         return false;
++        dropped(s, sequence);
++        return false;
 +    };
 +    let bytes = encoded.len();
 +    if s.pending.len() >= s.delivery.max_queue_size as usize
 +        || bytes > (s.delivery.max_queue_bytes as usize).saturating_sub(s.bytes)
 +    {
-+        dropped(s, sequence);
-+        return false;
-+    }
+         dropped(s, sequence);
+         return false;
+     }
 +    if s.queue.is_empty() {
 +        s.queued_since = Some(Instant::now());
-     }
++    }
      s.bytes += bytes;
      s.pending.insert(sequence);
-@@ -404,7 +460,25 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+     s.queue.push_back((sequence, value, bytes, credential));
+@@ -400,11 +456,36 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+     let mut events = Vec::new();
+     let mut root_descriptors = BTreeMap::new();
+     let mut credential_routes = BTreeMap::new();
+-    let cutoff = s
++    let flush_cutoff = s
          .flush_snapshot
          .map(|(barrier, _, _)| barrier)
          .filter(|barrier| s.pending.range(..=*barrier).next().is_some());
@@ -97,12 +103,19 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
 +        || s.queued_since.is_some_and(|since| {
 +            since.elapsed() >= Duration::from_millis(s.delivery.schedule_delay_ms as u64)
 +        });
-+    // Dispatch still needs a drain when a flush has reset the batch trigger.
-+    let dispatch_pending = s
-+        .queue
-+        .front()
-+        .is_some_and(|(seq, _, _, _)| s.dispatch_waiters.range(*seq..).next().is_some());
-+    s.draining |= ready || dispatch_pending;
++    s.draining |= ready;
++    // A dispatch can pull its queued prefix forward independently of the timer.
++    let cutoff = flush_cutoff.or_else(|| {
++        s.dispatch_waiters
++            .last_key_value()
++            .map(|(&sequence, _)| sequence)
++            .filter(|barrier| {
++                !s.draining
++                    && s.queue
++                        .front()
++                        .is_some_and(|(sequence, _, _, _)| sequence <= barrier)
++            })
++    });
 +    let count = if s.draining || cutoff.is_some() {
 +        max_count.min(s.delivery.max_batch_size as usize)
 +    } else {
@@ -112,7 +125,7 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
          if s.queue
              .front()
              .is_some_and(|(seq, _, _, _)| cutoff.is_some_and(|cutoff| *seq > cutoff))
-@@ -434,6 +508,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+@@ -434,6 +515,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
          }
          events.push(value);
      }
@@ -122,7 +135,7 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
 +    } else if !events.is_empty()
 +        && s.queue
 +            .front()
-+            .is_some_and(|(seq, _, _, _)| cutoff.is_some_and(|cutoff| *seq > cutoff))
++            .is_some_and(|(seq, _, _, _)| flush_cutoff.is_some_and(|cutoff| *seq > cutoff))
 +    {
 +        // A flush only admits its captured prefix. Schedule later records as
 +        // their own batch, without carrying the prefix's trigger or timer.
@@ -132,7 +145,7 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
      let through = cutoff.unwrap_or(s.sequence);
      if s.queue.front().is_none_or(|(seq, _, _, _)| *seq > through) {
          s.delivered = s.delivered.max(through);
-@@ -1109,6 +1196,8 @@ mod tests {
+@@ -1109,6 +1203,8 @@ mod tests {
 
      static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -141,8 +154,8 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
      #[tokio::test]
      async fn detached_dispatch_wakes_on_acknowledgement_or_shutdown() {
          use std::future::Future;
-@@ -1125,19 +1214,31 @@ mod tests {
- 
+@@ -1125,19 +1221,31 @@ mod tests {
+
          let _test = TEST_LOCK.lock().unwrap();
          *lock() = Routes::default();
 +        configure_host_trace_delivery(HostTraceDeliverySettings {
@@ -163,7 +176,7 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
 -        let mut second = std::pin::pin!(dispatch_trace_event(encoded));
 +        let mut first = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
 +        let mut second = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
- 
+
          assert!(first.as_mut().poll(&mut first_context).is_pending());
 +        let first_batch: Value = serde_json::from_str(&drain_trace_events(1).unwrap()).unwrap();
 +        assert_eq!(first_batch["events"].as_array().unwrap().len(), 1);
@@ -176,10 +189,10 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
          drain_trace_events(2).unwrap();
          ack_trace_events(1, 0).unwrap();
          assert_eq!(first_wakes.0.load(Ordering::Relaxed), 1);
-@@ -1154,6 +1255,208 @@ mod tests {
+@@ -1154,6 +1262,215 @@ mod tests {
          );
      }
- 
+
 +    #[test]
 +    fn detached_dispatch_behind_flush_drains_after_prefix_ack() {
 +        use std::future::Future;
@@ -201,6 +214,7 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
 +        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
 +        let mut dispatch = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
 +        assert!(dispatch.as_mut().poll(&mut context).is_pending());
++        event(&mut lock(), &sample_span(), "end", None, None);
 +
 +        let drain = || serde_json::from_str::<Value>(&drain_trace_events(100).unwrap()).unwrap();
 +        assert_eq!(drain()["events"][0]["sequence"], 1);
@@ -211,8 +225,14 @@ index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2
 +        assert_eq!(later["events"][0]["sequence"], 2);
 +        assert_eq!(later["events"][0]["name"], "replay");
 +        assert!(dispatch.as_mut().poll(&mut context).is_pending());
++        assert_eq!(drain()["events"], json!([]));
 +        ack_trace_events(2, 0).unwrap();
 +        assert_eq!(dispatch.poll(&mut context), Poll::Ready(Ok(())));
++        assert_eq!(drain()["events"], json!([]));
++
++        lock().queued_since = Some(Instant::now() - Duration::from_secs(61));
++        assert_eq!(drain()["events"][0]["sequence"], 3);
++        ack_trace_events(3, 0).unwrap();
 +    }
 +
 +    #[test]
