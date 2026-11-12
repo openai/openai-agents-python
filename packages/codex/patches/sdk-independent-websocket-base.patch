@@ -11,7 +11,7 @@ index bb5d510a..5cf75a4c 100644
              env_key: None,
              env_key_instructions: None,
 diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
-index 427aa8d3..edb652d8 100644
+index 427aa8d3..c7ac0cb3 100644
 --- a/codex-rs/cli/src/doctor.rs
 +++ b/codex-rs/cli/src/doctor.rs
 @@ -2310,6 +2310,9 @@ async fn websocket_reachability_check(
@@ -24,10 +24,29 @@ index 427aa8d3..edb652d8 100644
      let auth = runtime_provider.auth().await;
      details.push(format!(
          "auth mode: {}",
-@@ -2355,6 +2358,25 @@ async fn websocket_reachability_check(
+@@ -2328,7 +2331,10 @@ async fn websocket_reachability_check(
+     };
+     match api_provider.websocket_url_for_path("responses") {
+         Ok(url) => {
+-            details.push(format!("endpoint: {url}"));
++            details.push(format!(
++                "endpoint origin: {}",
++                url.origin().ascii_serialization()
++            ));
+             if let Some(host) = url.host_str()
+                 && let Some(port) = url.port_or_known_default()
+             {
+@@ -2355,6 +2361,32 @@ async fn websocket_reachability_check(
          }
      };
  
++    if provider.websocket_base_url.is_some() && auth_changes.is_none() {
++        return websocket_probe_warning(
++            "Responses WebSocket auth could not be used",
++            details,
++            "independent WebSocket requires tracked credential ownership".to_string(),
++        );
++    }
 +    if let Err(message) = provider.validate_websocket_auth(auth.as_ref().map(CodexAuth::auth_mode))
 +    {
 +        return websocket_probe_warning(
@@ -50,6 +69,18 @@ index 427aa8d3..edb652d8 100644
      let mut extra_headers = HeaderMap::new();
      extra_headers.insert(
          OPENAI_BETA_HEADER,
+diff --git a/codex-rs/codex-api/Cargo.toml b/codex-rs/codex-api/Cargo.toml
+index 716cbc7b..8b334682 100644
+--- a/codex-rs/codex-api/Cargo.toml
++++ b/codex-rs/codex-api/Cargo.toml
+@@ -33,6 +33,7 @@ url = { workspace = true }
+ uuid = { workspace = true }
+ 
+ [dev-dependencies]
++tracing-subscriber = { workspace = true }
+ anyhow = { workspace = true }
+ assert_matches = { workspace = true }
+ pretty_assertions = { workspace = true }
 diff --git a/codex-rs/codex-api/src/endpoint/images.rs b/codex-rs/codex-api/src/endpoint/images.rs
 index 2217ce89..e11a4860 100644
 --- a/codex-rs/codex-api/src/endpoint/images.rs
@@ -194,6 +225,125 @@ index c931ed5b..5ec63a3e 100644
              query_params: None,
              headers: HeaderMap::new(),
              retry: crate::RetryConfig {
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 207a02ec..34ad23ad 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -580,7 +580,7 @@ async fn connect_websocket(
+     turn_state: Option<Arc<OnceLock<String>>>,
+     tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
+ ) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
+-    info!("connecting to websocket: {url}");
++    info!("connecting to websocket");
+ 
+     let mut request = url
+         .as_str()
+@@ -598,11 +598,11 @@ async fn connect_websocket(
+ 
+     let (stream, response) = match response {
+         Ok((stream, response)) => {
+-            info!("successfully connected to websocket: {url}");
++            info!("successfully connected to websocket");
+             (stream, response)
+         }
+         Err(err) => {
+-            error!("failed to connect to websocket: {err}, url: {url}");
++            error!("failed to connect to websocket: {err}");
+             return Err(map_ws_error(err, &url));
+         }
+     };
+@@ -1071,6 +1071,91 @@ mod tests {
+     use std::collections::HashMap;
+     use std::sync::Arc;
+ 
++    #[tokio::test]
++    async fn handshake_logs_omit_endpoint_path_and_query() {
++        use tracing::instrument::WithSubscriber;
++        struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
++        impl std::io::Write for LogBuffer {
++            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++                self.0.lock().unwrap().extend_from_slice(bytes);
++                Ok(bytes.len())
++            }
++            fn flush(&mut self) -> std::io::Result<()> {
++                Ok(())
++            }
++        }
++        for succeeds in [false, true] {
++            for suffix in [
++                "/private-path-marker?token=private-query-marker",
++                "/%70rivate-encoded?token=%73ynthetic",
++            ] {
++                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++                let endpoint = format!("ws://{}{suffix}", listener.local_addr().unwrap());
++                let server = if succeeds {
++                    Some(tokio::spawn(async move {
++                        let (stream, _) = listener.accept().await.unwrap();
++                        tokio_tungstenite::accept_async_with_config(
++                            stream,
++                            Some(websocket_config()),
++                        )
++                        .await
++                        .unwrap()
++                    }))
++                } else {
++                    drop(listener);
++                    None
++                };
++                let output = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
++                let subscriber = tracing_subscriber::fmt()
++                    .with_max_level(tracing::Level::INFO)
++                    .with_ansi(false)
++                    .without_time()
++                    .with_writer({
++                        let output = Arc::clone(&output);
++                        move || LogBuffer(Arc::clone(&output))
++                    })
++                    .finish();
++                let factory =
++                    HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::ReqwestDefault);
++                let result = tokio::time::timeout(
++                    Duration::from_secs(2),
++                    connect_websocket(
++                        Url::parse(&endpoint).unwrap(),
++                        HeaderMap::new(),
++                        &factory,
++                        None,
++                        None,
++                    ),
++                )
++                .with_subscriber(subscriber)
++                .await
++                .expect("connection settled");
++                assert_eq!(result.is_ok(), succeeds);
++                drop(result);
++                if let Some(server) = server {
++                    drop(server.await.unwrap());
++                }
++                let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
++                assert!(log.contains("connecting to websocket"));
++                assert_eq!(
++                    log.contains("successfully connected to websocket"),
++                    succeeds
++                );
++                for marker in [
++                    "private-path-marker",
++                    "private-query-marker",
++                    "%70rivate-encoded",
++                    "%73ynthetic",
++                ] {
++                    assert!(
++                        !log.contains(marker),
++                        "endpoint data escaped into logs: {log}"
++                    );
++                }
++            }
++        }
++    }
++
+     #[test]
+     fn destination_tls_selection_preserves_secure_and_configured_ca_construction() {
+         const CASE: &str = "CODEX_RESPONSES_TLS_SELECTION_TEST_CASE";
 diff --git a/codex-rs/codex-api/src/endpoint/search.rs b/codex-rs/codex-api/src/endpoint/search.rs
 index 2de48fe7..086a7f1f 100644
 --- a/codex-rs/codex-api/src/endpoint/search.rs
@@ -231,7 +381,7 @@ index ed43d8aa..74358600 100644
          headers: HeaderMap::new(),
          retry: RetryConfig {
 diff --git a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
-index e43e19eb..ed52ca03 100644
+index e43e19eb..da303f11 100644
 --- a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
 +++ b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
 @@ -64,6 +64,7 @@ fn test_provider(base_url: String) -> Provider {
@@ -242,6 +392,79 @@ index e43e19eb..ed52ca03 100644
          query_params: Some(HashMap::new()),
          headers: HeaderMap::new(),
          retry: RetryConfig {
+@@ -696,3 +697,72 @@ async fn realtime_ws_e2e_realtime_v2_parser_emits_handoff_requested() {
+ fn test_client(provider: Provider) -> RealtimeWebsocketClient {
+     RealtimeWebsocketClient::new(provider, HttpClientFactory::new(ReqwestDefault))
+ }
++
++#[tokio::test]
++async fn realtime_keeps_its_origin_with_a_separate_responses_websocket_base() {
++    let trap = TcpListener::bind("127.0.0.1:0")
++        .await
++        .expect("trap listener");
++    let trap_url = format!("ws://{}", trap.local_addr().unwrap());
++    let trap_opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
++    let observed = std::sync::Arc::clone(&trap_opened);
++    let trap_task = tokio::spawn(async move {
++        if trap.accept().await.is_ok() {
++            observed.store(true, std::sync::atomic::Ordering::SeqCst);
++        }
++    });
++    let (addr, server) = spawn_realtime_ws_server(|mut ws| async move {
++        let first = ws.next().await.unwrap().unwrap().into_text().unwrap();
++        assert_eq!(
++            serde_json::from_str::<Value>(&first).unwrap()["type"],
++            "session.update"
++        );
++        ws.send(Message::Text(
++            json!({"type":"session.updated","session":{"id":"ordinary-realtime"}})
++                .to_string()
++                .into(),
++        ))
++        .await
++        .unwrap();
++        while let Some(message) = ws.next().await {
++            if matches!(message, Ok(Message::Close(_))) {
++                break;
++            }
++        }
++    })
++    .await;
++    let mut provider = test_provider(format!("http://{addr}"));
++    provider.websocket_base_url = Some(trap_url);
++    let client = test_client(provider);
++    let connection = tokio::time::timeout(
++        Duration::from_secs(5),
++        client.connect(
++            RealtimeSessionConfig {
++                function_tools: Vec::new(),
++                v2: None,
++                instructions: "Answer.".into(),
++                initial_items: Vec::new(),
++                delegation_ack_filler: None,
++                model: Some("realtime-test-model".into()),
++                session_id: None,
++                event_parser: RealtimeEventParser::V1,
++                session_mode: RealtimeSessionMode::Conversational,
++                output_modality: RealtimeOutputModality::Audio,
++                voice: RealtimeVoice::Cove,
++            },
++            HeaderMap::new(),
++            HeaderMap::new(),
++        ),
++    )
++    .await
++    .expect("connect timeout")
++    .expect("connect");
++    assert!(
++        matches!(connection.next_event().await.unwrap(), Some(RealtimeEvent::SessionUpdated { realtime_session_id, .. }) if realtime_session_id == "ordinary-realtime")
++    );
++    connection.close().await.unwrap();
++    server.await.unwrap();
++    assert!(!trap_opened.load(std::sync::atomic::Ordering::SeqCst));
++    trap_task.abort();
++    let _ = trap_task.await;
++}
 diff --git a/codex-rs/codex-api/tests/realtime_websocket_tls.rs b/codex-rs/codex-api/tests/realtime_websocket_tls.rs
 index 7b7a3363..78e0543a 100644
 --- a/codex-rs/codex-api/tests/realtime_websocket_tls.rs
@@ -267,7 +490,7 @@ index aba43ce9..71cc8452 100644
          headers: HeaderMap::new(),
          retry: codex_api::RetryConfig {
 diff --git a/codex-rs/codex-client/src/provider.rs b/codex-rs/codex-client/src/provider.rs
-index 41a99420..4499905b 100644
+index 41a99420..d1b82623 100644
 --- a/codex-rs/codex-client/src/provider.rs
 +++ b/codex-rs/codex-client/src/provider.rs
 @@ -45,6 +45,7 @@ impl RetryConfig {
@@ -307,12 +530,17 @@ index 41a99420..4499905b 100644
              return if path.is_empty() {
                  base.to_owned()
              } else {
-@@ -112,7 +121,8 @@ impl Provider {
+@@ -112,7 +121,13 @@ impl Provider {
      }
  
      pub fn websocket_url_for_path(&self, path: &str) -> Result<Url, url::ParseError> {
 -        let mut url = Url::parse(&self.url_for_path(path))?;
-+        let base = self.websocket_base_url.as_deref().unwrap_or(&self.base_url);
++        let base = match path {
++            "responses" | "/responses" => {
++                self.websocket_base_url.as_deref().unwrap_or(&self.base_url)
++            }
++            _ => &self.base_url,
++        };
 +        let mut url = Url::parse(&self.url_for_path_from(base, path))?;
  
          let scheme = match url.scheme() {
@@ -437,7 +665,7 @@ index 43d5ed1c..ccd6aed1 100644
            "description": "Maximum time (in milliseconds) to wait for a websocket connection attempt before treating it as failed.",
            "format": "uint64",
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 62b0ed13..7663dcb4 100644
+index 62b0ed13..46419cbd 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -1985,6 +1985,7 @@ impl ModelClientSession {
@@ -456,10 +684,23 @@ index 62b0ed13..7663dcb4 100644
              auth_revision,
              api_auth,
              auth_owner_generation,
-@@ -2061,6 +2063,12 @@ impl ModelClientSession {
+@@ -2061,6 +2063,25 @@ impl ModelClientSession {
              request_route_telemetry,
              responses_headers,
          } = params;
++        if self
++            .client
++            .state
++            .provider
++            .info()
++            .websocket_base_url
++            .is_some()
++            && self.client.state.provider.auth_manager().is_none()
++        {
++            return Err(ApiError::InvalidRequest {
++                message: "independent WebSocket requires tracked credential ownership".into(),
++            });
++        }
 +        self.client
 +            .state
 +            .provider
@@ -469,7 +710,7 @@ index 62b0ed13..7663dcb4 100644
          let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision);
          let reset_reason = match self.websocket_session.connection.as_ref() {
              Some(_)
-@@ -2555,6 +2563,7 @@ impl ModelClientSession {
+@@ -2555,6 +2576,7 @@ impl ModelClientSession {
                  .websocket_connection(WebsocketConnectParams {
                      session_telemetry,
                      api_provider: client_setup.api_provider,
@@ -477,7 +718,7 @@ index 62b0ed13..7663dcb4 100644
                      auth_revision: client_setup.auth_revision,
                      api_auth: client_setup.api_auth,
                      auth_owner_generation: client_setup.auth_owner_generation,
-@@ -3525,6 +3534,7 @@ impl AuthRequestTelemetryContext {
+@@ -3525,6 +3547,7 @@ impl AuthRequestTelemetryContext {
  struct WebsocketConnectParams<'a> {
      session_telemetry: &'a SessionTelemetry,
      api_provider: codex_api::Provider,
@@ -605,8 +846,20 @@ index 1823275e..ba9b3794 100644
          model_catalog_url: None,
          // Environment variable that should exist in the test environment.
          // ModelClient will return an error if the environment variable for the
+diff --git a/codex-rs/ext/guardian-v2/Cargo.toml b/codex-rs/ext/guardian-v2/Cargo.toml
+index 02e69106..a6b39bc2 100644
+--- a/codex-rs/ext/guardian-v2/Cargo.toml
++++ b/codex-rs/ext/guardian-v2/Cargo.toml
+@@ -38,6 +38,7 @@ tracing = { workspace = true }
+ uuid = { workspace = true }
+ 
+ [dev-dependencies]
++codex-models-manager = { workspace = true }
+ codex-model-provider-info = { workspace = true }
+ codex-utils-cargo-bin = { workspace = true }
+ core_test_support = { workspace = true }
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
-index cf5d463e..7215c310 100644
+index cf5d463e..90ffd684 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
 @@ -34,6 +34,7 @@ use codex_model_provider::ProviderAuthScope;
@@ -633,22 +886,24 @@ index cf5d463e..7215c310 100644
              redirect_policy,
              key,
              auth_changes,
-@@ -197,7 +200,13 @@ impl ConnectionPool {
+@@ -197,7 +200,15 @@ impl ConnectionPool {
                  .pop();
              match idle {
                  Some(connection)
 -                    if connection.key == key
-+                    if self
-+                        .config
-+                        .provider
-+                        .info()
-+                        .validate_websocket_auth(auth_mode)
-+                        .is_ok()
++                    if (self.config.provider.info().websocket_base_url.is_none()
++                        || auth_changes.is_some())
++                        && self
++                            .config
++                            .provider
++                            .info()
++                            .validate_websocket_auth(auth_mode)
++                            .is_ok()
 +                        && connection.key == key
                          && connection
                              .auth_changes
                              .as_ref()
-@@ -299,6 +308,13 @@ impl ConnectionPool {
+@@ -299,6 +310,13 @@ impl ConnectionPool {
              .auth_manager()
              .map(|manager| manager.auth_change_receiver());
          let revision = auth_changes.as_mut().map(|auth| *auth.borrow_and_update());
@@ -662,7 +917,7 @@ index cf5d463e..7215c310 100644
          let ResolvedResponsesProvider {
              provider,
              redirect_policy,
-@@ -331,6 +347,7 @@ impl ConnectionPool {
+@@ -331,6 +349,7 @@ impl ConnectionPool {
          Ok(ClientSetup {
              provider,
              auth,
@@ -670,7 +925,7 @@ index cf5d463e..7215c310 100644
              redirect_policy,
              key,
              auth_changes,
-@@ -399,6 +416,7 @@ impl ConnectionPool {
+@@ -399,6 +418,7 @@ impl ConnectionPool {
          let ClientSetup {
              provider,
              auth,
@@ -678,10 +933,15 @@ index cf5d463e..7215c310 100644
              redirect_policy: _,
              key,
              auth_changes,
-@@ -412,6 +430,9 @@ impl ConnectionPool {
+@@ -412,6 +432,14 @@ impl ConnectionPool {
          );
  
          let provider_info = self.config.provider.info();
++        if provider_info.websocket_base_url.is_some() && auth_changes.is_none() {
++            return Err(LunaSamplerError::Api(ApiError::InvalidRequest {
++                message: "independent WebSocket requires tracked credential ownership".into(),
++            }));
++        }
 +        provider_info
 +            .validate_websocket_auth(auth_mode)
 +            .map_err(|message| LunaSamplerError::Api(ApiError::InvalidRequest { message }))?;
@@ -689,10 +949,10 @@ index cf5d463e..7215c310 100644
          let connect = client.connect(
              &self.config.http_client_factory,
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
-index 6cf716de..65d36c91 100644
+index 6cf716de..a6e70a9e 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
-@@ -460,3 +460,39 @@ async fn http_cache_preserves_no_constraint_redirect_policy_and_configured_heade
+@@ -460,3 +460,156 @@ async fn http_cache_preserves_no_constraint_redirect_policy_and_configured_heade
      );
      Ok(())
  }
@@ -729,6 +989,123 @@ index 6cf716de..65d36c91 100644
 +    ));
 +    assert_eq!(sampler.sample(sample_request("managed-http")).await?, "low");
 +    assert_eq!(output.requests().len(), 1);
++    assert_eq!(gateway.opens.load(Ordering::SeqCst), 0);
++    Ok(())
++}
++
++#[derive(Debug)]
++struct SwitchingModeProvider {
++    inner: codex_model_provider::SharedModelProvider,
++    manager: Arc<AuthManager>,
++    first: std::sync::atomic::AtomicBool,
++    tracked: bool,
++}
++
++struct ManagedCredential(CodexAuth);
++impl codex_login::ExternalAuth for ManagedCredential {
++    fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
++        Box::pin(async { Ok(self.0.clone()) })
++    }
++    fn refresh(
++        &self,
++        _: codex_login::ExternalAuthRefreshContext,
++    ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
++        self.resolve()
++    }
++}
++
++impl codex_model_provider::ModelProvider for SwitchingModeProvider {
++    fn models_manager(
++        &self,
++        home: std::path::PathBuf,
++        catalog: Option<codex_protocol::openai_models::ModelsResponse>,
++    ) -> codex_models_manager::manager::SharedModelsManager {
++        self.inner.models_manager(home, catalog)
++    }
++    fn info(&self) -> &ModelProviderInfo {
++        self.inner.info()
++    }
++    fn auth_manager(&self) -> Option<Arc<AuthManager>> {
++        self.tracked.then(|| Arc::clone(&self.manager))
++    }
++    fn account_state(&self) -> codex_model_provider::ProviderAccountResult {
++        self.inner.account_state()
++    }
++    fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
++        Box::pin(async {
++            let previous = self.inner.auth().await;
++            if self.first.swap(false, Ordering::SeqCst) {
++                assert_eq!(
++                    previous.as_ref().map(CodexAuth::auth_mode),
++                    Some(AuthMode::ApiKey)
++                );
++                self.manager
++                    .set_external_auth(Arc::new(ManagedCredential(
++                        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++                    )))
++                    .await
++                    .expect("install managed credential");
++            }
++            previous
++        })
++    }
++}
++
++#[tokio::test]
++async fn independent_websocket_rejects_auth_change_between_mode_and_credential_resolution()
++-> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let http = responses::start_mock_server().await;
++    let ws = responses::start_websocket_server(vec![Vec::new()]).await;
++    let gateway = Gateway::new(&http.uri(), ws.uri()).await?;
++    let base_url = format!("{}/v1", http.uri());
++    let mut info = ModelProviderInfo::create_openai_provider(Some(base_url.clone()));
++    info.websocket_base_url = Some(format!("{}/v1", gateway.url).into());
++    let manager =
++        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("synthetic-initial-key"));
++    let mut changes = manager.auth_change_receiver();
++    let before = *changes.borrow_and_update();
++    let mut config = sampler_config(base_url);
++    config.provider = Arc::new(SwitchingModeProvider {
++        inner: create_model_provider(info, Some(Arc::clone(&manager))),
++        manager,
++        first: std::sync::atomic::AtomicBool::new(true),
++        tracked: true,
++    });
++    let pool = ConnectionPool::new(Arc::new(config));
++    let permit = Arc::clone(&pool.sockets).acquire_owned().await?;
++    assert!(matches!(pool.open_connection(permit).await,
++        Err(LunaSamplerError::Api(ApiError::Stream(message))) if message == "authentication changed while resolving routing"));
++    assert!(*changes.borrow_and_update() > before);
++    assert_eq!(gateway.opens.load(Ordering::SeqCst), 0);
++    Ok(())
++}
++
++#[tokio::test]
++async fn independent_websocket_rejects_untracked_credential_change() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let http = responses::start_mock_server().await;
++    let ws = responses::start_websocket_server(vec![Vec::new()]).await;
++    let gateway = Gateway::new(&http.uri(), ws.uri()).await?;
++    let base_url = format!("{}/v1", http.uri());
++    let mut info = ModelProviderInfo::create_openai_provider(Some(base_url.clone()));
++    info.websocket_base_url = Some(format!("{}/v1", gateway.url).into());
++    let manager =
++        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("synthetic-initial-key"));
++    let mut changes = manager.auth_change_receiver();
++    let before = *changes.borrow_and_update();
++    let mut config = sampler_config(base_url);
++    config.provider = Arc::new(SwitchingModeProvider {
++        inner: create_model_provider(info, Some(Arc::clone(&manager))),
++        manager,
++        first: std::sync::atomic::AtomicBool::new(true),
++        tracked: false,
++    });
++    let pool = ConnectionPool::new(Arc::new(config));
++    let permit = Arc::clone(&pool.sockets).acquire_owned().await?;
++    assert!(matches!(pool.open_connection(permit).await,
++        Err(LunaSamplerError::Api(ApiError::InvalidRequest { message })) if message == "independent WebSocket requires tracked credential ownership"));
++    assert!(*changes.borrow_and_update() > before);
 +    assert_eq!(gateway.opens.load(Ordering::SeqCst), 0);
 +    Ok(())
 +}
@@ -931,7 +1308,7 @@ index 3a328dd2..f6686618 100644
          env_key: None,
          env_key_instructions: None,
 diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
-index 9c15c54b..a0144aef 100644
+index 9c15c54b..69ae70b5 100644
 --- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 +++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 @@ -78,6 +78,7 @@ base_url = "http://localhost:11434/v1"
@@ -966,7 +1343,7 @@ index 9c15c54b..a0144aef 100644
              model_catalog_url: None,
              env_key: None,
              env_key_instructions: None,
-@@ -882,3 +886,138 @@ model_catalog_url = "https://gateway.example/codex/catalog?token=catalog-secret"
+@@ -882,3 +886,145 @@ model_catalog_url = "https://gateway.example/codex/catalog?token=catalog-secret"
          "https://gateway.example/v1"
      );
  }
@@ -990,6 +1367,13 @@ index 9c15c54b..a0144aef 100644
 +        assert_eq!(
 +            provider.url_for_path("/responses"),
 +            "https://http.example/http%2Froot/responses?original=a%26b&original=&extra=a%26%3D%2B%25%23"
++        );
++        assert_eq!(
++            provider
++                .websocket_url_for_path("/realtime")
++                .unwrap()
++                .as_str(),
++            "wss://http.example/http%2Froot/realtime?original=a%26b&original=&extra=a%26%3D%2B%25%23"
 +        );
 +        let websocket = provider.websocket_url_for_path("/responses").unwrap();
 +        assert_eq!(

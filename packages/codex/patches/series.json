@@ -878,8 +878,8 @@
     },
     {
       "path": "sdk-independent-websocket-base.patch",
-      "sha256": "fd4c2eb7ca12cb38648cbfcb1f0cf4a43d8291a06171abe6f59bae9d824b2885"
+      "sha256": "0f7ac1c90b22ab0fb6c5af56a2ef5e2270a90f13df9513f41226f9a7ea991d06"
     }
   ],
-  "result_tree": "9d078bf18c89e2d1627a82830b1042837685f791"
+  "result_tree": "90497e6d048dfc4cac4c9834074dd63c56b346f0"
 }
