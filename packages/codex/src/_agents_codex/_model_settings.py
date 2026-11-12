@@ -61,6 +61,38 @@ def _capture_provider_compaction(value: Any) -> ProviderCompactionPolicy:
     raise ValueError("Unsupported provider_compaction policy")
 
 
+def _capture_hosted_tool_choice(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    kind = value.get("type")
+    supported = {
+        "web_search",
+        "file_search",
+        "code_interpreter",
+        "image_generation",
+        "computer",
+        "computer_use_preview",
+        "shell",
+        "apply_patch",
+        "tool_search",
+        "mcp",
+    }
+    if (
+        not isinstance(kind, str)
+        or kind not in supported
+        or value.keys() - ({"type", "server_label", "name"} if kind == "mcp" else {"type"})
+    ):
+        raise ValueError("hosted tool choice needs a supported provider selector")
+    copied = dict(value)
+    if kind == "mcp" and (
+        not isinstance(copied.get("server_label"), str)
+        or not copied["server_label"].strip()
+        or (
+            "name" in copied and (not isinstance(copied["name"], str) or not copied["name"].strip())
+        )
+    ):
+        raise ValueError("hosted MCP choice needs a captured server and tool identity")
+    return MappingProxyType(copied)
+
+
 def _capture_model_settings(
     settings: ModelSettings | None, settings_type: type[ModelSettings]
 ) -> ModelSettings:
@@ -199,6 +231,8 @@ def _capture_model_settings(
                 ):
                     raise ValueError("tool_choice needs a nonempty captured tool identity")
                 captured["tool_choice"] = ToolRef(value.name, value.namespace)
+            elif isinstance(value, Mapping):
+                captured["tool_choice"] = _capture_hosted_tool_choice(value)
             elif value not in ("auto", "none", "required"):
                 raise ValueError("tool_choice must be an outer mode or ToolRef")
     return cast("ModelSettings", captured)

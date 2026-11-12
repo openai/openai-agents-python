@@ -1261,6 +1261,7 @@ pub(crate) async fn update_active(
         if let Some(choice) = settings.tool_choice {
             target.model.tool_choice = Some(choice);
             target.model.request_controls.named_tool_choice = Some(None);
+            target.model.request_controls.hosted_tool_choice = Some(None);
         }
         if let Some(controls) = &settings.request_controls {
             target.model.request_controls.apply_patch(controls);

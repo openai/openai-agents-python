@@ -16,6 +16,7 @@ from _agents_codex.agent import (
     ContextT as ContextT,
     FrozenInstanceError as FrozenInstanceError,
     Generic as Generic,
+    HostedToolChoice as HostedToolChoice,
     Mapping as Mapping,
     MappingProxyType as MappingProxyType,
     ModelSettings as ModelSettings,
