@@ -31,10 +31,12 @@ from agents import (
     HttpMCP,
     NativeProvider,
     OutputValidationError,
+    ToolContext,
     TurnStoppedError,
     function_tool,
     telemetry,
 )
+from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 from tests.telemetry_transport_fixtures import (
     DecodedCollector,
@@ -136,6 +138,8 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "prepared_request_context",
         "closed_session_context",
         "child_turn_policy",
+        "child_followup_trace",
+        "child_followup_reloaded_trace",
         "child_interaction_policy",
     ],
 )
@@ -190,7 +194,14 @@ async def _native_case(case: str) -> None:
                 await telemetry.configure(
                     traces=export,
                     logs=telemetry.OtlpHttp(endpoint=f"{peer.endpoint}/v1/logs")
-                    if case in ("policies", "ancestry_queue", "child_turn_policy")
+                    if case
+                    in (
+                        "policies",
+                        "ancestry_queue",
+                        "child_turn_policy",
+                        "child_followup_trace",
+                        "child_followup_reloaded_trace",
+                    )
                     else None,
                     processors=[recorder],
                     log_user_prompt=True,
@@ -233,6 +244,10 @@ async def _native_case(case: str) -> None:
                     await _closed_session_context(fixture, provider)
                 elif case == "child_turn_policy":
                     await _child_turn_policy(recorder, peer, Path(directory))
+                elif case == "child_followup_trace":
+                    await _child_followup_trace(peer, Path(directory))
+                elif case == "child_followup_reloaded_trace":
+                    await _child_followup_reloaded_trace(peer, Path(directory))
                 elif case == "child_interaction_policy":
                     await _child_interaction_policy(Path(directory))
                 else:
@@ -1222,6 +1237,463 @@ asyncio.run(scopes())
             [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=15
         )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _child_followup_trace(peer: DecodedCollector, directory: Path) -> None:
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.native_fixtures import text_response
+    from tests.test_native_child_agents import (
+        agent_for,
+        child_peer,
+        collaboration,
+        handles,
+        metadata,
+        trust,
+    )
+    from tests.test_native_executor_tools import declaration
+
+    async def run_case(mode: str) -> tuple[int, bool, bool]:
+        check_origin = mode.startswith("origin_")
+        bare = mode in ("bare", "origin_bare_metadata")
+        deferred = mode in (
+            "deferred",
+            "mixed",
+            "origin_disabled",
+            "origin_metadata",
+            "origin_sensitive",
+        )
+        mixed = mode == "mixed"
+        directory_for_case = directory / mode
+        directory_for_case.mkdir()
+        caller_id = {
+            "idle": "a",
+            "deferred": "b",
+            "mixed": "c",
+            "bare": "d",
+            "origin_disabled": "1",
+            "origin_metadata": "2",
+            "origin_sensitive": "3",
+            "origin_bare_metadata": "4",
+            "origin_idle_metadata": "5",
+        }[mode] * 32
+        messages = ["follow-up input canary"]
+        if mixed:
+            messages = ["disabled queued input canary", "last input canary"]
+        marker = f"FOLLOWUP_RESPONSE_CANARY_{mode}"
+        completion_held, release_completion = asyncio.Event(), asyncio.Event()
+        child_requests: list[dict[str, Any]] = []
+        first_response_id = None
+        mailbox_dispatched = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        class DispatchObserver:
+            def on_trace_event(self, event: telemetry.TraceLifecycleEvent) -> None:
+                if (
+                    event["lifecycle"] == "end"
+                    and event["trace_id"] == caller_id
+                    and event["name"] == "op.dispatch.inter_agent_communication"
+                ):
+                    loop.call_soon_threadsafe(mailbox_dispatched.set)
+
+        if deferred:
+            telemetry.add_trace_processor(DispatchObserver())
+
+        with pytest.MonkeyPatch.context() as patch:
+            async with (
+                child_peer(("default",)) as model,
+                ExecutorPeer(directory_for_case / "remote").serve() as executor,
+            ):
+                trust(executor, directory_for_case, patch)
+                root_response = model.response
+
+                def response():
+                    nonlocal first_response_id
+                    body = model.requests[-1]
+                    meta = metadata(body, model.request_headers[-1])
+                    if meta["agent_name"] == "/root":
+                        return root_response()
+                    child_requests.append(meta)
+                    if len(child_requests) == 1:
+                        first_response_id = f"resp_{len(model.requests)}"
+                        final = assistant_output("Initial final answer")
+                        final["item"]["phase"] = "final_answer"
+                        if not deferred:
+                            return [final]
+                        # Seeing the commentary delta proves Core has processed the preceding
+                        # final answer, which defers mail to the next turn.
+                        signal = text_response("after-final-answer", "After final answer")
+                        signal[0]["item"]["phase"] = signal[-1]["item"]["phase"] = "commentary"
+                        return [final, *signal]
+                    inputs = json.dumps(body["input"])
+                    assert all(inputs.count(message) == 1 for message in messages)
+                    positions = [inputs.index(message) for message in messages]
+                    assert positions == sorted(positions)
+                    assert meta["turn_id"] != child_requests[0]["turn_id"]
+                    final = assistant_output(marker)
+                    final["item"]["phase"] = "final_answer"
+                    return [final]
+
+                async def hold_completion(event):
+                    if (
+                        deferred
+                        and event["type"] == "response.completed"
+                        and event["response"]["id"] == first_response_id
+                    ):
+                        completion_held.set()
+                        await release_completion.wait()
+
+                model.response = response
+                model.before_event = hold_completion
+                async with agent_for(model, executor).session(
+                    environment=declaration(executor)
+                ) as session:
+                    try:
+                        with telemetry.trace(
+                            "spawn child with response capture",
+                            options=telemetry.TraceOptions(
+                                disabled=mode == "origin_disabled",
+                                include_sensitive_data=not mode.endswith("metadata"),
+                            ),
+                        ):
+                            creation = await session.submit("Spawn a child")
+                        assert (await creation.get_result()).final_output == "root complete"
+                        [original] = await handles(session, 1)
+                        if deferred:
+                            await completion_held.wait()
+                            stream = original.events()
+                            try:
+                                async for event in stream:
+                                    if (
+                                        event.type == "output_text_delta"
+                                        and event.item_id == "after-final-answer"
+                                    ):
+                                        break
+                                else:
+                                    pytest.fail("Core never observed the post-final commentary")
+                            finally:
+                                await stream.aclose()
+                        else:
+                            initial_result = await original.get_result()
+                            assert initial_result.final_output == "Initial final answer"
+
+                        if mixed:
+                            # The enabled dispatch confirms the prior disabled send has
+                            # been queued without waking the child.
+                            model.action = collaboration(
+                                "send_message",
+                                {"target": "/root/alpha", "message": messages[0]},
+                                "queued-call",
+                            )
+                            with telemetry.trace(
+                                "queue-only caller",
+                                options=telemetry.TraceOptions(
+                                    disabled=True, include_sensitive_data=True
+                                ),
+                            ):
+                                earlier = await session.submit("Queue mail for the child")
+                            assert (await earlier.get_result()).final_output == "root complete"
+
+                        model.action = collaboration(
+                            "followup_task",
+                            {"target": "/root/alpha", "message": messages[-1]},
+                            "followup-call-last",
+                        )
+                        if bare:
+                            assert telemetry.current_context() is None
+                            caller_span_id = "123456789abcdef0"
+                            wake = await session.submit(
+                                "Follow up with the child",
+                                parent_trace={
+                                    "traceparent": f"00-{caller_id}-{caller_span_id}-01",
+                                },
+                            )
+                        else:
+                            with telemetry.trace(
+                                "follow-up caller",
+                                options=telemetry.TraceOptions(
+                                    trace_id=caller_id, include_sensitive_data=mixed or check_origin
+                                ),
+                            ) as caller:
+                                caller_span_id = caller.context.span_id
+                                wake = await session.submit("Follow up with the child")
+                        assert (await wake.get_result()).final_output == "root complete"
+
+                        if deferred:
+                            # The dispatch ends after mail is queued. Holding the old response
+                            # until then forces the old task's completion to own the wake.
+                            await asyncio.wait_for(mailbox_dispatched.wait(), timeout=8)
+                            assert len(child_requests) == 1
+                            release_completion.set()
+                            await original.get_result()
+
+                        async with timeout(8):
+                            while True:
+                                [successor] = await handles(session, 1)
+                                if successor.turn_id != original.turn_id:
+                                    break
+                                await asyncio.sleep(0.01)
+                            assert (await successor.get_result()).final_output == marker
+                        assert successor.child_id == original.child_id
+                        assert len(child_requests) == 2
+                        assert child_requests[0]["turn_id"] == original.turn_id
+                        assert child_requests[1]["turn_id"] == successor.turn_id
+                        assert child_requests[1].get("parent_turn_id") == wake.turn_id
+                    finally:
+                        release_completion.set()
+
+        assert (await telemetry.force_flush()).status == "success"
+        spans = _spans(peer)
+        successor_spans = [
+            span
+            for span in spans
+            if span["name"] == "session_task.turn"
+            and _attrs(span).get("turn.id") == successor.turn_id
+        ]
+        in_caller_trace = any(
+            span["traceId"] == caller_id and _descends(span, caller_span_id, spans)
+            for span in successor_spans
+        )
+        exported = any(
+            marker in json.dumps(record["payload"])
+            for record in peer.records
+            if record["signal"] == "logs"
+        )
+        return len(successor_spans), in_caller_trace, exported
+
+    results = {mode: await run_case(mode) for mode in ("idle", "deferred", "mixed")}
+    assert results == {
+        "idle": (1, True, False),
+        "deferred": (1, True, False),
+        "mixed": (0, False, False),
+    }, ("follow-up span count, caller ancestry and response capture", results)
+    bare = await run_case("bare")
+    assert bare[:2] == (1, True), ("bare W3C follow-up span and ancestry", bare)
+
+    origins = {
+        mode: await run_case(mode)
+        for mode in (
+            "origin_disabled",
+            "origin_metadata",
+            "origin_sensitive",
+            "origin_bare_metadata",
+            "origin_idle_metadata",
+        )
+    }
+    assert origins == {
+        "origin_disabled": (0, False, False),
+        "origin_metadata": (1, True, False),
+        "origin_sensitive": (1, True, True),
+        "origin_bare_metadata": (1, True, False),
+        "origin_idle_metadata": (1, True, False),
+    }, ("origin restrictions on a follow-up wake", origins)
+
+
+async def _child_followup_reloaded_trace(collector: DecodedCollector, directory: Path) -> None:
+    from dataclasses import replace
+
+    from agents import ChildStepContext, NativeAgents
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import agent_for, child_peer, collaboration, metadata, trust
+    from tests.test_native_executor_tools import declaration
+
+    async def run_case(mode: str, index: int) -> tuple[int, bool, bool]:
+        directory_for_case = directory / mode
+        directory_for_case.mkdir()
+        caller_id = f"{index:x}" * 32
+        marker = f"RELOADED_FOLLOWUP_RESPONSE_{mode}"
+        bare = mode == "cold_bare"
+        cold_restore = mode in ("cold", "cold_bare")
+        trace_state = "vendor=synthetic"
+        carriers: list[tuple[dict[str, str], bool]] = []
+        model_carriers: list[dict[str, str]] = []
+
+        @function_tool
+        def read_carrier(ctx: ToolContext[None]) -> str:
+            """Read a synthetic value."""
+            assert ctx.trace_context is not None
+            carriers.append((ctx.trace_context.to_headers(), telemetry.current_context() is None))
+            return "synthetic value"
+
+        async def supply_tool(_step: ChildStepContext[None]) -> list[FunctionTool]:
+            return [read_carrier]
+
+        followup_input = "wake the original child once"
+        requests: dict[str, list[dict[str, Any]]] = {"alpha": [], "beta": []}
+
+        with pytest.MonkeyPatch.context() as patch:
+            async with (
+                child_peer(("default",)) as model,
+                ExecutorPeer(directory_for_case / "remote").serve() as executor,
+            ):
+                trust(executor, directory_for_case, patch)
+                original_response = model.response
+
+                def response():
+                    body = model.requests[-1]
+                    meta = metadata(body, model.request_headers[-1])
+                    if meta["agent_name"] == "/root":
+                        return original_response()
+                    name = meta["agent_name"].rsplit("/", 1)[-1]
+                    requests[name].append(meta)
+                    if name == "beta":
+                        return [assistant_output("Replacement complete")]
+                    if len(requests["alpha"]) == 1:
+                        return [assistant_output("Initial complete")]
+                    assert json.dumps(body["input"]).count(followup_input) == 1
+                    if bare:
+                        client_metadata = body["client_metadata"]
+                        model_carriers.append(
+                            {
+                                key: client_metadata[f"ws_request_header_{key}"]
+                                for key in ("traceparent", "tracestate")
+                                if f"ws_request_header_{key}" in client_metadata
+                            }
+                        )
+                        if len(requests["alpha"]) == 2:
+                            return [function_call("read_carrier", {}, "bare-followup-tool")]
+                    final = assistant_output(marker)
+                    final["item"]["phase"] = "final_answer"
+                    return [final]
+
+                model.response = response
+                agent = agent_for(model, executor, websocket=bare)
+                [native] = [tool for tool in agent.tools if isinstance(tool, NativeAgents)]
+                native = replace(native, max_children=1)
+                agent = replace(
+                    agent,
+                    tools=[read_carrier, replace(native, before_step=supply_tool)]
+                    if bare
+                    else [native],
+                )
+                environment = declaration(executor)
+
+                async def child_at(session, name, *, settled=False):
+                    async with timeout(8):
+                        while True:
+                            if requests[name]:
+                                child_id = requests[name][0]["thread_id"]
+                                async for child in session.subagents():
+                                    if child.id == child_id and (
+                                        not settled or child.turn is not None
+                                    ):
+                                        return child
+                            await asyncio.sleep(0)
+
+                async def wake(session):
+                    model.action = collaboration(
+                        "followup_task",
+                        {"target": "/root/alpha", "message": followup_input},
+                        "reload-alpha",
+                    )
+                    if bare:
+                        assert telemetry.current_context() is None
+                        caller_span_id = "123456789abcdef0"
+                        root = await session.submit(
+                            "Wake alpha again",
+                            parent_trace={
+                                "traceparent": f"00-{caller_id}-{caller_span_id}-01",
+                                "tracestate": trace_state,
+                            },
+                        )
+                    else:
+                        with telemetry.trace(
+                            "reload caller",
+                            options=telemetry.TraceOptions(
+                                trace_id=caller_id, include_sensitive_data=True
+                            ),
+                        ) as scope:
+                            root = await session.submit("Wake alpha again")
+                            caller_span_id = scope.context.span_id
+                    assert (await root.get_result()).final_output == "root complete"
+                    replacement = await child_at(session, "alpha", settled=True)
+                    assert replacement.id == alpha.id
+                    assert replacement.turn is not None
+                    if not cold_restore:
+                        assert replacement.turn.instance_id != first.instance_id
+                    assert replacement.turn.turn_id != first.turn_id
+                    assert (await replacement.turn.get_result()).final_output == marker
+                    assert len(requests["alpha"]) == (3 if bare else 2)
+                    if bare:
+                        assert requests["alpha"][1]["turn_id"] == replacement.turn.turn_id
+                        [(carrier, no_private_scope)] = carriers
+                        assert no_private_scope
+                        assert len(model_carriers) == 2
+                        for context in [carrier, *model_carriers]:
+                            assert context["traceparent"][3:35] == caller_id
+                            assert context["traceparent"].endswith("-00")
+                        assert [
+                            context.get("tracestate") for context in [carrier, *model_carriers]
+                        ] == [trace_state] * 3, (carrier, model_carriers)
+                    assert requests["alpha"][-1]["turn_id"] == replacement.turn.turn_id
+                    assert requests["alpha"][-1].get("parent_turn_id") == root.turn_id
+                    return replacement.turn.turn_id, caller_span_id
+
+                async with agent.session(environment=environment) as session:
+                    with telemetry.trace(
+                        "create alpha",
+                        options=telemetry.TraceOptions(
+                            disabled=mode == "disabled",
+                            include_sensitive_data=mode != "metadata",
+                        ),
+                    ):
+                        creation = await session.submit("Create alpha")
+                    assert (await creation.get_result()).final_output == "root complete"
+                    alpha = await child_at(session, "alpha", settled=True)
+                    first = alpha.turn
+                    assert first is not None
+                    assert (await first.get_result()).final_output == "Initial complete"
+                    if cold_restore:
+                        saved = await session.save_state()
+                    else:
+                        model.action = collaboration(
+                            "spawn_agent",
+                            {"task_name": "beta", "message": "Replace alpha", "fork_turns": "none"},
+                            "evict-alpha",
+                        )
+                        root = await session.submit("Make alpha nonresident")
+                        assert (await root.get_result()).final_output == "root complete"
+                        beta = await child_at(session, "beta", settled=True)
+                        assert beta.turn is not None
+                        assert (await beta.turn.get_result()).final_output == "Replacement complete"
+                        evicted = await child_at(session, "alpha")
+                        assert not evicted.is_live and evicted.turn is None
+                        turn_id, caller_span_id = await wake(session)
+                if cold_restore:
+                    async with agent.session(environment=environment, state=saved) as restored:
+                        cold = await child_at(restored, "alpha")
+                        assert cold.id == alpha.id and not cold.is_live and cold.turn is None
+                        turn_id, caller_span_id = await wake(restored)
+
+        assert (await telemetry.force_flush()).status == "success"
+        spans = _spans(collector)
+        successor_spans = [
+            span
+            for span in spans
+            if span["name"] == "session_task.turn" and _attrs(span).get("turn.id") == turn_id
+        ]
+        ancestry = any(
+            span["traceId"] == caller_id and _descends(span, caller_span_id, spans)
+            for span in successor_spans
+        )
+        captured = any(
+            marker in json.dumps(record["payload"])
+            for record in collector.records
+            if record["signal"] == "logs"
+        )
+        return len(successor_spans), ancestry, captured
+
+    observed = {
+        mode: await run_case(mode, index)
+        for index, mode in enumerate(("disabled", "metadata", "permissive", "cold", "cold_bare"), 6)
+    }
+
+    assert observed == {
+        "disabled": (0, False, False),
+        "metadata": (1, True, False),
+        "permissive": (1, True, True),
+        "cold": (0, False, False),
+        "cold_bare": (0, False, False),
+    }, ("reloaded child tracing and response capture", observed)
 
 
 async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directory: Path) -> None:

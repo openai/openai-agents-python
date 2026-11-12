@@ -4735,6 +4735,28 @@ impl TurnLifecycleContributor for PythonContributor {
                     same_id_recovery,
                     policy_failure: OnceLock::new(),
                 });
+                #[cfg(test)]
+                if let Some(hold) = input
+                    .thread_store
+                    .get::<admission_order_tests::ReceiptWriteHold>()
+                    && hold.turn_id == input.turn_id
+                {
+                    hold.entered.add_permits(1);
+                    hold.release
+                        .lock()
+                        .expect("receipt write test gate")
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("release receipt write test gate");
+                }
+                let Some(startup) = input
+                    .turn_store
+                    .get::<codex_extension_api::TurnStartupGate>()
+                else {
+                    return;
+                };
+                let Some(publication) = startup.lock_current() else {
+                    return;
+                };
                 crate::native_interception::attach_sdk_admission(input.turn_store, &receipt);
                 input.turn_store.insert(receipt.clone());
                 if let Some(previous) = admission.replace(receipt) {
@@ -4748,6 +4770,7 @@ impl TurnLifecycleContributor for PythonContributor {
                         }
                     });
                 }
+                drop(publication);
                 drop(admission);
                 tools.family.graph_changed.send_replace(());
             }
@@ -6211,6 +6234,12 @@ pub(crate) mod admission_order_tests {
         pub entered: tokio::sync::Semaphore,
         pub release: tokio::sync::Semaphore,
     }
+
+    pub(crate) struct ReceiptWriteHold {
+        pub turn_id: String,
+        pub entered: tokio::sync::Semaphore,
+        pub release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
 }
 
 #[cfg(test)]
@@ -6355,6 +6384,7 @@ pub(crate) mod managed_tests {
         turn: ExtensionData,
     ) -> ExtensionData {
         let session = ExtensionData::new("session");
+        turn.get_or_init(codex_extension_api::TurnStartupGate::default);
         let mode = serde_json::from_value(json!({
             "mode":"default", "settings":{
                 "model":"test", "reasoning_effort":null, "developer_instructions":null
@@ -6372,6 +6402,49 @@ pub(crate) mod managed_tests {
             })
             .await;
         turn
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoked_start_cannot_publish_python_admission_after_graph_lock() {
+        let thread = Arc::new(admission_thread());
+        let tools = thread.get::<PythonTools>().unwrap();
+        let prior = start_admission(&thread, "prior").await;
+        let prior = tools.admitted_turn(&prior).expect("prior turn receipt");
+
+        let (release, wait_for_release) = std::sync::mpsc::channel();
+        let hold = thread.get_or_init(|| admission_order_tests::ReceiptWriteHold {
+            turn_id: "revoked".into(),
+            entered: tokio::sync::Semaphore::new(0),
+            release: Mutex::new(wait_for_release),
+        });
+        let parent = codex_extension_api::TurnStartupGate::default();
+        let reservation = parent.child();
+        let turn = ExtensionData::new("revoked");
+        turn.insert(reservation.clone());
+        let starting = {
+            let thread = Arc::clone(&thread);
+            tokio::spawn(async move { start_admission_with_store(&thread, "revoked", turn).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), hold.entered.acquire())
+            .await
+            .expect("receipt write test gate")
+            .expect("receipt write test gate semaphore")
+            .forget();
+        // The contributor is already polling with the synchronous graph and
+        // admission locks held. Dropping a surrounding async select cannot
+        // stop its next instruction.
+        reservation.cancel();
+        release.send(()).expect("release stale contributor");
+        let revoked = starting.await.expect("stale contributor returns");
+        assert!(revoked.get::<TurnAdmission>().is_none());
+        assert!(tools.owns_admission(&prior));
+
+        let later = ExtensionData::new("later");
+        later.insert(parent.child());
+        let later = start_admission_with_store(&thread, "later", later).await;
+        let later = tools.admitted_turn(&later).expect("later turn receipt");
+        assert!(tools.owns_admission(&later));
+        assert!(!tools.owns_admission(&prior));
     }
 
     #[tokio::test]
@@ -7096,6 +7169,7 @@ pub(crate) mod managed_tests {
     ) -> ExtensionData {
         let session = ExtensionData::new("test-session");
         let turn = ExtensionData::new(turn_id);
+        turn.insert(codex_extension_api::TurnStartupGate::default());
         let mode = serde_json::from_value(json!({
             "mode":"default", "settings":{
                 "model":"test", "reasoning_effort":null, "developer_instructions":null

@@ -1117,6 +1117,32 @@ async def test_codex_login_cannot_open_provider_hosted_tools(tmp_path):
                 pytest.fail("Codex login must not admit provider-hosted tools")
 
 
+@pytest.mark.parametrize(
+    "tool",
+    [
+        FileSearch(vector_store_ids=["vs_fixture"]),
+        CodeInterpreter(container="cntr_fixture"),
+        ImageGeneration(),
+    ],
+    ids=["file-search", "code-interpreter", "image-generation"],
+)
+async def test_responses_lite_rejects_hosted_tools_before_provider_request(responses, tool):
+    borrowed = provider(responses)
+    async with timeout(20), borrowed:
+        agent = Agent(
+            instructions="Use the hosted tool.",
+            provider=borrowed,
+            tools=[tool],
+        )
+        with pytest.raises(
+            (ValueError, RuntimeError),
+            match="Provider-hosted tools require Responses; Responses Lite is unsupported",
+        ):
+            async with agent.session() as session:
+                await (await session.submit("Run the hosted tool.")).get_result()
+    assert not responses.requests
+
+
 @pytest.mark.parametrize("value", [None, 0, 1, 50, 51])
 async def test_file_search_normalizes_result_limit_in_native_request(responses, value):
     responses.respond(assistant_output("Done."))
