@@ -259,7 +259,6 @@ async def test_exporter_default_budget_refuses_a_retry_beyond_its_deadline():
     assert len(received) == 1
 
 
-
 async def test_exporter_backoff_cannot_extend_the_delivery_deadline():
     with collector([503, 200]) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(
