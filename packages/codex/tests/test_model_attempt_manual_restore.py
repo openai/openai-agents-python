@@ -58,7 +58,9 @@ def accepted(controls):
     ],
 )
 def test_accepted_retry_controls_preserve_presence_null_and_values(controls):
-    model, restored = implementation._manual_restore_model_settings(accepted(controls))
+    model, restored = implementation._manual_restore_model_settings(
+        accepted(controls), authorized_model=None, trusted_default="fixture"
+    )
     assert model == "fixture"
     assert restored["request_controls"] == controls
     if isinstance(controls.get("retry"), dict):
@@ -87,7 +89,9 @@ def test_accepted_retry_controls_preserve_presence_null_and_values(controls):
 )
 def test_saved_retry_controls_do_not_bypass_accepted_shape(controls):
     with pytest.raises(ValueError):
-        implementation._manual_restore_model_settings(accepted(controls))
+        implementation._manual_restore_model_settings(
+            accepted(controls), authorized_model=None, trusted_default="fixture"
+        )
 
 
 def snapshot(owner="native-owner", requests=3, missing=1):
