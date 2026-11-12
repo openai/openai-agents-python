@@ -1,0 +1,119 @@
+diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
+index b0a057f8..af3734aa 100644
+--- a/codex-rs/codex-api/src/received_response_facts.rs
++++ b/codex-rs/codex-api/src/received_response_facts.rs
+@@ -1,6 +1,9 @@
+ //! Select only typed provider refusal/probability members, never arbitrary bodies.
+ use crate::{ApiError, ResponseEvent};
+ use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::ResponsesEventTransport;
++use codex_protocol::protocol::SdkRawProviderEvent;
++use codex_protocol::protocol::SdkRawProviderSource;
+ use codex_protocol::response_facts::{ProbabilityToken, ResponseFact};
+ use serde_json::Value;
+ 
+@@ -139,6 +142,7 @@ const MAX_APPLICATION_STREAM_BYTES: usize = 8 * 1024 * 1024;
+ /// Projects a native application model stream without admitting unfinished tool calls.
+ #[derive(Default)]
+ pub struct ApplicationModelStream {
++    observe_raw_provider_events: bool,
+     deferred: Vec<ResponseEvent>,
+     deferred_bytes: usize,
+     completion: Option<ResponseEvent>,
+@@ -146,16 +150,33 @@ pub struct ApplicationModelStream {
+ }
+ 
+ impl ApplicationModelStream {
++    pub fn new(observe_raw_provider_events: bool) -> Self {
++        Self {
++            observe_raw_provider_events,
++            ..Self::default()
++        }
++    }
++
+     /// Returns ready events and whether the application should advance its iterator.
+     pub fn push(&mut self, json: &str) -> (Vec<ResponseEvent>, bool) {
+         let mut ready = Vec::new();
++        let mut raw = None;
+         if self.failure.is_none() {
+-            self.failure = self.project(json, &mut ready).err();
++            self.failure = self.project(json, &mut ready, &mut raw).err();
++        }
++        // Raw observations follow producer order even while tool effects are deferred.
++        if let Some(raw) = raw {
++            ready.insert(0, ResponseEvent::RawProvider(raw));
+         }
+         (ready, self.failure.is_none())
+     }
+ 
+-    fn project(&mut self, json: &str, ready: &mut Vec<ResponseEvent>) -> Result<(), ApiError> {
++    fn project(
++        &mut self,
++        json: &str,
++        ready: &mut Vec<ResponseEvent>,
++        raw: &mut Option<SdkRawProviderEvent>,
++    ) -> Result<(), ApiError> {
+         if self.completion.is_some() {
+             return Err(invalid_application_stream(
+                 "Native model stream yielded after completion",
+@@ -168,6 +189,13 @@ impl ApplicationModelStream {
+         }
+         let event: crate::sse::ResponsesStreamEvent = serde_json::from_str(json)
+             .map_err(|_| invalid_application_stream("Malformed native model response event"))?;
++        if self.observe_raw_provider_events {
++            *raw = Some(SdkRawProviderEvent {
++                source: SdkRawProviderSource::Responses,
++                transport: ResponsesEventTransport::Json,
++                payload: event.raw.clone(),
++            });
++        }
+         if event.kind == "error" {
+             return Err(invalid_application_stream(
+                 "Native model stream reported a provider error",
+@@ -253,6 +281,46 @@ mod application_stream_retention_tests {
+     use super::*;
+     use serde_json::json;
+ 
++    #[test]
++    fn raw_observations_keep_provider_order_across_deferred_tool_output() {
++        let mut stream = ApplicationModelStream::new(true);
++        let frames = [
++            json!({
++                "type": "response.output_item.done",
++                "item": {"type": "function_call", "call_id": "call", "name": "lookup", "arguments": "{}"}
++            }),
++            json!({"type": "response.sdk_fixture.opaque", "extension": [false, null, 0]}),
++            json!({"type": "response.completed", "response": {"id": "resp_raw"}}),
++        ];
++        for frame in frames {
++            let (ready, advance) = stream.push(&frame.to_string());
++            assert!(advance);
++            assert!(matches!(
++                ready.first(),
++                Some(ResponseEvent::RawProvider(event)) if event.payload == frame
++            ));
++            assert!(!ready.iter().any(|event| matches!(
++                event,
++                ResponseEvent::OutputItemDone(_) | ResponseEvent::Completed { .. }
++            )));
++        }
++        let accepted = stream.finish(None).unwrap();
++        assert!(
++            accepted
++                .iter()
++                .any(|event| matches!(event, ResponseEvent::OutputItemDone(_)))
++        );
++        assert!(matches!(
++            accepted.last(),
++            Some(ResponseEvent::Completed { .. })
++        ));
++        assert!(
++            !accepted
++                .iter()
++                .any(|event| matches!(event, ResponseEvent::RawProvider(_)))
++        );
++    }
++
+     fn deferred_tool() -> ApplicationModelStream {
+         let mut stream = ApplicationModelStream::default();
+         let (ready, advance) = stream.push(

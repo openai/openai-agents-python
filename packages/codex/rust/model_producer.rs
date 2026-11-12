@@ -45,6 +45,8 @@ pub(super) struct ModelReply {
     usage: Option<codex_protocol::protocol::TokenUsage>,
     #[serde(default)]
     original_usage: Option<OriginalResponsesUsage>,
+    #[serde(default)]
+    raw_chat_completion: Option<serde_json::Map<String, Value>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -210,7 +212,7 @@ impl PythonTools {
                     && matches!(slot.reply, Some(PreparationReply::ModelProducer { .. }))
             })
     }
-    pub(crate) fn start_model_producer_stream(&self, id: u64) -> bool {
+    pub(crate) fn start_model_producer_stream(&self, id: u64, observe_raw: bool) -> bool {
         let mut replies = self
             .preparation_replies
             .lock()
@@ -237,7 +239,7 @@ impl PythonTools {
             Delivery::Streaming {
                 events,
                 finish,
-                projection: ApplicationModelStream::default(),
+                projection: ApplicationModelStream::new(observe_raw),
             },
         ) else {
             unreachable!()
@@ -261,6 +263,7 @@ impl PythonTools {
             if slot.is_closed() {
                 return false;
             }
+            let attempt = slot.callback.model_attempt.as_ref();
             let Some(PreparationReply::ModelProducer {
                 reply:
                     Delivery::Streaming {
@@ -271,7 +274,14 @@ impl PythonTools {
             else {
                 return false;
             };
+            let had_usage = projection.completed_usage().is_some();
             let (projected, continue_stream) = projection.push(data);
+            // Retirement can discard the reply before the iterator settles.
+            if !had_usage
+                && let (Some(attempt), Some(usage)) = (attempt, projection.completed_usage())
+            {
+                let _ = attempt.report_usage(usage.clone());
+            }
             (projected, events.clone(), continue_stream)
         };
         for event in projected {
@@ -524,6 +534,17 @@ impl ModelResponseInterceptor for Producer {
                     if !ticket.admits() || callback.cleanup_failed.load(Ordering::Acquire) {
                         return Err(FAILURE.into());
                     }
+                    if let Some(id) = reply
+                        .raw_chat_completion
+                        .as_ref()
+                        .and_then(|raw| raw.get("id"))
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                    {
+                        if id != reply.response_id {
+                            return Err(FAILURE.into());
+                        }
+                    }
                     let mut events = codex_extension_api::completed_model_response(
                         reply.response_id,
                         reply.output,
@@ -571,6 +592,18 @@ impl ModelResponseInterceptor for Producer {
                                 )),
                             );
                         }
+                    }
+                    if let Some(raw) = reply.raw_chat_completion {
+                        events.insert(
+                            events.len() - 1,
+                            Ok(codex_api::ResponseEvent::RawProvider(
+                                codex_protocol::protocol::SdkRawProviderEvent {
+                                    source: codex_protocol::protocol::SdkRawProviderSource::ChatCompletions,
+                                    transport: codex_protocol::protocol::ResponsesEventTransport::Json,
+                                    payload: Value::Object(raw),
+                                },
+                            )),
+                        );
                     }
                     Ok(futures_util::stream::iter(events).boxed())
                 }
