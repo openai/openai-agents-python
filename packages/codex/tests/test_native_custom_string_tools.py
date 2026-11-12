@@ -149,7 +149,12 @@ async def test_native_custom_string_tool_preserves_finish_turn(responses):
 async def test_native_completed_custom_string_call_survives_manual_checkpoint(
     responses, finish_turn
 ):
+    from dataclasses import replace
+
+    from agents import GuardrailResult, OutputGuardrail
+
     calls = []
+    guarded = []
     custom_finished = asyncio.Event()
 
     @function_tool(finish_turn=finish_turn)
@@ -179,23 +184,27 @@ async def test_native_completed_custom_string_call_survives_manual_checkpoint(
             outcomes = json.loads(saved.to_json())["native_continuation"]["tool_outcomes"]
             assert outcomes["held_call_ids"] == ["raw"]
 
-    async with timeout(20), agent.session(state=saved) as restored:
+    def check(context, source):
+        if context.tool_call is not None:
+            guarded.append(context.tool_call.call_id)
+            assert context.final_output == RAW_INPUT.upper()
+        return GuardrailResult(False)
+
+    current = replace(agent, output_guardrails=(OutputGuardrail("restored-output", check),))
+    async with timeout(20), current.session(state=saved) as restored:
         turn = restored.restored_turn
         assert turn is not None and turn.turn_id == original.turn_id
         request = await next_request(restored.interactions(), confirm)
         assert request.call_id == "manual"
         await request.approve()
         completed = await turn.get_result()
-        assert completed.final_output == (RAW_INPUT.upper() if finish_turn else "done")
-        if finish_turn:
-            assert completed.tool_call is not None and completed.tool_call.call_id == "raw"
-            assert len(responses.requests) == 1
-            history = await restored.history_snapshot()
-            output = tool_output({"input": list(history.items)}, "raw", "custom_tool_call_output")
-        else:
-            output = tool_output(responses.requests[-1], "raw", "custom_tool_call_output")
+        assert completed.final_output == "done"
+        assert completed.tool_call is None
+        assert len(responses.requests) == 2
+        output = tool_output(responses.requests[-1], "raw", "custom_tool_call_output")
         assert output == RAW_INPUT.upper()
 
+    assert guarded == (["raw"] if finish_turn else [])
     assert calls == [RAW_INPUT]
 
 
