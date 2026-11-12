@@ -197,3 +197,46 @@ async fn process_http_intent_declines_hooks_and_preserves_ordinary_startup() {
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn websocket_tls_hint_is_fresh_thread_only_and_never_attaches_http_pool() {
+    let (_directory, parent) = parent_config().await;
+    let ordinary: crate::options::ThreadOptions = serde_json::from_value(json!({})).unwrap();
+    let private: crate::options::ThreadOptions =
+        serde_json::from_value(json!({"_sdk_websocket_tls":true})).unwrap();
+    assert!(!ordinary.private_wss_tls && private.private_wss_tls);
+    let original = parent.model_provider.clone();
+    let catalog = parent.model_providers.clone();
+    let mut child = StartThreadOptions::new(parent.clone());
+    crate::private_wss::install(&mut child, ordinary.private_wss_tls);
+    assert!(
+        child
+            .thread_extension_init
+            .get::<codex_api::SdkWebsocketTlsSelector>()
+            .is_none()
+    );
+    crate::private_wss::install(&mut child, private.private_wss_tls);
+    assert!(
+        child
+            .thread_extension_init
+            .get::<codex_api::SdkWebsocketTlsSelector>()
+            .is_some()
+    );
+    assert!(
+        child
+            .thread_extension_init
+            .get::<codex_http_client::SdkModelHttpPool>()
+            .is_none()
+    );
+    assert_eq!(child.config.model_provider, original);
+    assert_eq!(child.config.model_providers, catalog);
+    let mut siwc = StartThreadOptions::new(parent);
+    siwc.config.model_provider_id = "native_agent_siwc_fixture".into();
+    crate::private_wss::install(&mut siwc, true);
+    assert!(
+        siwc.thread_extension_init
+            .get::<codex_api::SdkWebsocketTlsSelector>()
+            .is_none()
+    );
+}
