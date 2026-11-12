@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -110,9 +111,12 @@ async def test_canonical_resume_preserves_current_prompt(
         assert "instructions" not in request
 
 
-@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize(
+    ("explicit", "replacement"),
+    [(False, None), (True, None), (False, "rename"), (True, "rename"), (True, "override")],
+)
 async def test_native_prompt_defaults_and_explicit_empty_overrides(
-    responses: ResponsesFixture, explicit: bool
+    responses: ResponsesFixture, explicit: bool, replacement: str | None
 ) -> None:
     responses.respond(assistant_output("prompt result"))
     reference = {"id": "pmpt_owned", "variables": {"topic": "captured"}}
@@ -127,7 +131,9 @@ async def test_native_prompt_defaults_and_explicit_empty_overrides(
         reference["variables"]["topic"] = "changed after capture"  # type: ignore[index]
 
     options: dict[str, Any] = (
-        {"model": "fixture-explicit", "instructions": "", "tools": []} if explicit else {}
+        {"model": "fixture-explicit", "instructions": "", "tools": []}
+        if explicit and replacement != "override"
+        else {}
     )
     async with NativeProvider(
         base_url=responses.url, api_key="synthetic-prompt-key", supports_websockets=False
@@ -135,6 +141,10 @@ async def test_native_prompt_defaults_and_explicit_empty_overrides(
         agent = Agent(
             provider=provider, hosted_prompt=source, transform_context=transform, **options
         )
+        if replacement == "rename":
+            agent = replace(agent, name="Renamed")
+        elif replacement == "override":
+            agent = replace(agent, model="fixture-explicit", instructions="", tools=[])
         assert (await agent.run("Use current declared prompt.")).final_output == "prompt result"
     assert resolutions == 1
     assert len(responses.requests) == 1
