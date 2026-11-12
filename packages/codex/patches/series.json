@@ -791,7 +791,11 @@
     {
       "path": "sdk-native-model-stream-completion-usage.patch",
       "sha256": "d89d2ed9176b3a4a163a890d2d9cf2be51cf6029d13d25aa895f876eb2770609"
+    },
+    {
+      "path": "sdk-trace-delivery-controls.patch",
+      "sha256": "6c5e3c6cc3c9106c85b6e740f2ef76e1a18f5f89f48bdaeda91fb4b6f21c979b"
     }
   ],
-  "result_tree": "bd562c8e9a302c673e18f9cd980c746a7972afed"
+  "result_tree": "85c9783d1944eaf3d613658b42b2599d5665c129"
 }
