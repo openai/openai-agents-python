@@ -15,9 +15,10 @@ import sys as sys
 import threading as threading
 import uuid as uuid
 import weakref as weakref
+from collections import Counter
 from collections.abc import Iterator as Iterator
 from contextlib import contextmanager as contextmanager
-from dataclasses import dataclass as dataclass
+from dataclasses import dataclass as dataclass, fields
 from pathlib import Path as Path
 from typing import (
     Any as Any,
@@ -37,6 +38,9 @@ from ._lifecycle import _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from .shell import ShellOutput as ShellOutput
 from .tools import ToolOutput as ToolOutput, _capture_application_data
+from .usage import RunUsage
+
+_RUN_USAGE_FIELDS = tuple(field.name for field in fields(RunUsage))
 
 # Register one hook without retaining adapters after their application lifetime.
 # Serializing registration and ownership changes with fork prevents a child
@@ -232,9 +236,99 @@ class SQLiteSessionStore:
                 "(id TEXT PRIMARY KEY, token TEXT, revision INTEGER NOT NULL DEFAULT 0, "
                 "write_id TEXT, payload TEXT)"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS sdk_run_usage "
+                "(session_id TEXT NOT NULL, branch_id TEXT NOT NULL, turn_id TEXT NOT NULL, "
+                "usage TEXT NOT NULL, PRIMARY KEY (session_id, branch_id, turn_id))"
+            )
             connection.execute("PRAGMA user_version=1")
         with _stores_mutex:
             _stores.add(self)
+
+    async def store_run_usage(
+        self,
+        session_id: str,
+        turn_id: str,
+        usage: RunUsage,
+        *,
+        branch_id: str = "main",
+    ) -> None:
+        """Record usage against stable application-selected session, branch and turn IDs.
+
+        Use the admitted root Turn's turn_id with its measured result usage.
+        That result includes usage from any attached child runs. Use an
+        application-assigned stable ID for an external report. Repeating a
+        report for the same key replaces its counters.
+        """
+        identifiers = (session_id, branch_id, turn_id)
+        if any(not isinstance(value, str) or not value for value in identifiers):
+            raise ValueError("Usage record IDs must be nonempty strings")
+        if not isinstance(usage, RunUsage):
+            raise TypeError("usage must be RunUsage")
+        payload = json.dumps({name: getattr(usage, name) for name in _RUN_USAGE_FIELDS})
+
+        def write() -> None:
+            with self._mutex, self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO sdk_run_usage (session_id, branch_id, turn_id, usage) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(session_id, branch_id, turn_id) "
+                    "DO UPDATE SET usage=excluded.usage",
+                    (session_id, branch_id, turn_id, payload),
+                )
+
+        await _join(asyncio.create_task(asyncio.to_thread(write)))
+
+    def _usage_entries(
+        self, session_id: str, branch_id: str | None, turn_id: str | None = None
+    ) -> Iterator[tuple[str, RunUsage]]:
+        with self._mutex, self._connect() as connection:
+            for saved_turn, payload in connection.execute(
+                "SELECT turn_id, usage FROM sdk_run_usage WHERE session_id=? "
+                "AND (? IS NULL OR branch_id=?) AND (? IS NULL OR turn_id=?) ORDER BY rowid",
+                (session_id, branch_id, branch_id, turn_id, turn_id),
+            ):
+                yield saved_turn, RunUsage(**json.loads(payload))
+
+    async def get_turn_usage(
+        self,
+        session_id: str,
+        *,
+        branch_id: str = "main",
+        turn_id: str | None = None,
+    ) -> dict[str, RunUsage]:
+        """Read recorded counters keyed by turn ID in the selected branch."""
+        return await asyncio.to_thread(
+            lambda: dict(self._usage_entries(session_id, branch_id, turn_id))
+        )
+
+    async def get_session_usage(
+        self, session_id: str, *, branch_id: str | None = None
+    ) -> dict[str, int] | None:
+        """Sum recorded counters and total_turns across one branch or the session."""
+
+        def read() -> dict[str, int] | None:
+            totals: Counter[str] = Counter()
+            for _, usage in self._usage_entries(session_id, branch_id):
+                totals.update({name: getattr(usage, name) for name in _RUN_USAGE_FIELDS})
+                totals["total_turns"] += 1
+            return dict(totals) if totals else None
+
+        return await asyncio.to_thread(read)
+
+    async def clear_run_usage(
+        self, session_id: str, *, branch_id: str | None = None, turn_id: str | None = None
+    ) -> None:
+        """Delete the session's recorded usage, optionally scoped to a branch or turn."""
+
+        def delete() -> None:
+            with self._mutex, self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM sdk_run_usage WHERE session_id=? "
+                    "AND (? IS NULL OR branch_id=?) AND (? IS NULL OR turn_id=?)",
+                    (session_id, branch_id, branch_id, turn_id, turn_id),
+                )
+
+        await _join(asyncio.create_task(asyncio.to_thread(delete)))
 
     @staticmethod
     async def read_legacy_history(
