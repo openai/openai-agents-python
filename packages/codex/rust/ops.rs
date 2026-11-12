@@ -546,10 +546,7 @@ pub(crate) struct InitialTurn {
     pub initialization: std::sync::Arc<codex_core::InitialTurnInitialization>,
 }
 
-pub async fn submit_replaceable(
-    state: &crate::engine::ThreadState,
-    value: Value,
-) -> Result<Value> {
+pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value) -> Result<Value> {
     submit_replaceable_with_attempts(state, value, None).await
 }
 
@@ -563,6 +560,9 @@ pub async fn submit_replaceable_with_attempts(
     let mut mutation = Some(state.mutations.lock().await);
     let thread = &state.thread;
     let mut p: TurnParams = decode(value)?;
+    if let Some(model) = p.start.model_override.as_deref() {
+        state.engine.validate_model(model).await?;
+    }
     let initial = state
         .initial_turn
         .lock()
@@ -860,6 +860,9 @@ pub async fn recover_prepared(
     terminal: Option<crate::python_tools::RecoveredToolCompletionSeed>,
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
+    if let Some(model) = p.model_override.as_deref() {
+        state.engine.validate_model(model).await?;
+    }
     let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;
     if let Some(submission) = p.observation_submission_id {

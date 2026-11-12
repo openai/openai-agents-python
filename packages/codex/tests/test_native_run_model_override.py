@@ -14,11 +14,11 @@ from tests.test_native_manual_tools import LookupArgs, next_request
 
 def model_names():
     catalog = json.loads(
-        (
-            Path(__file__).parents[1] / ".upstream/codex/codex-rs/models-manager/models.json"
-        ).read_text()
+        (Path(__file__).parent / "fixtures" / "request-control-models.json").read_text()
     )
-    return [model["slug"] for model in catalog["models"] if model["supported_in_api"]][:3]
+    initial = catalog["models"][0]["slug"]
+    # The application backend owns these distinct synthetic routing aliases.
+    return initial, initial + "-run-fixture", initial + "-destination-fixture"
 
 
 def message(text):
