@@ -26,7 +26,7 @@ from agents import (
     function_tool,
     telemetry,
 )
-from agents.testing import ScriptedResponses, text, tool_call
+from agents.testing import ScriptedResponse, ScriptedResponses, text, tool_call
 from agents.tools import ToolOutput
 
 from .history_reader import read_history
@@ -132,6 +132,8 @@ async def exercise(scenario: str, collector_url: str) -> dict[str, Any]:
                 result = await turn.get_result()
                 receipt["outcome"] = "completed"
                 receipt["final_output"] = str(result.final_output)
+                if scenario == "retry":
+                    receipt["completed_model_requests"] = turn.run_usage.requests
             except OutputValidationError:
                 receipt["outcome"] = "output_validation_failure"
             except NativeError as error:
@@ -156,6 +158,12 @@ async def exercise(scenario: str, collector_url: str) -> dict[str, Any]:
             await run(Agent(instructions="Answer briefly.", provider=provider))
         finally:
             await provider.aclose()
+    elif scenario == "retry":
+        async with ScriptedResponses(
+            ScriptedResponse((), status=503), [text("Recovered after retry.")]
+        ) as peer:
+            await run(Agent(instructions="Answer briefly.", provider=peer.provider))
+            receipt["provider_requests"] = len(peer.requests)
     elif scenario == "validation":
         async with ScriptedResponses([text('{"count":"invalid"}')]) as peer:
             await run(
@@ -205,7 +213,9 @@ async def walkthrough(collector: Collector, scenario: str) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--scenario", choices=["tool", "tool-error", "provider", "validation"], default="tool"
+        "--scenario",
+        choices=["tool", "tool-error", "provider", "validation", "retry"],
+        default="tool",
     )
     parser.add_argument("--output", type=Path, default=Path("synthetic-trace.json"))
     parser.add_argument("--port", type=int, default=0)

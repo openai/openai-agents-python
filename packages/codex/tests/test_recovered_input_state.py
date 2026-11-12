@@ -70,3 +70,22 @@ def test_idle_state_cannot_carry_another_run_origin():
     del state["native_continuation"]
     with pytest.raises(ValidationError, match="requires a manual continuation"):
         SessionState.from_json(json.dumps(state))
+
+
+@pytest.mark.parametrize("version", [8, 9])
+def test_original_input_round_trip_with_request_budget(version):
+    state = SessionState.from_json(
+        json.dumps(
+            saved(
+                format_version=version,
+                output_version=1,
+                output_fingerprint="0" * 64,
+                run_budget={"version": 1, "max_requests": 2, "admitted_requests": 1},
+                original_input="original budgeted request",
+            )
+        )
+    )
+    restored = SessionState.from_json(state.to_json())
+    assert restored.original_input == "original budgeted request"
+    assert restored.run_budget is not None
+    assert restored.run_budget.admitted_requests == 1
