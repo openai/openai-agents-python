@@ -312,6 +312,31 @@ async def test_chat_stream_bounds_usage_only_chunks_and_closes(monkeypatch):
     assert closed == [True]
 
 
+async def test_chat_stream_keeps_usage_if_cancelled_at_the_periodic_yield():
+    measured = []
+
+    async def frames():
+        yield chunk({"content": "done"}, "stop")
+        for _ in range(254):
+            yield chunk()
+        task = asyncio.current_task()
+        assert task is not None
+        asyncio.get_running_loop().call_soon(task.cancel)
+        yield chunk(usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
+
+    async def create(**body):
+        return frames()
+
+    async def consume():
+        model = ChatCompletionsModel(client(create), stream=True)
+        async for _ in model.stream(request(lambda value: measured.append(value) or True)):
+            pass
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.create_task(consume())
+    assert [entry["total_tokens"] for entry in measured] == [3]
+
+
 async def test_chat_stream_keeps_measured_usage_when_cleanup_fails():
     measured = []
 

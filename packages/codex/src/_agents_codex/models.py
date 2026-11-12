@@ -1068,8 +1068,6 @@ class ChatCompletionsModel:
                     chunk_count += 1
                     if chunk_count > _MAX_CHAT_STREAM_CHUNKS:
                         raise ValueError("Chat stream exceeded its chunk limit")
-                    if chunk_count % 256 == 0:
-                        await asyncio.sleep(0)
                     raw = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk
                     if not isinstance(raw, dict):
                         raise TypeError("Chat stream chunks must be objects")
@@ -1085,6 +1083,8 @@ class ChatCompletionsModel:
                         measured = _chat_completion_usage(usage)
                         if measured is not None:
                             request.report_usage(measured)
+                    if chunk_count % 256 == 0:
+                        await asyncio.sleep(0)
                     task = asyncio.current_task()
                     if task is not None and cancellation_requested(task):
                         raise asyncio.CancelledError()
