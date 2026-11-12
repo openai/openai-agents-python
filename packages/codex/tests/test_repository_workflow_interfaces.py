@@ -319,8 +319,8 @@ def test_preview_install_checks_do_not_enable_pypi_or_automatic_tags() -> None:
     matrix = install["jobs"]["install"]["strategy"]["matrix"]
     assert matrix["python"] == ["3.10", "3.14"]
     assert {item["wheel"] for item in matrix["platform"]} == {
-        "manylinux_2_39_x86_64",
-        "manylinux_2_39_aarch64",
+        "manylinux_2_28_x86_64",
+        "manylinux_2_28_aarch64",
         "win_amd64",
         "macosx_11_0_arm64",
     }
@@ -331,7 +331,7 @@ def test_preview_install_checks_do_not_enable_pypi_or_automatic_tags() -> None:
         "v0.24.0a7",
     ]
     assert (
-        '[{"platform":{"runner":"ubuntu-24.04-arm","wheel":"manylinux_2_39_aarch64"}}]'
+        '[{"platform":{"runner":"ubuntu-24.04-arm","wheel":"manylinux_2_28_aarch64"}}]'
         in matrix["exclude"]
     )
     tags = yaml.load((workflows / "release-tag.yml").read_text(), Loader=yaml.BaseLoader)
