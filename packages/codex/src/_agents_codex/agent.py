@@ -1359,9 +1359,8 @@ class Agent(Generic[ContextT, OutputT]):
         only be checked when a Session opens. This never reads credentials or
         connects to a provider, executor or MCP server.
         """
-        from .mcp import _tool_names
         from .schema import _prepare_spec
-        from .session import _check_namespaced_tool_collisions, _split_tools
+        from .session import _OpeningTools
 
         native = importlib.import_module("agents._native")
 
@@ -1377,17 +1376,12 @@ class Agent(Generic[ContextT, OutputT]):
                 tools_provided=getattr(declaration, "_hosted_tools_provided", False),
                 extra_body=declaration.model_settings.get("extra_body"),
             )
-            python_tools, mcp_tools, native_agents = _split_tools(
+            opening_tools = _OpeningTools.capture(
                 declaration.tools, declaration.programmatic_tool_calling
             )
-            _check_namespaced_tool_collisions(
-                python_tools,
-                _tool_names(mcp_tools),
-                declaration.tools,
-                native_agents=native_agents,
-            )
+            opening_tools.validate_collisions()
             native._validate_python_tool_declarations(
-                json.dumps([json.loads(tool._spec_json()) for tool in python_tools])
+                json.dumps([json.loads(tool._spec_json()) for tool in opening_tools.python])
             )
             _prepare_spec(declaration.output_type)
 
