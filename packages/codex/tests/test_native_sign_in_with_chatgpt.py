@@ -31,13 +31,19 @@ from agents import (
     NativeProvider,
     PromptedOutput,
     SessionState,
+    ShellCall,
+    ShellCommandOutput,
+    ShellExit,
+    ShellOutput,
     SignInWithChatGPT,
     SignInWithChatGPTCredentials,
     SQLiteSessionStore,
+    ToolContext,
     TurnNeedsAttention,
     TurnStoppedError,
     computer_tool,
     function_tool,
+    shell_tool,
 )
 from agents.agent import (
     SignInWithChatGPT as AgentSignInWithChatGPT,
@@ -52,6 +58,7 @@ from tests.native_fixtures import (
     responses as responses,
     tool_output,
 )
+from tests.test_native_application_shell import shell_call
 from tests.test_native_manual_tools import LookupArgs, next_request
 
 MODEL = "gpt-6.1-sol"
@@ -197,7 +204,10 @@ async def test_explicit_plan_auth_runs_streaming_tool_turn(plan_endpoint: Respon
 @pytest.mark.parametrize(
     "terminal", ["completed", "eof", "interrupted", "cancel", "deadline", "api-key"]
 )
-async def test_tool_calls_require_successful_registered_response(terminal, monkeypatch, tmp_path):
+@pytest.mark.parametrize("kind", ["function", "application-shell"])
+async def test_tool_calls_require_successful_registered_response(
+    kind, terminal, monkeypatch, tmp_path
+):
     call_id = "registered-tool-call"
     requests = []
     effects = []
@@ -207,12 +217,29 @@ async def test_tool_calls_require_successful_registered_response(terminal, monke
     release_peer = asyncio.Event()
     completes = terminal in ("completed", "api-key")
 
-    @function_tool
-    async def record_effect() -> str:
-        """Record one synthetic application effect."""
+    def record() -> str:
         effects.append(terminal_sent)
         tool_started.set()
         return "recorded"
+
+    @function_tool
+    async def record_effect() -> str:
+        """Record one synthetic application effect."""
+        return record()
+
+    async def execute_shell(_: ToolContext[None], call: ShellCall) -> ShellOutput:
+        assert call.call_id == call_id
+        return ShellOutput(
+            output=[ShellCommandOutput(stdout=record(), stderr="", outcome=ShellExit(exit_code=0))]
+        )
+
+    tool = record_effect
+    call_frame = function_call("record_effect", {}, call_id)
+    if kind == "application-shell":
+        tool = shell_tool(execute_shell)
+        call_frame = shell_call(
+            call_id=call_id, action={"commands": ["synthetic"], "max_output_length": 128}
+        )
 
     async def handle(request: web.Request) -> web.StreamResponse:
         nonlocal terminal_sent
@@ -227,8 +254,14 @@ async def test_tool_calls_require_successful_registered_response(terminal, monke
 
         await write({"type": "response.created", "response": {"id": response_id}})
         if first:
-            await write(function_call("record_effect", {}, call_id))
+            await write(call_frame)
             call_sent.set()
+            if kind == "application-shell" and terminal in ("completed", "eof", "interrupted"):
+                # Give an eagerly dispatched executor a chance to run before the terminal event.
+                try:
+                    await asyncio.wait_for(tool_started.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
             if terminal in ("cancel", "deadline"):
                 await release_peer.wait()
                 return response
@@ -275,7 +308,7 @@ async def test_tool_calls_require_successful_registered_response(terminal, monke
             agent = Agent(
                 instructions="Follow the request.",
                 model=MODEL,
-                tools=[record_effect],
+                tools=[tool],
                 provider=NativeProvider(
                     api_key="synthetic-key", base_url=base_url, supports_websockets=False
                 ),
@@ -284,7 +317,7 @@ async def test_tool_calls_require_successful_registered_response(terminal, monke
             set_endpoint(monkeypatch, base_url)
             agent = plan_agent(
                 access_token(),
-                tools=[record_effect],
+                tools=[tool],
                 model_settings={
                     "invocation_timeout_ms": 2_000 if terminal == "deadline" else 60_000
                 },
@@ -314,7 +347,13 @@ async def test_tool_calls_require_successful_registered_response(terminal, monke
         if completes:
             assert effects == [terminal == "completed"]
             assert len(requests) == 2
-            assert tool_output(requests[1], call_id) == "recorded"
+            if kind == "application-shell":
+                output = next(
+                    item for item in requests[1]["input"] if item["type"] == "shell_call_output"
+                )
+                assert output["call_id"] == call_id and output["output"][0]["stdout"] == "recorded"
+            else:
+                assert tool_output(requests[1], call_id) == "recorded"
         else:
             assert effects == []
             assert len(requests) == 1

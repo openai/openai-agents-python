@@ -70,9 +70,11 @@ daytona/usaspending_text2sql/
 4. **Row limit**: Hard cap (default 100 rows) with truncation detection
 5. **Timeout**: Queries killed after 30 seconds
 
-### Audit log
+<a id="audit-log"></a>
 
-All sandbox operations (exec calls, start/stop, SQL queries and their results) are logged to `.audit_log.jsonl` as structured JSONL events via the SDK's `Instrumentation` and `JsonlOutboxSink`. This is useful for debugging, replaying sessions, or inspecting exactly what SQL the agent ran.
+### Sandbox event log
+
+The example uses `JsonlOutboxSink` to append sandbox events to `.audit_log.jsonl` beside `agent.py` on the host. Use it to inspect commands, including SQL queries, and their captured output. Delivery is best-effort and the SDK truncates long output, so the file may be incomplete.
 
 ### Sandbox
 

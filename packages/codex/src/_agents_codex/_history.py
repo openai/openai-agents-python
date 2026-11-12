@@ -40,6 +40,7 @@ class _HistoryItem:
 _EXECUTION_TYPES = {"command_execution", "mcp_call", "patch_execution"}
 _CALL_TYPES_BY_OUTPUT = {
     "function_call_output": "function_call",
+    "shell_call_output": "shell_call",
     "tool_search_output": "tool_search_call",
 }
 
@@ -92,6 +93,7 @@ def _response_item(
         "custom_tool_call",
         "computer_call",
         "apply_patch_call",
+        "shell_call",
         "tool_search_call",
     }:
         item_id = item_id or raw.get("call_id")
@@ -100,6 +102,7 @@ def _response_item(
         "custom_tool_call_output",
         "computer_call_output",
         "apply_patch_call_output",
+        "shell_call_output",
         "tool_search_output",
     }:
         item_id = item_id or (f"{raw['call_id']}:output" if raw.get("call_id") else None)
@@ -194,7 +197,7 @@ def _response_item(
         }
     if kind == "web_search_call":
         return project_web_search_item({**raw, "type": "WebSearch"}, True, turn_id)
-    return project_hosted_response_item(raw, turn_id)
+    return project_hosted_response_item(raw, turn_id, item_id=item_id)
 
 
 def _received_usage(raw: dict[str, Any] | None) -> ReceivedTokenUsage | None:
@@ -288,7 +291,7 @@ def project_history(
             occurrence.native = native
             occurrence.recorded_id = recorded_id
         identities[identity] = occurrence
-        if kind in {"function_call", "tool_search_call"}:
+        if kind in {"function_call", "shell_call", "tool_search_call"}:
             if kind == "function_call" and not native:
                 occurrence.original_input = original_input
             latest_calls[call_key] = occurrence
@@ -369,7 +372,13 @@ def project_history(
         elif kind == "response_item":
             turn_id = current_turn
             reconciliation = None
-            if payload.get("type") in {
+            if payload.get("type") == "shell_call_output":
+                metadata = payload.get("internal_chat_message_metadata_passthrough")
+                if isinstance(metadata, dict):
+                    original_turn = metadata.get("turn_id")
+                    if (original_turn, "shell_call", payload.get("call_id")) in latest_calls:
+                        turn_id = original_turn
+            elif payload.get("type") in {
                 "function_call_output",
                 "custom_tool_call_output",
                 "computer_call_output",

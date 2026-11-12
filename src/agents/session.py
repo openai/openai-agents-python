@@ -80,6 +80,8 @@ from _agents_codex.session import (
     RecordedTurn as RecordedTurn,
     ReplaceArguments as ReplaceArguments,
     ResponseIntegrityReason as ResponseIntegrityReason,
+    RunDiagnosticError as RunDiagnosticError,
+    RunErrorDetails as RunErrorDetails,
     Sequence as Sequence,
     Session as Session,
     SessionBusyError as SessionBusyError,

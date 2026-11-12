@@ -7,7 +7,7 @@ Give an Agent access to specific decoded UTF-8 files by assigning each file an a
 Install the SDK preview wheel and use the source archive from the same release. Follow the [installation guide](../../docs/sdk/installation.md) and configure `OPENAI_API_KEY` through your usual credential setup. Live model requests can incur charges. From the checkout root, run:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.selected_documents
+python -m examples.codex.selected_documents
 ```
 
 The [example](selected_documents.py) creates a temporary text file, exposes it as `notes`, and asks the Agent to revise its status. It prints the answer and the status line read back from disk, then removes the temporary directory.
