@@ -6,11 +6,34 @@ import inspect
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import aclosing, asynccontextmanager
 from functools import wraps
+from traceback import clear_frames
 from types import TracebackType
 from typing import Any, TypeVar, cast
 
 _Function = TypeVar("_Function", bound=Callable[..., Any])
 _Declarations = Callable[[Any], Sequence[Any]]
+
+
+def _protect_mcp_initializer(declaration: type[Any]) -> None:
+    """Keep rejected credentials out of generated initializer traceback frames."""
+    initialize = declaration.__init__
+
+    @wraps(initialize)
+    def protected(self: Any, *args: Any, **kwargs: Any) -> None:
+        try:
+            initialize(self, *args, **kwargs)
+        except BaseException as error:
+            clear_frames(error.__traceback__)
+            object.__setattr__(error, "__context__", None)
+            object.__setattr__(error, "__cause__", None)
+            for name in ("env", "headers", "bearer_token", "access_token", "tool_config"):
+                if name in self.__dict__:
+                    object.__setattr__(self, name, None)
+            raise
+        finally:
+            del self, args, kwargs
+
+    declaration.__init__ = protected
 
 
 def _strip_mcp_frames(error: BaseException) -> None:

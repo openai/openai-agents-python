@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from traceback import walk_tb
 from typing import Any
 
 import pytest
@@ -107,6 +108,26 @@ def test_hosted_mcp_callback_needs_provider_approval(policy: str | None) -> None
         config["require_approval"] = policy
         with pytest.raises(ValueError, match="approval callback requires provider approval"):
             HostedMCP(tool_config=config, on_approval_request=lambda _: {"approve": False})
+
+
+def test_hosted_mcp_constructor_rejection_scrubs_traceback_credentials() -> None:
+    with pytest.raises(ValueError, match="approval callback requires provider approval") as caught:
+        declaration(
+            callback=lambda _: {"approve": False},
+            require_approval="never",
+            authorization="private-hosted-authorization",
+        )
+
+    sdk_frames = [
+        frame
+        for frame, _ in walk_tb(caught.value.__traceback__)
+        if frame.f_globals.get("__name__", "").startswith("_agents_codex.")
+    ]
+    assert sdk_frames
+    for frame in sdk_frames:
+        captured = repr(frame.f_locals)
+        assert "private-hosted-credential" not in captured
+        assert "private-hosted-authorization" not in captured
 
 
 @pytest.mark.parametrize("operation", ["session", "run"])

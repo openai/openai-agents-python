@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, cast
 from pydantic import BaseModel, ConfigDict, JsonValue, with_config
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
+from ._mcp_errors import _protect_mcp_initializer
 from ._public import preserve_module_identity
 
 if TYPE_CHECKING:
@@ -171,4 +172,5 @@ def _check_request(config: Mapping[str, Any], request: Mapping[str, Any]) -> Non
         raise ValueError("Hosted MCP approval is outside the captured tool filter")
 
 
+_protect_mcp_initializer(HostedMCP)
 preserve_module_identity(globals(), "agents.hosted_mcp")
