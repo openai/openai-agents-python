@@ -22,6 +22,7 @@ enum ProviderStatus {
 
 struct State {
     logger_layer: Option<reload::Handle<Option<ExportLayer>, Registry>>,
+    console_layer: Option<reload::Handle<Option<ExportLayer>, Registry>>,
     status: ProviderStatus,
     engine_started: bool,
     provider: Option<OtelProvider>,
@@ -29,6 +30,7 @@ struct State {
 
 static STATE: Mutex<State> = Mutex::const_new(State {
     logger_layer: None,
+    console_layer: None,
     status: ProviderStatus::Unavailable,
     engine_started: false,
     provider: None,
@@ -166,6 +168,12 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
                 && ACTIVE_ENGINES.load(Ordering::Acquire) == 0,
             "Telemetry restart requires all Codex clients to close"
         );
+        state
+            .console_layer
+            .as_ref()
+            .context("Console diagnostic layer was not initialized")?
+            .reload(None)
+            .context("Could not retire console diagnostics")?;
         codex_otel::sdk_trace::restart_trace_delivery().map_err(|error| anyhow!(error))?;
         state.status = ProviderStatus::Unavailable;
     } else {
@@ -179,12 +187,13 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
                 .boxed(),
         ];
         layers.push(OtelProvider::reloadable_tracing_layer(SERVICE).boxed());
-        if let Some(diagnostics) = diagnostics {
-            layers.push(diagnostics.layer(&ACTIVE).boxed());
-        }
+        let (console, console_handle) =
+            reload::Layer::new(diagnostics.map(|options| options.layer(&ACTIVE).boxed()));
+        layers.push(console.boxed());
         tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layers))
             .context("Could not claim the process-wide Rust tracing subscriber")?;
         state.logger_layer = Some(handle);
+        state.console_layer = Some(console_handle);
     }
 
     let provider = codex_core::otel_init::build_provider(

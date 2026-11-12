@@ -150,6 +150,8 @@ def native_trace_child_env() -> dict[str, str]:
         "native_deadline_reset_case",
         "native_restart_case",
         "native_restart_credentials_case",
+        "native_restart_diagnostics_omitted_case",
+        "native_restart_diagnostics_none_case",
         "native_outcome_privacy_case",
         "native_auth_case",
         pytest.param("native_batch_case", marks=pytest.mark.serial),
@@ -173,6 +175,52 @@ def test_real_native_capture_policy_and_openai_export(case_name):
         timeout=45,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    if case_name.startswith("native_restart_diagnostics_"):
+        before, after = result.stdout.split("DIAGNOSTICS_RESTART_BOUNDARY", 1)
+
+        def records(output):
+            values = []
+            for line in output.splitlines():
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and value.get("kind") == "native_diagnostic":
+                    values.append(value)
+            return values
+
+        assert "DIAGNOSTICS_ENABLED_PAYLOAD" in json.dumps(records(before))
+        assert records(after) == []
+
+
+async def native_restart_diagnostics_omitted_case():
+    await native_restart_diagnostics_case(explicit_none=False)
+
+
+async def native_restart_diagnostics_none_case():
+    await native_restart_diagnostics_case(explicit_none=True)
+
+
+async def native_restart_diagnostics_case(*, explicit_none):
+    async def operation(output):
+        async with ScriptedResponses(lambda body: [text(output)]) as peer:
+            agent = Agent(instructions="Answer.", provider=peer.provider)
+            assert (await agent.run("Synthetic input")).final_output == output
+
+    await telemetry.configure(
+        diagnostics=telemetry.ConsoleDiagnostics(
+            level="trace", targets=("codex_api::sse::responses",), include_fields=True
+        )
+    )
+    await operation("DIAGNOSTICS_ENABLED_PAYLOAD")
+    await telemetry.shutdown()
+    print("DIAGNOSTICS_RESTART_BOUNDARY", flush=True)
+    if explicit_none:
+        await telemetry.configure(restart_after_shutdown=True, diagnostics=None)
+    else:
+        await telemetry.configure(restart_after_shutdown=True)
+    await operation("DIAGNOSTICS_DISABLED_PAYLOAD")
+    await telemetry.shutdown()
 
 
 async def native_restart_case():
