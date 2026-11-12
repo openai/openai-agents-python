@@ -30,6 +30,7 @@ from agents import (
     Environment,
     EnvironmentSource,
     ExecutorContext,
+    Handoff,
     InputGuardrail,
     InputImage,
     InputText,
@@ -1168,6 +1169,45 @@ def guardrail_constructor_inference(
             output_guardrails=(output_guardrail,),
         ),
         Agent[dict[str, int], int],
+    )
+
+
+def callback_handoff_contexts() -> None:
+    @function_tool
+    def route(context: ToolContext[Application], ticket: int) -> str:
+        return str(ticket)
+
+    target = Agent[Application, str](instructions="Resolve the routed ticket.")
+    edge = agents.Handoff(target, route)
+    assert_type(edge, agents.Handoff[Application, str])
+    Agent[Application, str](instructions="Route.", handoffs=[edge])
+
+
+def hosted_handoff_type_contract() -> None:
+    @function_tool
+    def transfer(ticket: int) -> str:
+        return str(ticket)
+
+    class PromptAnswer(BaseModel):
+        text: str
+
+    target = Agent(instructions="target")
+    Agent(hosted_prompt={"id": "pmpt_test"}, handoffs=[Handoff(target, transfer)])
+    typed = Agent(instructions="target", output_type=PromptAnswer)
+    Agent(
+        hosted_prompt={"id": "pmpt_test"},
+        output_type=PromptAnswer,
+        handoffs=[Handoff(typed, transfer)],
+    )
+
+    def completed_batch(_context: agents.ToolBatchCompletionContext[None]) -> None:
+        return None
+
+    Agent(hosted_prompt={"id": "pmpt_test"}, tool_batch_completion=completed_batch)
+    Agent(
+        hosted_prompt={"id": "pmpt_test"},
+        output_type=PromptAnswer,
+        tool_batch_completion=completed_batch,
     )
 
 

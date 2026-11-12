@@ -24,6 +24,13 @@ class NativeRealtimeNoiseReduction(TypedDict):
 
 
 class NativeRealtimeServerVad(TypedDict, total=False):
+    """Server VAD settings with provider tuning and authoritative typed keys.
+
+    Empty or None provider_data has been omitting vendor leaves from updates.
+    Providers merging partial VAD settings have been retaining earlier leaves.
+    A complete VAD reset has been using turn_detection=None before re-enabling it.
+    """
+
     type: Required[Literal["server_vad"]]
     create_response: bool
     interrupt_response: bool
@@ -32,14 +39,23 @@ class NativeRealtimeServerVad(TypedDict, total=False):
     silence_duration_ms: int
     idle_timeout_ms: int
     model_version: str
+    provider_data: dict[str, Any] | None
 
 
 class NativeRealtimeSemanticVad(TypedDict, total=False):
+    """Semantic VAD settings with provider tuning and authoritative typed keys.
+
+    Empty or None provider_data has been omitting vendor leaves from updates.
+    Providers merging partial VAD settings have been retaining earlier leaves.
+    A complete VAD reset has been using turn_detection=None before re-enabling it.
+    """
+
     type: Required[Literal["semantic_vad"]]
     create_response: bool
     interrupt_response: bool
     eagerness: Literal["auto", "low", "medium", "high"]
     model_version: str
+    provider_data: dict[str, Any] | None
 
 
 class NativeRealtimeCustomVoice(TypedDict):
@@ -170,8 +186,21 @@ class NativeRealtimeResponseOptions(TypedDict, total=False):
     max_output_tokens: int | Literal["inf"]
 
 
+_VAD_TYPED_KEYS = frozenset(
+    "type model_version modelVersion create_response createResponse interrupt_response "
+    "interruptResponse threshold prefix_padding_ms prefixPaddingMs silence_duration_ms "
+    "silenceDurationMs idle_timeout_ms idleTimeoutMs eagerness provider_data providerData".split()
+)
+
+
 def serialize_realtime_settings(settings: NativeRealtimeSettings) -> dict[str, Any]:
     """Copy canonical settings without filling omitted fields or coercing NaN."""
+    vad = settings.get("turn_detection")
+    if isinstance(vad, dict) and (data := vad.get("provider_data")) is not None:
+        if not isinstance(data, dict) or any(not isinstance(key, str) for key in data):
+            raise ValueError("VAD provider_data must be a JSON object or None")
+        if _VAD_TYPED_KEYS.intersection(data):
+            raise ValueError("VAD provider_data cannot override typed settings")
     if "tool_choice" in settings:
         choice = settings["tool_choice"]
         if not (

@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from ._function_tools import FunctionTool
 from .agent import Agent
+from .handoffs import Handoff
 from .mcp import _MCP
 from .native_agents import NativeAgents
 from .realtime_agents import RealtimeHandoff, _handoff_tool
@@ -68,11 +69,22 @@ def _capture_agent_graph(
     profiles: list[_AgentProfile] = []
     for agent in agents:
         source = opening if agent is root else agent
+        handoff_bindings = {
+            id(reference.callback)
+            for reference in source.handoffs
+            if isinstance(reference, Handoff)
+        }
+        instructions = (
+            source.instructions if getattr(source, "_hosted_instructions_provided", True) else None
+        )
         declaration = Agent[Any, Any](
-            instructions=source.instructions,
+            instructions=cast(str, instructions),
             realtime=source.realtime,
+            hosted_prompt=source.hosted_prompt,
             name=source.name,
-            tools=source.tools,
+            tools=tuple(tool for tool in source.tools if id(tool) not in handoff_bindings)
+            if getattr(source, "_hosted_tools_provided", True)
+            else None,
             handoffs=source.handoffs,
             model=source.model,
             model_settings=source.model_settings,
@@ -112,7 +124,9 @@ def _capture_agent_graph(
         callback_tools: list[FunctionTool[Any, Any, Any]] = []
         python_slots = sum(_python_tool_slot(tool) is not None for tool in declaration.tools)
         for reference in declaration.handoffs:
-            if isinstance(reference, RealtimeHandoff):
+            if isinstance(reference, Handoff):
+                target = reference.target
+            elif isinstance(reference, RealtimeHandoff):
                 target = reference.agent
             elif isinstance(reference, Agent):
                 target = reference
@@ -131,7 +145,9 @@ def _capture_agent_graph(
                 else:
                     target = cached[1]
             name = (
-                reference.name
+                reference.callback.name
+                if isinstance(reference, Handoff)
+                else reference.name
                 if isinstance(reference, RealtimeHandoff) and reference.name is not None
                 else _handoff_name(target)
             )
@@ -144,20 +160,40 @@ def _capture_agent_graph(
                 agents.append(target)
             target_id = f"{id_prefix}{index}"
             previous = targets.get(name)
+            if previous is not None and isinstance(reference, Handoff):
+                slot = callbacks.get(name)
+                base = python_slots
+                if (
+                    previous == target_id
+                    and slot is not None
+                    and callback_tools[slot - base] is reference.callback
+                ):
+                    continue
             if previous is not None and (
-                previous != target_id or name in options or isinstance(reference, RealtimeHandoff)
+                previous != target_id
+                or name in callbacks
+                or isinstance(reference, (Handoff, RealtimeHandoff))
             ):
                 raise ValueError(f"Duplicate handoff name in Agent {agent.name!r}: {name}")
             targets[name] = target_id
-            if isinstance(reference, RealtimeHandoff):
-                options[name] = reference
+            if isinstance(reference, (Handoff, RealtimeHandoff)):
+                if isinstance(reference, RealtimeHandoff):
+                    options[name] = reference
                 callbacks[name] = python_slots + len(callback_tools)
-                callback_tools.append(_handoff_tool(reference, agent, name))
+                callback_tools.append(
+                    reference.callback
+                    if isinstance(reference, Handoff)
+                    else _handoff_tool(reference, agent, name)
+                )
         _check_handoff_tool_names(
             (tool.ref for tool in declaration.tools if isinstance(tool, FunctionTool)), targets
         )
         if callback_tools:
-            declaration = replace(declaration, tools=(*declaration.tools, *callback_tools))
+            declaration = replace(
+                declaration,
+                instructions=cast(str, instructions),
+                tools=(*declaration.tools, *callback_tools),
+            )
         profiles.append(
             _AgentProfile(
                 f"{id_prefix}{indices[id(agent)]}",

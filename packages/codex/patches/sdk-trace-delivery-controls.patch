@@ -1,0 +1,407 @@
+diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+index 72f25f3a708658780e4d0324f750319a00681ee9..76816513dc961af42bdaa1c1ddd3ce0b03edf988 100644
+--- a/codex-rs/otel/src/sdk_trace_routes.rs
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -13,6 +13,50 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
+ const MAX_EVENTS: usize = 2048;
+ const MAX_BYTES: usize = 4 * 1024 * 1024;
+
++/// Process-wide settings for the existing native-to-host lifecycle queue.
++#[derive(Clone, Debug, Deserialize)]
++#[serde(default, deny_unknown_fields)]
++pub struct HostTraceDeliverySettings {
++    max_queue_size: u32,
++    max_queue_bytes: u32,
++    max_batch_size: u32,
++    schedule_delay_ms: u32,
++    export_trigger_ratio: f64,
++}
++
++impl Default for HostTraceDeliverySettings {
++    fn default() -> Self {
++        Self {
++            max_queue_size: MAX_EVENTS as u32,
++            max_queue_bytes: MAX_BYTES as u32,
++            max_batch_size: 512,
++            schedule_delay_ms: 0,
++            export_trigger_ratio: 0.7,
++        }
++    }
++}
++
++impl HostTraceDeliverySettings {
++    pub fn parse(value: Value) -> Result<Self, String> {
++        let settings: Self =
++            serde_json::from_value(value).map_err(|_| "invalid host trace delivery options")?;
++        if settings.max_queue_size == 0
++            || settings.max_queue_bytes == 0
++            || settings.max_batch_size == 0
++            || !settings.export_trigger_ratio.is_finite()
++            || !(0.0..=1.0).contains(&settings.export_trigger_ratio)
++        {
++            return Err("invalid host trace delivery options".into());
++        }
++        Ok(settings)
++    }
++}
++
++/// Install validated settings before enabling the process trace provider.
++pub fn configure_host_trace_delivery(settings: HostTraceDeliverySettings) {
++    lock().delivery = settings;
++}
++
+ pub struct TraceCredentials {
+     identity: String,
+     headers: HashMap<String, String>,
+@@ -43,6 +87,9 @@ struct Routes {
+     acknowledged: u64,
+     delivered: u64,
+     queue: VecDeque<(u64, Value, usize, Option<Arc<HostTraceCredential>>)>,
++    delivery: HostTraceDeliverySettings,
++    queued_since: Option<Instant>,
++    draining: bool,
+     pending: BTreeSet<u64>,
+     dispatch_waiters: BTreeMap<u64, tokio::sync::oneshot::Sender<()>>,
+     bytes: usize,
+@@ -320,11 +367,20 @@ fn enqueue_event(
+         }
+         value["__root_descriptor"] = descriptor;
+     }
+-    let bytes = serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len());
+-    if s.pending.len() >= MAX_EVENTS || s.bytes + bytes > MAX_BYTES {
++    let Ok(encoded) = serde_json::to_vec(&value) else {
++        dropped(s, sequence);
++        return false;
++    };
++    let bytes = encoded.len();
++    if s.pending.len() >= s.delivery.max_queue_size as usize
++        || bytes > (s.delivery.max_queue_bytes as usize).saturating_sub(s.bytes)
++    {
+         dropped(s, sequence);
+         return false;
+     }
++    if s.queue.is_empty() {
++        s.queued_since = Some(Instant::now());
++    }
+     s.bytes += bytes;
+     s.pending.insert(sequence);
+     s.queue.push_back((sequence, value, bytes, credential));
+@@ -400,11 +456,36 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+     let mut events = Vec::new();
+     let mut root_descriptors = BTreeMap::new();
+     let mut credential_routes = BTreeMap::new();
+-    let cutoff = s
++    let flush_cutoff = s
+         .flush_snapshot
+         .map(|(barrier, _, _)| barrier)
+         .filter(|barrier| s.pending.range(..=*barrier).next().is_some());
+-    for _ in 0..max_count.min(512) {
++    let trigger =
++        ((s.delivery.max_queue_size as f64 * s.delivery.export_trigger_ratio) as usize).max(1);
++    let ready = s.delivery.schedule_delay_ms == 0
++        || s.queue.len() >= trigger
++        || s.queued_since.is_some_and(|since| {
++            since.elapsed() >= Duration::from_millis(s.delivery.schedule_delay_ms as u64)
++        });
++    s.draining |= ready;
++    // A dispatch can pull its queued prefix forward independently of the timer.
++    let cutoff = flush_cutoff.or_else(|| {
++        s.dispatch_waiters
++            .last_key_value()
++            .map(|(&sequence, _)| sequence)
++            .filter(|barrier| {
++                !s.draining
++                    && s.queue
++                        .front()
++                        .is_some_and(|(sequence, _, _, _)| sequence <= barrier)
++            })
++    });
++    let count = if s.draining || cutoff.is_some() {
++        max_count.min(s.delivery.max_batch_size as usize)
++    } else {
++        0
++    };
++    for _ in 0..count {
+         if s.queue
+             .front()
+             .is_some_and(|(seq, _, _, _)| cutoff.is_some_and(|cutoff| *seq > cutoff))
+@@ -434,6 +515,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+         }
+         events.push(value);
+     }
++    if s.queue.is_empty() {
++        s.queued_since = None;
++        s.draining = false;
++    } else if !events.is_empty()
++        && s.queue
++            .front()
++            .is_some_and(|(seq, _, _, _)| flush_cutoff.is_some_and(|cutoff| *seq > cutoff))
++    {
++        // A flush only admits its captured prefix. Schedule later records as
++        // their own batch, without carrying the prefix's trigger or timer.
++        s.draining = false;
++        s.queued_since = Some(Instant::now());
++    }
+     let through = cutoff.unwrap_or(s.sequence);
+     if s.queue.front().is_none_or(|(seq, _, _, _)| *seq > through) {
+         s.delivered = s.delivered.max(through);
+@@ -1109,6 +1203,8 @@ mod tests {
+
+     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
++    const DETACHED_OBSERVATION: &str = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
++
+     #[tokio::test]
+     async fn detached_dispatch_wakes_on_acknowledgement_or_shutdown() {
+         use std::future::Future;
+@@ -1125,19 +1221,31 @@ mod tests {
+
+         let _test = TEST_LOCK.lock().unwrap();
+         *lock() = Routes::default();
++        configure_host_trace_delivery(HostTraceDeliverySettings {
++            max_queue_size: 2,
++            schedule_delay_ms: 60_000,
++            export_trigger_ratio: 1.0,
++            ..HostTraceDeliverySettings::default()
++        });
+         set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
+-        let encoded = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
+         let first_wakes = Arc::new(WakeCounter::default());
+         let second_wakes = Arc::new(WakeCounter::default());
+         let first_waker = Waker::from(first_wakes.clone());
+         let second_waker = Waker::from(second_wakes.clone());
+         let mut first_context = std::task::Context::from_waker(&first_waker);
+         let mut second_context = std::task::Context::from_waker(&second_waker);
+-        let mut first = std::pin::pin!(dispatch_trace_event(encoded));
+-        let mut second = std::pin::pin!(dispatch_trace_event(encoded));
++        let mut first = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
++        let mut second = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
+
+         assert!(first.as_mut().poll(&mut first_context).is_pending());
++        let first_batch: Value = serde_json::from_str(&drain_trace_events(1).unwrap()).unwrap();
++        assert_eq!(first_batch["events"].as_array().unwrap().len(), 1);
+         assert!(second.as_mut().poll(&mut second_context).is_pending());
++        let mut rejected = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
++        assert_eq!(
++            rejected.as_mut().poll(&mut second_context),
++            Poll::Ready(Err("Trace event exceeds processor queue capacity".into()))
++        );
+         drain_trace_events(2).unwrap();
+         ack_trace_events(1, 0).unwrap();
+         assert_eq!(first_wakes.0.load(Ordering::Relaxed), 1);
+@@ -1154,6 +1262,215 @@ mod tests {
+         );
+     }
+
++    #[test]
++    fn detached_dispatch_behind_flush_drains_after_prefix_ack() {
++        use std::future::Future;
++        use std::task::Poll;
++
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        configure_host_trace_delivery(HostTraceDeliverySettings {
++            max_queue_size: 8,
++            max_batch_size: 1,
++            schedule_delay_ms: 60_000,
++            export_trigger_ratio: 1.0,
++            ..HostTraceDeliverySettings::default()
++        });
++        set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
++        event(&mut lock(), &sample_span(), "end", None, None);
++        assert_eq!(capture_barrier(), 1);
++
++        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
++        let mut dispatch = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
++        assert!(dispatch.as_mut().poll(&mut context).is_pending());
++        event(&mut lock(), &sample_span(), "end", None, None);
++
++        let drain = || serde_json::from_str::<Value>(&drain_trace_events(100).unwrap()).unwrap();
++        assert_eq!(drain()["events"][0]["sequence"], 1);
++        assert_eq!(drain()["events"], json!([]));
++        ack_trace_events(1, 0).unwrap();
++
++        let later = drain();
++        assert_eq!(later["events"][0]["sequence"], 2);
++        assert_eq!(later["events"][0]["name"], "replay");
++        assert!(dispatch.as_mut().poll(&mut context).is_pending());
++        assert_eq!(drain()["events"], json!([]));
++        ack_trace_events(2, 0).unwrap();
++        assert_eq!(dispatch.poll(&mut context), Poll::Ready(Ok(())));
++        assert_eq!(drain()["events"], json!([]));
++
++        lock().queued_since = Some(Instant::now() - Duration::from_secs(61));
++        assert_eq!(drain()["events"][0]["sequence"], 3);
++        ack_trace_events(3, 0).unwrap();
++    }
++
++    #[test]
++    fn host_delivery_options_reject_invalid_bounds_and_allow_small_queues() {
++        for value in [
++            json!(null),
++            json!({"unknown": 1}),
++            json!({"max_queue_size": 0}),
++            json!({"max_queue_bytes": 0}),
++            json!({"max_batch_size": 0}),
++            json!({"schedule_delay_ms": -1}),
++            json!({"schedule_delay_ms": 4294967296_u64}),
++            json!({"export_trigger_ratio": -0.1}),
++            json!({"export_trigger_ratio": 1.1}),
++        ] {
++            assert!(HostTraceDeliverySettings::parse(value).is_err());
++        }
++        assert!(
++            HostTraceDeliverySettings::parse(json!({
++                "max_queue_size": 1,
++                "max_batch_size": 128,
++                "export_trigger_ratio": 0,
++            }))
++            .is_ok()
++        );
++    }
++
++    #[test]
++    fn host_delivery_waits_for_trigger_timer_and_active_flush() {
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        configure_host_trace_delivery(
++            HostTraceDeliverySettings::parse(json!({
++                "max_queue_size": 8,
++                "max_batch_size": 3,
++                "schedule_delay_ms": 60000,
++                "export_trigger_ratio": 0.5,
++            }))
++            .unwrap(),
++        );
++        set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
++        let span = sample_span();
++        let enqueue = || event(&mut lock(), &span, "end", None, None);
++        let drain = || serde_json::from_str::<Value>(&drain_trace_events(100).unwrap()).unwrap();
++        for _ in 0..3 {
++            enqueue();
++        }
++        let waiting = drain();
++        assert_eq!(waiting["events"], json!([]));
++        assert_eq!(waiting["through_sequence"], 0);
++        enqueue();
++        let first = drain();
++        assert_eq!(first["events"].as_array().unwrap().len(), 3);
++        assert_eq!(first["through_sequence"], 3);
++        ack_trace_events(3, 0).unwrap();
++        let remainder = drain();
++        assert_eq!(remainder["events"].as_array().unwrap().len(), 1);
++        assert_eq!(remainder["events"][0]["sequence"], 4);
++        ack_trace_events(4, 0).unwrap();
++
++        enqueue();
++        assert_eq!(drain()["events"], json!([]));
++        assert_eq!(capture_barrier(), 5);
++        let flushed = drain();
++        assert_eq!(flushed["events"][0]["sequence"], 5);
++        ack_trace_events(5, 0).unwrap();
++        assert_eq!(result(5, "success").status, "success");
++
++        enqueue();
++        assert_eq!(drain()["events"], json!([]));
++        lock().queued_since = Some(Instant::now() - Duration::from_secs(61));
++        let expired = drain();
++        assert_eq!(expired["events"][0]["sequence"], 6);
++        ack_trace_events(6, 0).unwrap();
++        assert!(lock().pending.is_empty());
++    }
++
++    #[test]
++    fn host_flush_does_not_trigger_later_queue_records() {
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        configure_host_trace_delivery(
++            HostTraceDeliverySettings::parse(json!({
++                "max_queue_size": 8,
++                "max_batch_size": 1,
++                "schedule_delay_ms": 60000,
++                "export_trigger_ratio": 0.5,
++            }))
++            .unwrap(),
++        );
++        set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
++        let span = sample_span();
++        let enqueue = || event(&mut lock(), &span, "end", None, None);
++        let drain = || serde_json::from_str::<Value>(&drain_trace_events(100).unwrap()).unwrap();
++        enqueue();
++        enqueue();
++        assert_eq!(capture_barrier(), 2);
++        enqueue();
++        lock().queued_since = Some(Instant::now() - Duration::from_secs(61));
++        assert_eq!(drain()["events"][0]["sequence"], 1);
++        assert_eq!(drain()["events"][0]["sequence"], 2);
++        let queued_since = lock().queued_since;
++        assert_eq!(drain()["events"], json!([]));
++        assert_eq!(lock().queued_since, queued_since);
++        ack_trace_events(2, 0).unwrap();
++        assert_eq!(drain()["events"], json!([]));
++        lock().queued_since = Some(Instant::now() - Duration::from_secs(61));
++        assert_eq!(drain()["events"][0]["sequence"], 3);
++        ack_trace_events(3, 0).unwrap();
++
++        enqueue();
++        assert_eq!(capture_barrier(), 4);
++        enqueue();
++        assert_eq!(drain()["events"][0]["sequence"], 4);
++        ack_trace_events(4, 0).unwrap();
++        assert_eq!(drain()["events"], json!([]));
++        enqueue();
++        enqueue();
++        assert_eq!(drain()["events"], json!([]));
++        enqueue();
++        assert_eq!(drain()["events"][0]["sequence"], 5);
++    }
++
++    #[test]
++    fn host_flush_waiting_for_ack_does_not_latch_an_empty_drain() {
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        configure_host_trace_delivery(
++            HostTraceDeliverySettings::parse(json!({"schedule_delay_ms": 60000})).unwrap(),
++        );
++        set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
++        let span = sample_span();
++        let enqueue = || event(&mut lock(), &span, "end", None, None);
++        let drain = || serde_json::from_str::<Value>(&drain_trace_events(100).unwrap()).unwrap();
++        enqueue();
++        assert_eq!(capture_barrier(), 1);
++        assert_eq!(drain()["events"][0]["sequence"], 1);
++        enqueue();
++        assert_eq!(drain()["events"], json!([]));
++        ack_trace_events(1, 0).unwrap();
++        assert_eq!(drain()["events"], json!([]));
++    }
++
++    #[test]
++    fn host_delivery_accounts_for_configured_queue_and_byte_overflow() {
++        let _test = TEST_LOCK.lock().unwrap();
++        let span = sample_span();
++        for (settings, admitted, dropped) in [
++            (json!({"max_queue_size": 2}), 2, 1),
++            (json!({"max_queue_bytes": 1}), 0, 3),
++        ] {
++            *lock() = Routes::default();
++            configure_host_trace_delivery(HostTraceDeliverySettings::parse(settings).unwrap());
++            set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
++            for _ in 0..3 {
++                event(&mut lock(), &span, "end", None, None);
++            }
++            let barrier = capture_barrier();
++            let snapshot: Value = serde_json::from_str(&drain_trace_events(100).unwrap()).unwrap();
++            assert_eq!(snapshot["events"].as_array().unwrap().len(), admitted);
++            assert_eq!(snapshot["through_sequence"], 3);
++            ack_trace_events(3, 0).unwrap();
++            let report = result(barrier, "success");
++            assert_eq!(report.status, "partial");
++            assert_eq!(report.dropped_records, dropped);
++            assert!(lock().pending.is_empty());
++        }
++    }
++
+     #[derive(Debug, Default, Clone)]
+     struct Recorder(Arc<Mutex<Vec<String>>>);
+     impl SpanProcessor for Recorder {

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         ApplyPatchEditor as ApplyPatchEditor,
         ApplyPatchOperation as ApplyPatchOperation,
         ApplyPatchResult as ApplyPatchResult,
+        apply_patch_batch_tool as apply_patch_batch_tool,
         apply_patch_tool as apply_patch_tool,
     )
     from .canonical_storage import (
@@ -59,6 +60,10 @@ if TYPE_CHECKING:
         ComputerSafetyError as ComputerSafetyError,
         computer_tool as computer_tool,
     )
+    from .conversations import (
+        ConversationsHistory as ConversationsHistory,
+        ConversationsWriteError as ConversationsWriteError,
+    )
     from .decisions import (
         DecisionError as DecisionError,
         DecisionInput as DecisionInput,
@@ -81,6 +86,7 @@ if TYPE_CHECKING:
         InputGuardrail as InputGuardrail,
         OutputGuardrail as OutputGuardrail,
     )
+    from .handoffs import Handoff as Handoff
     from .input import (
         AssistantMessage as AssistantMessage,
         ImageDetail as ImageDetail,
@@ -133,6 +139,8 @@ if TYPE_CHECKING:
         StdioMCP as StdioMCP,
     )
     from .model_context import (
+        HostedPromptReference as HostedPromptReference,
+        HostedPromptSource as HostedPromptSource,
         ModelContextSnapshot as ModelContextSnapshot,
         ModelRequestContext as ModelRequestContext,
     )
@@ -145,6 +153,7 @@ if TYPE_CHECKING:
         ModelRequestOptions as ModelRequestOptions,
         ModelRequestOptionsFactory as ModelRequestOptionsFactory,
         ModelResponse as ModelResponse,
+        ModelRetryAdviceRequest as ModelRetryAdviceRequest,
         NativeModel as NativeModel,
         NativeStreamingModel as NativeStreamingModel,
         ResponsesModel as ResponsesModel,
@@ -181,6 +190,16 @@ if TYPE_CHECKING:
         UncertainCall as UncertainCall,
     )
     from .repl import run_demo_loop as run_demo_loop
+    from .retry import (
+        ModelRetrySettings as ModelRetrySettings,
+        NormalizedError as NormalizedError,
+        RetryAdvice as RetryAdvice,
+        RetryBackoffSettings as RetryBackoffSettings,
+        RetryDecision as RetryDecision,
+        RetryPolicy as RetryPolicy,
+        RetryPolicyContext as RetryPolicyContext,
+        retry_policies as retry_policies,
+    )
     from .schema import (
         NativeOutput as NativeOutput,
         OutputSpec as OutputSpec,
@@ -273,6 +292,7 @@ _MODULES = {
     "AnyLLMModel": ".models",
     "ModelProvider": ".models",
     "ModelRequest": ".models",
+    "ModelRetryAdviceRequest": ".models",
     "ModelRequestOptions": ".models",
     "ModelRequestOptionsFactory": ".models",
     "ModelResponse": ".models",
@@ -297,6 +317,8 @@ _MODULES = {
     "ToolBatchResult": ".completion",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
+    "HostedPromptReference": ".model_context",
+    "HostedPromptSource": ".model_context",
     "RawProviderUsage": ".usage",
     "RunBudget": ".usage",
     "RunUsage": ".usage",
@@ -341,9 +363,18 @@ _MODULES = {
     "VerificationProof": ".manual",
     "Interaction": ".manual",
     "Agent": ".agent",
+    "Handoff": ".handoffs",
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",
+    "ModelRetrySettings": ".retry",
+    "NormalizedError": ".retry",
+    "RetryAdvice": ".retry",
+    "RetryBackoffSettings": ".retry",
+    "RetryDecision": ".retry",
+    "RetryPolicy": ".retry",
+    "RetryPolicyContext": ".retry",
+    "retry_policies": ".retry",
     "NativeProvider": ".agent",
     "SignInWithChatGPT": ".agent",
     "SignInWithChatGPTCredentials": ".agent",
@@ -356,6 +387,8 @@ _MODULES = {
     "LocalStorage": ".state",
     "AsyncSQLAlchemySessionStore": ".canonical_storage",
     "CustomStorage": ".canonical_storage",
+    "ConversationsHistory": ".conversations",
+    "ConversationsWriteError": ".conversations",
     "DaprSessionStore": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
     "MongoDBSessionStore": ".canonical_storage",
@@ -409,6 +442,7 @@ _MODULES = {
     "ApplyPatchEditor": ".apply_patch",
     "ApplyPatchOperation": ".apply_patch",
     "ApplyPatchResult": ".apply_patch",
+    "apply_patch_batch_tool": ".apply_patch",
     "apply_patch_tool": ".apply_patch",
     "Computer": ".computer",
     "ComputerProvider": ".computer",

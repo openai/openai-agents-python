@@ -302,11 +302,11 @@ async def test_waiter_rescans_after_real_native_seal_outcome(responses, monkeypa
             def __getattr__(self, name: str) -> Any:
                 return getattr(native, name)
 
-            async def _seal_manual(self) -> str:
+            async def _seal_manual(self, *args: Any, **kwargs: Any) -> str:
                 sealing.set()
                 await release_seal.wait()
                 # Real native attempt: its refusal or seal is never fabricated.
-                return await native._seal_manual()
+                return await native._seal_manual(*args, **kwargs)
 
         session._native = SealHandoff()
         original_readers(session)
@@ -460,10 +460,10 @@ async def test_question_retries_only_after_real_native_seal_refusal(responses, m
                 def __getattr__(self, name: str) -> Any:
                     return getattr(native, name)
 
-                async def _seal_manual(self) -> str:
+                async def _seal_manual(self, *args: Any, **kwargs: Any) -> str:
                     sealing.set()
                     await release_seal.wait()
-                    return await native._seal_manual()
+                    return await native._seal_manual(*args, **kwargs)
 
             session._native = SealHandoff()
             suspending = asyncio.create_task(session.suspend())

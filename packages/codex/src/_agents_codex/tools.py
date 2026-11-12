@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         ToolTimeoutBehavior,
         ToolTimeoutError,
     )
+    from .agent import ContextT
     from .manual import ActionRequested
     from .native_interception import Allow, Deny, ReplaceArguments
 
@@ -676,8 +677,35 @@ class _ToolCatalog:
             )
         ]
 
+    def input_error_slots(self, *, run_formatter: bool = False) -> list[int]:
+        from ._function_tools import _CapturedApproval
+
+        slots = []
+        for slot, tool in enumerate(self.tools):
+            function = tool.function if isinstance(tool, _CapturedApproval) else tool
+            if isinstance(function, _CapturedFunction) and (
+                function.input_error_function is not None
+                or (run_formatter and function._allow_run_error_formatter)
+            ):
+                slots.append(slot)
+        return slots
+
     def native_specs(self) -> str:
         return json.dumps([json.loads(tool.spec_json) for tool in self.tools])
+
+
+def _capture_tools(
+    generation: int,
+    tools: tuple[FunctionTool[Any, Any, Any], ...],
+    context: ContextT | None,
+) -> _ToolCatalog:
+    return _ToolCatalog(
+        generation,
+        tuple(tool._capture(context) for tool in tools),
+    )
+
+
+_capture_tools.__module__ = "agents.session"
 
 
 def _function_parameters(

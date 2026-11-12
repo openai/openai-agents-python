@@ -43,6 +43,10 @@ pub(crate) struct ProfileSpec {
     manual_slots: Vec<usize>,
     #[serde(default)]
     terminal_slots: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    input_error_slots: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    run_input_error_slots: Vec<usize>,
     #[serde(default)]
     step_defaults: Option<Vec<usize>>,
     #[serde(default)]
@@ -112,7 +116,7 @@ fn handoff_defaults(
 struct OpeningFiles(Vec<InstructionFile>);
 
 impl OpeningProfiles {
-    /// A serialized pending source can only claim permissions the fresh graph
+    /// A serialized source can only claim permissions the fresh graph
     /// grants without running a callback.
     pub(crate) fn validate_pending_source(&self, source: &AgentProfileReceipt) -> Result<()> {
         let mut candidates = vec![self.root_id.as_str()];
@@ -134,7 +138,7 @@ impl OpeningProfiles {
                 );
             }
         }
-        anyhow::bail!("Restored pending Agent profile requires live callback acceptance")
+        anyhow::bail!("Restored Agent profile requires live callback acceptance")
     }
 
     pub(crate) fn validate_restored_handoff(
@@ -287,9 +291,28 @@ fn roster_fingerprint(roster: &[ProfileSpec], root_id: &str) -> Result<String> {
         .iter()
         .map(|profile| {
             let mut descriptor = serde_json::to_value(profile)?;
+            // Refreshed Session formatter policy; declared input callbacks remain pinned.
+            descriptor
+                .as_object_mut()
+                .unwrap()
+                .remove("run_input_error_slots");
             // Endpoint credentials, process configuration and refreshed policies are not
             // declaration compatibility. Their fresh native owners remain authority.
             descriptor["mcp_servers"] = json!(profile.mcp_servers.keys().collect::<Vec<_>>());
+            // Runtime-only policy reset; unchanged declaration compatibility.
+            if let Some(controls) = descriptor
+                .pointer_mut("/model/request_controls")
+                .and_then(Value::as_object_mut)
+                && controls.get("retry") == Some(&json!({"has_policy": false}))
+            {
+                controls.remove("retry");
+                if controls.is_empty() {
+                    descriptor["model"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("request_controls");
+                }
+            }
             Ok(descriptor)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -345,6 +368,19 @@ struct PersistedProfile {
     profile_id: String,
     epoch: u64,
     model: AgentProfileModelSettings,
+}
+
+fn rebind_attempt_controls(
+    mut saved: AgentProfileModelSettings,
+    current: &AgentProfileModelSettings,
+) -> AgentProfileModelSettings {
+    saved
+        .request_controls
+        .retry
+        .clone_from(&current.request_controls.retry);
+    saved.request_controls.attempt_timeout_ms = current.request_controls.attempt_timeout_ms;
+    saved.invocation_timeout_ms = current.invocation_timeout_ms;
+    saved
 }
 
 pub(crate) fn profile_receipt(value: &Value) -> Result<AgentProfileReceipt> {
@@ -473,6 +509,7 @@ pub(crate) fn operation_source(
         matching == 1,
         "Original operation has no unique canonical accepted Agent envelope"
     );
+    opening.validate_pending_source(&source)?;
     Ok(source)
 }
 
@@ -483,10 +520,12 @@ pub(crate) fn restore_source(
     validate_restored(opening, history)?;
     let (_, source) = restored_envelope(opening, history)?
         .context("Managed Agent checkpoint has no source receipt")?;
-    Ok(AgentProfileReceipt {
+    let source = AgentProfileReceipt {
         profile_id: source.profile_id,
         epoch: source.epoch,
-    })
+    };
+    opening.validate_pending_source(&source)?;
+    Ok(source)
 }
 
 pub(crate) fn validate_restored(
@@ -579,11 +618,18 @@ async fn prepare_profile(
         descriptor.before_complete,
         descriptor.tool_batch_completion,
     ];
+    let input_error_slots = descriptor
+        .input_error_slots
+        .iter()
+        .chain(&descriptor.run_input_error_slots)
+        .copied()
+        .collect::<Vec<_>>();
     let catalog = if voice {
         tools.voice_profile_catalog(
             descriptor.tools.clone(),
             &descriptor.manual_slots,
             &descriptor.terminal_slots,
+            &input_error_slots,
             descriptor.step_defaults.as_deref(),
             flags,
         )?
@@ -592,6 +638,7 @@ async fn prepare_profile(
             descriptor.tools.clone(),
             &descriptor.manual_slots,
             &descriptor.terminal_slots,
+            &input_error_slots,
             descriptor.step_defaults.as_deref(),
             flags,
             startup,
@@ -1028,7 +1075,11 @@ pub(crate) async fn configure(
     let mut profiles = BTreeMap::new();
     for descriptor in &opening.roster {
         let model = if descriptor.id == opening.root_id {
-            opening_model.clone()
+            if restored {
+                rebind_attempt_controls(opening_model.clone(), &descriptor.model)
+            } else {
+                opening_model.clone()
+            }
         } else {
             descriptor.model.clone()
         };
@@ -1175,9 +1226,23 @@ pub(crate) async fn update_active(
     };
     profiles.tools.check_idle(thread).await?;
     let mut target = (*captured.profile).clone();
+    if catalog.is_some() {
+        if let Some(Some(prompt)) = &mut target.model.request_controls.hosted_prompt {
+            prompt.omit_tools = false;
+        }
+    }
     if let Some(settings) = settings {
         if let Some(model) = &settings.model {
             target.model.model = model.clone();
+            if settings
+                .request_controls
+                .as_ref()
+                .is_none_or(|controls| controls.hosted_prompt.is_none())
+            {
+                if let Some(Some(prompt)) = &mut target.model.request_controls.hosted_prompt {
+                    prompt.omit_model = false;
+                }
+            }
         }
         if let Some(effort) = &settings.effort {
             target.model.reasoning_effort = effort.clone();
@@ -1267,6 +1332,7 @@ pub(crate) async fn replace_tools(
     default_slots: Option<&[usize]>,
     profile_update: Option<&ProfileToolUpdate>,
     terminal_slots: &[usize],
+    input_error_slots: &[usize],
 ) -> Result<Option<u64>> {
     let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
         return Ok(None);
@@ -1292,6 +1358,7 @@ pub(crate) async fn replace_tools(
         specs,
         manual_slots,
         terminal_slots,
+        input_error_slots,
         default_slots,
         [
             previous.selecting_steps,
@@ -1465,6 +1532,40 @@ struct HandoffExecutor {
     callback: Option<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>>,
 }
 
+/// A callback failure retires only its own provisional reservation. Accepted or
+/// still-running siblings retain their original native reservation owner.
+struct ProvisionalHandoff<'a> {
+    executor: &'a HandoffExecutor,
+    turn: String,
+    call: String,
+    keep: bool,
+}
+
+impl Drop for ProvisionalHandoff<'_> {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let mut pending = self
+            .executor
+            .profiles
+            .reservation
+            .lock()
+            .expect("Agent reservation poisoned");
+        if let Some(reservation) = pending.as_mut() {
+            if reservation.turn == self.turn
+                && reservation.expected == self.executor.source
+                && reservation.target == self.executor.target
+            {
+                reservation.calls.remove(&self.call);
+                if reservation.calls.is_empty() && !reservation.accepted {
+                    *pending = None;
+                }
+            }
+        }
+    }
+}
+
 impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
     fn tool_name(&self) -> ToolName {
         ToolName::new(None, self.name.clone())
@@ -1484,6 +1585,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
         call_id: &str,
         result: &dyn ToolOutput,
     ) -> codex_tools::AcceptedToolOutcome {
+        let mut outcome = self
+            .callback
+            .as_ref()
+            .map_or_else(Default::default, |callback| {
+                callback.on_result_accepted(turn_id, call_id, result)
+            });
         let handoff = (|| {
             if !result.success_for_logging() {
                 return None;
@@ -1508,24 +1615,16 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                 call_id: call_id.into(),
             })
         })();
-        codex_tools::AcceptedToolOutcome {
-            handoff,
-            ..Default::default()
-        }
+        // This wrapper alone owns the transfer receipt; retain other accepted metadata.
+        outcome.handoff = handoff;
+        outcome
     }
     fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
     where
         ToolCall<'call>: 'a,
     {
         Box::pin(async move {
-            let turn_id = call.turn_id.to_owned();
-            let call_id = call.call_id.clone();
-            if let Some(callback) = &self.callback {
-                let output = callback.handle(call).await?;
-                if !output.success_for_logging() {
-                    return Ok(output);
-                }
-            } else {
+            if self.callback.is_none() {
                 let arguments: Value =
                     serde_json::from_str(call.function_arguments()?).map_err(|_| {
                         FunctionCallError::RespondToModel("Invalid handoff arguments".into())
@@ -1539,43 +1638,57 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                     ));
                 }
             }
-            let mut pending = self
-                .profiles
-                .reservation
-                .lock()
-                .expect("Agent reservation poisoned");
-            if pending
-                .as_ref()
-                .is_some_and(|previous| previous.turn != turn_id)
             {
-                *pending = None;
-            }
-            if let Some(previous) = pending.as_mut() {
-                if previous.turn != turn_id
-                    || previous.expected != self.source
-                    || previous.target != self.target
+                let mut pending = self
+                    .profiles
+                    .reservation
+                    .lock()
+                    .expect("Agent reservation poisoned");
+                if pending
+                    .as_ref()
+                    .is_some_and(|previous| previous.turn != call.turn_id)
                 {
-                    return Err(FunctionCallError::RespondToModel(
-                        "Conflicting Agent handoffs in one tool batch".into(),
-                    ));
+                    *pending = None;
                 }
-                previous.calls.insert(call_id.clone());
-            } else {
-                *pending = Some(Reservation {
-                    turn: turn_id,
-                    expected: self.source.clone(),
-                    target: self.target.clone(),
-                    calls: HashSet::from([call_id]),
-                    accepted: false,
-                    restored: false,
-                });
+                if let Some(previous) = pending.as_mut() {
+                    if previous.turn != call.turn_id
+                        || previous.expected != self.source
+                        || previous.target != self.target
+                    {
+                        return Err(FunctionCallError::RespondToModel(
+                            "Conflicting Agent handoffs in one tool batch".into(),
+                        ));
+                    }
+                    previous.calls.insert(call.call_id.clone());
+                } else {
+                    *pending = Some(Reservation {
+                        turn: call.turn_id.to_owned(),
+                        expected: self.source.clone(),
+                        target: self.target.clone(),
+                        calls: HashSet::from([call.call_id.clone()]),
+                        accepted: false,
+                        restored: false,
+                    });
+                }
             }
-            Ok(Box::new(crate::python_tools::PythonOutput(
+            let mut reservation = ProvisionalHandoff {
+                executor: self,
+                turn: call.turn_id.to_owned(),
+                call: call.call_id.clone(),
+                keep: false,
+            };
+            let output = if let Some(callback) = &self.callback {
+                callback.handle(call).await?
+            } else {
+                Box::new(crate::python_tools::PythonOutput(
                 codex_protocol::dynamic_tools::DynamicToolResponse {
                     content_items: vec![codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText { text: "Handoff reserved.".into() }],
                     success: true,
                 },
-            )) as Box<dyn ToolOutput>)
+                )) as Box<dyn ToolOutput>
+            };
+            reservation.keep = output.success_for_logging();
+            Ok(output)
         })
     }
 }
@@ -1584,7 +1697,6 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
 pub(crate) fn wrap_handoff_callback(
     thread: &ExtensionData,
     source: Option<&AgentProfileReceipt>,
-    slot: usize,
     callback: Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>,
 ) -> Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>> {
     let Some(source) = source else {
@@ -1596,11 +1708,14 @@ pub(crate) fn wrap_handoff_callback(
     let Some(profile) = profiles.profiles.get(&source.profile_id) else {
         return callback;
     };
+    let callback_name = callback.tool_name().with_default_namespace();
     let Some((name, _)) = profile
         .declaration
         .handoff_callbacks
         .iter()
-        .find(|(_, candidate)| **candidate == slot)
+        .find(|(name, _)| {
+            ToolName::new(None, name.to_string()).with_default_namespace() == callback_name
+        })
     else {
         return callback;
     };
