@@ -516,6 +516,10 @@ assert set(sys.modules) == before
 for module in ('agent', 'session', 'telemetry', 'experimental.deferred', 'testing'):
     importlib.import_module('agents.' + module)
     assert 'agents._native' not in sys.modules, module
+    if module == 'session':
+        assert not any(
+            name.startswith(('agents.migration', 'agents.classic')) for name in sys.modules
+        )
 assert agents.Agent is importlib.import_module('agents.agent').Agent
 """,
         ],

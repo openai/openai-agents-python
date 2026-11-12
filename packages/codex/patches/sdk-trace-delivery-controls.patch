@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index 595db7c9805077179020f6ff5fb58e0906b141d2..29516cbc2cc773dbe2c1b997a72494195fa01b5d 100644
+index 9edd3ca7ef9f2fe0c59de68d45a3f273c2101ac2..a61b35a3b18bd31da623a1fa0b9c10cfeba02227 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -13,6 +13,50 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -61,32 +61,31 @@ index 595db7c9805077179020f6ff5fb58e0906b141d2..29516cbc2cc773dbe2c1b997a7249419
 +    queued_since: Option<Instant>,
 +    draining: bool,
      pending: BTreeSet<u64>,
+     dispatch_waiters: BTreeMap<u64, tokio::sync::oneshot::Sender<()>>,
      bytes: usize,
-     dropped: u64,
-@@ -285,11 +332,20 @@ fn event(
+@@ -296,10 +343,19 @@ fn enqueue_event(
          }
          value["__root_descriptor"] = descriptor;
      }
 -    let bytes = serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len());
 -    if s.pending.len() >= MAX_EVENTS || s.bytes + bytes > MAX_BYTES {
 +    let Ok(encoded) = serde_json::to_vec(&value) else {
-+        dropped(s, sequence);
-+        return;
+         dropped(s, sequence);
+         return false;
 +    };
 +    let bytes = encoded.len();
 +    if s.pending.len() >= s.delivery.max_queue_size as usize
 +        || bytes > (s.delivery.max_queue_bytes as usize).saturating_sub(s.bytes)
 +    {
-         dropped(s, sequence);
-         return;
-     }
++        dropped(s, sequence);
++        return false;
++    }
 +    if s.queue.is_empty() {
 +        s.queued_since = Some(Instant::now());
-+    }
+     }
      s.bytes += bytes;
      s.pending.insert(sequence);
-     s.queue.push_back((sequence, value, bytes, credential));
-@@ -310,7 +366,20 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+@@ -380,7 +436,20 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
          .flush_snapshot
          .map(|(barrier, _, _)| barrier)
          .filter(|barrier| s.pending.range(..=*barrier).next().is_some());
@@ -108,7 +107,7 @@ index 595db7c9805077179020f6ff5fb58e0906b141d2..29516cbc2cc773dbe2c1b997a7249419
          if s.queue
              .front()
              .is_some_and(|(seq, _, _, _)| cutoff.is_some_and(|cutoff| *seq > cutoff))
-@@ -340,6 +409,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+@@ -410,6 +479,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
          }
          events.push(value);
      }
@@ -128,9 +127,32 @@ index 595db7c9805077179020f6ff5fb58e0906b141d2..29516cbc2cc773dbe2c1b997a7249419
      let through = cutoff.unwrap_or(s.sequence);
      if s.queue.front().is_none_or(|(seq, _, _, _)| *seq > through) {
          s.delivered = s.delivered.max(through);
-@@ -1002,6 +1084,173 @@ mod tests {
+@@ -1101,6 +1183,10 @@ mod tests {
  
-     static TEST_LOCK: Mutex<()> = Mutex::new(());
+         let _test = TEST_LOCK.lock().unwrap();
+         *lock() = Routes::default();
++        configure_host_trace_delivery(HostTraceDeliverySettings {
++            max_queue_size: 2,
++            ..HostTraceDeliverySettings::default()
++        });
+         set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
+         let encoded = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
+         let first_wakes = Arc::new(WakeCounter::default());
+@@ -1114,6 +1200,11 @@ mod tests {
+ 
+         assert!(first.as_mut().poll(&mut first_context).is_pending());
+         assert!(second.as_mut().poll(&mut second_context).is_pending());
++        let mut rejected = std::pin::pin!(dispatch_trace_event(encoded));
++        assert_eq!(
++            rejected.as_mut().poll(&mut second_context),
++            Poll::Ready(Err("Trace event exceeds processor queue capacity".into()))
++        );
+         drain_trace_events(2).unwrap();
+         ack_trace_events(1, 0).unwrap();
+         assert_eq!(first_wakes.0.load(Ordering::Relaxed), 1);
+@@ -1130,6 +1221,173 @@ mod tests {
+         );
+     }
  
 +    #[test]
 +    fn host_delivery_options_reject_invalid_bounds_and_allow_small_queues() {

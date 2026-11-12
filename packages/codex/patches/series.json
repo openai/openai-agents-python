@@ -1,5 +1,5 @@
 {
-  "result_tree": "b8cfbf2fa154d73f4433fe22c9d8a9d019cafeb3",
+  "result_tree": "d4bd5eac2580760191ba0dd1b33e20ae9494b4f5",
   "patches": [
     {
       "path": "0001-native-schema-recovery.patch",
@@ -706,8 +706,12 @@
       "sha256": "3b4b270ab86c1f76b39d1d49f8e1c17e1896c6e4c6fdecba17a011a0a97ffbaf"
     },
     {
+      "path": "sdk-trace-lifecycle-dispatch.patch",
+      "sha256": "7ad94085ca25e835088fa60efc140869944e889aa02fdd3689b9560b2b300c8c"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
-      "sha256": "b827bfb98abc06304fd0febf2710bb7cb881ebce3f5a6d7519059869bae4c5ed"
+      "sha256": "2275442fa74e669c5e3d1b0f3f97a90c7284581109e53d2f3e7e636425365bd9"
     },
     {
       "path": "sdk-native-hosted-prompts-request-ownership.patch",
@@ -755,7 +759,7 @@
     },
     {
       "path": "sdk-trace-delivery-controls.patch",
-      "sha256": "ab69e05e28487153d3ab44a9bdae4862e24ad7dc1284a0872118dc703f0e49e8"
+      "sha256": "fcff34a990cf3dfb278e7944187e0a55455faf64b8e20cf47f8cbe55b614560d"
     }
   ]
 }

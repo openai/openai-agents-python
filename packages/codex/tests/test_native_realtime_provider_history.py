@@ -881,10 +881,8 @@ async def test_native_cumulative_history_media_budget_preserves_live_connection(
             await asyncio.gather(retrieving, return_exceptions=True)
 
 
-@pytest.mark.parametrize("ack_predecessor", [None, "root"])
 async def test_native_response_interrupts_create_and_drains_late_ack_without_next_edit(
     realtime_peer: RealtimePeer,
-    ack_predecessor: str | None,
 ) -> None:
     from agents.realtime import RealtimeHistory, RealtimeResponse
 
