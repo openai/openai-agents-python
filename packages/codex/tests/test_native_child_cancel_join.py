@@ -360,9 +360,10 @@ async def test_child_cancel_late_receipt_does_not_create_an_unsettled_owner(
                 await session.submit("Start background work")
                 await delivered.wait()
                 await peer.entered["alpha"].wait()
+                [captured] = await handles(session, 1)
                 [child] = [item async for item in session.subagents()]
-                assert child.turn is not None and not session._child_callbacks
-                pending = asyncio.create_task(child.try_cancel(child.turn))
+                assert child.id == captured.child_id and not session._child_callbacks
+                pending = asyncio.create_task(child.try_cancel(captured))
                 await confirmed.wait()
                 if reader_exit:
                     # Lose the event source after native cancellation settles but
