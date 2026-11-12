@@ -19,6 +19,7 @@ from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 from ._events import RequiredAction as RequiredAction, SessionItem as SessionItem
 from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
+from .input import UserInput, _native_input
 from .subagents import SubagentConfig as SubagentConfig
 from .tools import ToolRef as ToolRef
 from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage
@@ -322,9 +323,15 @@ class SessionState(BaseModel):
     # Portable restores bind to the original Codex user and workspace.
     codex_login_binding: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
+    original_input: UserInput | None = Field(default=None, repr=False)
+
     @model_validator(mode="after")
     def validate_tree(self) -> "SessionState":
         self._check_prompt_references()
+        if self.original_input is not None:
+            if self.native_continuation is None:
+                raise ValueError("Original run input requires a manual continuation")
+            _native_input(self.original_input)
         if (self.format_version in (8, 9)) != (self.run_budget is not None):
             raise ValueError("Request budget requires a version 8 or 9 manual checkpoint")
         if (self.format_version in (3, 5, 7, 8, 9)) != (self.native_continuation is not None):
