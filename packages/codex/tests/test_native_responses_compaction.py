@@ -220,6 +220,11 @@ async def test_optional_failure_keeps_completed_answer_and_original_context(resp
             None,
             id="incomplete-tool-pair",
         ),
+        pytest.param(
+            {"type": "item_reference", "id": "msg_untrusted_compaction_pointer"},
+            "new or modified instruction or control item",
+            id="opaque-item-reference",
+        ),
         *(
             pytest.param(
                 {
@@ -421,3 +426,46 @@ async def test_compaction_transform_keeps_original_instruction_provenance(respon
             replay = responses.requests[-1]["input"]
             assert f"{original} current" in json.dumps(replay)
             assert redacted not in json.dumps(replay)
+
+
+@pytest.mark.parametrize("mode", ["keep", "subset", "duplicate", "reordered"])
+async def test_compaction_retains_only_captured_reference_occurrences(responses, mode):
+    first = {"type": "item_reference", "id": "msg_captured_first"}
+    second = {"type": "item_reference", "id": "msg_captured_second"}
+    captured = [first, second, first]
+    replacement = {
+        "keep": captured,
+        "subset": [second, first],
+        "duplicate": [first, second, first, first],
+        "reordered": [first, first, second],
+    }[mode]
+
+    async def compact(**body):
+        assert [item for item in body["input"] if item["type"] == "item_reference"] == captured
+        return {"output": replacement}
+
+    responses.respond(assistant_output("original"))
+    responses.respond(assistant_output("continued"))
+    config = ResponsesCompaction(
+        client=client_for(compact), model="compact", should_compact=lambda context: False
+    )
+    async with (
+        timeout(30),
+        Agent(
+            instructions="Answer.", provider=provider(responses), compaction=config
+        ).session() as session,
+    ):
+        snapshot = await session.history_snapshot()
+        await session.transact_history(expected_revision=snapshot.revision, keep=0, items=captured)
+        await (await session.submit("original request")).get_result()
+        original = (await session.history_snapshot()).items
+        if mode in ("duplicate", "reordered"):
+            with pytest.raises(NativeError, match="new or modified instruction or control item"):
+                await session.compact()
+            assert (await session.history_snapshot()).items == original
+        else:
+            await session.compact()
+        await (await session.submit("continue")).get_result()
+    assert [
+        item for item in responses.requests[-1]["input"] if item["type"] == "item_reference"
+    ] == (captured if mode in ("duplicate", "reordered") else replacement)

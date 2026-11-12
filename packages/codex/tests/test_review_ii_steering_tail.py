@@ -74,18 +74,22 @@ class ProjectContinuation(InjectFirstFrozenTail):
     retained input, authority and the actual internal continuation fragment.
     """
 
-    async def _submit(self, encoded: str) -> str:
+    async def _submit(self, encoded: str, *, model_attempts: Any = None) -> str:
         request = json.loads(encoded)
         if request["mode"] == "continue_if_idle":
             assert self.terminal is not None
             assert request["expected_previous_turn_id"] == self.terminal[0]
             assert request["input"] == []
+            assert model_attempts is None
             request = {
                 "mode": "start_if_idle",
                 "input": [{"type": "text", "text": "synthetic continuation admission"}],
                 "start": request.get("start", {}),
             }
-        return await self.native._submit(json.dumps(request))
+        encoded = json.dumps(request)
+        if model_attempts is None:
+            return await self.native._submit(encoded)
+        return await self.native._submit(encoded, model_attempts=model_attempts)
 
 
 async def test_frozen_tail_preserves_exact_turn_and_follows_only_its_automatic_successor(

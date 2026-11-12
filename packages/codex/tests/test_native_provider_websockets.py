@@ -67,6 +67,7 @@ class WebSocketPeer(ResponsesFixture):
     handlers: int = 0
     providers: list[NativeProvider] = field(default_factory=list)
     disconnected: asyncio.Event = field(default_factory=asyncio.Event)
+    warmup_received: asyncio.Event = field(default_factory=asyncio.Event)
     creation_override: dict[str, Any] | None = None
     completion_id_override: str | None = None
     expected_disconnect_event: dict[str, Any] | None = None
@@ -135,6 +136,7 @@ class WebSocketPeer(ResponsesFixture):
                 response_id = f"resp_ws_{len(self.frames)}"
                 if payload.get("generate") is False:
                     self.warmups += 1
+                    self.warmup_received.set()
                     events: list[dict[str, Any]] = []
                     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
                 else:

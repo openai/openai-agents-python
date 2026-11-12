@@ -245,6 +245,9 @@ def _responses_client_scope(client: Any) -> tuple[str, str, str | None, str | No
             or getattr(client.responses.compact, "__func__", None) is not AsyncResponses.compact
         ):
             return None
+        # A mounted transport can rewrite the endpoint or account independently.
+        if any(transport is not None for transport in client._client._mounts.values()):
+            return None
         transport = client._client._transport
         if type(transport).__name__ != "AsyncHTTPTransport" or type(transport).__module__ not in (
             "httpx",

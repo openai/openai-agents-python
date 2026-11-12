@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c40e85240 100644
+index a743ae733ccb4b5dff5504658cf05056e2c65227..19d88f263d325e62c4b5c5d08807e2c121738505 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -1,4 +1,6 @@
@@ -9,7 +9,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
  use std::collections::HashSet;
  use std::sync::Arc;
  use std::time::Instant;
-@@ -133,6 +135,7 @@ pub(crate) async fn run_inline_auto_compact_task(
+@@ -135,6 +137,7 @@ pub(crate) async fn run_inline_auto_compact_task(
              phase,
          ),
          cancellation_token,
@@ -17,7 +17,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
      )
      .await?;
      Ok(())
-@@ -158,11 +161,13 @@ pub(crate) async fn run_compact_task(
+@@ -160,11 +163,13 @@ pub(crate) async fn run_compact_task(
              CompactionPhase::StandaloneTurn,
          ),
          cancellation_token,
@@ -31,7 +31,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
  async fn run_compact_task_inner(
      sess: Arc<Session>,
      source_step_context: Arc<StepContext>,
-@@ -171,6 +176,7 @@ async fn run_compact_task_inner(
+@@ -173,6 +178,7 @@ async fn run_compact_task_inner(
      world_state: Arc<WorldState>,
      compaction_metadata: CompactionTurnMetadata,
      cancellation_token: &CancellationToken,
@@ -39,7 +39,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
  ) -> CodexResult<()> {
      let turn_context = Arc::clone(&source_step_context.turn);
      let trigger = compaction_metadata.trigger();
-@@ -209,6 +215,7 @@ async fn run_compact_task_inner(
+@@ -211,6 +217,7 @@ async fn run_compact_task_inner(
          world_state,
          compaction_metadata,
          cancellation_token,
@@ -47,7 +47,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
      )
      .await;
      let status = compaction_status_from_result(&result);
-@@ -253,60 +260,319 @@ async fn run_compact_task_inner(
+@@ -255,60 +262,321 @@ async fn run_compact_task_inner(
      result.map(|_| ())
  }
  
@@ -81,10 +81,12 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
 +) -> CodexResult<()> {
 +    use codex_protocol::openai_models::InputModality;
 +
-+    let mut captured_controls = captured_items
-+        .iter()
-+        .filter(|item| is_compaction_control_item(item));
-+    for item in items.iter().filter(|item| is_compaction_control_item(item)) {
++    let mut captured_controls = captured_items.iter().filter(|item| {
++        is_compaction_control_item(item) || matches!(item, ResponseItem::ItemReference { .. })
++    });
++    for item in items.iter().filter(|item| {
++        is_compaction_control_item(item) || matches!(item, ResponseItem::ItemReference { .. })
++    }) {
 +        if !captured_controls.any(|captured| captured == item) {
 +            return Err(CodexErr::InvalidRequest(
 +                "Compacted window contains a new or modified instruction or control item".into(),
@@ -402,7 +404,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
          }
      }
      Ok(None)
-@@ -325,12 +591,7 @@ async fn publish_compaction_summary(
+@@ -327,12 +595,7 @@ async fn publish_compaction_summary(
      let (compaction_response_id, completed_output) = match compaction_response {
          Some((response, cancellation_token)) => (
              Some(response.response_id),
@@ -416,7 +418,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
          ),
          None => (None, None),
      };
-@@ -348,12 +609,57 @@ async fn publish_compaction_summary(
+@@ -350,12 +613,57 @@ async fn publish_compaction_summary(
          // belongs to this compaction turn.
          summary_item.set_turn_id_if_missing(&turn_context.sub_id);
      }
@@ -475,7 +477,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
      let (initial_context, world_state_baseline) =
          build_compaction_initial_context(sess, replacement_step_context, world_state).await;
      new_history =
-@@ -366,7 +672,7 @@ async fn publish_compaction_summary(
+@@ -368,7 +676,7 @@ async fn publish_compaction_summary(
              input_goal_ids,
              message: summary_text,
              window,
@@ -484,7 +486,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
              compaction_model_hash,
              reviewer_compaction_hash: None,
          },
-@@ -377,6 +683,7 @@ async fn publish_compaction_summary(
+@@ -379,6 +687,7 @@ async fn publish_compaction_summary(
      Ok(())
  }
  
@@ -492,7 +494,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
  async fn run_compact_task_inner_impl(
      sess: Arc<Session>,
      source_step_context: Arc<StepContext>,
-@@ -385,17 +692,29 @@ async fn run_compact_task_inner_impl(
+@@ -387,17 +696,29 @@ async fn run_compact_task_inner_impl(
      world_state: Arc<WorldState>,
      compaction_metadata: CompactionTurnMetadata,
      cancellation_token: &CancellationToken,
@@ -523,7 +525,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
      )
      .await?
      {
-@@ -403,9 +722,14 @@ async fn run_compact_task_inner_impl(
+@@ -405,9 +726,14 @@ async fn run_compact_task_inner_impl(
              .await;
          return Ok(summary);
      }
@@ -539,7 +541,7 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
      let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
      history.record_items(
          &[initial_input_for_turn.into()],
-@@ -1040,3 +1364,73 @@ async fn drain_to_completed(
+@@ -1064,3 +1390,93 @@ async fn drain_to_completed(
  #[cfg(test)]
  #[path = "compact_tests.rs"]
  mod tests;
@@ -602,6 +604,26 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
 +    }
 +
 +    #[test]
++    fn full_window_validation_preserves_reference_occurrence_provenance() {
++        let history = ContextManager::new();
++        let first = item(json!({"type":"item_reference","id":"msg_first"}));
++        let second = item(json!({"type":"item_reference","id":"msg_second"}));
++        let unknown = item(json!({"type":"item_reference","id":"msg_unknown"}));
++        let captured = [first.clone(), second.clone(), first.clone()];
++        validate_compaction_window(&history, &captured, &captured).unwrap();
++        validate_compaction_window(&history, &captured, &[second.clone(), first.clone()]).unwrap();
++        validate_compaction_window(&history, &captured, &[]).unwrap();
++        for replacement in [
++            vec![unknown],
++            vec![first.clone(), second.clone(), first.clone(), first.clone()],
++            vec![first.clone(), first, second],
++        ] {
++            assert!(validate_compaction_window(&history, &captured, &replacement).is_err());
++            assert!(history.raw_items().next().is_none());
++        }
++    }
++
++    #[test]
 +    fn full_window_validation_rejects_incomplete_pairs_without_mutating_the_source() {
 +        let history = ContextManager::new();
 +        for value in [
@@ -614,10 +636,10 @@ index ce0ff87681fcc7ae3577544fb59cd835feb0b772..a2a01bb8f24ed240a2727d040fe39a6c
 +    }
 +}
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0dfbd0d78d5 100644
+index d7d6cded1991d91e3aef58e1e00e5d16fa5fe147..f7780557725160f7947e1b2aaafd8e037ba47850 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -59,6 +59,7 @@ use codex_rollout_trace::InferenceTraceContext;
+@@ -61,6 +61,7 @@ use codex_rollout_trace::InferenceTraceContext;
  use codex_utils_output_truncation::approx_token_count;
  use codex_utils_output_truncation::truncate_text;
  use futures::StreamExt;
@@ -625,7 +647,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
  
  #[path = "compact_remote_v2_attempt.rs"]
  mod attempt;
-@@ -88,6 +89,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+@@ -90,6 +91,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
      world_state: Arc<WorldState>,
      reason: CompactionReason,
      phase: CompactionPhase,
@@ -633,7 +655,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
  ) -> CodexResult<()> {
      let compaction_metadata = CompactionTurnMetadata::new(
          CompactionTrigger::Auto,
-@@ -102,6 +104,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+@@ -104,6 +106,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
          Some(client_session),
          world_state,
          compaction_metadata,
@@ -641,7 +663,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
      )
      .await
  }
-@@ -110,6 +113,7 @@ pub(crate) async fn run_remote_compact_task(
+@@ -112,6 +115,7 @@ pub(crate) async fn run_remote_compact_task(
      sess: Arc<Session>,
      step_context: Arc<StepContext>,
      world_state: Arc<WorldState>,
@@ -649,7 +671,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
  ) -> CodexResult<()> {
      let compaction_metadata = CompactionTurnMetadata::new(
          CompactionTrigger::Manual,
-@@ -124,6 +128,7 @@ pub(crate) async fn run_remote_compact_task(
+@@ -126,6 +130,7 @@ pub(crate) async fn run_remote_compact_task(
          /*client_session*/ None,
          world_state,
          compaction_metadata,
@@ -657,7 +679,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
      )
      .await
  }
-@@ -135,6 +140,7 @@ async fn run_remote_compact_task_inner(
+@@ -137,6 +142,7 @@ async fn run_remote_compact_task_inner(
      client_session: Option<&mut ModelClientSession>,
      world_state: Arc<WorldState>,
      compaction_metadata: CompactionTurnMetadata,
@@ -665,7 +687,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
  ) -> CodexResult<()> {
      let turn_context = &step_context.turn;
      let trigger = compaction_metadata.trigger();
-@@ -178,6 +184,7 @@ async fn run_remote_compact_task_inner(
+@@ -180,6 +186,7 @@ async fn run_remote_compact_task_inner(
          world_state,
          compaction_metadata,
          &mut analytics_details,
@@ -673,7 +695,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
      )
      .await;
      let status = compaction_status_from_result(&result);
-@@ -217,6 +224,7 @@ async fn run_remote_compact_task_inner(
+@@ -219,6 +226,7 @@ async fn run_remote_compact_task_inner(
      }
  }
  
@@ -681,7 +703,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
  async fn run_remote_compact_task_inner_impl(
      sess: &Arc<Session>,
      step_context: &Arc<StepContext>,
-@@ -225,6 +233,7 @@ async fn run_remote_compact_task_inner_impl(
+@@ -227,6 +235,7 @@ async fn run_remote_compact_task_inner_impl(
      world_state: Arc<WorldState>,
      compaction_metadata: CompactionTurnMetadata,
      analytics_details: &mut CompactionAnalyticsDetails,
@@ -689,7 +711,7 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
  ) -> CodexResult<()> {
      let turn_context = &step_context.turn;
      let context_compaction_item = ContextCompactionItem::new();
-@@ -245,6 +254,7 @@ async fn run_remote_compact_task_inner_impl(
+@@ -247,6 +256,7 @@ async fn run_remote_compact_task_inner_impl(
          replacement_step_context,
          &world_state,
          compaction_metadata,
@@ -698,10 +720,10 @@ index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0df
      .await?
      .is_some()
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da544e08e5d8 100644
+index 209bf9a280fc34ef8c2a46ca394a91c4a49a8f46..5dcb45c29e6336a94aa034a3c30bd1ff25480866 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -486,6 +486,9 @@ pub(crate) async fn run_turn(
+@@ -487,6 +487,9 @@ pub(crate) async fn run_turn(
              false,
              &cancellation_token,
              &mut stop_hook_active,
@@ -711,7 +733,7 @@ index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da54
          )
          .await?
          {
-@@ -692,6 +695,9 @@ pub(crate) async fn run_turn(
+@@ -720,6 +723,9 @@ pub(crate) async fn run_turn(
                      pending_agent_handoff.is_some(),
                      &cancellation_token,
                      &mut stop_hook_active,
@@ -721,7 +743,7 @@ index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da54
                  )
                  .await?
                  {
-@@ -902,51 +908,15 @@ pub(crate) async fn run_turn(
+@@ -930,51 +936,15 @@ pub(crate) async fn run_turn(
                      {
                          return Ok(None);
                      }
@@ -782,7 +804,7 @@ index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da54
                      break;
                  }
                  continue;
-@@ -1760,6 +1730,79 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -1788,6 +1758,79 @@ async fn maybe_run_previous_model_inline_compact(
      Ok(())
  }
  
@@ -862,7 +884,7 @@ index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da54
  /// `world_state` belongs to `replacement_step_context`, which may differ from the compactor.
  #[allow(clippy::too_many_arguments)]
  #[instrument(
-@@ -1841,6 +1884,7 @@ async fn run_auto_compact(
+@@ -1869,6 +1912,7 @@ async fn run_auto_compact(
                  world_state,
                  reason,
                  phase,
@@ -870,7 +892,7 @@ index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da54
              )
              .await?;
          }
-@@ -3071,6 +3115,7 @@ async fn release_failed_tool_candidates(sess: &Session, step: &StepContext) {
+@@ -3099,6 +3143,7 @@ async fn release_failed_tool_candidates(sess: &Session, step: &StepContext) {
      release_held_tool_results(sess, step, true).await;
  }
  
@@ -878,7 +900,7 @@ index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da54
  async fn try_complete_tool_turn(
      sess: &Arc<Session>,
      step_context: &Arc<StepContext>,
-@@ -3078,6 +3123,9 @@ async fn try_complete_tool_turn(
+@@ -3106,6 +3151,9 @@ async fn try_complete_tool_turn(
      handoff_accepted: bool,
      cancellation_token: &CancellationToken,
      stop_hook_active: &mut bool,
@@ -888,7 +910,7 @@ index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da54
  ) -> CodexResult<bool> {
      let proposal = propose_tool_completion(
          sess,
-@@ -3103,20 +3151,33 @@ async fn try_complete_tool_turn(
+@@ -3131,20 +3179,33 @@ async fn try_complete_tool_turn(
                  .await;
                  *stop_hook_active = true;
              }
@@ -947,10 +969,10 @@ index 0c1e19ff6196ef8cbb1ef70d252d1ce6bf59adb2..f9ee1a269bb6c80778128e99574569e2
                  .await
              }
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index ec3eb521d35047ade09d21e3e0a2da524af0fdf4..353055774e69dfb1fff7bd82196edd1f99c0fd07 100644
+index a106db511a2ea20be390efdd4876e20d2db79233..19d758252c6a2a7527088fca5e6682cdc895ef01 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -146,6 +146,8 @@ pub use codex_api::ModelInvocationDeadlineState;
+@@ -147,6 +147,8 @@ pub use codex_api::ModelInvocationDeadlineState;
  mod model_request;
  pub use codex_api::completed_model_response;
  pub use model_request::CompactionInput;

@@ -713,8 +713,16 @@
       "sha256": "28b476d55f92c8b7eb619eedb3ee34d80eaccb512f23e3a6b084668f8b15ebad"
     },
     {
+      "path": "sdk-model-attempt-accounting.patch",
+      "sha256": "36d245c076fdae420316ecd26218c7039307ec4877b385a30e769cda0cfc02f9"
+    },
+    {
+      "path": "sdk-tracing-id-annotations.patch",
+      "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
-      "sha256": "6b4bb517e325c7f9853f6b43cf931529165caef7b787b058243cc282e140d5fa"
+      "sha256": "487a2e788517874133ef1d0aef8366cbcbd885fdb57783c1d569d374aed14220"
     },
     {
       "path": "sdk-native-hosted-prompts-request-ownership.patch",
@@ -726,7 +734,7 @@
     },
     {
       "path": "sdk-native-model-attempt-retry.patch",
-      "sha256": "f77247de799d0167f14453e0d57b5de61ecf88f41fec90b392378c253c61f507"
+      "sha256": "6c200a67f90681f5bdb77df080ecd85524e92598f9d1d21d7c6c7b3db3b8d207"
     },
     {
       "path": "sdk-realtime-incarnation-ownership.patch",
@@ -766,7 +774,7 @@
     },
     {
       "path": "sdk-borrowed-responses-compaction.patch",
-      "sha256": "2a61699ba9c01c448e29ef676c76960f7be9148a9c13549f5cf2ea2021d2e6ba"
+      "sha256": "2b8cef7b3cec859534a16fa431903519e922a8db604661da29cd476f5decbc48"
     },
     {
       "path": "sdk-managed-receipt-original-identity.patch",
@@ -774,8 +782,8 @@
     },
     {
       "path": "sdk-acknowledged-provider-window.patch",
-      "sha256": "da22bf16b3eeb4e5c4acb1837c919437f1f67860b448a9a4a73b010ca2178788"
+      "sha256": "cbf049d3d03e9071d9100217c969138574df3735def89c74abe2037da3978513"
     }
   ],
-  "result_tree": "9512733f68009b92e2cecf93ca0abd9e7ddcdaaa"
+  "result_tree": "12ad09a2104ea1adcf1d858cfabef828c6ec5eaa"
 }

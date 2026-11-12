@@ -1436,6 +1436,9 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
         discover_agents_md: bool = False,
+        resume_budget: RunBudget | None = None,
+        include_output_accepted: bool = False,
+        include_request_attempts: bool = False,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -1467,6 +1470,9 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
         discover_agents_md: bool = False,
+        resume_budget: RunBudget | None = None,
+        include_output_accepted: bool = False,
+        include_request_attempts: bool = False,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -1498,6 +1504,9 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
         discover_agents_md: bool = False,
+        resume_budget: RunBudget | None = None,
+        include_output_accepted: bool = False,
+        include_request_attempts: bool = False,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -1529,8 +1538,15 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
         discover_agents_md: bool = False,
+        resume_budget: RunBudget | None = None,
+        include_output_accepted: bool = False,
+        include_request_attempts: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
+
+        resume_budget has been supplying the original current request-only
+        ceiling for a budgeted manual checkpoint. Prior admissions have been
+        remaining consumed. Other openings have been rejecting this option.
 
         restored_output_type selects only a pending restored turn's output
         decoder, validator and repair policy. It must match the saved contract.
@@ -1551,6 +1567,11 @@ class Agent(Generic[ContextT, OutputT]):
         retains a limited suffix and reports gaps. This policy is not checkpointed.
         include_model_output_items=True records ordinary assistant messages and
         provider reasoning summaries in the Session's observation stream.
+        include_request_attempts=True has been retaining content-free native send
+        counts on Turn.request_attempts after settlement of each new explicit
+        native submission. Restored-only handles and private correction or child
+        turns have not been acquiring their own capture. Borrowed client sends
+        have been remaining unavailable. These counts have not been enforcing a cap.
         include_raw_provider_events=True captures Responses provider JSON. Use
         include_execution_details=True on the observation reader to receive it.
         Capture uses the Session's in-memory observation retention policy.
@@ -1662,6 +1683,7 @@ class Agent(Generic[ContextT, OutputT]):
                 context=context,
                 state=state,
                 restored_output_type=restored_output_type,
+                resume_budget=resume_budget,
                 initial_messages=initial_messages,
                 storage=storage,
                 resume=resume,
@@ -1680,6 +1702,8 @@ class Agent(Generic[ContextT, OutputT]):
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
                 include_model_output_items=include_model_output_items,
+                include_output_accepted=include_output_accepted,
+                include_request_attempts=include_request_attempts,
                 include_raw_provider_events=include_raw_provider_events,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
@@ -1699,6 +1723,7 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
+        resume_budget: RunBudget | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
@@ -1716,6 +1741,8 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_output_accepted: bool = False,
+        include_request_attempts: bool = False,
         include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
@@ -1744,6 +1771,7 @@ class Agent(Generic[ContextT, OutputT]):
                 context=context,
                 state=state,
                 restored_output_type=restored_output_type,
+                resume_budget=resume_budget,
                 initial_messages_json=_initial_messages_json(initial_messages),
                 storage=storage,
                 resume=resume,
@@ -1759,6 +1787,8 @@ class Agent(Generic[ContextT, OutputT]):
                 tool_error_formatter=tool_error_formatter,
                 observation_retention=observation_retention,
                 include_model_output_items=include_model_output_items,
+                include_output_accepted=include_output_accepted,
+                include_request_attempts=include_request_attempts,
                 include_raw_provider_events=include_raw_provider_events,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
@@ -1970,8 +2000,10 @@ class Agent(Generic[ContextT, OutputT]):
 
         budget limits this logical run's next root sampling admission, including
         output repair. Pass on_interaction if the budgeted run uses manual tools.
-        The SDK cannot capture a budgeted active run or add a budget to a
-        restored active turn. return_state=True can still save an idle result.
+        Request-only limits have been supporting portable manual continuation.
+        Restoring that turn has been requiring budget with its original ceiling.
+        Token/cost limits have been rejecting active capture. return_state=True
+        has been remaining available for idle results.
 
         Pass state to restore with current bindings. For a supported pending
         manual checkpoint, input=None resumes the existing turn. Idle state
@@ -1987,10 +2019,15 @@ class Agent(Generic[ContextT, OutputT]):
         4,096 responses or 8 MiB raises NativeError after completion.
         return_items=True retains the accepted assistant and tool items in
         Completed.items with their producing Agents.
-        capture_error_details=True retains run evidence on submission errors.
+        capture_error_details=True has been retaining run evidence on submission errors.
+        Portable manual checkpoints have been retaining captured caller input.
+        Restores without that origin have been reporting input=None and incomplete=True.
         Read the snapshot from RunDiagnosticError.details. The original error is its cause.
         """
         capture_error_details = capture_error_details is True
+        error_input = deepcopy(input) if capture_error_details else None
+        if error_input is not None:
+            input = error_input
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(
             initial_messages, state=state, _audio_budget=audio_budget
@@ -2002,7 +2039,6 @@ class Agent(Generic[ContextT, OutputT]):
             _check_audio_json({"initial_messages": initial_messages, "input": parts})
             if not isinstance(input, str):
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
-        error_input = deepcopy(input) if capture_error_details else None
         options: dict[str, Any] = {}
         if capture_error_details:
             options["include_raw_provider_events"] = True
@@ -2056,8 +2092,8 @@ class Agent(Generic[ContextT, OutputT]):
             if state is not None and not isinstance(state, SessionState):
                 raise TypeError("state must be a SessionState")
             resume_manual = state is not None and state.native_continuation is not None
-            if resume_manual:
-                if budget is not None:
+            if resume_manual and state is not None:
+                if budget is not None and state.run_budget is None:
                     raise CapabilityError("Cannot set a budget when restoring an active checkpoint")
                 if input is not None:
                     raise ValueError("Use input=None to resume a pending manual checkpoint")
@@ -2088,7 +2124,12 @@ class Agent(Generic[ContextT, OutputT]):
                 and (tool._bind is None or tool.needs_approval is not False)
                 and (tools is None or tool in tools or tool.ref in tools)
             )
-            if state is None and budget is not None and pause_manual:
+            if (
+                state is None
+                and budget is not None
+                and pause_manual
+                and (budget.max_tokens is not None or budget.max_estimated_cost_micros is not None)
+            ):
                 raise CapabilityError(
                     "An active run with a budget cannot be captured for manual replies. "
                     "Pass on_interaction or use Agent.session() for live replies."
@@ -2136,6 +2177,8 @@ class Agent(Generic[ContextT, OutputT]):
                 options["trace_options"] = trace_options
             if state is not None:
                 options["state"] = state
+                if resume_manual:
+                    options["resume_budget"] = budget
             if provider is not None:
                 options["provider"] = provider
             if model is not None:
@@ -2282,7 +2325,14 @@ class Agent(Generic[ContextT, OutputT]):
                                 or any(tool is grant for grant in declared)
                             )
                             pending.extend(profile.handoffs.values())
-                        if budget is not None and has_reachable_manual:
+                        if (
+                            budget is not None
+                            and has_reachable_manual
+                            and (
+                                budget.max_tokens is not None
+                                or budget.max_estimated_cost_micros is not None
+                            )
+                        ):
                             raise CapabilityError(
                                 "An active run with a budget cannot be captured "
                                 "for manual replies. Pass on_interaction or use "
@@ -2350,6 +2400,8 @@ class Agent(Generic[ContextT, OutputT]):
                         submission = await session.submit(
                             input, tools=tools, before_step=before_step, **submit_options
                         )
+                if capture_error_details and input is not None:
+                    session._remember_run_error_input(submission, error_input)
                 if session._interaction_handler is None and pause_manual:
                     return await session._run_with_interactions(
                         submission,

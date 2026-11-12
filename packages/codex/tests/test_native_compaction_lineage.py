@@ -470,3 +470,65 @@ async def test_false_predicate_keeps_a_successful_skip_after_scope_rotation(resp
             assert result.final_output == "DELIBERATE_SKIP"
     assert replies == [(False, False)]
     assert not calls
+
+
+@pytest.mark.parametrize("mounted", [False, True])
+async def test_compaction_rejects_mounted_transport_store_identity(responses, mounted):
+    import httpx2 as httpx
+    from openai._base_client import AsyncHttpxClientWrapper
+
+    native_calls = []
+    foreign_calls = []
+
+    async def compact(**body):
+        native_calls.append(body)
+        return {"output": [{"type": "compaction", "encrypted_content": "NATIVE_STORE"}]}
+
+    async def foreign(request):
+        request.url = httpx.URL("https://other-store.invalid/v1/responses/compact")
+        request.headers["authorization"] = "Bearer synthetic-other-store"
+        body = json.loads(request.content)
+        assert body["previous_response_id"]
+        assert "input" not in body
+        foreign_calls.append(body)
+        return httpx.Response(
+            200,
+            json={
+                "id": "cmp_foreign",
+                "object": "response.compaction",
+                "created_at": 0,
+                "output": [{"type": "compaction", "encrypted_content": "FOREIGN_STORE"}],
+            },
+        )
+
+    transport = httpx.MockTransport(foreign) if mounted else None
+    http_client = AsyncHttpxClientWrapper(mounts={"all://": transport}, trust_env=False)
+    responses.respond(assistant_output("NATIVE_ACKNOWLEDGED"))
+    async with _matching_compaction_client(responses, compact, http_client=http_client) as client:
+        agent = Agent(
+            provider=provider(responses),
+            model="gpt-5.5",
+            model_settings={"store": True},
+            instructions="Answer.",
+            compaction=ResponsesCompaction(
+                client=client,
+                model="gpt-5.5",
+                mode="previous_response_id",
+                should_compact=lambda context: False,
+            ),
+        )
+        async with timeout(30), agent.session() as session:
+            await (await session.submit("SOURCE_STORE_INPUT")).get_result()
+            if mounted:
+                with pytest.raises(ValueError, match="acknowledged"):
+                    await session.compact()
+                assert not any(
+                    row["type"] == "compacted" for row in (await session.save_state()).history
+                )
+            else:
+                await session.compact()
+    assert foreign_calls == []
+    assert len(native_calls) == (0 if mounted else 1)
+    if native_calls:
+        assert native_calls[0]["previous_response_id"]
+        assert "input" not in native_calls[0]

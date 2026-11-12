@@ -19,6 +19,7 @@ from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 from ._events import RequiredAction as RequiredAction, SessionItem as SessionItem
 from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
+from .input import UserInput, _native_input
 from .subagents import SubagentConfig as SubagentConfig
 from .tools import ToolCallInfo as _ToolCallInfo, ToolRef as ToolRef
 from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage
@@ -180,6 +181,20 @@ class _ToolOutcomes(BaseModel):
     held_call_ids: list[str] = Field(default_factory=list)
 
 
+class _RequestRunBudgetCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    version: int = Field(ge=1, le=1)
+    max_requests: int = Field(ge=0, le=2**53 - 1)
+    admitted_requests: int = Field(ge=0, le=2**53 - 1)
+
+    @model_validator(mode="after")
+    def validate_admissions(self) -> "_RequestRunBudgetCheckpoint":
+        if self.admitted_requests > self.max_requests:
+            raise ValueError("Admitted requests cannot exceed the saved request limit")
+        return self
+
+
 class _ManualContinuation(BaseModel):
     """Native receipt order at a settled manual boundary, never live grants."""
 
@@ -273,6 +288,8 @@ class SessionState(BaseModel):
     against the destination's current opening declarations. No version
     contains live grants or acquires tools from saved names. Versions 6 and 7
     also retain native CodeMode values and terminal cell observations.
+    Versions 8 and 9 have been adding request-only budget receipts to manual
+    checkpoints without and with retained CodeMode state, respectively.
 
     Verify the checkpoint's integrity before restoring it. A strict Environment
     requires a matching saved executor policy digest. Local and remote
@@ -281,7 +298,7 @@ class SessionState(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
 
-    format_version: Literal[2, 3, 4, 5, 6, 7]
+    format_version: Literal[2, 3, 4, 5, 6, 7, 8, 9]
     codex_revision: str
     source_session_id: str
     history: list[dict[str, Any]]
@@ -302,6 +319,7 @@ class SessionState(BaseModel):
     # None predates on_step; [] intentionally withholds every optional MCP tool.
     step_mcp_tools: list[_StepMcpTool] | None = None
     native_continuation: _ManualContinuation | None = None
+    run_budget: _RequestRunBudgetCheckpoint | None = None
     run_usage: RunUsage | None = None
     guardrail_results: list[_GuardrailCheckpointRecord] = Field(default_factory=list)
     # SDK contract identity is checked before importing native state or grants.
@@ -322,19 +340,27 @@ class SessionState(BaseModel):
     # Portable restores bind to the original Codex user and workspace.
     codex_login_binding: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
+    original_input: UserInput | None = Field(default=None, repr=False)
+
     @model_validator(mode="after")
     def validate_tree(self) -> "SessionState":
         self._check_prompt_references()
-        if (self.format_version in (3, 5, 7)) != (self.native_continuation is not None):
-            raise ValueError("Settled manual continuation requires format_version 3, 5 or 7")
+        if self.original_input is not None:
+            if self.native_continuation is None:
+                raise ValueError("Original run input requires a manual continuation")
+            _native_input(self.original_input)
+        if (self.format_version in (8, 9)) != (self.run_budget is not None):
+            raise ValueError("Request budget requires a version 8 or 9 manual checkpoint")
+        if (self.format_version in (3, 5, 7, 8, 9)) != (self.native_continuation is not None):
+            raise ValueError("Settled manual continuation requires format_version 3, 5, 7, 8 or 9")
         if self.operation_tools is not None:
-            if self.format_version not in (5, 7):
+            if self.format_version not in (5, 7, 8, 9):
                 raise ValueError("Operation tools require an SDK manual checkpoint")
             if len(set(self.operation_tools)) != len(self.operation_tools):
                 raise ValueError("Operation tools must identify distinct declarations")
         if "_sdk_default_tools" in self.agent_options:
             # Persistent defaults belong to idle and manual SDK envelopes.
-            if self.format_version not in (4, 5, 6, 7):
+            if self.format_version not in (4, 5, 6, 7, 8, 9):
                 raise ValueError("Saved defaults require an SDK checkpoint")
             defaults = TypeAdapter(list[ToolRef]).validate_json(
                 json.dumps(self.agent_options["_sdk_default_tools"]), strict=True
@@ -342,14 +368,14 @@ class SessionState(BaseModel):
             if len(set(defaults)) != len(defaults):
                 raise ValueError("Saved defaults must identify distinct declarations")
         if (self.output_version is None) != (self.output_fingerprint is None) or (
-            self.format_version in (4, 5, 6, 7) and self.output_version is None
+            self.format_version in (4, 5, 6, 7, 8, 9) and self.output_version is None
         ):
             raise ValueError("Checkpoint requires both output_version and output_fingerprint")
         if (
             self.root_code_mode is not None
             or any(child.code_mode is not None for child in self.descendants)
-        ) and self.format_version not in (6, 7):
-            raise ValueError("Code-mode state requires a version 6 or 7 checkpoint")
+        ) and self.format_version not in (6, 7, 9):
+            raise ValueError("Code-mode state requires a version 6, 7 or 9 checkpoint")
         if self.root_metadata is None:
             raise ValueError("Tree checkpoints require root metadata")
         if (

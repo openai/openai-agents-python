@@ -16,6 +16,7 @@ from agents import (
     ToolContext,
     function_tool,
 )
+from agents.observation import AgentProfileChanged
 from agents.realtime import RealtimeAgentConfig, RealtimeConfig, RealtimeSession, realtime_handoff
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response
@@ -336,6 +337,15 @@ async def test_native_custom_handoff_waits_for_callback_and_configuration_ack(
             await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
             assert await session.get_active_agent() is target
             assert len(calls) == 1
+            reader = session.events()
+            try:
+                async for event in reader:
+                    if isinstance(event, AgentProfileChanged):
+                        assert event.agent_name == "B"
+                        assert event.previous_agent_name == "A"
+                        break
+            finally:
+                await reader.aclose()
 
 
 @pytest.mark.parametrize("handoff", [False, True])
@@ -1036,6 +1046,75 @@ async def test_session_output_guard_covers_backend_after_voice_update(realtime_p
         if updated:
             assert await voice.get_active_agent() is target
         assert len(peer.responses.requests) == 1
+
+
+async def test_native_structured_handoff_interrupt_retires_callback_without_target(realtime_peer):
+    peer = realtime_peer
+    entered, release, retired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    effects = []
+
+    class Transfer(BaseModel):
+        reason: str
+
+    async def on_handoff(context, payload):
+        assert context.agent is source
+        assert payload.reason == "requested"
+        effects.append("entered")
+        entered.set()
+        try:
+            await release.wait()
+            effects.append("accepted")
+        finally:
+            retired.set()
+
+    target = Agent(name="B", instructions="Target voice instructions")
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-interrupted-handoff-key",
+            supports_websockets=False,
+        ) as provider,
+    ):
+        source = Agent(
+            name="A",
+            instructions="Source voice instructions",
+            provider=provider,
+            handoffs=[
+                realtime_handoff(
+                    target,
+                    name="transfer_record",
+                    input_type=Transfer,
+                    on_handoff=on_handoff,
+                )
+            ],
+        )
+        async with (
+            source.session() as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        ):
+            try:
+                await peer.frame(lambda frame: frame["type"] == "session.update")
+                await peer.function(
+                    "transfer_record", {"reason": "requested"}, "cancelled-transfer"
+                )
+                await entered.wait()
+                start = len(peer.frames)
+                await voice.interrupt("response-cancelled-transfer")
+                await retired.wait()
+                release.set()
+                await voice.send_text("Continue with the source")
+                await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
+                assert effects == ["entered"]
+                assert await voice.get_active_agent() is source
+                assert await session.get_active_agent() is source
+                assert not any(
+                    frame["type"] == "session.update"
+                    and "Target voice instructions" in frame["session"].get("instructions", "")
+                    for frame in peer.frames[start:]
+                )
+            finally:
+                release.set()
 
 
 async def test_native_voice_combines_agent_and_session_speech_guards_across_handoff(realtime_peer):

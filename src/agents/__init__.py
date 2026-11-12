@@ -259,6 +259,8 @@ if TYPE_CHECKING:
     from .turn import (
         ChildTurn as ChildTurn,
         PendingRequests as PendingRequests,
+        RequestAttemptCount as RequestAttemptCount,
+        RequestAttempts as RequestAttempts,
         SteeringReceipt as SteeringReceipt,
         Turn as Turn,
         TurnNeedsAttention as TurnNeedsAttention,
@@ -481,6 +483,8 @@ _MODULES = {
     "Turn": ".turn",
     "ChildTurn": ".turn",
     "PendingRequests": ".turn",
+    "RequestAttemptCount": ".turn",
+    "RequestAttempts": ".turn",
     "SteeringReceipt": ".turn",
     "TurnNeedsAttention": ".turn",
     "ExecutorNetworkReceipt": ".turn_receipt",
