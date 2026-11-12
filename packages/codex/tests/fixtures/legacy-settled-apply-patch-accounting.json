@@ -1,0 +1,16 @@
+{
+  "public_format_version": 5,
+  "native_format_version": 3,
+  "seen_call_ids": [
+    "legacy-confirm"
+  ],
+  "reply_order": [
+    "legacy-confirm"
+  ],
+  "tool_outcomes": {
+    "call_ids": [
+      "legacy-confirm"
+    ],
+    "outcomes": []
+  }
+}

@@ -164,6 +164,50 @@ impl ToolOutcomes {
             outcomes,
         }))
     }
+    fn normalize_legacy_settled_patches(
+        &mut self,
+        history: &[RolloutItem],
+        thread: ThreadId,
+        turn: &str,
+        legacy: &HashSet<String>,
+    ) -> Result<()> {
+        if legacy.is_empty() {
+            return Ok(());
+        }
+        let expected = Self::capture(history, thread, turn)?
+            .context("Legacy tool outcomes lack a retained completed response")?;
+        if self.call_ids == expected.call_ids {
+            return Ok(());
+        }
+        ensure!(
+            self.response_observation_id == expected.response_observation_id
+                && self.call_ids
+                    == expected
+                        .call_ids
+                        .iter()
+                        .filter(|call| !legacy.contains(*call))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                && self
+                    .outcomes
+                    .iter()
+                    .all(|(id, _)| self.call_ids.contains(id))
+                && self
+                    .held_call_ids
+                    .iter()
+                    .all(|id| self.call_ids.contains(id)),
+            "Legacy tool outcomes differ beyond settled application patches"
+        );
+        self.call_ids = expected.call_ids;
+        self.outcomes.extend(
+            expected
+                .outcomes
+                .into_iter()
+                .filter(|(id, _)| legacy.contains(id)),
+        );
+        Ok(())
+    }
+
     fn validate(&self, history: &[RolloutItem], thread: ThreadId, turn: &str) -> Result<()> {
         let expected = Self::capture(history, thread, turn)?
             .context("Recovered tool outcomes lack a retained completed response")?;
@@ -497,8 +541,8 @@ fn validate_frame(
         .filter(|id| !id.is_empty())
         .context("Manual continuation has no turn identity")?
         .to_owned();
-    let seen: Vec<String> = serde_json::from_value(frame["seen_call_ids"].clone())?;
-    let seen_calls: HashSet<String> = seen.iter().cloned().collect();
+    let mut seen: Vec<String> = serde_json::from_value(frame["seen_call_ids"].clone())?;
+    let mut seen_calls: HashSet<String> = seen.iter().cloned().collect();
     ensure!(
         seen_calls.len() == seen.len() && !seen.iter().any(String::is_empty),
         "Repeated or empty continuation call identity"
@@ -565,6 +609,8 @@ fn validate_frame(
     let mut calls: HashMap<String, Value> = HashMap::new();
     let mut admitted_order = Vec::new();
     let mut results = HashSet::new();
+    let mut owned_patch_calls = HashSet::new();
+    let mut legacy_settled_patches = HashSet::new();
     let mut last_started = None;
     let mut handoffs = Vec::new();
     for line in &history {
@@ -574,6 +620,8 @@ fn validate_frame(
             calls.clear();
             admitted_order.clear();
             results.clear();
+            owned_patch_calls.clear();
+            legacy_settled_patches.clear();
             handoffs.clear();
         }
         if raw["type"] == "event_msg"
@@ -618,6 +666,12 @@ fn validate_frame(
                         .as_str()
                         .context("History call lacks identity")?
                         .to_owned();
+                    if raw["type"] == "apply_patch_call"
+                        && crate::local_reconciliation::owns_application_patch(envelope)
+                        && envelope.turn_id() == Some(turn.as_str())
+                    {
+                        owned_patch_calls.insert(call.clone());
+                    }
                     admitted_order.push(call.clone());
                     ensure!(
                         calls.insert(call, raw.clone()).is_none(),
@@ -641,6 +695,12 @@ fn validate_frame(
                                 .is_some_and(|original| receipt_matches(original, &raw)),
                         "History replies are not the ordered prefix of admitted calls"
                     );
+                    if raw["type"] == "apply_patch_call_output"
+                        && owned_patch_calls.contains(&call)
+                        && envelope.turn_id() == Some(turn.as_str())
+                    {
+                        legacy_settled_patches.insert(call.clone());
+                    }
                     ensure!(results.insert(call), "Duplicate history reply");
                 }
             }
@@ -650,6 +710,15 @@ fn validate_frame(
         last_started.as_deref() == Some(&turn),
         "Continuation is not the unfinished last turn"
     );
+    // Earlier v3/v5 writers retained settled application patch pairs only in
+    // history. Recover their passive accounting, never a pending reply grant.
+    legacy_settled_patches.retain(|call| !seen_calls.contains(call));
+    for call in &admitted_order {
+        if legacy_settled_patches.contains(call) {
+            seen.push(call.clone());
+            seen_calls.insert(call.clone());
+        }
+    }
     ensure!(
         calls.keys().cloned().collect::<HashSet<_>>() == seen_calls,
         "Continuation seen calls do not match canonical history"
@@ -829,7 +898,13 @@ fn validate_frame(
     }
     let tool_outcomes = match frame.get("tool_outcomes") {
         Some(value) => {
-            let outcomes: ToolOutcomes = serde_json::from_value(value.clone())?;
+            let mut outcomes: ToolOutcomes = serde_json::from_value(value.clone())?;
+            outcomes.normalize_legacy_settled_patches(
+                &history,
+                source_id,
+                &turn,
+                &legacy_settled_patches,
+            )?;
             outcomes.validate(&history, source_id, &turn)?;
             Some(outcomes)
         }
