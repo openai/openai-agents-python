@@ -4670,6 +4670,23 @@ fn retain_trace_context(handle: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (handle, restrictions_parent=None, *, disabled=false, include_sensitive_data=true))]
+fn borrow_trace_context(
+    handle: &str,
+    restrictions_parent: Option<&str>,
+    disabled: bool,
+    include_sensitive_data: bool,
+) -> PyResult<String> {
+    codex_otel::sdk_trace::borrow_trace_context(
+        handle,
+        restrictions_parent,
+        disabled,
+        include_sensitive_data,
+    )
+    .map_err(py_error)
+}
+
+#[pyfunction]
 fn trace_span_context(handle: &str) -> PyResult<String> {
     codex_otel::sdk_trace::trace_span_context(handle).map_err(py_error)
 }
@@ -4794,6 +4811,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_trace_span, module)?)?;
     module.add_function(wrap_pyfunction!(end_trace_span, module)?)?;
     module.add_function(wrap_pyfunction!(retain_trace_context, module)?)?;
+    module.add_function(wrap_pyfunction!(borrow_trace_context, module)?)?;
     module.add_function(wrap_pyfunction!(trace_span_context, module)?)?;
     module.add_function(wrap_pyfunction!(set_trace_routes, module)?)?;
     module.add_function(wrap_pyfunction!(register_trace_credentials, module)?)?;
