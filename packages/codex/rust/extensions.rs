@@ -148,6 +148,7 @@ pub fn build(
     let agent_profiles = Arc::new(crate::agent_profiles::Contributor);
     builder.tool_contributor(agent_profiles.clone());
     builder.turn_lifecycle_contributor(agent_profiles);
+    builder.tool_contributor(Arc::new(codex_core::ManagedAgentToolContributor));
     builder.turn_lifecycle_contributor(Arc::new(crate::python_tools::GraphFenceContributor {
         manager: manager.clone(),
     }));

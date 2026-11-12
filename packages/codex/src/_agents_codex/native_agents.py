@@ -90,6 +90,28 @@ class NativeRole:
             object.__setattr__(self, "model_settings", MappingProxyType(settings))
 
 
+@dataclass(frozen=True, kw_only=True)
+class NativeRoleTool:
+    """Expose a declared native role as a tool that returns its child turn result."""
+
+    name: str
+    role: str
+    description: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.name, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.name) is None
+        ):
+            raise ValueError("Native role tool names must start with a lowercase ASCII letter")
+        if self.name in _COLLABORATION_TOOLS or self.name == "close_agent":
+            raise ValueError("Built-in collaboration tools cannot be replaced")
+        for name in ("role", "description"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Native role tool {name} must be a nonblank string")
+
+
 _ChildStepResult: TypeAlias = (
     Sequence["ToolRef | Tool[Any] | Environment[Any] | NativeAgents[Any]"]
     | None
@@ -116,6 +138,8 @@ class NativeAgents(Generic[ContextT]):
     Core's default, explorer, and worker roles are available without additional
     roles. Additional roles select instructions and optional model and
     reasoning effort.
+    managed_tools exposes selected roles as named collaboration tools. Each
+    call waits for its own child turn and returns that turn's result.
     max_children=None uses Core's session limit; max_depth=1 permits only
     direct children. Larger depths permit bounded delegation.
     Children share the Session's declared Python tools, application context,
@@ -165,6 +189,7 @@ class NativeAgents(Generic[ContextT]):
         Callable[[ChildStepContext[object]], _ChildStepResult] | _ChildBeforeStep[ContextT] | None
     ) = field(default=None, repr=False)
     interactions: bool = False
+    managed_tools: Sequence[NativeRoleTool] = ()
 
     def __post_init__(self) -> None:
         if self.before_step is not None and not callable(self.before_step):
@@ -179,6 +204,16 @@ class NativeAgents(Generic[ContextT]):
         if len({role.name for role in roles}) != len(roles):
             raise ValueError("Additional native role names must be unique")
         object.__setattr__(self, "additional_roles", roles)
+        managed_tools = tuple(self.managed_tools)
+        if any(not isinstance(tool, NativeRoleTool) for tool in managed_tools):
+            raise TypeError("managed_tools must contain NativeRoleTool declarations")
+        if len({tool.name for tool in managed_tools}) != len(managed_tools):
+            raise ValueError("Native role tool names must be unique")
+        role_names = _BUILTIN_ROLES | {role.name for role in roles}
+        for tool in managed_tools:
+            if tool.role not in role_names:
+                raise ValueError(f"Unknown native role {tool.role!r} for tool {tool.name!r}")
+        object.__setattr__(self, "managed_tools", managed_tools)
         if isinstance(self.max_depth, bool) or not isinstance(self.max_depth, int):
             raise TypeError("max_depth must be an integer")
         if not 1 <= self.max_depth < sys.maxsize:
@@ -188,6 +223,10 @@ class NativeAgents(Generic[ContextT]):
                 raise TypeError("max_children must be an integer or None")
             if not 1 <= self.max_children < sys.maxsize:
                 raise ValueError("max_children must be a positive native-sized integer")
+
+    @property
+    def _collaboration_tool_names(self) -> tuple[str, ...]:
+        return (*_COLLABORATION_TOOLS, *(tool.name for tool in self.managed_tools))
 
 
 @dataclass(frozen=True, slots=True)

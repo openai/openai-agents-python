@@ -1984,7 +1984,6 @@ def _fixed_tool_refs(
     project_guidance: bool = False,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
-    from .native_agents import _COLLABORATION_TOOLS
 
     fixed: set[ToolRef] = set()
     for tool in tools:
@@ -2011,7 +2010,9 @@ def _fixed_tool_refs(
     if project_guidance:
         fixed.update(ToolRef(name, "functions") for name in _PROJECT_GUIDANCE_TOOL_NAMES)
     if native_agents is not None:
-        fixed.update(ToolRef(name, "collaboration") for name in _COLLABORATION_TOOLS)
+        fixed.update(
+            ToolRef(name, "collaboration") for name in native_agents._collaboration_tool_names
+        )
     return fixed
 
 
@@ -4257,6 +4258,20 @@ class Session(Generic[ContextT, OutputT]):
                                 role.name for role in native_agents.additional_roles
                             ],
                             "_native_agent_max_depth": native_agents.max_depth,
+                            **(
+                                {
+                                    "_native_agent_tools": [
+                                        {
+                                            "name": tool.name,
+                                            "role": tool.role,
+                                            "description": tool.description,
+                                        }
+                                        for tool in native_agents.managed_tools
+                                    ],
+                                }
+                                if native_agents.managed_tools
+                                else {}
+                            ),
                         }
                         if native_agents is not None
                         else {}
@@ -4305,7 +4320,7 @@ class Session(Generic[ContextT, OutputT]):
                         + (
                             [
                                 {"name": name, "namespace": "collaboration"}
-                                for name in _COLLABORATION_TOOLS
+                                for name in native_agents._collaboration_tool_names
                             ]
                             if native_agents is not None
                             else []

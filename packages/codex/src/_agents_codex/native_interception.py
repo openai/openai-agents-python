@@ -179,7 +179,6 @@ class _NativeInterception:
     def refresh(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         from .executor import Environment
         from .mcp import _tool_names
-        from .native_agents import _COLLABORATION_TOOLS
         from .session import _split_tools
 
         rules: list[dict[str, Any]] = []
@@ -200,7 +199,8 @@ class _NativeInterception:
                 if descriptor.approval is None:
                     continue
                 names = [
-                    {"namespace": "collaboration", "name": name} for name in _COLLABORATION_TOOLS
+                    {"namespace": "collaboration", "name": name}
+                    for name in descriptor._collaboration_tool_names
                 ]
                 duration = None
                 scope = "thread_tree"
@@ -240,7 +240,6 @@ class _NativeInterception:
     ) -> _Descriptor | None:
         from .executor import Environment
         from .mcp import _MCP, _tool_names
-        from .native_agents import _COLLABORATION_TOOLS
 
         session = self.session
         selected: _Descriptor | None = None
@@ -253,7 +252,7 @@ class _NativeInterception:
         elif (
             session._native_agents is not None
             and call.namespace == "collaboration"
-            and call.name in _COLLABORATION_TOOLS
+            and call.name in session._native_agents._collaboration_tool_names
         ):
             selected = session._native_agents
         else:

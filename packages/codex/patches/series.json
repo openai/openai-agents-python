@@ -735,7 +735,11 @@
     {
       "path": "sdk-application-model-raw-events.patch",
       "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
+    },
+    {
+      "path": "sdk-managed-agent-tools.patch",
+      "sha256": "59a07c624bf0ab68f7ab34ee064d457a9227ece1206f9df971d03695c9862b21"
     }
   ],
-  "result_tree": "ef2589e5dc2139b9fd876243feed649a52492302"
+  "result_tree": "e0289fe1efac5999827dcdd70219f127f5c59cc6"
 }
