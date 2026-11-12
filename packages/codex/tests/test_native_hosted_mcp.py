@@ -932,35 +932,48 @@ async def test_native_hosted_mcp_handoff_rejects_divergent_configuration_before_
 
 
 @pytest.mark.parametrize("manual", [False, True])
-async def test_native_hosted_mcp_programmatic_caller_explicitly_allowed(
-    responses: ResponsesFixture, manual: bool
+@pytest.mark.parametrize("programmatic", [False, True])
+async def test_native_hosted_mcp_unbound_program_caller_fails_before_exposure(
+    responses: ResponsesFixture, manual: bool, programmatic: bool
 ) -> None:
     observed: list[Any] = []
 
     def decide(request: Any) -> dict[str, bool]:
         observed.append(request)
-        return {"approve": False}
+        return {"approve": True}
 
     tool = declaration(callback=None if manual else decide, allowed_callers=["programmatic"])
     event = approval()
     caller = {"type": "program", "tool_id": "interpreter_1"}
     event["item"]["caller"] = caller
     responses.respond(event)
-    responses.respond(assistant_output("Allowed caller."))
+    responses.respond(assistant_output("Unbound caller must not execute."))
 
     def answer(event: Any) -> Any:
         request = tool.match(event)
         assert request is not None
         observed.append(request)
-        return request.reply({"approve": False})
+        return request.reply({"approve": True})
 
     async with timeout(30), provider(responses) as native:
-        result = await Agent(
-            instructions="Use docs.", provider=native, model="gpt-5.2", tools=[tool]
-        ).run("Lookup.", on_interaction=answer if manual else None)
-    assert result.final_output == "Allowed caller."
-    assert len(observed) == 1
-    assert replies(responses)[0]["caller"] == caller
+        with pytest.raises(
+            (ValueError, NativeError),
+            match=(
+                "Manual tool arguments could not be delivered"
+                if manual
+                else "native program ownership"
+            ),
+        ):
+            await Agent(
+                instructions="Use docs.",
+                provider=native,
+                model="gpt-5.2",
+                tools=[tool],
+                programmatic_tool_calling=programmatic,
+            ).run("Lookup.", on_interaction=answer if manual else None)
+    assert observed == []
+    assert len(responses.requests) == 1
+    assert replies(responses) == []
 
 
 @pytest.mark.parametrize("representation", ["replacement", "original_projection", "audit_only"])

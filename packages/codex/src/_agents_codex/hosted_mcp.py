@@ -68,6 +68,8 @@ class HostedMCP(Generic[ContextT_contra]):
     application replies. Credentials are excluded from portable tool identities.
     Portable state containing a positive MCP approval cannot be restored: imported
     data cannot authorize a provider operation with newly supplied credentials.
+    This direct approval carrier rejects program callers: provider caller
+    metadata does not establish native program ownership.
     """
 
     tool_config: Mapping[str, Any] = field(repr=False)
@@ -168,6 +170,10 @@ def _check_request(config: Mapping[str, Any], request: Mapping[str, Any]) -> Non
         allowed_callers = ["direct"]
     if caller_kind is None or caller_kind not in allowed_callers:
         raise ValueError("Hosted MCP approval is outside the captured caller policy")
+    # Hosted MCP has no native CodeMode projection. A provider-supplied parent
+    # identity cannot establish a live native program owner for this approval.
+    if caller_kind == "programmatic":
+        raise ValueError("Hosted MCP approval requires verified native program ownership")
     if names is not None and request["name"] not in names:
         raise ValueError("Hosted MCP approval is outside the captured tool filter")
 
