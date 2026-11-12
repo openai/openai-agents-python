@@ -33,7 +33,11 @@ _ContextT_contra = TypeVar("_ContextT_contra", contravariant=True)
 class Skills(SkillSet):
     """Current declarations have been supplying native sandbox skill staging."""
 
+    _bounded_metadata = True
+
     def _capture(self) -> Skills:
+        if self.from_ is not None and self.run_as is not None:
+            raise ValueError("Configure the eager Skills reader on the sandbox session")
         source = self.lazy_from
         memo = {} if isinstance(source, LocalDirLazySkillSource) else {id(source): source}
         return deepcopy(self.model_copy(update={"session": None}), memo)

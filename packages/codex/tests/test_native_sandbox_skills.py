@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 
 from agents import Agent, Environment
+from agents.classic.sandbox.entries import LocalDir
 from agents.sandbox import (
     LazySkillSource,
+    LocalDirLazySkillSource,
     Manifest,
     Skill,
     SkillMetadata,
@@ -33,6 +35,48 @@ def test_native_inline_skill_preserves_document_bytes() -> None:
     )
     manifest = skills.process_manifest(Manifest(root="/workspace"))
     assert manifest.entries[Path(".agents/report")].children["SKILL.md"].content == b"plain"
+
+
+async def test_native_local_skill_metadata_keeps_only_complete_headers(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    good = tmp_path / "skills/report/SKILL.md"
+    oversized = tmp_path / "skills/oversized/SKILL.md"
+    good.parent.mkdir(parents=True)
+    oversized.parent.mkdir(parents=True)
+    content = b"---\nname: report\ndescription: COMPLETE_HEADER\n---\n" + b"a" * (1024 * 1024)
+    good.write_bytes(content)
+    oversized.write_bytes(
+        b"---\nname: oversize\ndescription: INCOMPLETE_HEADER" + b"x" * (64 * 1024)
+    )
+    skills = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path("skills"))))
+
+    instructions = await skills.instructions(Manifest(root=str(tmp_path)))
+
+    assert instructions is not None
+    assert "COMPLETE_HEADER" in instructions
+    assert ".agents/oversized" not in instructions
+    assert good.read_bytes() == content
+
+
+@pytest.mark.parametrize("limit", ["entries", "bytes"])
+async def test_native_local_skill_metadata_rejects_scan_overflow(tmp_path, monkeypatch, limit):
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "skills"
+    source.mkdir()
+    if limit == "entries":
+        for index in range(1025):
+            (source / str(index)).mkdir()
+        error = "entry limit"
+    else:
+        for index in range(65):
+            directory = source / str(index)
+            directory.mkdir()
+            (directory / "SKILL.md").write_bytes(b"---\nname: report\n---\n" + b"x" * (64 * 1024))
+        error = "aggregate byte limit"
+    skills = Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path("skills"))))
+
+    with pytest.raises(ValueError, match=error):
+        await skills.instructions(Manifest(root=str(tmp_path)))
 
 
 class Source(LazySkillSource):
@@ -497,18 +541,41 @@ async def test_owned_cold_resume_stages_current_eager_skills_only(
     saved = original.state.model_copy(deep=True)
     await client.delete(original)
     assert not root.exists()
-    skill = Skill(name="report", description="COLD_RESUME_INDEX", content="new current document")
-    skills = (
-        Skills(skills=[skill])
-        if kind == "inline"
-        else Skills(from_=Dir(children={"report": skill.as_dir_entry()}))
-    )
+    document_bytes = b"new current document"
+    if kind == "inline":
+        skills = Skills(
+            skills=[
+                Skill(
+                    name="report",
+                    description="COLD_RESUME_INDEX",
+                    content=document_bytes,
+                )
+            ]
+        )
+    else:
+        document_bytes = b"---\nname: report\ndescription: COLD_RESUME_INDEX\n---\n" + b"x" * (
+            1024 * 1024
+        )
+        skills = Skills(
+            from_=Dir(
+                children={
+                    "report": Dir(children={"SKILL.md": File(content=document_bytes)}),
+                    "oversized": Dir(
+                        children={
+                            "SKILL.md": File(
+                                content=b"---\nname: oversized\ndescription: " + b"x" * (64 * 1024)
+                            )
+                        }
+                    ),
+                }
+            )
+        )
 
     @asynccontextmanager
     async def connect(selected):
         assert selected is not original
         assert (root / "keep.txt").read_bytes() == b"original snapshot data"
-        assert (root / ".agents/report/SKILL.md").read_bytes() == b"new current document"
+        assert (root / ".agents/report/SKILL.md").read_bytes() == document_bytes
         async with ExecutorPeer(tmp_path / "executor").serve() as peer:
             trust(peer, tmp_path, monkeypatch)
             yield Environment(
@@ -540,8 +607,11 @@ async def test_owned_cold_resume_stages_current_eager_skills_only(
         assert (
             await (await session.submit("Inspect restored skills")).get_result()
         ).final_output == "done"
-        assert ".agents/report" in str(responses.requests)
+        instructions = str(responses.requests)
+        assert ".agents/report" in instructions
+        assert "COLD_RESUME_INDEX" in instructions
+        assert "- oversized:" not in instructions
         assert (root / "keep.txt").read_bytes() == b"original snapshot data"
         document = root / ".agents/report/SKILL.md"
         assert document.is_file(), "Published eager skill index without restored skill files"
-        assert document.read_bytes() == b"new current document"
+        assert document.read_bytes() == document_bytes

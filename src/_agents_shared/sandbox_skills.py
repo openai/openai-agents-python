@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import abc
 import io
+import os
 import re
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path, PurePath
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
@@ -48,6 +50,33 @@ _SKILL_PATH_GUIDANCE = (
 _SCOPED_SKILL_PATH_ERROR = (
     "skill path must be non-empty and workspace-relative when sandbox.cwd is configured"
 )
+
+_MAX_METADATA_ENTRIES = 1024
+_MAX_METADATA_FILE_BYTES = 64 * 1024
+_MAX_METADATA_BYTES = 4 * 1024 * 1024
+
+
+@dataclass
+class _MetadataBudget:
+    remaining: int = _MAX_METADATA_BYTES
+
+    def read_limit(self) -> int:
+        return min(_MAX_METADATA_FILE_BYTES, self.remaining) + 1
+
+    def parse(self, payload: bytes, *, read_limit: int) -> dict[str, str] | None:
+        self.remaining -= len(payload)
+        if self.remaining < 0:
+            raise ValueError("Skills metadata exceeds the aggregate byte limit")
+        truncated = len(payload) >= read_limit
+        if truncated:
+            prefix = payload[: read_limit - 1]
+            end = max(prefix.rfind(b"\n"), prefix.rfind(b"\r"))
+            if end < 0:
+                return None
+            payload = prefix[: end + 1]
+        markdown = payload.decode("utf-8", errors="replace")
+        return _parse_frontmatter(markdown, require_complete=truncated)
+
 
 _HOW_TO_USE_SKILLS_SECTION = "\n".join(
     [
@@ -179,12 +208,31 @@ class LocalDirLazySkillSource(LazySkillSource):
         skills_path: str,
         source_grants: tuple[SandboxPathGrant, ...] = (),
     ) -> list[SkillMetadata]:
+        return self._list_skill_metadata(skills_path=skills_path, source_grants=source_grants)
+
+    def _list_skill_metadata(
+        self,
+        *,
+        skills_path: str,
+        source_grants: tuple[SandboxPathGrant, ...],
+        budget: _MetadataBudget | None = None,
+    ) -> list[SkillMetadata]:
         src_root = self._src_root(source_grants=source_grants)
         if src_root is None:
             return []
 
+        if budget is None:
+            children: Iterable[Path] = src_root.iterdir()
+        else:
+            with os.scandir(src_root) as entries:
+                bounded_children = [
+                    src_root / entry.name for entry in islice(entries, _MAX_METADATA_ENTRIES + 1)
+                ]
+            if len(bounded_children) > _MAX_METADATA_ENTRIES:
+                raise ValueError("Skills metadata directory exceeds the entry limit")
+            children = bounded_children
         metadata: list[SkillMetadata] = []
-        for child in sorted(src_root.iterdir(), key=lambda entry: entry.name):
+        for child in sorted(children, key=lambda entry: entry.name):
             try:
                 child_stat = child.stat(follow_symlinks=False)
             except OSError:
@@ -199,10 +247,17 @@ class LocalDirLazySkillSource(LazySkillSource):
             if not stat.S_ISREG(skill_md_stat.st_mode):
                 continue
             try:
-                markdown = skill_md_path.read_text(encoding="utf-8")
+                if budget is None:
+                    frontmatter = _parse_frontmatter(skill_md_path.read_text(encoding="utf-8"))
+                else:
+                    read_limit = budget.read_limit()
+                    with skill_md_path.open("rb") as handle:
+                        payload = handle.read(read_limit)
+                    frontmatter = budget.parse(payload, read_limit=read_limit)
             except OSError:
                 continue
-            frontmatter = _parse_frontmatter(markdown)
+            if frontmatter is None:
+                continue
             metadata.append(
                 SkillMetadata(
                     name=frontmatter.get("name", child.name),
@@ -416,7 +471,7 @@ def _take_continuation_lines(
     return body, index
 
 
-def _parse_frontmatter(markdown: str) -> dict[str, str]:
+def _parse_frontmatter(markdown: str, *, require_complete: bool = False) -> dict[str, str] | None:
     """Read the string metadata subset used by skill indexes, without a YAML dependency.
 
     Supports single-line values, indented wrapped plain values, and folded/literal blocks
@@ -446,7 +501,7 @@ def _parse_frontmatter(markdown: str) -> dict[str, str]:
         None,
     )
     if end_index is None:
-        return {}
+        return None if require_complete else {}
 
     metadata: dict[str, str] = {}
     index = 1
@@ -607,6 +662,7 @@ class SkillSet(BaseModel):
     skills_path: str = Field(default=".agents")
 
     _skills_metadata: list[SkillMetadata] | None = PrivateAttr(default=None)
+    _bounded_metadata: ClassVar[bool] = False
     _skills_metadata_cache_key: tuple[tuple[str, bool, str | None], ...] | None = PrivateAttr(
         default=None
     )
@@ -809,7 +865,9 @@ class SkillSet(BaseModel):
             ),
         }
 
-    async def _resolve_runtime_metadata(self, manifest: Manifest) -> list[SkillMetadata]:
+    async def _resolve_runtime_metadata(
+        self, manifest: Manifest, *, budget: _MetadataBudget | None = None
+    ) -> list[SkillMetadata]:
         if self.session is None:
             return []
 
@@ -821,6 +879,8 @@ class SkillSet(BaseModel):
         except Exception:
             return []
 
+        if budget is not None and len(entries) > _MAX_METADATA_ENTRIES:
+            raise ValueError("Skills metadata directory exceeds the entry limit")
         metadata: list[SkillMetadata] = []
         for entry in entries:
             if not entry.is_dir():
@@ -831,17 +891,25 @@ class SkillSet(BaseModel):
             skill_path = posix_path_as_path(coerce_posix_path(self.skills_path) / skill_name)
             skill_md_path = skill_dir / "SKILL.md"
 
-            try:
-                handle = await self.session.read(skill_md_path, user=self.run_as)
-            except Exception:
+            if budget is None:
+                try:
+                    handle = await self.session.read(skill_md_path, user=self.run_as)
+                except Exception:
+                    continue
+                try:
+                    frontmatter = _parse_frontmatter(_read_text(handle))
+                finally:
+                    handle.close()
+            else:
+                read_limit = budget.read_limit()
+                try:
+                    payload = await self.session.read_bounded(skill_md_path, max_bytes=read_limit)
+                except Exception:
+                    continue
+                frontmatter = budget.parse(payload, read_limit=read_limit)
+
+            if frontmatter is None:
                 continue
-
-            try:
-                markdown = _read_text(handle)
-            finally:
-                handle.close()
-
-            frontmatter = _parse_frontmatter(markdown)
             metadata.append(
                 SkillMetadata(
                     name=frontmatter.get("name", skill_name),
@@ -856,6 +924,7 @@ class SkillSet(BaseModel):
         if self._skills_metadata is not None and self._skills_metadata_cache_key == cache_key:
             return self._skills_metadata
 
+        budget = _MetadataBudget() if self._bounded_metadata else None
         metadata: list[SkillMetadata] = []
 
         for skill in self.skills:
@@ -867,7 +936,15 @@ class SkillSet(BaseModel):
                 )
             )
 
-        if self.lazy_from is not None:
+        if budget is not None and type(self.lazy_from) is LocalDirLazySkillSource:
+            metadata.extend(
+                self.lazy_from._list_skill_metadata(
+                    skills_path=self.skills_path,
+                    source_grants=manifest.extra_path_grants,
+                    budget=budget,
+                )
+            )
+        elif self.lazy_from is not None:
             metadata.extend(
                 self.lazy_from.list_skill_metadata(
                     skills_path=self.skills_path,
@@ -875,9 +952,9 @@ class SkillSet(BaseModel):
                 )
             )
         elif self.from_ is not None:
-            metadata.extend(await self._resolve_runtime_metadata(manifest))
+            metadata.extend(await self._resolve_runtime_metadata(manifest, budget=budget))
 
-        if isinstance(self.from_, Dir) and not metadata:
+        if budget is None and isinstance(self.from_, Dir) and not metadata:
             for key, entry in self.from_.children.items():
                 if not isinstance(entry, Dir):
                     continue
