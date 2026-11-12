@@ -1,0 +1,55 @@
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index d77c9401..7fe98880 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -70,8 +70,23 @@ pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
+     if matches!(kind.as_str(), "configuration_update" | "compaction_trigger") {
+         return Ok(None);
+     }
+-    let item: ResponseItem =
++    // Keep foreign reasoning in the original history for inspection. Its provider
++    // state is unsuitable for replay as a native Responses item.
++    if kind == "reasoning"
++        && fields.get("provider_data").is_some_and(|data| {
++            serde_json::from_str::<BTreeMap<String, &RawValue>>(data.get())
++                .is_ok_and(|data| !data.is_empty())
++        })
++    {
++        return Ok(None);
++    }
++    let mut item: ResponseItem =
+         serde_json::from_str(value).map_err(|_| "Invalid canonical history item".to_string())?;
++    // The classic Chat Completions adapter can reuse this placeholder on every
++    // item. Core assigns an independent native ID after admission.
++    if item.id().is_some_and(|id| id.as_str() == "__fake_id__") {
++        item.set_id(None);
++    }
+     Ok(match item {
+         ResponseItem::Other
+         | ResponseItem::ConfigurationUpdate { .. }
+@@ -917,6 +932,25 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn imports_portable_provider_items_without_foreign_reasoning_or_placeholder_ids() {
++        let foreign = r#"{"type":"reasoning","id":"rs_foreign","summary":[],"encrypted_content":"foreign","provider_data":{"origin":"fixture"}}"#;
++        assert!(input_projection(foreign).unwrap().is_none());
++
++        let native = r#"{"type":"reasoning","id":"rs_native","summary":[],"encrypted_content":"native","provider_data":{}}"#;
++        let native = input_projection(native).unwrap().unwrap();
++        assert_eq!(native.id().unwrap().as_str(), "rs_native");
++
++        let placeholder = r#"{"type":"message","id":"__fake_id__","role":"assistant","content":[{"type":"output_text","text":"portable"}]}"#;
++        assert!(
++            input_projection(placeholder)
++                .unwrap()
++                .unwrap()
++                .id()
++                .is_none()
++        );
++    }
++
+     #[test]
+     fn original_numeric_values_and_untyped_objects_remain_exact() {
+         let original = r#"{"type":17,"n":184467440737095516161234567890,"nested":{"fraction":1.2345678901234567890123456789}}"#.to_owned();
