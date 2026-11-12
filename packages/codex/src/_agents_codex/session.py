@@ -97,6 +97,7 @@ from ._managed_workspace import (
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _audio_json, _check_audio_json
 from ._native_async import _NativeCompletionError as _NativeCompletionError
+from ._opening_compatibility import _validate_custom_storage_capabilities
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
@@ -3260,34 +3261,6 @@ def _validate_storage_opening(
     if reconciliation and (resume is None or not isinstance(storage, LocalStorage)):
         raise ValueError("reconciled_calls requires a LocalStorage resume")
     return reconciliation
-
-
-def _validate_custom_storage_capabilities(
-    storage: LocalStorage | CustomStorage | None,
-    *,
-    native_agents: NativeAgents[Any] | None,
-    goals: bool,
-    programmatic_tool_calling: bool,
-    checklist: bool,
-    mcp_tools: Sequence[_MCP[Any]],
-    has_environment: bool,
-    available: Sequence[Tool[Any]],
-    tools: Sequence[FunctionTool[Any, Any, Any]],
-) -> None:
-    if isinstance(storage, CustomStorage) and (
-        native_agents is not None
-        or goals
-        or programmatic_tool_calling
-        or checklist
-        or mcp_tools
-        or has_environment
-        or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
-        or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
-    ):
-        raise ValueError(
-            "CustomStorage preview does not support children, goals, checklist, "
-            "code mode, manual tools, standalone native tools or environments"
-        )
 
 
 def _capture_project_guidance(
