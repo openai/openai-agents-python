@@ -329,15 +329,40 @@ index 0518ea88..8fd7e796 100644
              model_catalog_url: None,
              env_key: None,
              env_key_instructions: None,
+diff --git a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
+index b9f89c95..c8e078be 100644
+--- a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
++++ b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
+@@ -50,6 +50,7 @@ message ModelProvider {
+   bool supports_websockets = 17;
+   bool supports_standalone_web_search = 18;
+   optional string model_catalog_url = 19;
++  optional string websocket_base_url = 20;
+ }
+ 
+ message StringMap {
+diff --git a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs
+index 6ffc7bbd..c65a0b8f 100644
+--- a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs
++++ b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs
+@@ -79,6 +79,8 @@ pub struct ModelProvider {
+     pub supports_standalone_web_search: bool,
+     #[prost(string, optional, tag = "19")]
+     pub model_catalog_url: ::core::option::Option<::prost::alloc::string::String>,
++    #[prost(string, optional, tag = "20")]
++    pub websocket_base_url: ::core::option::Option<::prost::alloc::string::String>,
+ }
+ #[derive(Clone, PartialEq, ::prost::Message)]
+ pub struct StringMap {
 diff --git a/codex-rs/config/src/thread_config/remote.rs b/codex-rs/config/src/thread_config/remote.rs
-index da0af3bc..95a9a96b 100644
+index da0af3bc..fec0c4a2 100644
 --- a/codex-rs/config/src/thread_config/remote.rs
 +++ b/codex-rs/config/src/thread_config/remote.rs
 @@ -173,6 +173,7 @@ fn model_provider_from_proto(
      let info = ModelProviderInfo {
          name: provider.name,
          base_url: provider.base_url,
-+        websocket_base_url: None,
++        websocket_base_url: provider.websocket_base_url.map(Into::into),
          model_catalog_url: provider.model_catalog_url.map(Into::into),
          env_key: provider.env_key,
          env_key_instructions: provider.env_key_instructions,
@@ -345,11 +370,50 @@ index da0af3bc..95a9a96b 100644
      let ModelProviderInfo {
          name,
          base_url,
-+        websocket_base_url: _,
++        websocket_base_url,
          model_catalog_url,
          env_key,
          env_key_instructions,
-@@ -553,6 +555,7 @@ mod tests {
+@@ -234,6 +236,7 @@ fn model_provider_to_proto(
+         id: id.into(),
+         name,
+         base_url,
++        websocket_base_url: websocket_base_url.map(RedactedString::into_inner),
+         model_catalog_url: model_catalog_url.map(RedactedString::into_inner),
+         env_key,
+         env_key_instructions,
+@@ -455,6 +458,22 @@ mod tests {
+         assert_eq!(actual, expected);
+     }
+ 
++    #[test]
++    fn model_provider_proto_preserves_independent_websocket_endpoint() {
++        use prost::Message;
++
++        for endpoint in [None, Some("wss://socket.example/gateway?route=%23x%2Fy")] {
++            let mut expected = expected_provider();
++            expected.websocket_base_url = endpoint.map(Into::into);
++            let bytes = model_provider_to_proto("local", expected.clone()).encode_to_vec();
++            let decoded = proto::ModelProvider::decode(bytes.as_slice()).expect("decode provider");
++            let (id, actual) =
++                model_provider_from_proto(decoded).expect("model provider from proto");
++            assert_eq!(id, "local");
++            assert_eq!(actual, expected);
++        }
++    }
++
+     #[test]
+     fn model_provider_proto_defaults_standalone_web_search_to_false() {
+         let expected = ModelProviderInfo {
+@@ -480,6 +499,7 @@ mod tests {
+                             id: "local".to_string(),
+                             name: "Local".to_string(),
+                             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
++                            websocket_base_url: None,
+                             model_catalog_url: Some(
+                                 "http://127.0.0.1:8061/api/codex/models".to_string(),
+                             ),
+@@ -553,6 +573,7 @@ mod tests {
          ModelProviderInfo {
              name: "Local".to_string(),
              base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
@@ -625,7 +689,7 @@ index cf5d463e..7215c310 100644
          let connect = client.connect(
              &self.config.http_client_factory,
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
-index 6cf716de..bd411bfe 100644
+index 6cf716de..65d36c91 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
 +++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
 @@ -460,3 +460,39 @@ async fn http_cache_preserves_no_constraint_redirect_policy_and_configured_heade
@@ -647,7 +711,7 @@ index 6cf716de..bd411bfe 100644
 +    let gateway = Gateway::new(&http.uri(), ws.uri()).await?;
 +    let base_url = format!("{}/v1", http.uri());
 +    let mut provider = ModelProviderInfo::create_openai_provider(Some(base_url.clone()));
-+    provider.websocket_base_url = Some(format!("{}/v1", gateway.url));
++    provider.websocket_base_url = Some(format!("{}/v1", gateway.url).into());
 +    let mut config = sampler_config(base_url);
 +    config.provider = create_model_provider(
 +        provider,
