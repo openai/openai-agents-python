@@ -319,37 +319,82 @@ async def test_managed_callbacks_activate_native_trace_context(
         await telemetry.shutdown()
 
 
+@pytest.mark.parametrize("marker_order", ["before_selection", "after_selection", "after_http"])
 @pytest.mark.parametrize("prefix_count,pending_limit", [(1, 1), (300, None)])
 async def test_selector_first_managed_stream_keeps_full_prefix(
-    responses, tmp_path, monkeypatch, prefix_count, pending_limit
+    responses, tmp_path, monkeypatch, prefix_count, pending_limit, marker_order
 ):
-    received, held = [], {}
+    received, held, selected, delayed = [], {}, {}, []
+    prefix_delivered = asyncio.Event()
+    marker_received = asyncio.Event()
+    http_started = asyncio.get_running_loop().create_future()
     register = Session._register_managed_tool_stream
     select = Session._select_step
 
+    def register_prefix(self, event):
+        turn_id = event["msg"]["child_turn_id"]
+        state = selected.get(turn_id)
+        if state is None:
+            held[turn_id] = event
+            return
+        for index in range(prefix_count):
+            self._observations.append(
+                OutputTextDelta(
+                    session_id=self.id,
+                    turn_id=turn_id,
+                    submission_id=state.handle.submission_id,
+                    item_id="prefix-item",
+                    delta=f"prefix-{index}",
+                )
+            )
+        register(self, event)
+
     def hold_marker(self, event):
-        held[event["msg"]["child_turn_id"]] = event
+        def deliver():
+            if marker_order == "before_selection":
+                register_prefix(self, event)
+            else:
+                delayed.append((self, event))
+            marker_received.set()
+
+        if marker_order == "after_http":
+            http_started.add_done_callback(lambda _: deliver())
+        else:
+            deliver()
 
     async def selector_first(self, state, message):
+        if message["thread"] != self.id:
+            if marker_order == "before_selection":
+                await marker_received.wait()
+            selected[message["turn_id"]] = state
         marker = held.pop(message["turn_id"], None)
         if marker is not None:
-            for index in range(prefix_count):
-                self._observations.append(
-                    OutputTextDelta(
-                        session_id=self.id,
-                        turn_id=message["turn_id"],
-                        submission_id=state.handle.submission_id,
-                        item_id="prefix-item",
-                        delta=f"prefix-{index}",
-                    )
-                )
-            register(self, marker)
-            await asyncio.sleep(0)
+            register_prefix(self, marker)
+            await prefix_delivered.wait()
         await select(self, state, message)
 
-    async def observe(value):
-        received.append(value["event"])
+    async def before_event(event):
+        if len(responses.requests) == 2 and event["type"] == "response.created":
+            http_started.set_result(None)
+            await marker_received.wait()
+            # The child provider request proves its selection has completed.
+            # The marker can arrive independently, without a later selector to replay it.
+            for session, marker in delayed:
+                register_prefix(session, marker)
+            delayed.clear()
+            await prefix_delivered.wait()
 
+    async def observe(value):
+        event = value["event"]
+        received.append(event)
+        if (
+            isinstance(event, OutputTextDelta)
+            and event.item_id == "prefix-item"
+            and event.delta == f"prefix-{prefix_count - 1}"
+        ):
+            prefix_delivered.set()
+
+    responses.before_event = before_event
     monkeypatch.setattr(Session, "_register_managed_tool_stream", hold_marker)
     monkeypatch.setattr(Session, "_select_step", selector_first)
     tool = NativeRoleTool(

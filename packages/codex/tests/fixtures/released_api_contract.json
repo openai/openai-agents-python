@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "51b5a07664a7566359eba4cd6933d952f83244a7",
+  "baseline_commit": "1811cf56a168165cb3e483dce68fb317705bc0f3",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -3173,6 +3173,7 @@
           "class FileSearchCallItem(_HostedCallItem):\n    type: Literal['file_search_call']\n    queries: list[str]\n    results: list[dict[str, JsonValue]] | None",
           "class CodeInterpreterCallItem(_HostedCallItem):\n    type: Literal['code_interpreter_call']\n    container_id: str\n    code: str | None\n    outputs: list[dict[str, JsonValue]] | None",
           "class ShellCallItem(_HostedCallItem):\n    type: Literal['shell_call']\n    call_id: str\n    action: dict[str, JsonValue]",
+          "class LocalShellCallItem(TypedDict):\n    type: Literal['local_shell_call']\n    id: str\n    turn_id: str\n    call_id: str | None\n    action: dict[str, JsonValue]\n    status: str",
           "class ShellCallOutputItem(_HostedCallItem):\n    type: Literal['shell_call_output']\n    call_id: str\n    output: list[dict[str, JsonValue]]",
           "class ImageGenerationCallItem(_HostedCallItem):\n    type: Literal['image_generation_call']\n    result: str | None\n    revised_prompt: str | None",
           "class FunctionCallItem(TypedDict):\n    type: Literal['function_call']\n    id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue\n    status: FunctionCallStatus",
@@ -3191,7 +3192,7 @@
           "class InterruptSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['interrupt_subagent_call']",
           "class CloseSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['close_subagent_call']",
           "class WaitForSubagentsCallItem(_SubagentCallItem):\n    type: Literal['wait_for_subagents_call']\n    sender_agent_id: str",
-          "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | ShellCallOutputItem | ImageGenerationCallItem)",
+          "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | LocalShellCallItem | ShellCallOutputItem | ImageGenerationCallItem)",
           "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile | _InputAudio]",
           "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | ToolSearchCallItem | ToolSearchOutputItem | UserMessageItem)"
         ],
