@@ -5,7 +5,7 @@ index 00939718..c44c5617 100644
 @@ -47,6 +47,10 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
          self.0.spec()
      }
- 
+
 +    fn is_native_environment_tool(&self) -> bool {
 +        self.0.is_native_environment_tool()
 +    }
@@ -36,7 +36,7 @@ index 3621a0b4..3093c18b 100644
 @@ -184,6 +186,20 @@ impl ToolRouter {
          self.can_manage_children
      }
- 
+
 +    pub(crate) fn exposed_builtin_tool_names(&self) -> HashSet<ToolName> {
 +        self.registry
 +            .entries()
@@ -90,7 +90,7 @@ index ef3df3f8..0b7d1c42 100644
 +    }
 +    Ok(router)
  }
- 
+
  struct SelectedStepTools(Option<HashSet<ToolName>>, Option<ToolName>);
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
 index d46b8b05..48669076 100644
@@ -102,7 +102,7 @@ index d46b8b05..48669076 100644
  pub use session_isolation::SessionIsolation;
 +pub use tool_policy::FinalStepBuiltinTools;
  pub use tool_policy::ToolPolicy;
- 
+
  pub use capabilities::ConversationHistorySnapshot;
 diff --git a/codex-rs/ext/extension-api/src/tool_policy.rs b/codex-rs/ext/extension-api/src/tool_policy.rs
 index 85fde765..89f20494 100644
@@ -110,7 +110,7 @@ index 85fde765..89f20494 100644
 +++ b/codex-rs/ext/extension-api/src/tool_policy.rs
 @@ -2,6 +2,27 @@
  //! This policy only restricts tools; permission and approval checks still apply.
- 
+
  use crate::ToolName;
 +use std::collections::HashSet;
 +use std::sync::OnceLock;
@@ -133,7 +133,7 @@ index 85fde765..89f20494 100644
 +        }
 +    }
 +}
- 
+
  /// Supply through `ExtensionDataInit` before starting a thread. The host captures
  /// the policy once; later extension-state changes cannot relax it. Callers must
 diff --git a/codex-rs/tools/src/tool_executor.rs b/codex-rs/tools/src/tool_executor.rs
@@ -141,9 +141,9 @@ index 192d2979..d1c231ef 100644
 --- a/codex-rs/tools/src/tool_executor.rs
 +++ b/codex-rs/tools/src/tool_executor.rs
 @@ -125,6 +125,11 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
- 
+
      fn spec(&self) -> ToolSpec;
- 
+
 +    /// Runtime-authored identity for an SDK-owned Environment helper.
 +    fn is_native_environment_tool(&self) -> bool {
 +        false
