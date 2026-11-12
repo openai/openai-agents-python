@@ -887,7 +887,23 @@
     {
       "path": "sdk-mcp-discovery-cache.patch",
       "sha256": "f70e4a2e85f8928eb8f37a1bfe31a62d647ac08a8a2c9ca8d3c2482ba5712c20"
+    },
+    {
+      "path": "sdk-request-transport-overrides.patch",
+      "sha256": "ff262396ca0159c9f18d837ada626be2b9587fd6a6796b3bf8b3a252531718f3"
+    },
+    {
+      "path": "sdk-run-model-settings-override.patch",
+      "sha256": "9d64f9b282274050774c19d009266abf4929674ff1c7c3af4f6a5818689292e7"
+    },
+    {
+      "path": "sdk-request-transport-persistence.patch",
+      "sha256": "ded7b447e4295bd7ff701e97ec854166622c65faa562d7f9e9f52cab067fdc3f"
+    },
+    {
+      "path": "sdk-request-transport-startup-warmup.patch",
+      "sha256": "a7409b913c6d9fc3a8e9aae391dede4d31c273b11f6492ceb03c21817444c2ab"
     }
   ],
-  "result_tree": "34342524058268a18065a773d4b145dd26893322"
+  "result_tree": "401fb2fa49feb2eca86fa0b088b084842569f255"
 }

@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
+from openai import Omit, omit
 from typing_extensions import Required, TypedDict
 
 from .retry import ModelRetrySettings
@@ -213,6 +214,19 @@ def _capture_model_settings(
             }[key]
             if value not in allowed:
                 raise ValueError(f"Unsupported {key}")
+        elif key == "extra_headers":
+            if not isinstance(value, Mapping) or any(
+                not isinstance(name, str) or not isinstance(item, (str, Omit))
+                for name, item in value.items()
+            ):
+                raise TypeError("extra_headers must map strings to strings or Omit")
+            captured[key] = MappingProxyType(
+                {name: omit if isinstance(item, Omit) else item for name, item in value.items()}
+            )
+        elif key == "extra_query":
+            if not isinstance(value, Mapping) or any(not isinstance(name, str) for name in value):
+                raise TypeError("extra_query must be a JSON object")
+            captured[key] = json.loads(json.dumps(dict(value), allow_nan=False))
         elif key == "metadata":
             if not isinstance(value, Mapping) or any(
                 not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()

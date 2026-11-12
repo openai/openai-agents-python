@@ -950,7 +950,13 @@ pub async fn restore(
             startup.config.model_reasoning_summary = settings.reasoning_summary;
             startup.config.service_tier = settings.service_tier.clone();
             startup.config.sdk_tool_choice = settings.tool_choice;
+            let current_transport = startup
+                .config
+                .sdk_request_controls
+                .request_transport
+                .clone();
             startup.config.sdk_request_controls = settings.request_controls.clone();
+            startup.config.sdk_request_controls.request_transport = current_transport;
         }
         // Validate the actual fixed history and current policy before import:
         // a bad catalog must not leave records that prevent a corrected restore.

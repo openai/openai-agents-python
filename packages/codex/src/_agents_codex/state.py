@@ -231,6 +231,7 @@ class _ManualContinuation(BaseModel):
     tool_outcomes: _ToolOutcomes | None = None
     output_schema: dict[str, Any] | None = None
     model_override: str | None = None
+    model_settings_override: dict[str, Any] | None = None
 
 
 class ApplicationToolOutput(BaseModel):

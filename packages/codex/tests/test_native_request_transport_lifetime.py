@@ -1,0 +1,354 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, cast
+
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+from openai import AsyncOpenAI
+
+from agents import (
+    Agent,
+    ChatCompletionsModel,
+    FunctionTool,
+    NativeProvider,
+    ResponsesModel,
+    function_tool,
+)
+from agents.state import SessionState
+from tests._asyncio import timeout
+from tests.native_fixtures import assistant_output, function_call
+from tests.test_native_manual_tools import LookupArgs, next_request
+from tests.test_native_provider_websockets import WebSocketPeer, peer
+
+
+@pytest.mark.parametrize("websocket", [False, True])
+@pytest.mark.parametrize("capture", ["save_state", "fork"])
+async def test_operation_transport_is_not_checkpoint_authority(monkeypatch, websocket, capture):
+    model = "gpt-5.1-codex" if websocket else "fixture-unlisted-request-controls"
+    observed: list[tuple[dict[str, str], dict[str, str]]] = []
+    method = "websocket" if websocket else "handle"
+    original = getattr(WebSocketPeer, method)
+
+    async def record(self, request):
+        observed.append(
+            ({name.lower(): value for name, value in request.headers.items()}, dict(request.query))
+        )
+        return await original(self, request)
+
+    monkeypatch.setattr(WebSocketPeer, method, record)
+
+    @function_tool
+    def lookup(value: str) -> str:
+        """Return one synthetic lookup result."""
+        return value
+
+    async with timeout(30), peer() as server:
+        provider = server.provider(websocket=websocket)
+
+        def inference_routes():
+            if not websocket:
+                return observed
+            return [
+                (headers, next(query for upgrade, query in observed if upgrade == headers))
+                for headers in server.request_headers
+            ]
+
+        source = Agent(
+            model=model,
+            instructions="Use lookup once, then answer.",
+            provider=provider,
+            tools=[lookup],
+            model_settings={
+                "extra_headers": {"x-default": "SYNTHETIC_SOURCE_DEFAULT"},
+                "extra_query": {"default": "SYNTHETIC_SOURCE_QUERY"},
+            },
+        )
+        server.respond(function_call("lookup", {"value": "receipt"}, "lookup-source"))
+        server.respond(assistant_output("source answer"))
+        async with source.session() as session:
+            turn = await session.submit(
+                "First operation.",
+                model_settings_override={
+                    **({} if websocket else {"temperature": 0.2}),
+                    "extra_headers": {"x-operation": "SYNTHETIC_FIRST_OPERATION"},
+                    "extra_query": {"operation": "SYNTHETIC_FIRST_QUERY"},
+                },
+            )
+            assert (await turn.get_result()).final_output == "source answer"
+            if websocket:
+                server.respond(assistant_output("same scoped socket"))
+                await (
+                    await session.submit(
+                        "Use the same explicitly granted route once more.",
+                        model_settings_override={
+                            "extra_headers": {"x-operation": "SYNTHETIC_FIRST_OPERATION"},
+                            "extra_query": {"operation": "SYNTHETIC_FIRST_QUERY"},
+                        },
+                    )
+                ).get_result()
+                generated = [frame for frame in server.frames if frame.get("generate") is not False]
+                assert generated[-1].get("previous_response_id")
+            state = await getattr(session, capture)()
+            encoded = state.to_json()
+            for marker in (
+                "SYNTHETIC_SOURCE_DEFAULT",
+                "SYNTHETIC_SOURCE_QUERY",
+                "SYNTHETIC_FIRST_OPERATION",
+                "SYNTHETIC_FIRST_QUERY",
+            ):
+                assert marker not in encoded
+            if websocket:
+                warmup_headers, warmup_query = observed[0]
+                assert warmup_headers.get("x-default") == "SYNTHETIC_SOURCE_DEFAULT"
+                assert warmup_query == {"default": "SYNTHETIC_SOURCE_QUERY"}
+            first_routes = len(inference_routes())
+            assert first_routes
+            for headers, query in inference_routes():
+                assert "x-default" not in headers
+                assert headers["x-operation"] == "SYNTHETIC_FIRST_OPERATION"
+                assert query["operation"] == "SYNTHETIC_FIRST_QUERY"
+                assert "default" not in query
+            server.respond(assistant_output("next live answer"))
+            assert (
+                await (await session.submit("Next live operation.")).get_result()
+            ).final_output == ("next live answer")
+            assert len(inference_routes()) > first_routes
+            for headers, query in inference_routes()[first_routes:]:
+                assert headers["x-default"] == "SYNTHETIC_SOURCE_DEFAULT"
+                assert "x-operation" not in headers
+                assert "operation" not in query
+            assert "SYNTHETIC_FIRST_OPERATION" not in (await session.save_state()).to_json()
+
+        current = Agent(
+            model=model,
+            instructions="Use lookup once, then answer.",
+            provider=provider,
+            tools=[lookup],
+            model_settings={
+                "extra_headers": {"x-default": "SYNTHETIC_DESTINATION_DEFAULT"},
+                "extra_query": {"default": "SYNTHETIC_DESTINATION_QUERY"},
+            },
+        )
+        prior = len(inference_routes())
+        server.respond(assistant_output("restored answer"))
+        async with current.session(state=SessionState.from_json(encoded)) as restored:
+            assert (
+                await (await restored.submit("Continue from the saved operation.")).get_result()
+            ).final_output == "restored answer"
+        assert len(inference_routes()) > prior
+        for headers, query in inference_routes()[prior:]:
+            assert headers["x-default"] == "SYNTHETIC_DESTINATION_DEFAULT"
+            assert "x-operation" not in headers
+            assert query["default"] == "SYNTHETIC_DESTINATION_QUERY"
+            assert "operation" not in query
+        assert "SYNTHETIC_FIRST_OPERATION" not in json.dumps(server.requests)
+
+
+async def test_queued_transport_is_detached_and_steering_cannot_replace_it(monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    queries = []
+    original = WebSocketPeer.handle
+
+    async def record(self, request):
+        queries.append(dict(request.query))
+        return await original(self, request)
+
+    monkeypatch.setattr(WebSocketPeer, "handle", record)
+
+    @function_tool
+    async def wait_for_release() -> str:
+        """Wait on the test-owned release barrier."""
+        entered.set()
+        await release.wait()
+        return "released"
+
+    async with timeout(30), peer() as server:
+        provider = server.provider(websocket=False)
+        server.respond(function_call("wait_for_release", {}, "held-source"))
+        server.respond(assistant_output("released source"))
+        server.respond(assistant_output("queued answer"))
+        server.respond(assistant_output("ordinary answer"))
+        agent = Agent(instructions="Answer.", tools=[wait_for_release], provider=provider)
+        async with agent.session() as session:
+            first = await session.submit("Wait.")
+            await entered.wait()
+            headers, query = {"x-queued": "SYNTHETIC_QUEUED_CAPTURE"}, {"queued": "captured"}
+            queued = await session.submit(
+                "Queued work.",
+                if_busy="queue",
+                model_settings_override={"extra_headers": headers, "extra_query": query},
+            )
+            headers["x-queued"] = "SYNTHETIC_LATE_MUTATION"
+            query["queued"] = "mutated"
+            with pytest.raises(TypeError, match="steer"):
+                await cast(Any, session).submit(
+                    "Cannot replace the active transport.",
+                    if_busy="steer",
+                    model_settings_override={},
+                )
+            release.set()
+            assert (await first.get_result()).final_output == "released source"
+            assert (await queued.get_result()).final_output == "queued answer"
+            assert server.request_headers[-1]["x-queued"] == "SYNTHETIC_QUEUED_CAPTURE"
+            assert queries[-1]["queued"] == "captured"
+            assert (
+                await (await session.submit("Ordinary work.")).get_result()
+            ).final_output == "ordinary answer"
+            assert "x-queued" not in server.request_headers[-1]
+            assert "queued" not in queries[-1]
+            assert "SYNTHETIC_QUEUED_CAPTURE" not in (await session.save_state()).to_json()
+
+
+@pytest.mark.parametrize("adapter", [ResponsesModel, ChatCompletionsModel])
+async def test_borrowed_transport_and_async_credentials_are_request_scoped(adapter):
+    observed: list[tuple[str | None, dict[str, str], dict[str, Any]]] = []
+    keys = iter(["SYNTHETIC_FIRST_KEY", "SYNTHETIC_SECOND_KEY"])
+
+    async def api_key() -> str:
+        return next(keys)
+
+    async def handle(request):
+        body = await request.json()
+        assert "request_transport" not in body
+        observed.append(
+            (
+                request.headers.get("authorization"),
+                dict(request.query),
+                {name.lower(): value for name, value in request.headers.items()},
+            )
+        )
+        if adapter is ChatCompletionsModel:
+            return web.json_response(
+                {
+                    "id": "chat-synthetic",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "answer"},
+                        }
+                    ],
+                }
+            )
+        return web.json_response(
+            {
+                "id": f"resp_synthetic_{len(observed)}",
+                "status": "completed",
+                "output": [assistant_output("answer")["item"]],
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/{tail:.*}", handle)
+    async with timeout(30), TestServer(app) as server:
+        async with AsyncOpenAI(
+            api_key=api_key, base_url=str(server.make_url("/v1/")), max_retries=0
+        ) as client:
+            backend = adapter(client)
+            async with NativeProvider(
+                base_url="https://unused.invalid/v1", model_backend=backend
+            ) as provider:
+                agent = Agent(
+                    instructions="Answer.",
+                    model="gpt-4.1",
+                    provider=provider,
+                    model_settings={"extra_headers": {"x-default": "SYNTHETIC_DEFAULT"}},
+                )
+                async with agent.session() as session:
+                    assert (
+                        await (
+                            await session.submit(
+                                "First operation.",
+                                model_settings_override={
+                                    "extra_headers": {"x-operation": "SYNTHETIC_ADAPTER_OPERATION"},
+                                    "extra_query": {"operation": "first"},
+                                },
+                            )
+                        ).get_result()
+                    ).final_output == "answer"
+                    saved = (await session.save_state()).to_json()
+                    assert (
+                        await (await session.submit("Second operation.")).get_result()
+                    ).final_output == "answer"
+                assert not client.is_closed()
+    assert len(observed) == 2
+    assert [headers for headers, _, _ in observed] == [
+        "Bearer SYNTHETIC_FIRST_KEY",
+        "Bearer SYNTHETIC_SECOND_KEY",
+    ]
+    assert observed[0][1] == {"operation": "first"}
+    assert observed[0][2]["x-operation"] == "SYNTHETIC_ADAPTER_OPERATION"
+    assert observed[1][1] == {}
+    assert "x-operation" not in observed[1][2]
+    assert "x-default" not in observed[0][2]
+    assert observed[1][2]["x-default"] == "SYNTHETIC_DEFAULT"
+    for marker in ("SYNTHETIC_FIRST_KEY", "SYNTHETIC_SECOND_KEY", "SYNTHETIC_ADAPTER_OPERATION"):
+        assert marker not in saved
+
+
+async def test_manual_resume_retains_sampling_but_rebinds_transport(monkeypatch):
+    observed = []
+    original = WebSocketPeer.handle
+
+    async def record(self, request):
+        observed.append(
+            ({name.lower(): value for name, value in request.headers.items()}, dict(request.query))
+        )
+        return await original(self, request)
+
+    monkeypatch.setattr(WebSocketPeer, "handle", record)
+    lookup = FunctionTool(
+        name="lookup", description="Read one value.", input_type=LookupArgs, output_type=str
+    )
+    async with timeout(30), peer() as server:
+        provider = server.provider(websocket=False)
+        source = Agent(
+            model="fixture-unlisted-request-controls",
+            instructions="Look up a value.",
+            provider=provider,
+            tools=[lookup],
+            model_settings={"temperature": 0.6},
+        )
+        server.respond(function_call("lookup", {"key": "record"}, "manual-record"))
+        async with source.session() as session:
+            await session.submit(
+                "Look up record.",
+                model_settings_override={
+                    "temperature": 0.2,
+                    "extra_headers": {"x-operation": "SYNTHETIC_MANUAL_SOURCE"},
+                    "extra_query": {"operation": "SYNTHETIC_MANUAL_QUERY"},
+                },
+            )
+            await next_request(session.interactions(), lookup)
+            state = await session.suspend()
+        encoded = state.to_json()
+        assert "SYNTHETIC_MANUAL_SOURCE" not in encoded
+        assert "SYNTHETIC_MANUAL_QUERY" not in encoded
+        current = Agent(
+            model="fixture-unlisted-request-controls",
+            instructions="Look up a value.",
+            provider=provider,
+            tools=[lookup],
+            model_settings={
+                "temperature": 0.6,
+                "extra_headers": {"x-current": "SYNTHETIC_MANUAL_CURRENT"},
+            },
+        )
+        server.respond(assistant_output("resumed result"))
+        server.respond(assistant_output("independent result"))
+        async with current.session(state=SessionState.from_json(encoded)) as restored:
+            request = await next_request(restored.interactions(), lookup)
+            await request.respond("receipt")
+            assert restored.restored_turn is not None
+            assert (await restored.restored_turn.get_result()).final_output == "resumed result"
+            assert server.requests[-1]["temperature"] == 0.2
+            assert observed[-1][0]["x-current"] == "SYNTHETIC_MANUAL_CURRENT"
+            assert "x-operation" not in observed[-1][0]
+            assert "operation" not in observed[-1][1]
+            assert (
+                await (await restored.submit("Independent operation.")).get_result()
+            ).final_output == ("independent result")
+            assert server.requests[-1]["temperature"] == 0.6

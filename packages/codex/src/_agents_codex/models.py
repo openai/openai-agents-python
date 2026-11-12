@@ -174,6 +174,10 @@ async def _request_options_for(
 ) -> dict[str, Any]:
     value: Any = source
     observed: ModelRequest | None = None
+    selected: dict[str, Any] = {}
+    transport: Any = None
+    scoped_headers: Any = None
+    scoped_query: Any = None
     task = asyncio.current_task()
 
     def admit(owner: asyncio.Task[Any] | None = task) -> bool:
@@ -189,9 +193,33 @@ async def _request_options_for(
             value = await _call_callback(source, admit, observed)
         if task is not None and cancellation_requested(task):
             raise asyncio.CancelledError
-        return dict(_capture_request_options(value)) if value is not None else {}
+        if value is not None:
+            selected = dict(_capture_request_options(value))
+        transport = getattr(request, "_request_transport", None)
+        if transport is not None:
+            scoped_headers = transport.get("headers")
+            scoped_query = transport.get("query")
+            if scoped_headers is not None:
+                overridden = {name.lower() for name in scoped_headers}
+                selected["headers"] = {
+                    **{
+                        name: header
+                        for name, header in selected.get("headers", {}).items()
+                        if name.lower() not in overridden
+                    },
+                    **scoped_headers,
+                }
+            if scoped_query is not None:
+                from openai import omit
+
+                selected["query"] = {
+                    **selected.get("query", {}),
+                    **{name: omit if item is None else item for name, item in scoped_query.items()},
+                }
+        return selected
     finally:
-        del source, request, value, observed, task, admit
+        del source, request, value, observed, selected, transport, scoped_headers, scoped_query
+        del task, admit
 
 
 def _client_request_options(options: Mapping[str, Any]) -> dict[str, Any]:

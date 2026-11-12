@@ -48,6 +48,7 @@ from typing import (
 )
 from urllib.parse import urlsplit as urlsplit
 
+from openai import Omit
 from typing_extensions import Required as _Required, TypedDict as TypedDict, TypeVar as TypeVar
 
 from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
@@ -164,6 +165,10 @@ class ModelSettings(TypedDict, total=False, closed=True):
     the current model's context-window ratio. Explicit ``context_management``
     takes precedence, including ``None``. ``store=True``
     requires API-key authentication.
+    ``extra_headers`` and ``extra_query`` have been selecting per-request metadata.
+    Header ``omit`` values have been removing inherited header names, while query
+    ``None`` values have been omitting pairs. Top-level ``None`` has been clearing
+    the corresponding SDK override.
 
     ``reset_tool_choice=True``: ordinary text sampling only; opt-in release of
     required/named forcing after an
@@ -190,6 +195,8 @@ class ModelSettings(TypedDict, total=False, closed=True):
     temperature: float | None
     top_p: float | None
     top_logprobs: int | None
+    extra_headers: Mapping[str, str | Omit] | None
+    extra_query: Mapping[str, Any] | None
     parallel_tool_calls: bool | None
     verbosity: Literal["low", "medium", "high"] | None
     metadata: Mapping[str, str] | None

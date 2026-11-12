@@ -441,7 +441,26 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "provider_compaction",
         "extra_body",
     }
+    transport: dict[str, Any] = {}
+    if "extra_headers" in copied:
+        headers = copied["extra_headers"]
+        from openai import Omit
+
+        transport["headers"] = (
+            None
+            if headers is None
+            else {
+                name: None if isinstance(value, Omit) else value for name, value in headers.items()
+            }
+        )
+    if "extra_query" in copied:
+        transport["query"] = copied["extra_query"]
+        transport["query_nulls_as_empty"] = False
+    if transport:
+        controls["request_transport"] = transport
     for key, value in copied.items():
+        if key in ("extra_headers", "extra_query"):
+            continue
         if key == "tool_choice":
             if isinstance(value, ToolRef):
                 result["tool_choice"] = "required"
@@ -3636,6 +3655,7 @@ def _current_attempt_controls(
     return {
         "retry": retry,
         "attempt_timeout_ms": profile.get("attempt_timeout_ms", root.get("attempt_timeout_ms")),
+        "request_transport": profile.get("request_transport", root.get("request_transport")),
     }
 
 
@@ -4349,8 +4369,14 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if hosted_verification is not None and chatgpt_apps is not None:
                     raise ValueError("Select one explicit Apps registration per Session")
+                startup_transport = settings.get("request_controls", {}).get("request_transport")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **(
+                        {"_sdk_request_transport": startup_transport}
+                        if startup_transport is not None
+                        else {}
+                    ),
                     **({"_sdk_websocket_tls": True} if private_wss_tls else {}),
                     **guidance_options,
                     **(
@@ -4744,6 +4770,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
                 options.pop("_sdk_websocket_tls", None)
+                options.pop("_sdk_request_transport", None)
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
@@ -4765,6 +4792,7 @@ class Session(Generic[ContextT, OutputT]):
                     active = _Submission(
                         restored_output,
                         model_override=continuation.model_override,
+                        model_settings_override=continuation.model_settings_override,
                         guardrail_results=session._restore_guardrail_records(saved),
                         run_usage=_UsageCollector(saved.run_usage),
                         original_input=saved.original_input,
@@ -5402,6 +5430,7 @@ class Session(Generic[ContextT, OutputT]):
             reset: dict[str, Any] = {
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
+                    "request_transport": controls.get("request_transport"),
                     "retry": None,
                 },
             }
@@ -6525,6 +6554,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         model_override: str | None = None,
+        model_settings_override: ModelSettings | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -6543,6 +6573,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         model_override: str | None = None,
+        model_settings_override: ModelSettings | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -6560,6 +6591,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: None = None,
         budget: None = None,
         model_override: None = None,
+        model_settings_override: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -6577,6 +6609,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         model_override: str | None = None,
+        model_settings_override: ModelSettings | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -6618,6 +6651,11 @@ class Session(Generic[ContextT, OutputT]):
         supporting manual suspension with matching trusted limits and policy.
         See RunBudget for the counted usage, errors, and overshoot behavior.
 
+        model_settings_override has been selecting sparse settings for this root and
+        its automatic continuations without changing Session defaults. Queueing has
+        been capturing a detached copy before waiting. Steering has been refusing
+        these overrides. Omission and None have been inheriting the current defaults.
+
         trace_options overrides linkage and adds native tracing restrictions.
         Explicit parent takes precedence over ambient context, then Session
         defaults. Disabled/content restrictions from every owner remain sticky.
@@ -6642,6 +6680,28 @@ class Session(Generic[ContextT, OutputT]):
         try:
             self._check_open()
             model_override = _capture_model_override(model_override)
+            captured_settings = (
+                None
+                if model_settings_override is None
+                else _copy_model_settings(model_settings_override)
+            )
+            if captured_settings is not None:
+                requested_retry = captured_settings.get("retry")
+                if requested_retry is not None and requested_retry.policy is not None:
+                    inherited_retry = self._effective_agent().model_settings.get("retry")
+                    if (
+                        inherited_retry is None
+                        or requested_retry.policy is not inherited_retry.policy
+                    ):
+                        raise TypeError(
+                            "model_settings_override cannot install a different "
+                            "retry policy callable"
+                        )
+            encoded_settings = (
+                None
+                if captured_settings is None
+                else _native_model_settings(None, captured_settings)
+            )
             parent_trace = _trace_context(parent_trace)
             self._check_callback_operation("start work in its own Session")
             self._check_graph_admission()
@@ -6656,6 +6716,7 @@ class Session(Generic[ContextT, OutputT]):
                 or prepare_request is not None
                 or budget is not None
                 or model_override is not None
+                or model_settings_override is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -6713,6 +6774,7 @@ class Session(Generic[ContextT, OutputT]):
                 prepare_request=prepare_request,
                 budget=_RunBudget(budget) if budget is not None else None,
                 model_override=model_override,
+                model_settings_override=encoded_settings,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -8988,6 +9050,7 @@ class Session(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: _RunBudget | None = None,
         model_override: str | None = None,
+        model_settings_override: dict[str, Any] | None = None,
         run_usage: _UsageCollector | None = None,
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
@@ -9117,6 +9180,7 @@ class Session(Generic[ContextT, OutputT]):
                 prepare_request=prepare_request,
                 budget=budget,
                 model_override=model_override,
+                model_settings_override=model_settings_override,
                 tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
@@ -10812,6 +10876,10 @@ class Session(Generic[ContextT, OutputT]):
                             request["start"] = {"final_output_json_schema": state.output.schema}
                         if state.model_override is not None:
                             request.setdefault("start", {})["model_override"] = state.model_override
+                        if state.model_settings_override is not None:
+                            request.setdefault("start", {})["model_settings_override"] = (
+                                state.model_settings_override
+                            )
                         if state.writable_roots is not None:
                             request["writable_roots"] = state.writable_roots
                         state.observation_after = self._observations.sequence
@@ -11119,6 +11187,7 @@ class Session(Generic[ContextT, OutputT]):
                     step_index=state.step_index,
                     budget=state.budget,
                     model_override=state.model_override,
+                    model_settings_override=state.model_settings_override,
                     run_usage=state.run_usage,
                     submission_request_attempts=state.submission_request_attempts,
                     original_input=state.original_input,
@@ -11368,6 +11437,13 @@ class Session(Generic[ContextT, OutputT]):
                 return None
             if state.failure.done():
                 raise state.failure.result()
+            repair_model_settings = deepcopy(state.model_settings_override)
+            if repair_model_settings is not None:
+                repair_model_settings.pop("tool_choice", None)
+                controls = repair_model_settings.get("request_controls")
+                if isinstance(controls, dict):
+                    for key in ("named_tool_choice", "hosted_tool_choice", "reset_tool_choice"):
+                        controls.pop(key, None)
             # No repair work can have started before this local check.
             # _start reaches its identical check without yielding.
             repair._check_open()
@@ -11383,6 +11459,7 @@ class Session(Generic[ContextT, OutputT]):
                         _prepare_spec(str),
                         budget=state.budget,
                         model_override=state.model_override,
+                        model_settings_override=repair_model_settings,
                         run_usage=state.run_usage,
                     )
                 except NativeError as error:
@@ -12514,6 +12591,10 @@ class Session(Generic[ContextT, OutputT]):
                 disable_provider_retries=message.get("disable_provider_retries") is True,
                 _report_usage=report_usage,
             )
+            if "request_transport" in message:
+                object.__setattr__(
+                    request, "_request_transport", deepcopy(message["request_transport"])
+                )
             if self._include_raw_provider_events:
                 object.__setattr__(request, "_observe_raw_provider_events", True)
             backend = self._model_backend
