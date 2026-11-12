@@ -112,6 +112,18 @@ def records(case="oneshot_text"):
     return {case: {side: [row(side, index, case) for index in range(5)] for side in VERSIONS}}
 
 
+def native_http_records(case="oneshot_text"):
+    return {case: {side: [row("v1", index, case) for index in range(5)] for side in VERSIONS}}
+
+
+def buffered_rows(rows):
+    for item in rows:
+        item.update(response_mode="buffered", wire_transport="json")
+        item["server"]["emitted_text_chunks"] = 0
+        for receipt in item["server"]["receipts"]:
+            receipt.update(stream=False, text_chunks=0)
+
+
 class PairedStatisticsTests(unittest.TestCase):
     def test_correlated_pairs_do_not_create_independent_round_noise(self):
         baseline = [10, 20, 30, 40, 50]
@@ -340,17 +352,76 @@ class SummaryQualificationTests(unittest.TestCase):
 class BufferedQualificationTests(unittest.TestCase):
     def test_buffered_final_result_keeps_json_receipts_and_no_live_metrics(self):
         value = records("oneshot_output_64k_256_plain")
-        for item in value["oneshot_output_64k_256_plain"]["v1"]:
-            item.update(response_mode="buffered", wire_transport="json")
-            item["server"]["emitted_text_chunks"] = 0
-            for receipt in item["server"]["receipts"]:
-                receipt.update(stream=False, text_chunks=0)
+        buffered_rows(value["oneshot_output_64k_256_plain"]["v1"])
         summary = compare.summarize(value, expected_versions=VERSIONS, v1_response_mode="buffered")
         metrics = summary["oneshot_output_64k_256_plain"]["metrics"]
         self.assertNotIn("first_delta_p50_ms", metrics)
         self.assertEqual(
             metrics["full_owner_cpu_ms_per_operation"]["stable_values"], [10, 11, 12, 13, 14]
         )
+        for override, expected_reference in (
+            (["--reference-response-mode", "streaming"], "streaming"),
+            ([], "buffered"),
+        ):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "comparison"
+                commands = []
+
+                def launch(command, commands=commands, **kwargs):
+                    commands.append(command)
+                    path = Path(command[command.index("--output") + 1])
+                    sample = int(command[command.index("--sample-index") + 1])
+                    item = row("v1", sample, "oneshot_tool_output_16k_128")
+                    if "--response-mode" in command:
+                        self.assertEqual(command[command.index("--response-mode") + 1], "buffered")
+                        buffered_rows([item])
+
+                    def wait(timeout):
+                        path.write_text(compare.json.dumps(item))
+                        return 0
+
+                    return SimpleNamespace(pid=12345, wait=wait)
+
+                argv = [
+                    "compare.py",
+                    "--reference-engine",
+                    "v1",
+                    "--v0-python",
+                    "/reference/python",
+                    "--v1-python",
+                    "/target/python",
+                    "--v0-version",
+                    VERSIONS["v1"],
+                    "--v1-version",
+                    VERSIONS["v1"],
+                    "--server-python",
+                    "/peer/python",
+                    "--output-dir",
+                    str(output),
+                    "--samples",
+                    "1",
+                    "--cases",
+                    "oneshot_tool_output_16k_128",
+                    "--v1-response-mode",
+                    "buffered",
+                    *override,
+                ]
+                with (
+                    mock.patch.dict(os.environ, {}, clear=True),
+                    mock.patch.object(sys, "argv", argv),
+                    mock.patch.object(compare.subprocess, "Popen", side_effect=launch),
+                    mock.patch.object(compare.platform, "platform", return_value="test-host"),
+                    mock.patch.object(compare, "terminate_group"),
+                    mock.patch("builtins.print"),
+                ):
+                    compare.main()
+                self.assertEqual(len(commands), 2)
+                self.assertEqual("--response-mode" in commands[0], expected_reference == "buffered")
+                self.assertIn("--response-mode", commands[1])
+                metadata = compare.json.loads((output / "metadata.json").read_text())
+                self.assertTrue(metadata["completed"])
+                self.assertEqual(metadata["reference_response_mode"], expected_reference)
+                self.assertEqual(metadata["v1_response_mode"], "buffered")
 
     def test_mode_transport_and_denominator_drift_fail_closed(self):
         for change in (
@@ -366,6 +437,70 @@ class BufferedQualificationTests(unittest.TestCase):
             change(value["oneshot_text"]["v1"][0])
             with self.subTest(change=change), self.assertRaises(ValueError):
                 compare.summarize(value, expected_versions=VERSIONS)
+        for side in ("v0", "v1"):
+            for field, wrong_value in (
+                ("response_mode", "buffered" if side == "v0" else "streaming"),
+                ("wire_transport", "json" if side == "v0" else "sse"),
+            ):
+                value = native_http_records()
+                buffered_rows(value["oneshot_text"]["v1"])
+                value["oneshot_text"][side][0][field] = wrong_value
+                with self.subTest(side=side, field=field), self.assertRaises(ValueError):
+                    compare.summarize(
+                        value,
+                        expected_versions=dict.fromkeys(VERSIONS, VERSIONS["v1"]),
+                        reference_engine="v1",
+                        reference_response_mode="streaming",
+                        v1_response_mode="buffered",
+                    )
+        for extra in (
+            ["--reference-response-mode", "streaming"],
+            [
+                "--reference-engine",
+                "v1",
+                "--reference-response-mode",
+                "buffered",
+                "--cases",
+                "warm_stream",
+            ],
+            [
+                "--reference-engine",
+                "v1",
+                "--reference-response-mode",
+                "buffered",
+                "--native-transport",
+                "websocket",
+            ],
+        ):
+            argv = [
+                "compare.py",
+                "--v0-python",
+                "/reference/python",
+                "--v1-python",
+                "/target/python",
+                "--v0-version",
+                VERSIONS["v1"],
+                "--v1-version",
+                VERSIONS["v1"],
+                "--server-python",
+                "/peer/python",
+                "--output-dir",
+                "/unused-output",
+                "--cases",
+                "oneshot_text",
+                *extra,
+            ]
+            with (
+                self.subTest(extra=extra),
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(compare.subprocess, "Popen") as spawn,
+                mock.patch.object(sys, "stderr", io.StringIO()),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                compare.main()
+            self.assertEqual(raised.exception.code, 2)
+            spawn.assert_not_called()
 
     def test_stable_live_stream_is_sse_and_buffered_live_is_rejected(self):
         value = records("warm_stream")
@@ -434,6 +569,26 @@ class NativeReferenceWebSocketTests(unittest.TestCase):
         self.assertIn("ratio_target_over_reference", result["primary"])
         self.assertNotIn("ratio_native_over_stable", result["primary"])
         self.assertEqual(result["primary"]["sample_count_per_side"], [5, 5])
+        for explicit, reference_mode in (("streaming", "streaming"), (None, "buffered")):
+            value = native_http_records()
+            buffered_rows(value["oneshot_text"]["v1"])
+            if reference_mode == "buffered":
+                buffered_rows(value["oneshot_text"]["v0"])
+            value["oneshot_text"]["v0"].reverse()
+            result = compare.summarize(
+                value,
+                expected_versions=dict.fromkeys(VERSIONS, VERSIONS["v1"]),
+                reference_engine="v1",
+                reference_response_mode=explicit,
+                v1_response_mode="buffered",
+            )["oneshot_text"]
+            self.assertEqual(result["reference_response_mode"], reference_mode)
+            self.assertEqual(result["v1_response_mode"], "buffered")
+            self.assertEqual(result["sample_indices"], list(range(5)))
+            self.assertEqual(
+                result["primary"]["reference_values"], [9, 9.9, 10.8, 11.700000000000001, 12.6]
+            )
+            self.assertEqual(result["primary"]["sample_count_per_side"], [5, 5])
 
     def test_http_fallback_cannot_qualify_as_websocket(self):
         value = self.native_records()
