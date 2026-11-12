@@ -27,9 +27,11 @@ from agents import (
     LocalStorage,
     ModelRequest,
     ModelResponse,
+    ModelRetrySettings,
     NativeError,
     NativeProvider,
     PromptedOutput,
+    RetryDecision,
     SessionState,
     ShellCall,
     ShellCommandOutput,
@@ -596,25 +598,48 @@ async def test_manual_checkpoint_admits_the_verified_account_before_pending_call
     assert plan_endpoint.request_headers[1]["authorization"] == f"Bearer {renewed}"
 
 
-async def test_plan_limit_is_terminal(plan_endpoint):
+@pytest.mark.parametrize("affirmative_policy", [False, True], ids=["default", "affirmative"])
+@pytest.mark.parametrize(
+    "quota_code",
+    ["subscription_sharing_usage_limit_exceeded", "insufficient_quota"],
+    ids=["typed-plan-quota", "stream-quota"],
+)
+async def test_plan_limit_is_terminal(plan_endpoint, affirmative_policy, quota_code):
     plan_endpoint.respond(
         {
             "type": "response.failed",
             "response": {
                 "error": {
-                    "code": "subscription_sharing_usage_limit_exceeded",
-                    "type": "usage_limit_reached",
+                    "code": quota_code,
+                    "type": (
+                        "insufficient_quota"
+                        if quota_code == "insufficient_quota"
+                        else "usage_limit_reached"
+                    ),
                     "message": "Synthetic plan limit.",
                 }
             },
         }
     )
     plan_endpoint.respond(assistant_output("An unexpected retry succeeded."))
-    async with timeout(30), plan_agent(access_token()).session() as session:
+    agent = plan_agent(access_token())
+    retry_calls = []
+    if affirmative_policy:
+
+        def approve_retry(_context):
+            retry_calls.append(True)
+            return RetryDecision(True, delay_ms=0)
+
+        agent = replace(
+            agent,
+            model_settings={"retry": ModelRetrySettings(max_retries=1, policy=approve_retry)},
+        )
+    async with timeout(30), agent.session() as session:
         with pytest.raises(NativeError) as caught:
             await (await session.submit("Hello.")).get_result()
     assert caught.value.category == "usage_limit_exceeded"
     assert len(plan_endpoint.requests) == 1
+    assert retry_calls == []
 
 
 @pytest.mark.parametrize(
@@ -630,8 +655,9 @@ async def test_plan_limit_is_terminal(plan_endpoint):
         (503, "subscription_sharing_usage_unavailable", "server_overloaded", True),
     ],
 )
+@pytest.mark.parametrize("affirmative_policy", [False, True], ids=["default", "affirmative"])
 async def test_http_failure_retains_provider_diagnostics(
-    monkeypatch, status, code, category, compact
+    monkeypatch, status, code, category, compact, affirmative_policy
 ):
     requests = []
     token = access_token()
@@ -657,7 +683,19 @@ async def test_http_failure_retains_provider_diagnostics(
     peer.router.add_post("/responses", responses_handler)
     async with TestServer(peer) as server:
         set_endpoint(monkeypatch, str(server.make_url("/")).rstrip("/"))
-        async with timeout(30), plan_agent(token).session() as session:
+        agent = plan_agent(token)
+        retry_calls = []
+        if affirmative_policy:
+
+            def approve_retry(_context):
+                retry_calls.append(True)
+                return RetryDecision(True, delay_ms=0)
+
+            agent = replace(
+                agent,
+                model_settings={"retry": ModelRetrySettings(max_retries=1, policy=approve_retry)},
+            )
+        async with timeout(30), agent.session() as session:
             if compact:
                 with pytest.raises(NativeError) as caught:
                     await session.compact()
@@ -682,6 +720,7 @@ async def test_http_failure_retains_provider_diagnostics(
         assert diagnostic in str(error)
     assert token not in diagnostics
     assert requests == [("POST", "/responses", f"Bearer {token}")]
+    assert retry_calls == []
 
 
 @pytest.mark.parametrize("case", ["admission", "capability", "discarded_parameter"])

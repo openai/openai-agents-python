@@ -91,6 +91,7 @@ from ._lifecycle import (
 )
 from ._managed_tool_stream import _ManagedToolStream
 from ._managed_workspace import (
+    _SANDBOX_EVENTS_ATTRIBUTE,
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
     ManagedWorkspaceCheckpoint,
     _capture_retired_workspace,
@@ -101,7 +102,10 @@ from ._media import _audio_json, _check_audio_json
 from ._model_retry import _is_model_abort, _ModelFailure, _normalized_error, _resolve_retry
 from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._opening import _capture_opening_agent as _capture_opening_agent
-from ._opening_compatibility import _validate_custom_storage_capabilities
+from ._opening_compatibility import (
+    _validate_custom_storage_capabilities,
+    _validate_storage_opening as _validate_storage_opening,
+)
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
@@ -117,6 +121,7 @@ from ._stored_history import (
     _options as _stored_options,
     _turn_page as _stored_turn_page,
 )
+from ._submission import _future as _future, _Submission as _Submission
 from ._tool_errors import ToolErrorContext, ToolErrorFormatter
 from ._trace_context import (
     TraceContext as TraceContext,
@@ -347,6 +352,7 @@ from .usage import (
 )
 
 if TYPE_CHECKING:
+    from ._sandbox_events import _OperationObserver
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage
     from .turn import ChildTurn
@@ -1138,12 +1144,6 @@ class Completed(Generic[OutputT, TurnT]):
         return cast("Turn[Any] | ChildTurn", self.turn).application_tool_outputs
 
 
-def _future() -> asyncio.Future[Any]:
-    future = asyncio.get_running_loop().create_future()
-    future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
-    return future
-
-
 def _validate_function_concurrency(value: int | None) -> None:
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
         raise ValueError("max_function_concurrency must be a positive integer or None")
@@ -1176,102 +1176,6 @@ class _NativeCallback:
     receipt: dict[str, Any]
     native: Any
     cancelled: bool = False
-
-
-@dataclass
-class _Submission:
-    output: _PreparedOutput
-    run_usage: _UsageCollector = field(default_factory=_UsageCollector)
-    model_run_usage: _UsageCollector = field(default_factory=_UsageCollector, repr=False)
-    observation_after: int = 0
-    accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
-    completion: asyncio.Future[Any] = field(default_factory=_future)
-    terminal: asyncio.Future[Any] = field(default_factory=_future)
-    failure: asyncio.Future[Any] = field(default_factory=_future)
-    model_failure: _ModelFailure | None = field(default=None, repr=False)
-    handle: Turn[Any] | None = None
-    issued: Turn[Any] | None = None
-    task: asyncio.Task[None] | None = None
-    callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
-    function_admission: asyncio.Semaphore | None = None
-    tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
-    terminal_observations: dict[str, ToolStarted] = field(default_factory=dict, repr=False)
-    pending_application_outputs: dict[str, ApplicationToolOutput] = field(
-        default_factory=dict, repr=False
-    )
-    completion_continuations: int = 0
-    guardrail_results: list[GuardrailRecord] = field(default_factory=list)
-    guardrail_input: UserInput | None = field(default=None, repr=False)
-    original_input: UserInput | None = field(default=None, repr=False)
-    input_guardrails_started: bool = False
-    input_guardrails_task: asyncio.Task[None] | None = field(default=None, repr=False)
-    calls: set[str] = field(default_factory=set)
-    mcp_calls: dict[str, str] = field(default_factory=dict)
-    mcp_names: dict[tuple[str, str], ToolRef] = field(default_factory=dict, repr=False)
-    mcp_call_names: dict[str, ToolRef] = field(default_factory=dict, repr=False)
-    step_mcp: tuple[_MCP[Any], ...] | None = field(default=None, repr=False)
-    stopping: bool = False
-    cleanup_error: BaseException | None = None
-    deferred_close: tuple[bool, BaseException | None, Completed[Any] | None] | None = None
-    manual_inputs: dict[int, Any] = field(default_factory=dict)
-    questions: dict[int, _NativeQuestion] = field(default_factory=dict)
-    changed: asyncio.Event = field(default_factory=asyncio.Event)
-    restored_pending: bool = False
-    retire_manual: bool = False
-    graceful_requested: bool = False
-    unsampled_steering: bool = False
-    continued_from: str | None = None
-    last_assistant_had_blank_final: bool = False
-    policy_stop: Literal["requested", "expired"] | None = None
-    repairing: bool = False
-    repair_attempt_count: int = 0
-    # A one-element tuple distinguishes an accepted None from no accepted value.
-    accepted_output: tuple[Any] | None = None
-    before_step: _BeforeStep[Any] | None = None
-    prepare_request: _PrepareRequest | None = None
-    preparation_index: int = 0
-    step_index: int = 0
-    budget: _RunBudget | None = None
-    operation_slots: tuple[int, ...] | None = None
-    operation_mcp: tuple[_MCP[Any], ...] | None = None
-    operation_refs: tuple[ToolRef, ...] | None = None
-    writable_roots: tuple[str, ...] | None = None
-    parent_trace: TraceContext | None = field(default=None, repr=False)
-    tracing: _CapturedTrace | None = field(default=None, repr=False)
-    realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None
-    output_override: bool = False
-    operation_declarations: tuple[Any, ...] | None = None
-    operation_agent: Agent[Any, Any] | None = None
-    operation_declaration_source: dict[str, Any] | None = None
-
-    def add_callback(
-        self, task: asyncio.Task[None], receipt: _NativeCallback | None = None
-    ) -> None:
-        self.callbacks[task] = receipt
-        task.add_done_callback(self._callback_finished)
-
-    def _callback_finished(self, task: asyncio.Task[None]) -> None:
-        self.changed.set()
-
-    async def wait_for_callbacks(self) -> None:
-        # Admission remains open while this submission owns the turn. A
-        # returned callback may cause another call after any earlier snapshot.
-        while pending := tuple(task for task in self.callbacks if not task.done()):
-            await asyncio.wait((*pending, self.failure), return_when=asyncio.FIRST_COMPLETED)
-            if self.failure.done():
-                raise self.failure.result()
-        if self.failure.done():
-            raise self.failure.result()
-
-    def retain_cleanup_error(self: _CallbackState, error: BaseException) -> None:
-        if self.cleanup_error is None:
-            self.cleanup_error = error
-        else:
-            _retain_cleanup_error(
-                self.cleanup_error,
-                error,
-                _error_contexts(self.cleanup_error.__context__),
-            )
 
 
 @dataclass
@@ -2418,6 +2322,37 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
+@dataclass(frozen=True)
+class _OpeningTools:
+    """One classified opening declaration, before context binding."""
+
+    available: Sequence[Tool[Any]]
+    python: tuple[FunctionTool[Any, Any, Any], ...]
+    mcp: tuple[_MCP[Any], ...]
+    native_agents: NativeAgents[Any] | None
+
+    @classmethod
+    def capture(
+        cls, available: Sequence[Tool[Any]], programmatic_tool_calling: bool
+    ) -> _OpeningTools:
+        python, mcp, native_agents = _split_tools(available, programmatic_tool_calling)
+        return cls(available, python, mcp, native_agents)
+
+    def validate_collisions(self, *, project_guidance: bool = False) -> list[dict[str, str]]:
+        mcp_names = _tool_names(self.mcp)
+        _check_namespaced_tool_collisions(
+            self.python,
+            mcp_names,
+            self.available,
+            native_agents=self.native_agents,
+            project_guidance=project_guidance,
+        )
+        return mcp_names
+
+    def bind(self, context: Any, *, generation: int = 0) -> _ToolCatalog:
+        return _capture_tools(generation, self.python, context)
+
+
 def _check_native_agents_provider(
     native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
@@ -2685,11 +2620,16 @@ def _capture_profile_runtimes(
     roster: list[dict[str, Any]] = []
     for index, profile in enumerate(profiles):
         declaration = profile.declaration
-        tools, mcp, roles = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
+        opening_tools = _OpeningTools.capture(
+            declaration.tools, declaration.programmatic_tool_calling
+        )
+        mcp = opening_tools.mcp
         catalog = (
             root_catalog
             if index == 0 and not profile.handoff_callbacks
-            else _capture_tools(root_catalog.generation if index == 0 else 0, tools, context)
+            else opening_tools.bind(
+                context, generation=root_catalog.generation if index == 0 else 0
+            )
         )
         _check_handoff_tool_names(
             (
@@ -2699,12 +2639,7 @@ def _capture_profile_runtimes(
             ),
             profile.handoffs,
         )
-        _check_namespaced_tool_collisions(
-            tools,
-            _tool_names(mcp),
-            declaration.tools,
-            native_agents=roles,
-        )
+        opening_tools.validate_collisions()
         output = _prepare_spec(declaration.output_type)
         instructions = root_instructions if index == 0 else (declaration.instructions or "")
         captured[profile.id] = _ProfileRuntime(profile, catalog, output, instructions)
@@ -3232,6 +3167,7 @@ class _EnvironmentLease:
         self._woke_borrower = False
         self.interrupted = False
         self._workspace_instructions: str | None = None
+        self._sandbox_events: _OperationObserver | None = None
         self._owner = _create_task(self._hold(source))
 
     async def _hold(self, source: AbstractAsyncContextManager[Environment[Any]]) -> None:
@@ -3244,6 +3180,15 @@ class _EnvironmentLease:
             if instructions is not None and not isinstance(instructions, str):
                 raise TypeError("Workspace instructions must be captured text")
             self._workspace_instructions = instructions
+            observer = getattr(source, _SANDBOX_EVENTS_ATTRIBUTE, None)
+            if observer is not None:
+                from ._sandbox_events import _OperationObserver
+
+                if not isinstance(observer, _OperationObserver):
+                    raise TypeError(
+                        "Native sandbox observations require a sandbox_environment source"
+                    )
+            self._sandbox_events = observer
             self._ready.set_result(environment)
             try:
                 await asyncio.shield(self._retired)
@@ -3299,29 +3244,6 @@ async def _release_environment(lease: _EnvironmentLease) -> None:
         await _join(lease._owner)
     finally:
         lease.detach_borrower()
-
-
-def _validate_storage_opening(
-    storage: LocalStorage | CustomStorage | None,
-    state: SessionState | None,
-    resume: str | None,
-    reconciled_calls: Sequence[ReconciledCall],
-) -> tuple[ReconciledCall, ...]:
-    if storage is not None and not isinstance(storage, (LocalStorage, CustomStorage)):
-        raise TypeError("storage must be LocalStorage or CustomStorage")
-    if state is not None and (storage is not None or resume is not None):
-        raise ValueError("Portable state cannot be combined with persistent storage or resume")
-    if resume is not None:
-        if storage is None:
-            raise ValueError("resume requires the original storage backend")
-        if not isinstance(resume, str) or not resume:
-            raise TypeError("resume must be a nonempty native Session ID")
-    reconciliation = tuple(reconciled_calls)
-    if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
-        raise TypeError("reconciled_calls must contain ReconciledCall records")
-    if reconciliation and (resume is None or not isinstance(storage, LocalStorage)):
-        raise ValueError("reconciled_calls requires a LocalStorage resume")
-    return reconciliation
 
 
 def _capture_project_guidance(
@@ -3918,7 +3840,12 @@ class Session(Generic[ContextT, OutputT]):
                     "LocalStorage does not support code mode: nested tool identities "
                     "do not yet have durable intent and result receipts"
                 )
-            tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
+            opening_tools = _OpeningTools.capture(agent.tools, programmatic_tool_calling)
+            tools, mcp_tools, native_agents = (
+                opening_tools.python,
+                opening_tools.mcp,
+                opening_tools.native_agents,
+            )
             if restored_resource_servers:
                 assert restored_defaults is not None
                 restored_defaults = (
@@ -3978,16 +3905,9 @@ class Session(Generic[ContextT, OutputT]):
                         "NativeAgents requires an Environment with all three execution tools"
                     )
             output = _prepare_spec(agent.output_type)
-            mcp_names = _tool_names(allowed_mcp)
-            _check_namespaced_tool_collisions(
-                allowed_tools,
-                mcp_names,
-                available,
-                native_agents=native_agents,
-                project_guidance=project_guidance,
-            )
+            mcp_names = opening_tools.validate_collisions(project_guidance=project_guidance)
             model = agent.model
-            catalog = _capture_tools(0, tools, context)
+            catalog = opening_tools.bind(context)
             bound_tools = catalog.tools
             native = importlib.import_module("agents._native")
             native._validate_python_tool_declarations(catalog.native_specs())
@@ -4799,9 +4719,7 @@ class Session(Generic[ContextT, OutputT]):
                         json.dumps(saved.history)
                     )
                     session._mcp_tools = mcp_tools
-                session._model_backend = provider.model_backend
-                if provider.model_backend is not None:
-                    session._native._enable_model_producer(True)
+                session._bind_native_producers(lease, thread, provider)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
                 options.pop("_sdk_websocket_tls", None)
@@ -5103,6 +5021,7 @@ class Session(Generic[ContextT, OutputT]):
         self._provider_lease: Any = None
         self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
+        self._sandbox_events: _OperationObserver | None = None
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
@@ -5255,6 +5174,16 @@ class Session(Generic[ContextT, OutputT]):
         self._mcp_reader: asyncio.Task[None] | None = None
         if _start_readers:
             self._start_readers()
+
+    def _bind_native_producers(
+        self, lease: _EnvironmentLease | None, thread: Any, provider: NativeProvider
+    ) -> None:
+        if lease is not None and lease._sandbox_events is not None:
+            self._sandbox_events = lease._sandbox_events
+            thread._enable_sandbox_operations()
+        self._model_backend = provider.model_backend
+        if provider.model_backend is not None:
+            self._native._enable_model_producer(True)
 
     def _start_readers(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         self._start_interception(pending)
@@ -9026,6 +8955,8 @@ class Session(Generic[ContextT, OutputT]):
         native_admission: dict[str, Any] | BaseException | None = None,
     ) -> BaseException | None:
         try:
+            if self._sandbox_events is not None:
+                self._native._enable_sandbox_operations()
             state.task = _create_task(
                 self._execute(state, input, admitted=admitted, native_admission=native_admission)
             )
@@ -13848,6 +13779,16 @@ class Session(Generic[ContextT, OutputT]):
                 if self._realtime is not None and self._realtime._ingest(event):
                     continue
                 message = event.get("msg", {})
+                if message.get("type") == "_sdk_sandbox_operation":
+                    if self._sandbox_events is not None:
+                        sandbox_invocation = _Invocation(self)
+                        sandbox_token = _invocation.set(sandbox_invocation)
+                        try:
+                            await self._sandbox_events.emit(message)
+                        finally:
+                            sandbox_invocation.active = False
+                            _invocation.reset(sandbox_token)
+                    continue
                 if (
                     message.get("type") == "shutdown_complete"
                     and event.get("subagent_id") is None

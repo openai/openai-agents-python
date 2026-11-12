@@ -10,6 +10,21 @@ from _agents_codex.mcp import _project_tool_names
 from agents import HttpMCP
 
 
+@pytest.mark.parametrize("name", ["_project_name", "_project_tool_names"])
+def test_projection_aliases_keep_callable_and_module_identity(name: str) -> None:
+    from _agents_codex import _mcp_names, mcp
+    from agents import mcp as public_mcp
+    from agents.migration import mcp as migration_mcp
+
+    function = getattr(_mcp_names, name)
+    assert getattr(mcp, name) is function
+    assert function.__module__ == "agents.mcp"
+    if name == "_project_name":
+        assert public_mcp._project_name is function
+    else:
+        assert migration_mcp._project_tool_names is function
+
+
 def test_projection_matches_core_golden_vectors_in_any_input_order() -> None:
     vectors = json.loads((Path(__file__).parent / "fixtures/mcp-projection.json").read_text())
     for rows in (vectors, list(reversed(vectors))):

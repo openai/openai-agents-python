@@ -3,14 +3,41 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._function_tools import FunctionTool, Tool
 from .canonical_storage import CustomStorage
 from .mcp import _MCP
 from .native_agents import NativeAgents
+from .recovery import ReconciledCall
 from .state import LocalStorage
 from .tools import WebSearch
+
+if TYPE_CHECKING:
+    from .state import SessionState
+
+
+def _validate_storage_opening(
+    storage: LocalStorage | CustomStorage | None,
+    state: SessionState | None,
+    resume: str | None,
+    reconciled_calls: Sequence[ReconciledCall],
+) -> tuple[ReconciledCall, ...]:
+    if storage is not None and not isinstance(storage, (LocalStorage, CustomStorage)):
+        raise TypeError("storage must be LocalStorage or CustomStorage")
+    if state is not None and (storage is not None or resume is not None):
+        raise ValueError("Portable state cannot be combined with persistent storage or resume")
+    if resume is not None:
+        if storage is None:
+            raise ValueError("resume requires the original storage backend")
+        if not isinstance(resume, str) or not resume:
+            raise TypeError("resume must be a nonempty native Session ID")
+    reconciliation = tuple(reconciled_calls)
+    if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
+        raise TypeError("reconciled_calls must contain ReconciledCall records")
+    if reconciliation and (resume is None or not isinstance(storage, LocalStorage)):
+        raise ValueError("reconciled_calls requires a LocalStorage resume")
+    return reconciliation
 
 
 def _validate_custom_storage_capabilities(

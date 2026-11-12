@@ -13,7 +13,8 @@ from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import RootModel, TypeAdapter
 
 from _agents_codex._function_tools import FunctionTool, ToolContext
-from _agents_codex.mcp import _launch_text, _project_tool_names
+from _agents_codex._mcp_names import _project_tool_names
+from _agents_codex.mcp import _launch_text
 from _agents_codex.native_interception import Allow, Deny
 from _agents_codex.tools import _CapturedFunction
 
