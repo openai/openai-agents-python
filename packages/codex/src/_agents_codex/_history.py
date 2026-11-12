@@ -95,6 +95,7 @@ def _response_item(
         "computer_call",
         "apply_patch_call",
         "shell_call",
+        "local_shell_call",
         "tool_search_call",
     }:
         item_id = item_id or raw.get("call_id")
@@ -110,6 +111,18 @@ def _response_item(
     if not item_id:
         return None
     common = {"id": item_id, "turn_id": turn_id, "type": kind}
+    if kind == "local_shell_call":
+        action = raw.get("action")
+        if not isinstance(action, dict):
+            return None
+        call_id = raw.get("call_id")
+        status = raw.get("status")
+        return {
+            **common,
+            "call_id": call_id if isinstance(call_id, str) else None,
+            "action": action,
+            "status": status if isinstance(status, str) else "unknown",
+        }
     if kind == "message" and raw.get("role") in {"user", "assistant"}:
         role = raw["role"]
         accepted = (
