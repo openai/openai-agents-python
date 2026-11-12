@@ -801,9 +801,21 @@
       "sha256": "6c5e3c6cc3c9106c85b6e740f2ef76e1a18f5f89f48bdaeda91fb4b6f21c979b"
     },
     {
+      "path": "sdk-managed-agent-tools.patch",
+      "sha256": "ad8d845a6da5485d0010f95d2afa19b10139c9cd05ba3bb5c0b8790491a13fb6"
+    },
+    {
+      "path": "sdk-managed-agent-tool-code-mode.patch",
+      "sha256": "163e7309b5262b15b4a63b2c32fc0cc0a13e17103ec7e4b637bd03a2392b9804"
+    },
+    {
+      "path": "sdk-managed-agent-child-catalog.patch",
+      "sha256": "aa9744156b870e194d6dc7e6244e311a290332c7b453747a7440682e69cf674a"
+    },
+    {
       "path": "sdk-native-sandbox-operation-events.patch",
       "sha256": "1d7c7fec2d0faf1956b48dfd7e48b135f3847748d88efb1835b233e39df2f765"
     }
   ],
-  "result_tree": "b2d6f07c1d3ed59727298be62eaf8b409fb37ef7"
+  "result_tree": "3a36ab20a06471607656fd6f6c002143d43d85ba"
 }

@@ -163,6 +163,7 @@ if TYPE_CHECKING:
         ChildStepContext as ChildStepContext,
         NativeAgents as NativeAgents,
         NativeRole as NativeRole,
+        NativeRoleTool as NativeRoleTool,
     )
     from .native_interception import (
         Allow as Allow,
@@ -335,6 +336,7 @@ _MODULES = {
     "ChildStepContext": ".native_agents",
     "NativeAgents": ".native_agents",
     "NativeRole": ".native_agents",
+    "NativeRoleTool": ".native_agents",
     "Environment": ".executor",
     "LocalStorageMount": ".executor",
     "EnvironmentSource": ".executor",

@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "958cb07d8471a5641c9cf1d674197f98cf19d369",
+  "baseline_commit": "4a36ae0185d9a512d91e4d1ec89f65e28d952db6",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -802,9 +802,10 @@
           "ContextT = TypeVar('ContextT', contravariant=True, default=object)",
           "_ContextT_co = TypeVar('_ContextT_co', covariant=True, default=object)",
           "@dataclass(frozen=True, kw_only=True)\nclass NativeRole:\n    name: str\n    instructions: str = field(repr=False)\n    description: str\n    model: str | None = None\n    model_settings: Mapping[Literal['reasoning_effort'], str] | None = None",
+          "@dataclass(frozen=True, kw_only=True)\nclass NativeRoleTool:\n    name: str\n    role: str\n    description: str",
           "_ChildStepResult: TypeAlias = Sequence['ToolRef | Tool[Any] | Environment[Any] | NativeAgents[Any]'] | None | StopTurn | Awaitable[Sequence['ToolRef | Tool[Any] | Environment[Any] | NativeAgents[Any]'] | None | StopTurn]",
           "_ChildBeforeStep: TypeAlias = Callable[['ChildStepContext[ContextT]'], _ChildStepResult]",
-          "@dataclass(frozen=True, kw_only=True)\nclass NativeAgents(Generic[ContextT]):\n    additional_roles: Sequence[NativeRole] = ()\n    max_children: int | None = None\n    approval: Callable[[ToolContext[object], NativeToolCall], bool | Awaitable[bool]] | Callable[[ToolContext[ContextT], NativeToolCall], bool | Awaitable[bool]] | None = field(default=None, repr=False)\n    max_depth: int = 1\n    before_step: Callable[[ChildStepContext[object]], _ChildStepResult] | _ChildBeforeStep[ContextT] | None = field(default=None, repr=False)\n    interactions: bool = False",
+          "@dataclass(frozen=True, kw_only=True)\nclass NativeAgents(Generic[ContextT]):\n    additional_roles: Sequence[NativeRole] = ()\n    max_children: int | None = None\n    approval: Callable[[ToolContext[object], NativeToolCall], bool | Awaitable[bool]] | Callable[[ToolContext[ContextT], NativeToolCall], bool | Awaitable[bool]] | None = field(default=None, repr=False)\n    max_depth: int = 1\n    before_step: Callable[[ChildStepContext[object]], _ChildStepResult] | _ChildBeforeStep[ContextT] | None = field(default=None, repr=False)\n    interactions: bool = False\n    managed_tools: Sequence[NativeRoleTool] = ()",
           "@dataclass(frozen=True, slots=True)\nclass ChildInvocation:\n    session_id: str\n    child_id: str\n    instance_id: str\n    turn_id: str\n\n    @property\n    def submission_id(self) -> str:\n        pass",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ChildStepContext(Generic[_ContextT_co]):\n    context: _ContextT_co = field(repr=False)\n    child: ChildInvocation\n    step_index: int\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass"
         ],
@@ -813,7 +814,8 @@
           "ChildStepContext": "agents.native_agents.ChildStepContext",
           "ContextT": "ContextT",
           "NativeAgents": "agents.native_agents.NativeAgents",
-          "NativeRole": "agents.native_agents.NativeRole"
+          "NativeRole": "agents.native_agents.NativeRole",
+          "NativeRoleTool": "agents.native_agents.NativeRoleTool"
         },
         "imports": [
           "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
@@ -2254,6 +2256,7 @@
       "NativeOutput": "agents.schema.NativeOutput",
       "NativeProvider": "agents.agent.NativeProvider",
       "NativeRole": "agents.native_agents.NativeRole",
+      "NativeRoleTool": "agents.native_agents.NativeRoleTool",
       "NativeStreamingModel": "agents.models.NativeStreamingModel",
       "NativeToolCall": "agents.native_interception.NativeToolCall",
       "NetworkPolicy": "agents.executor.NetworkPolicy",
@@ -5147,6 +5150,7 @@
       "NativeOutput",
       "NativeProvider",
       "NativeRole",
+      "NativeRoleTool",
       "NativeStreamingModel",
       "NativeToolCall",
       "NetworkPolicy",
@@ -5257,7 +5261,7 @@
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",
       "from .model_context import HostedPromptReference as HostedPromptReference, HostedPromptSource as HostedPromptSource, ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",
       "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, ModelRetryAdviceRequest as ModelRetryAdviceRequest, NativeModel as NativeModel, NativeStreamingModel as NativeStreamingModel, ResponsesModel as ResponsesModel",
-      "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole",
+      "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole, NativeRoleTool as NativeRoleTool",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
       "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",
       "from .rate_limits import ApiRateLimits as ApiRateLimits, ApiRateLimitWindow as ApiRateLimitWindow, CodexPlanCredits as CodexPlanCredits, CodexPlanLimit as CodexPlanLimit, CodexPlanSpendLimit as CodexPlanSpendLimit, CodexPlanUsage as CodexPlanUsage, CodexPlanWindow as CodexPlanWindow",

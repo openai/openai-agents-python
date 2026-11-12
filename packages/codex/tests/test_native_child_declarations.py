@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -14,20 +15,39 @@ import pytest
 from agents import (
     Agent,
     Environment,
+    FunctionTool,
     NativeAgents,
+    NativeError,
     NativeRole,
+    NativeRoleTool,
+    NativeToolCall,
+    Session,
+    ToolContext,
+    function_tool,
 )
+from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
     ResponsesFixture,
     assistant_output,
+    function_call,
     responses as responses,
 )
 from tests.test_native_agent import provider
-from tests.test_native_child_agents import child_output, child_peer, handles, metadata, trust
+from tests.test_native_child_agents import (
+    child_output,
+    child_peer,
+    collaboration,
+    handles,
+    metadata,
+    trust,
+)
+from tests.test_native_code_mode import code_call
 from tests.test_native_executor_tools import declaration
+from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_mcp_tools import declarations
+from tests.test_native_profile_model_controls import MODEL as NATIVE_ROLE_FIXTURE_MODEL
 
 
 def _role() -> NativeRole:
@@ -83,6 +103,326 @@ def test_native_child_declarations_capture_roles_and_hide_instructions() -> None
 def test_native_child_declarations_reject_reserved_or_invalid_names(name: str) -> None:
     with pytest.raises(ValueError, match="Built-in native roles|Native role names"):
         NativeRole(name=name, instructions="Read.", description="Read a topic.")
+
+
+def test_native_role_tools_capture_validated_role_bindings() -> None:
+    tool = NativeRoleTool(name="research_topic", role="research", description="Research a topic.")
+    supplied = [tool]
+    children = NativeAgents(additional_roles=[_role()], managed_tools=supplied)
+    supplied.clear()
+    assert children.managed_tools == (tool,)
+
+    with pytest.raises(ValueError, match="Unknown native role 'research'"):
+        NativeAgents(managed_tools=[tool])
+    with pytest.raises(ValueError, match="Native role tool names must be unique"):
+        NativeAgents(additional_roles=[_role()], managed_tools=[tool, tool])
+    with pytest.raises(ValueError, match="Built-in collaboration tools"):
+        replace(tool, name="spawn_agent")
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_native_role_tool_returns_its_child_result_after_approval(
+    allowed: bool,
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[NativeToolCall] = []
+    ordinary_calls = 0
+
+    def approve(_context: ToolContext[object], call: NativeToolCall) -> bool:
+        calls.append(call)
+        return allowed
+
+    tool = NativeRoleTool(name="research_topic", role="research", description="Research a topic.")
+
+    @function_tool(name=tool.name)
+    def ordinary() -> str:
+        nonlocal ordinary_calls
+        ordinary_calls += 1
+        return "ordinary application result"
+
+    responses.respond(function_call(tool.name, {}, "ordinary"))
+    responses.respond(collaboration(tool.name, {"input": "Read the requested record."}, "managed"))
+    if allowed:
+        responses.respond(assistant_output("managed child result"))
+        responses.respond(assistant_output("parent final result"))
+    agent = Agent(
+        instructions="Call the research tool.",
+        model="gpt-5.5",
+        provider=provider(responses),
+        tools=[
+            ordinary,
+            NativeAgents(additional_roles=[_role()], managed_tools=[tool], approval=approve),
+        ],
+    )
+
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        async with agent.session(environment=declaration(executor)) as session:
+            root = await session.submit("Research the record.")
+            if allowed:
+                result = await root.get_result()
+                assert result.final_output == "parent final result"
+            else:
+                with pytest.raises(NativeError, match="interception failed or was denied"):
+                    await root.get_result()
+            root_turn_id = root.turn_id
+            children = [child async for child in session.subagents()]
+
+    assert ordinary_calls == 1
+    assert [(call.namespace, call.name) for call in calls] == [("collaboration", tool.name)]
+    assert len(children) == int(allowed)
+    assert len(responses.requests) == 2 + 2 * int(allowed)
+    if not allowed:
+        return
+    outputs = [
+        item
+        for item in responses.requests[-1]["input"]
+        if item["type"] == "function_call_output" and item["call_id"] == "managed"
+    ]
+    assert len(outputs) == 1
+    assert "managed child result" in json.dumps(outputs[0]["output"])
+    child_request = responses.requests[2]
+    child_metadata = metadata(child_request, responses.request_headers[2])
+    assert child_metadata["agent_name"].startswith("/root/tool_")
+    assert child_metadata["root_turn_id"] == root_turn_id
+    assert _role().instructions in json.dumps(child_request)
+
+
+async def test_native_role_tool_catalog_passes_to_owned_child(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    approved: list[str] = []
+
+    def approve(_context: ToolContext[object], call: NativeToolCall) -> bool:
+        approved.append(call.name)
+        return True
+
+    reviewer = _role()
+    collector = NativeRole(
+        name="collector",
+        description="Collect a fact.",
+        instructions="CATALOG_COLLECTOR_ROLE",
+    )
+    review_tool = NativeRoleTool(
+        name="delegate_review", role=reviewer.name, description="Delegate a review."
+    )
+    collect_tool = NativeRoleTool(
+        name="collect_fact", role=collector.name, description="Collect a fact."
+    )
+    responses.respond(
+        collaboration(review_tool.name, {"input": "Review the record."}, "delegate-review")
+    )
+    responses.respond(
+        collaboration(collect_tool.name, {"input": "Collect the requested fact."}, "collect-fact")
+    )
+    responses.respond(assistant_output("collector result"))
+    responses.respond(assistant_output("reviewer result"))
+    responses.respond(assistant_output("parent final result"))
+    agent = Agent(
+        instructions="Delegate the review.",
+        model=NATIVE_ROLE_FIXTURE_MODEL,
+        provider=provider(responses),
+        tools=[
+            NativeAgents(
+                max_depth=2,
+                additional_roles=[reviewer, collector],
+                managed_tools=[review_tool, collect_tool],
+                approval=approve,
+            )
+        ],
+    )
+
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        async with agent.session(environment=declaration(executor)) as session:
+            result = await (await session.submit("Review the record.")).get_result()
+
+    child = responses.requests[1]
+    assert reviewer.instructions in json.dumps(child)
+    advertised = list(child.get("tools", []))
+    for item in child["input"]:
+        if item.get("type") == "additional_tools":
+            advertised.extend(item["tools"])
+    assert f'"{collect_tool.name}"' in json.dumps(advertised)
+    assert collector.instructions in json.dumps(responses.requests[2])
+    assert "collector result" in json.dumps(responses.requests[3]["input"])
+    assert result.final_output == "parent final result"
+    assert approved == [review_tool.name, collect_tool.name]
+    assert len(responses.requests) == 5
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_native_role_tool_from_code_mode(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowed: bool
+) -> None:
+    calls: list[NativeToolCall] = []
+    callback_ids: list[str] = []
+
+    def approve(context: ToolContext[object], call: NativeToolCall) -> bool:
+        callback_ids.append(context.call_id)
+        calls.append(call)
+        return allowed
+
+    role_tool = NativeRoleTool(
+        name="research_topic", role="research", description="Research a topic."
+    )
+    responses.respond(
+        code_call(
+            'if (typeof tools.collaboration__spawn_agent !== "undefined") {'
+            'throw new Error("Built-in collaboration tools must be called directly");'
+            "} "
+            'text(await tools.collaboration__research_topic({input: "Read the record."}));',
+            "managed-code",
+        )
+    )
+    if allowed:
+        responses.respond(assistant_output("managed code child result"))
+    responses.respond(assistant_output("parent final result"))
+    agent = Agent(
+        instructions="Use the named research tool from Code Mode.",
+        model=NATIVE_ROLE_FIXTURE_MODEL,
+        provider=provider(responses),
+        programmatic_tool_calling=True,
+        tools=[
+            NativeAgents(additional_roles=[_role()], managed_tools=[role_tool], approval=approve)
+        ],
+    )
+
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        async with agent.session(environment=declaration(executor)) as session:
+            turn = await session.submit("Research the record.")
+            result = await turn.get_result()
+            code_outputs = [
+                item.get("output")
+                for item in responses.requests[-1]["input"]
+                if item.get("call_id") == "managed-code" and "output" in item
+            ]
+            assert result.final_output == "parent final result", (calls, code_outputs)
+            assert len([child async for child in session.subagents()]) == int(allowed)
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert (call.namespace, call.name) == ("collaboration", role_tool.name)
+    assert call.route == "programmatic_tool_calling"
+    assert call.outer_call_id == "managed-code"
+    assert call.call_id is None
+    assert call.runtime_tool_call_id
+    assert callback_ids == [call.runtime_tool_call_id]
+    assert len(responses.requests) == (3 if allowed else 2)
+    if allowed:
+        assert "managed code child result" in json.dumps(responses.requests[-1]["input"])
+
+
+async def test_completed_native_role_tool_result_survives_a_root_checkpoint(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal_received = asyncio.Event()
+    release_child = asyncio.Event()
+    settle = Session._settle_child_callbacks
+
+    async def delay_settlement(session: Session[Any, Any], child: Any) -> None:
+        await child.terminal
+        terminal_received.set()
+        await release_child.wait()
+        await settle(session, child)
+
+    monkeypatch.setattr(Session, "_settle_child_callbacks", delay_settlement)
+    role_tool = NativeRoleTool(
+        name="research_topic", role="research", description="Research a topic."
+    )
+    lookup = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(collaboration(role_tool.name, {"input": "Read the record."}, "managed"))
+    responses.respond(assistant_output("managed result before checkpoint"))
+    responses.respond(function_call("lookup", {"key": "A"}, "root-manual"))
+    responses.respond(assistant_output("resumed parent result"))
+    agent = Agent(
+        instructions="Research before requesting the record.",
+        model="gpt-5.5",
+        provider=provider(responses),
+        tools=[NativeAgents(additional_roles=[_role()], managed_tools=[role_tool]), lookup],
+    )
+
+    async with timeout(30), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        async with agent.session(environment=declaration(executor)) as original:
+            root = await original.submit("Read the record.")
+            request = await next_request(original.interactions(), lookup)
+            assert request.call_id == "root-manual"
+            await terminal_received.wait()
+            suspension = asyncio.create_task(original.suspend())
+            try:
+                started = asyncio.Event()
+                asyncio.get_running_loop().call_soon(started.set)
+                await started.wait()
+                if suspension.done():
+                    await suspension
+                    pytest.fail("Checkpoint finished before the child callbacks settled")
+            finally:
+                release_child.set()
+            state = SessionState.from_json((await suspension).to_json())
+        async with agent.session(state=state, environment=declaration(executor)) as restored:
+            pending = await next_request(restored.interactions(), lookup)
+            assert pending.call_id == "root-manual"
+            await pending.respond("verified")
+            continuation = restored.restored_turn
+            assert continuation is not None
+            assert continuation.turn_id == root.turn_id
+            assert (await continuation.get_result()).final_output == "resumed parent result"
+
+    assert len(responses.requests) == 4
+    restored_input = json.dumps(responses.requests[-1]["input"])
+    assert "managed result before checkpoint" in restored_input
+    assert "verified" in restored_input
+
+
+async def test_cancelling_native_role_tool_retires_its_exact_child(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_started = asyncio.Event()
+    release = asyncio.Event()
+    child_output_item = assistant_output("abandoned child output")
+    child_output_item["item"]["id"] = "managed-child-held"
+
+    async def hold_child(event: dict[str, Any]) -> None:
+        if event.get("item", {}).get("id") == "managed-child-held":
+            child_started.set()
+            await release.wait()
+
+    responses.before_event = hold_child
+    tool = NativeRoleTool(name="research_topic", role="research", description="Research a topic.")
+    responses.respond(collaboration(tool.name, {"input": "Wait for the record."}, "managed"))
+    responses.respond(child_output_item)
+    responses.respond(assistant_output("next root result"))
+    agent = Agent(
+        instructions="Call the research tool.",
+        model="gpt-5.5",
+        provider=provider(responses),
+        tools=[NativeAgents(additional_roles=[_role()], managed_tools=[tool])],
+    )
+
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        async with agent.session(environment=declaration(executor)) as session:
+            try:
+                root = await session.submit("Research the record.")
+                await child_started.wait()
+                (child,) = await handles(session, 1)
+                await root.cancel()
+                with pytest.raises(NativeError, match="interrupted"):
+                    await child.get_result()
+                following = await (await session.submit("Continue without the tool.")).get_result()
+                assert following.final_output == "next root result"
+            finally:
+                release.set()
 
 
 @pytest.mark.parametrize("field", ["instructions", "description"])

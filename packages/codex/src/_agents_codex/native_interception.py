@@ -179,7 +179,6 @@ class _NativeInterception:
     def refresh(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         from .executor import Environment
         from .mcp import _tool_names
-        from .native_agents import _COLLABORATION_TOOLS
         from .session import _split_tools
 
         rules: list[dict[str, Any]] = []
@@ -200,7 +199,8 @@ class _NativeInterception:
                 if descriptor.approval is None:
                     continue
                 names = [
-                    {"namespace": "collaboration", "name": name} for name in _COLLABORATION_TOOLS
+                    {"namespace": "collaboration", "name": name}
+                    for name in descriptor._collaboration_tool_names
                 ]
                 duration = None
                 scope = "thread_tree"
@@ -240,7 +240,6 @@ class _NativeInterception:
     ) -> _Descriptor | None:
         from .executor import Environment
         from .mcp import _MCP, _tool_names
-        from .native_agents import _COLLABORATION_TOOLS
 
         session = self.session
         selected: _Descriptor | None = None
@@ -253,7 +252,7 @@ class _NativeInterception:
         elif (
             session._native_agents is not None
             and call.namespace == "collaboration"
-            and call.name in _COLLABORATION_TOOLS
+            and call.name in session._native_agents._collaboration_tool_names
         ):
             selected = session._native_agents
         else:
@@ -627,6 +626,7 @@ class _NativeInterception:
     ) -> None:
         from ._function_tools import ToolContext
         from .mcp import _MCP, MCPCallContext, _tool_names
+        from .native_agents import NativeAgents
         from .session import (
             NativeError,
             _call_callback,
@@ -658,12 +658,16 @@ class _NativeInterception:
         try:
             if isinstance(state, _Submission):
                 await asyncio.wait((state.accepted,))
+            callback_id = call.call_id
+            if callback_id is None and (
+                isinstance(descriptor, _MCP)
+                or isinstance(descriptor, NativeAgents)
+                and call.route == "programmatic_tool_calling"
+            ):
+                callback_id = call.runtime_tool_call_id
             if (
                 not admitted()
-                or (
-                    call.call_id is None
-                    and (not isinstance(descriptor, _MCP) or call.runtime_tool_call_id is None)
-                )
+                or callback_id is None
                 or not native._handoff_native_interception(nonce)
             ):
                 return
@@ -806,11 +810,13 @@ class _NativeInterception:
             else:
                 approval = descriptor.approval
                 assert approval is not None
-                assert call.call_id is not None
+                if call.phase != "before":
+                    reply = '{"action":"continue"}'
+                    return
                 collab_context = ToolContext(
                     session._context,
                     state.handle,
-                    call.call_id,
+                    callback_id,
                     call=info,
                     realtime_usage=session.realtime_usage,
                 )
