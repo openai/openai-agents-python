@@ -22,6 +22,17 @@ class _SkillCopyBudget:
         self.lock = asyncio.Lock()
         self.members = 0
         self.bytes = 0
+        self.snapshot_digest: str | None = None
+        self.snapshot_pending = False
+        self.restore_candidate: tuple[int, int, str] | None = None
+
+    def _accept_snapshot(self, charge: tuple[int, int, str]) -> None:
+        self.members = max(self.members, charge[0])
+        self.bytes = max(self.bytes, charge[1])
+        self.snapshot_digest = charge[2]
+        self.restore_candidate = None
+        self.trusted = True
+        self.snapshot_pending = False
 
     def __deepcopy__(self, memo: dict[int, object]) -> "_SkillCopyBudget":
         # Trusted state aliases have been sharing one physical resource's quota.

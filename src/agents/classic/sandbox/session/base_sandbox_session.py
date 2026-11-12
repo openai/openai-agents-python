@@ -34,6 +34,8 @@ from ..files import FileEntry
 from ..manifest import Manifest
 from ..materialization import MaterializationResult, MaterializedFile, _SkillCopyBudget
 from ..types import ExecResult, ExposedPortEndpoint, User
+from ..util.blocking_io import run_blocking_workspace_io
+from ..util.checksums import sha256_io
 from ..util.parse_utils import parse_ls_la
 from ..workspace_paths import (
     WorkspacePathPolicy,
@@ -229,8 +231,50 @@ class BaseSandboxSession(abc.ABC):
         return self.state._native_skill_copy_budget
 
     def _reset_skill_copy_budget_for_fresh_workspace(self) -> None:
-        self.state._native_skill_copy_budget.trusted = False
-        self.state._native_skill_copy_budget = _SkillCopyBudget(trusted=True)
+        previous = self.state._native_skill_copy_budget
+        candidate = previous.restore_candidate
+        if (previous.trusted or previous.snapshot_pending) and previous.snapshot_digest is not None:
+            candidate = (previous.members, previous.bytes, previous.snapshot_digest)
+        previous.trusted = False
+        fresh = _SkillCopyBudget(trusted=True)
+        fresh.restore_candidate = candidate
+        self.state._native_skill_copy_budget = fresh
+
+    async def _prepare_skill_copy_budget(self) -> None:
+        budget = self._skill_copy_budget()
+        if not budget.snapshot_pending:
+            return
+        # Missing runtime lineage has been requiring a conservative retained-tree charge.
+        # Serialized counters and fingerprint claims have been staying outside this proof.
+        restored = _SkillCopyBudget(trusted=True)
+        restored.reserve(members=1)
+        pending = [(self._workspace_root_path(), 0)]
+        while pending:
+            directory, depth = pending.pop()
+            for entry in await self._ls_bounded(directory, max_entries=4097 - restored.members):
+                restored.reserve(members=1, bytes=max(0, entry.size))
+                if entry.is_dir():
+                    if depth >= 32:
+                        raise ValueError("Skill materialization exceeds the sandbox depth limit")
+                    pending.append((posix_path_as_path(coerce_posix_path(entry.path)), depth + 1))
+        budget.members = max(budget.members, restored.members)
+        budget.bytes = max(budget.bytes, restored.bytes)
+        budget.trusted = True
+        budget.snapshot_pending = False
+
+    async def _skill_snapshot_charge(self, archive: io.IOBase) -> tuple[int, int, str] | None:
+        budget = self._skill_copy_budget()
+        if not budget.snapshot_pending or not archive.seekable():
+            return None
+        candidate = budget.restore_candidate
+        if candidate is None and budget.snapshot_digest is not None:
+            candidate = (budget.members, budget.bytes, budget.snapshot_digest)
+        if (
+            candidate is not None
+            and await run_blocking_workspace_io(sha256_io, archive) == candidate[2]
+        ):
+            return candidate
+        return None
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""
@@ -355,6 +399,9 @@ class BaseSandboxSession(abc.ABC):
             )
 
     async def _restore_snapshot_and_reapply_ephemeral_on_resume(self) -> None:
+        budget = self._skill_copy_budget()
+        budget.snapshot_pending = budget.trusted or budget.snapshot_pending
+        budget.trusted = False
         await self._restore_snapshot_into_workspace_on_resume()
         if self.should_provision_manifest_accounts_on_resume():
             await self.provision_manifest_accounts()

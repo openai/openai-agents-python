@@ -1580,8 +1580,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             # Older snapshots may contain unsupported members. Reject them before discarding
             # the live files; keep hydrate_workspace's own validation for direct callers too.
             await run_blocking_workspace_io(validate_archive)
+            charge = await self._skill_snapshot_charge(archive)
             await self._clear_workspace_root_on_resume()
             await self.hydrate_workspace(archive)
+            if charge is not None:
+                self._skill_copy_budget()._accept_snapshot(charge)
         finally:
             with suppress(Exception):
                 archive.close()

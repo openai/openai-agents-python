@@ -966,7 +966,19 @@ async def test_native_lazy_index_rejects_swapped_source(
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
 @pytest.mark.parametrize("limit", ["bytes", "members"])
 @pytest.mark.parametrize(
-    "state_mode", ["shared", "resumed", "serialized", "pydantic_json", "pydantic_dict"]
+    "state_mode",
+    [
+        "shared",
+        "resumed",
+        "serialized",
+        "pydantic_json",
+        "pydantic_dict",
+        "snapshot_shared",
+        "snapshot_serialized",
+        "snapshot_repository",
+        "snapshot_mismatch",
+        "recreated",
+    ],
 )
 async def test_native_skill_budget_survives_environment_lease_retirement(
     tmp_path, monkeypatch, responses, limit, state_mode
@@ -983,16 +995,36 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
         (selected / "SKILL.md").write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
         if limit == "bytes":
             with (selected / "large.bin").open("wb") as handle:
-                handle.truncate(40 * 1024 * 1024)
+                handle.truncate(
+                    1024
+                    if state_mode in ("snapshot_repository", "snapshot_mismatch") and name == "beta"
+                    else 40 * 1024 * 1024
+                )
         else:
-            for index in range(2050):
+            for index in range(
+                1
+                if state_mode in ("snapshot_repository", "snapshot_mismatch") and name == "beta"
+                else 2050
+            ):
                 (selected / str(index)).touch()
 
     client = UnixLocalSandboxClient()
+    from agents.sandbox import LocalSnapshotSpec
+
     options = UnixLocalSandboxClientOptions()
-    borrowed = await client.create(manifest=Manifest(), options=options)
+    borrowed = await client.create(
+        manifest=Manifest(),
+        options=options,
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots")
+        if state_mode.startswith("snapshot")
+        else None,
+    )
     await borrowed.start()
     root = Path(borrowed.state.manifest.root)
+    skills_path = "stored-skills" if state_mode == "snapshot_serialized" else ".agents"
+    if state_mode == "snapshot_repository":
+        with (root / "unrelated-repository.bin").open("wb") as handle:
+            handle.truncate(80 * 1024 * 1024)
     saved = (
         client.serialize_session_state(borrowed.state)
         if state_mode == "serialized"
@@ -1019,11 +1051,32 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
                     headers={"Authorization": "Bearer " + peer.token},
                     cwd=str(root),
                     tools=(),
-                    capability_directories=[str(root / ".agents")],
+                    capability_directories=[str(root / skills_path)],
                 )
 
             for name in ("alpha", "beta"):
                 if name == "beta" and state_mode != "shared":
+                    if state_mode.startswith("snapshot") or state_mode == "recreated":
+                        await borrowed.aclose()
+                        saved = borrowed.state.model_copy(deep=True)
+                        if state_mode == "snapshot_mismatch":
+                            import tarfile
+
+                            with tarfile.open(saved.snapshot._path(), "a") as archive:
+                                if limit == "bytes":
+                                    member = tarfile.TarInfo("unaccounted.bin")
+                                    member.size = 40 * 1024 * 1024
+                                    with (tmp_path / "alpha/alpha/large.bin").open("rb") as data:
+                                        archive.addfile(member, data)
+                                else:
+                                    for index in range(2050):
+                                        archive.addfile(tarfile.TarInfo(f"unaccounted-{index}"))
+                        if state_mode == "snapshot_serialized":
+                            saved = client.deserialize_session_state(
+                                client.serialize_session_state(saved)
+                            )
+                        await client.delete(borrowed)
+                        assert not root.exists()
                     restored = (
                         client.deserialize_session_state(saved)
                         if state_mode == "serialized"
@@ -1039,7 +1092,8 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
                     session=current,
                     connect=connect,
                     skills=Skills(
-                        lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path(name)))
+                        skills_path=skills_path,
+                        lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path(name))),
                     ),
                 )
                 responses.respond(function_call("load_skill", {"skill_name": name}, name))
@@ -1050,9 +1104,9 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
                     provider=provider(responses),
                     tools=source.skill_tools,
                 ).session(environment=source) as session:
-                    if name == "alpha":
+                    if name == "alpha" or state_mode in ("snapshot_repository", "recreated"):
                         assert (
-                            await (await session.submit("Load alpha.")).get_result()
+                            await (await session.submit(f"Load {name}.")).get_result()
                         ).final_output == "done"
                     else:
                         error = "byte" if limit == "bytes" else "member"
@@ -1063,8 +1117,10 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
                         )
                         with pytest.raises(ValueError, match=message):
                             await (await session.submit("Load beta.")).get_result()
-            assert (root / ".agents/alpha/SKILL.md").exists()
-            assert not (root / ".agents/beta").exists()
+            assert (root / skills_path / "alpha/SKILL.md").exists() is (state_mode != "recreated")
+            assert (root / skills_path / "beta").exists() is (
+                state_mode in ("snapshot_repository", "recreated")
+            )
     finally:
         if alias is not None:
             await alias.aclose()
@@ -1246,3 +1302,43 @@ async def test_native_skill_quota_tracks_fresh_resource(
         await client.delete(original)
         if transport is not None:
             transport.close()
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal snapshot")
+async def test_nonseekable_snapshot_persist_retires_private_quota_receipt(tmp_path, monkeypatch):
+    import io
+
+    from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+    from agents.sandbox import LocalSnapshotSpec
+
+    client = UnixLocalSandboxClient()
+    resource = await client.create(snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"))
+    try:
+        await resource.start()
+        await resource.stop()
+        budget = resource.state._native_skill_copy_budget
+        assert budget.snapshot_digest is not None
+        budget.restore_candidate = (budget.members, budget.bytes, budget.snapshot_digest)
+        original = resource._inner.persist_workspace
+
+        class Stream(io.IOBase):
+            def __init__(self, source):
+                self.source = source
+
+            def read(self, size=-1):
+                return self.source.read(size)
+
+            def close(self):
+                self.source.close()
+                super().close()
+
+        async def nonseekable():
+            return Stream(await original())
+
+        monkeypatch.setattr(resource._inner, "persist_workspace", nonseekable)
+        await resource._inner._persist_snapshot()
+        assert budget.snapshot_digest is None
+        assert budget.restore_candidate is None
+    finally:
+        await resource.aclose()
+        await client.delete(resource)

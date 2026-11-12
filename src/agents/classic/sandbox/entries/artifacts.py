@@ -316,6 +316,7 @@ class LocalDir(BaseEntry):
                     pass
                 else:
                     return None
+            await session._prepare_skill_copy_budget()
             sandbox.reserve()
             return await self._apply(session, dest, base_dir, user=user, budget=_LocalDirBudget())
 
