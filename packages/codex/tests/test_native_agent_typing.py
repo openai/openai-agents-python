@@ -1232,3 +1232,14 @@ direct_body_formatter = function_tool(body_error_callback, error_function=body_e
 decorated_body_formatter = function_tool(error_function=body_error_formatter)(body_error_callback)
 assert_type(Agent(instructions="Read.", tools=[direct_body_formatter]), Agent[Application, str])
 assert_type(Agent(instructions="Read.", tools=[decorated_body_formatter]), Agent[Application, str])
+
+
+def configured_child_type_contract(child: Agent[Application, str]) -> None:
+    def extract(result: Completed[str]) -> str:
+        assert_type(result.final_output, str)
+        return result.final_output
+
+    declared_child = child.as_tool("nested_child", "Run the configured child.")
+    extracted_child = child.as_tool("extracted_child", custom_output_extractor=extract)
+    assert_type(Agent(instructions="Delegate.", tools=[declared_child]), Agent[Application, str])
+    assert_type(Agent(instructions="Delegate.", tools=[extracted_child]), Agent[Application, str])

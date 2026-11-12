@@ -30,6 +30,7 @@ from .manual import _CapturedManual as _CapturedManual
 from .realtime_result import BackgroundResult as BackgroundResult
 
 if TYPE_CHECKING:
+    from ._agent_tool import _ConfiguredAgentTool
     from ._function_tools import (
         FunctionTool,
         ToolContext,
@@ -688,6 +689,7 @@ class _CapturedFunction:
 
     _allow_run_error_formatter: bool = field(default=False, repr=False)
     _reparse_error_arguments: bool = field(default=False, repr=False)
+    configured_agent: _ConfiguredAgentTool | None = field(default=None, repr=False)
 
     @property
     def _requires_live_manual_session(self) -> bool:
