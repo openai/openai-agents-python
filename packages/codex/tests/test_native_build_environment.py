@@ -210,6 +210,8 @@ def test_native_download_discards_partial_attempt_and_reuses_verified_cache(monk
         == destination
     )
     assert len(calls) == 2 and delays == [1]
+    assert destination.read_bytes() == content
+    assert list(tmp_path.glob("*.part")) == []
 
 
 @pytest.fixture
@@ -320,26 +322,6 @@ def test_download_closes_partial_output_before_cleanup(native_downloader, monkey
     assert raised.value is failure
     assert len(calls) == 1
     assert not (tmp_path / "archive.gz").exists()
-    assert not list(tmp_path.glob("*.part"))
-
-
-def test_download_reuses_verified_cache(native_downloader, monkeypatch, tmp_path):
-    destination = tmp_path / "archive.gz"
-    content = b"verified cache"
-    destination.write_bytes(content)
-
-    def unexpected_request(*args, **kwargs):
-        pytest.fail("a verified cache entry must not trigger a download")
-
-    monkeypatch.setattr(native_downloader.urllib.request, "urlopen", unexpected_request)
-
-    assert (
-        native_downloader._download(
-            "https://example.invalid/archive.gz", destination, hashlib.sha256(content).hexdigest()
-        )
-        == destination
-    )
-    assert destination.read_bytes() == content
     assert not list(tmp_path.glob("*.part"))
 
 

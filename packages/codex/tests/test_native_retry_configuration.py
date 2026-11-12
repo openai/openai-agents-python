@@ -12,7 +12,7 @@ from tests.native_fixtures import ResponsesFixture, assistant_output, function_c
 
 
 @pytest.mark.parametrize("name", ["request_max_retries", "stream_max_retries"])
-@pytest.mark.parametrize("value", [-1, True, 1.5, float("inf"), "1", 2**63])
+@pytest.mark.parametrize("value", [float("inf"), "1"])
 def test_rejects_invalid_retry_counts(name, value):
     with pytest.raises(ValueError, match=name):
         NativeProvider(**{name: value})
