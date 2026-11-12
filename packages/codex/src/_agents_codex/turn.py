@@ -153,6 +153,7 @@ class Turn(Generic[OutputT]):
     _observation_after: int = field(repr=False, compare=False)
     _guardrail_results: list[Any] = field(repr=False, compare=False)
     _request_attempts: Any = field(repr=False, compare=False)
+    _original_input: UserInput | None = field(default=None, repr=False, compare=False)
 
     @property
     def request_attempts(self) -> RequestAttempts | None:
