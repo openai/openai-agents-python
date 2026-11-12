@@ -1,0 +1,315 @@
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index a944a900cc534daed93252e1462bac479f744a70..0fc9648a2463d992f396952cfc8df2a8208be39e 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -238,18 +238,37 @@ impl ResponsesWebsocketConnection {
+             .is_none_or(|stream| stream.pump_task.is_finished())
+     }
+ 
++    pub async fn stream_request(
++        &self,
++        request: ResponsesWsRequest<'_>,
++        connection_reused: bool,
++        turn_state: Option<Arc<OnceLock<String>>>,
++        observe_raw_provider_events: bool,
++    ) -> Result<ResponseStream, ApiError> {
++        self.stream_request_with_send_observer(
++            request,
++            connection_reused,
++            turn_state,
++            observe_raw_provider_events,
++            None,
++        )
++        .await
++    }
++
++    /// Observe entry into this request's send, independently of connection telemetry.
+     #[instrument(
+         name = "responses_websocket.stream_request",
+         level = "info",
+         skip_all,
+         fields(transport = "responses_websocket", api.path = "/responses")
+     )]
+-    pub async fn stream_request(
++    pub async fn stream_request_with_send_observer(
+         &self,
+         request: ResponsesWsRequest<'_>,
+         connection_reused: bool,
+         turn_state: Option<Arc<OnceLock<String>>>,
+         observe_raw_provider_events: bool,
++        send_observer: Option<Arc<dyn Fn() + Send + Sync>>,
+     ) -> Result<ResponseStream, ApiError> {
+         let (tx_event, rx_event) =
+             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
+@@ -341,6 +360,7 @@ impl ResponsesWebsocketConnection {
+                             &timing_log_context,
+                             rx_interrupt,
+                             observe_raw_provider_events && !timing_log_context.warmup,
++                            send_observer.as_deref(),
+                         ) => result,
+                         _ = &mut stopped => Err(ApiError::Stream("local response invocation stopped".into())),
+                         _ = tx_event.closed() => Err(ApiError::Stream(
+@@ -710,9 +730,13 @@ async fn run_websocket_response_stream(
+     timing_log_context: &ResponsesWebsocketTimingLogContext,
+     interrupt: oneshot::Receiver<()>,
+     observe_raw_provider_events: bool,
++    send_observer: Option<&(dyn Fn() + Send + Sync)>,
+ ) -> Result<(), ApiError> {
+     let mut last_server_model: Option<String> = None;
+     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
++    if let Some(observe_send) = send_observer {
++        observe_send();
++    }
+     send_websocket_request(
+         ws_stream,
+         request_text,
+@@ -1194,6 +1218,7 @@ mod tests {
+             &context,
+             rx_interrupt,
+             /*observe_raw_provider_events*/ false,
++            /*send_observer*/ None,
+         )
+         .await
+         .unwrap_err();
+@@ -1608,6 +1633,7 @@ mod tests {
+                 &context,
+                 rx_interrupt,
+                 /*observe_raw_provider_events*/ false,
++                /*send_observer*/ None,
+             )
+             .await
+             .unwrap_err();
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 85ecf7a99841e73f79b4a3e94c24197ee74a14c3..cb984ef92138c4f67800439a129ff94df3e1ab02 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2165,10 +2165,18 @@ impl ModelClientSession {
+                 request.input = input;
+             }
+             inference_trace_attempt.record_started(&request);
++            let request_transport = if prompt.prefer_buffered_response {
++                codex_extension_api::ModelRequestTransport::HttpJson
++            } else {
++                codex_extension_api::ModelRequestTransport::HttpSse
++            };
+             let client = ApiResponsesClient::new(
+                 crate::model_request::SamplingStopTransport {
+                     inner: transport,
+                     stop: prompt.sampling_stop.clone(),
++                    model_attempt: responses_metadata.model_attempt.clone(),
++                    operation: responses_metadata.model_attempt_operation(),
++                    transport: request_transport,
+                 },
+                 client_setup.api_provider,
+                 client_setup.api_auth,
+@@ -2192,16 +2200,16 @@ impl ModelClientSession {
+                     } else {
+                         codex_extension_api::ModelRequestWire::Responses
+                     },
+-                    if prompt.prefer_buffered_response {
+-                        codex_extension_api::ModelRequestTransport::HttpJson
+-                    } else {
+-                        codex_extension_api::ModelRequestTransport::HttpSse
+-                    },
++                    request_transport,
+                 )
+             };
+             let produced = crate::model_request::produce_response(
+-                &interceptors, &request,
+-            ).await.map_err(CodexErr::Fatal)?;
++                &interceptors,
++                &request,
++                responses_metadata.model_attempt.as_deref(),
++            )
++            .await
++            .map_err(CodexErr::Fatal)?;
+             let stream_result = if let Some(events) = produced {
+                 Ok((None, None, events, None, None))
+             } else if prompt.prefer_buffered_response {
+@@ -2573,12 +2581,19 @@ impl ModelClientSession {
+                     codex_extension_api::ModelRequestTransport::Websocket,
+                 )
+             };
++            let operation = responses_metadata.model_attempt_operation();
++            let send_observer = responses_metadata.model_attempt.clone().map(|attempt| {
++                Arc::new(move || {
++                    attempt.0.record(operation, codex_extension_api::ModelRequestTransport::Websocket);
++                }) as Arc<dyn Fn() + Send + Sync>
++            });
+             let stream_result = websocket_connection
+-                .stream_request(
++                .stream_request_with_send_observer(
+                     ws_request,
+                     self.websocket_session.connection_reused(),
+                     Some(Arc::clone(&self.turn_state)),
+                     prompt.observe_raw_provider_events,
++                    send_observer,
+                 )
+                 .await;
+             if let Some(original_item_ids) = original_item_ids {
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index c5381f073e52f0bd1214cb8df3971bed8c817767..a411a755b0dba48c3aebf3a977082e5004de4352 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -7,9 +7,12 @@ use codex_client::Response;
+ use codex_client::StreamResponse;
+ use codex_client::TransportError;
+ use codex_extension_api::ExtensionData;
++use codex_extension_api::ModelAttemptOperation;
++use codex_extension_api::ModelAttemptRoute;
+ use codex_extension_api::ModelRequestContributor;
+ use codex_extension_api::ModelRequestInput;
+ use codex_extension_api::ModelRequestKind;
++use codex_extension_api::ModelRequestTransport;
+ use codex_extension_api::ModelResponseInterceptor;
+ use codex_extension_api::ModelResponseStream;
+ use codex_extension_api::ModelToolAdmission;
+@@ -34,15 +37,25 @@ pub(crate) async fn wait_if_sampling_stopped(stop: Option<&TurnSamplingStop>) {
+ pub(crate) struct SamplingStopTransport {
+     pub(crate) inner: ReqwestTransport,
+     pub(crate) stop: Option<Arc<TurnSamplingStop>>,
++    pub(crate) model_attempt: Option<Arc<ModelAttemptRoute>>,
++    pub(crate) operation: ModelAttemptOperation,
++    // Buffered Responses also stream the response body to enforce its size limit.
++    pub(crate) transport: ModelRequestTransport,
+ }
+ 
+ impl HttpTransport for SamplingStopTransport {
+     async fn execute(&self, request: Request) -> Result<Response, TransportError> {
++        if let Some(attempt) = &self.model_attempt {
++            attempt.0.record(self.operation, self.transport);
++        }
+         self.inner.execute(request).await
+     }
+ 
+     async fn stream(&self, request: Request) -> Result<StreamResponse, TransportError> {
+         wait_if_sampling_stopped(self.stop.as_deref()).await;
++        if let Some(attempt) = &self.model_attempt {
++            attempt.0.record(self.operation, self.transport);
++        }
+         self.inner.stream(request).await
+     }
+ }
+@@ -200,11 +213,15 @@ mod tests;
+ pub(crate) async fn produce_response(
+     interceptors: &[Box<dyn ModelResponseInterceptor>],
+     request: &impl serde::Serialize,
++    model_attempt: Option<&ModelAttemptRoute>,
+ ) -> Result<Option<ModelResponseStream>, String> {
+     let mut producers = interceptors.iter().filter(|interceptor| interceptor.produces_response());
+     let Some(selected) = producers.next() else { return Ok(None); };
+     if producers.next().is_some() { return Err("Multiple native model producers selected".into()); }
+     let request = serde_json::to_value(request).map_err(|_| "Native model request serialization failed")?;
++    if let Some(attempt) = model_attempt {
++        attempt.0.unavailable();
++    }
+     let producer = selected.produce_response(request, None).ok_or("Selected native model producer is unavailable")?;
+     producer.await.map(Some)
+ }
+diff --git a/codex-rs/core/src/responses_metadata.rs b/codex-rs/core/src/responses_metadata.rs
+index bfdeb3b40f524401e1a57879ab2335a45130f588..d7124cc71d81cbb214ecbe046b5ad17fc2adbf04 100644
+--- a/codex-rs/core/src/responses_metadata.rs
++++ b/codex-rs/core/src/responses_metadata.rs
+@@ -1,6 +1,7 @@
+ use std::collections::BTreeMap;
+ use std::collections::HashMap;
+ use std::io::ErrorKind;
++use std::sync::Arc;
+ 
+ use codex_analytics::CompactionImplementation;
+ use codex_analytics::CompactionPhase;
+@@ -241,6 +242,8 @@ pub struct CodexResponsesMetadata {
+     pub(crate) window_number: Option<u64>,
+     pub(crate) context_window_id: Option<Uuid>,
+     pub(crate) request_kind: Option<CodexResponsesRequestKind>,
++    // SDK-local ownership. All provider metadata is projected explicitly below.
++    pub(crate) model_attempt: Option<Arc<codex_extension_api::ModelAttemptRoute>>,
+     pub(crate) forked_from_thread_id: Option<ThreadId>,
+     pub(crate) forked_from_ordinal_exclusive: Option<u64>,
+     pub(crate) parent_thread_id: Option<ThreadId>,
+@@ -286,6 +289,7 @@ impl CodexResponsesMetadata {
+             window_number: None,
+             context_window_id: None,
+             request_kind: None,
++            model_attempt: None,
+             forked_from_thread_id: None,
+             forked_from_ordinal_exclusive: None,
+             parent_thread_id: None,
+@@ -310,6 +314,17 @@ impl CodexResponsesMetadata {
+         }
+     }
+ 
++    pub(crate) fn model_attempt_operation(&self) -> codex_extension_api::ModelAttemptOperation {
++        use codex_extension_api::ModelAttemptOperation;
++        match self.request_kind {
++            Some(CodexResponsesRequestKind::Compaction(_)) => ModelAttemptOperation::Compaction,
++            Some(CodexResponsesRequestKind::Memory | CodexResponsesRequestKind::Prewarm) => {
++                ModelAttemptOperation::Internal
++            }
++            _ => ModelAttemptOperation::Generation,
++        }
++    }
++
+     pub(crate) fn has_turn_metadata(&self) -> bool {
+         self.request_kind.is_some()
+     }
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 468f4ee1b2c3c210a6cd5284ef77d9a840031a9e..e472317da76af7d347f9df19a64b64579644b507 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -759,6 +759,10 @@ impl Session {
+         context_window_id: uuid::Uuid,
+     ) -> CodexResponsesMetadata {
+         CodexResponsesMetadata {
++            model_attempt: turn_context
++                .extension_data
++                .get::<codex_extension_api::ModelAttemptRoute>()
++                .filter(|route| route.0.matches_root_turn(responses_metadata.root_turn_id.as_deref())),
+             window_number: Some(window_number),
+             context_window_id: Some(context_window_id),
+             mcp_attribution: Some(self.services.executed_tool_calls.mcp_attribution_snapshot()),
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 61ddcbcb8bb8e71dd7931fff99ba6bb3e7e9d185..c88a52fe916551c68d06e6abca65b90cd3a89ad2 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -160,6 +160,10 @@ pub use model_request::ToolsOnlyCallInput;
+ pub use model_request::ToolsOnlyWorkCancellation;
+ pub use model_request::TurnSamplingStop;
+ 
++mod model_attempt;
++pub use model_attempt::ModelAttemptOperation;
++pub use model_attempt::ModelAttemptRecorder;
++pub use model_attempt::ModelAttemptRoute;
+ mod model_request_observation;
+ pub use model_request::PreparedRequestAdmission;
+ pub use model_request::PreparedRequestData;
+diff --git a/codex-rs/ext/extension-api/src/model_attempt.rs b/codex-rs/ext/extension-api/src/model_attempt.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea07c2e7dce8d7601ca55432ed581d37a9c4407c
+--- /dev/null
++++ b/codex-rs/ext/extension-api/src/model_attempt.rs
+@@ -0,0 +1,24 @@
++//! SDK-local accounting for entry into the transport send operation.
++use std::sync::Arc;
++
++use crate::ModelRequestTransport;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum ModelAttemptOperation {
++    Generation,
++    Compaction,
++    Internal,
++}
++
++pub trait ModelAttemptRecorder: Send + Sync + std::fmt::Debug {
++    /// Check the immutable root identity before a child uses this route.
++    fn matches_root_turn(&self, root_turn_id: Option<&str>) -> bool;
++    /// Record that a caller-owned model producer handles this request.
++    fn unavailable(&self);
++    /// Record a send locally. This hook must neither block on delivery nor call host code.
++    fn record(&self, operation: ModelAttemptOperation, transport: ModelRequestTransport);
++}
++
++/// Captured for the exact native turn that owns the send.
++#[derive(Clone, Debug)]
++pub struct ModelAttemptRoute(pub Arc<dyn ModelAttemptRecorder>);

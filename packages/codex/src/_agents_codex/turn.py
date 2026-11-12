@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio as asyncio
+import json as json
 from collections.abc import Iterator as Iterator, Sequence as Sequence
 from dataclasses import dataclass as dataclass, field as field
 from typing import (
@@ -68,6 +69,65 @@ class TurnNeedsAttention:
     rate_limits: ApiRateLimits
 
 
+@dataclass(frozen=True, slots=True)
+class RequestAttemptCount:
+    """Native sends have been counting by owner, operation, and transport."""
+
+    owner: Literal["root", "child"]
+    operation: Literal["generation", "compaction", "internal"]
+    transport: Literal["http_sse", "http_json", "websocket"]
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RequestAttempts:
+    """Transport send counts for one explicitly submitted native turn.
+
+    Complete coverage has been applying to this native turn. Private corrections
+    have been using separate submissions. Borrowed model clients can hide sends.
+    Usage, accepted effects, and request budgets have been following their own
+    accounting contracts.
+    """
+
+    availability: Literal["complete", "partial", "unavailable"]
+    counts: tuple[RequestAttemptCount, ...]
+    borrowed_requests_unavailable: bool
+
+
+def _request_attempts_snapshot(capture: Any) -> RequestAttempts | None:
+    if capture is None:
+        return None
+    encoded = capture._snapshot()
+    if encoded is None:
+        return None
+    value = json.loads(encoded)
+    if (
+        not isinstance(value, dict)
+        or value.get("availability") not in ("complete", "partial", "unavailable")
+        or type(value.get("borrowed_requests_unavailable")) is not bool
+        or not isinstance(value.get("counts"), list)
+    ):
+        raise ValueError("Invalid native request-attempt snapshot")
+    counts = []
+    for row in value["counts"]:
+        if (
+            not isinstance(row, dict)
+            or row.get("owner") not in ("root", "child")
+            or row.get("operation") not in ("generation", "compaction", "internal")
+            or row.get("transport") not in ("http_sse", "http_json", "websocket")
+            or not isinstance(row.get("count"), str)
+            or not row["count"].isascii()
+            or not row["count"].isdecimal()
+        ):
+            raise ValueError("Invalid native request-attempt count")
+        counts.append(
+            RequestAttemptCount(row["owner"], row["operation"], row["transport"], int(row["count"]))
+        )
+    return RequestAttempts(
+        value["availability"], tuple(counts), value["borrowed_requests_unavailable"]
+    )
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class Turn(Generic[OutputT]):
     """One submitted root task, or a separately scoped native child turn.
@@ -88,9 +148,22 @@ class Turn(Generic[OutputT]):
     _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)
     _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)
     _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)
+    _observe_output_acceptance: bool = field(repr=False, compare=False)
     _native: Any = field(repr=False, compare=False)
     _observation_after: int = field(repr=False, compare=False)
     _guardrail_results: list[Any] = field(repr=False, compare=False)
+    _request_attempts: Any = field(repr=False, compare=False)
+
+    @property
+    def request_attempts(self) -> RequestAttempts | None:
+        """Opted-in new submissions have been retaining a native-step send snapshot.
+
+        None has been indicating no capture, including restored-only handles and
+        private child turns. Before native settlement, an enabled capture has been
+        returning None. Native failure and cancellation have
+        been leaving settled counts readable, including after Session close.
+        """
+        return _request_attempts_snapshot(self._request_attempts)
 
     @property
     def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
@@ -339,6 +412,8 @@ class Turn(Generic[OutputT]):
 
     def _root_result_ready(self) -> bool:
         """Check whether a root result can be read without waiting on native work."""
+        if self._observe_output_acceptance and self._result is not None:
+            return self._result.done()
         step = list(self._steps())[-1]
         completion = step._completion
         return (
@@ -371,6 +446,9 @@ class ChildTurn(Protocol):
     @property
     def run_usage(self) -> RunUsage: ...
 
+    @property
+    def request_attempts(self) -> RequestAttempts | None: ...
+
     async def get_result(self) -> Completed[str, ChildTurn]: ...
     async def wait_for_request_or_result(
         self,
@@ -400,9 +478,11 @@ def _root_turn(
         "_session": session,
         "_owner": session._owner,
         "_run_usage": _UsageCollector(),
+        "_request_attempts": None,
         "_completion": completion,
         "_continuation": None,
         "_result": None,
+        "_observe_output_acceptance": False,
         "_native": None,
         "_observation_after": observation_after,
         "_guardrail_results": [] if guardrail_results is None else guardrail_results,
@@ -428,9 +508,11 @@ def _child_turn(session: Session[Any, Any], native: Any) -> Turn[str]:
         "_session": session,
         "_owner": session._owner,
         "_run_usage": observed.run_usage if observed is not None else _UsageCollector(),
+        "_request_attempts": None,
         "_completion": None,
         "_continuation": None,
         "_result": None,
+        "_observe_output_acceptance": False,
         "_native": native,
         "_guardrail_results": observed.guardrail_results if observed is not None else [],
         "_observation_after": observed.observation_after

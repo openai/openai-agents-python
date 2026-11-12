@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -43,6 +45,8 @@ from tests.native_fixtures import (
     text_response,
     tool_output,
 )
+from tests.test_buffered_responses import json_peer, provider as buffered_provider
+from tests.test_native_provider_websockets import peer as websocket_peer
 
 PNG = (
     "data:image/png;base64,"
@@ -56,6 +60,155 @@ def completed(item: dict[str, Any]) -> dict[str, Any]:
 
 def provider(peer: ResponsesFixture) -> NativeProvider:
     return NativeProvider(base_url=peer.url, api_key="synthetic-hosted-tools-key")
+
+
+@asynccontextmanager
+async def hosted_transport(transport, raw):
+    if transport == "buffered":
+        async with json_peer() as peer:
+            peer.expected_model = "fixture-hosted-responses"
+            peer.json_replies.append(
+                {
+                    "id": "resp_hosted_transport",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [raw],
+                }
+            )
+            async with buffered_provider(peer) as native_provider:
+                yield peer, native_provider
+    else:
+        async with websocket_peer() as peer:
+            peer.respond(completed(raw))
+            async with peer.provider() as native_provider:
+                yield peer, native_provider
+
+
+@pytest.mark.parametrize("transport", ["buffered", "websocket"])
+async def test_hosted_transport_keeps_request_and_completed_provider_item(transport):
+    raw = {
+        "type": "file_search_call",
+        "id": "fs_transport",
+        "status": "completed",
+        "queries": ["synthetic record"],
+        "results": [],
+        "future_field": {"retained": True},
+    }
+    async with timeout(30), hosted_transport(transport, raw) as (peer, native_provider):
+        agent = Agent(
+            instructions="Search the synthetic store.",
+            model="fixture-hosted-responses",
+            provider=native_provider,
+            tools=[FileSearch(vector_store_ids=["vs_transport"], include_search_results=True)],
+        )
+        async with agent.session() as session:
+            await (await session.submit("Search.")).get_result()
+            item = [item async for item in session.items() if item["type"] == raw["type"]][0]
+            assert item["provider_data"] == raw
+            saved = SessionState.from_json((await session.save_state()).to_json())
+            assert raw["id"] in saved.to_json()
+        assert len(peer.requests) == 1
+        assert next(t for t in peer.requests[0]["tools"] if t["type"] == "file_search") == {
+            "type": "file_search",
+            "vector_store_ids": ["vs_transport"],
+        }
+        assert "file_search_call.results" in peer.requests[0]["include"]
+        if transport == "buffered":
+            assert peer.requests[0]["stream"] is False
+        else:
+            assert peer.connections > 0 and not peer.http_requests
+
+
+@pytest.mark.parametrize("transport", ["buffered", "websocket"])
+async def test_hosted_lite_rejection_precedes_transport_request(transport):
+    async with timeout(30), hosted_transport(transport, {}) as (peer, native_provider):
+        agent = Agent(
+            instructions="Search.",
+            provider=native_provider,
+            tools=[FileSearch(vector_store_ids=["vs_transport"])],
+        )
+        with pytest.raises(
+            (ValueError, RuntimeError),
+            match="Provider-hosted tools require Responses; Responses Lite is unsupported",
+        ):
+            async with agent.session() as session:
+                await (await session.submit("Search.")).get_result()
+        assert not peer.requests
+
+
+async def test_hosted_result_projection_only_bounds_a_later_request(responses):
+    marker = "synthetic-hosted-full-evidence-"
+    raw = {
+        "type": "file_search_call",
+        "id": "fs_projection",
+        "status": "completed",
+        "queries": ["synthetic totals"],
+        "results": [
+            {
+                "file_id": "file_projection",
+                "filename": "totals.txt",
+                "score": 1.0,
+                "text": "TX-001=25\nTX-002=50\n" + marker + "detail " * 20000,
+            }
+        ],
+    }
+    responses.respond(completed(raw))
+    responses.respond(assistant_output("Follow-up complete."))
+    assert len(json.dumps(raw).encode("utf-8")) > 65536
+    evidence = {}
+    summary = None
+
+    def project(request):
+        if summary is None:
+            return None
+        return [
+            *[item for item in request.items if item.get("type") != "file_search_call"],
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": json.dumps(summary)}],
+            },
+        ]
+
+    async with timeout(30), provider(responses) as borrowed:
+        agent = Agent(
+            instructions="Search synthetic records.",
+            model="fixture-hosted-responses",
+            provider=borrowed,
+            tools=[FileSearch(vector_store_ids=["vs_projection"], include_search_results=True)],
+            transform_context=project,
+        )
+        async with agent.session() as session:
+            # The provider has been completing hosted work before local projection.
+            await (await session.submit("Search.")).get_result()
+            assert len(responses.requests) == 1
+            accepted = [
+                item async for item in session.items() if item["type"] == "file_search_call"
+            ][0]
+            reference = "evidence/fs_projection"
+            evidence[reference] = accepted["provider_data"]
+            assert evidence[reference] == raw
+            facts = [
+                line.split("=")
+                for line in evidence[reference]["results"][0]["text"].splitlines()[:2]
+            ]
+            summary = {
+                "record_ids": [record_id for record_id, _ in facts],
+                "total": sum(int(value) for _, value in facts),
+                "evidence_ref": reference,
+            }
+            await (await session.submit("Use the retained totals.")).get_result()
+            saved = (await session.save_state()).to_json()
+        second_input = json.dumps(responses.requests[1]["input"], ensure_ascii=False)
+        assert len(responses.requests) == 2
+        assert len(second_input.encode("utf-8")) < 65536
+        assert marker not in second_input and reference in second_input
+        assert summary == {
+            "record_ids": ["TX-001", "TX-002"],
+            "total": 75,
+            "evidence_ref": reference,
+        }
+        assert marker in saved
 
 
 @pytest.mark.asyncio
