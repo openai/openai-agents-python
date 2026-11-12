@@ -668,7 +668,8 @@ async def test_new_remembered_rejection_retires_imported_approval(responses):
     assert "later" not in effects
 
 
-async def test_remembered_decision_uses_updated_effective_instructions(responses):
+@pytest.mark.parametrize("graph", [False, True], ids=["single", "graph"])
+async def test_remembered_decision_uses_updated_effective_instructions(responses, graph):
     effects = []
 
     @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
@@ -676,7 +677,12 @@ async def test_remembered_decision_uses_updated_effective_instructions(responses
         effects.append(value)
         return value
 
-    agent = Agent(instructions="Opening policy.", tools=[risky], provider=provider(responses))
+    agent = Agent(
+        instructions="Opening policy.",
+        tools=[risky],
+        handoffs=[Agent(name="delegate", instructions="Delegate policy.")] if graph else (),
+        provider=provider(responses),
+    )
     async with timeout(25):
         async with agent.session() as source:
             await source.update(instructions="Current policy.")
@@ -686,7 +692,11 @@ async def test_remembered_decision_uses_updated_effective_instructions(responses
             await (await next_request(source.interactions(), risky)).approve(always=True)
             await turn.get_result()
             saved = await source.save_state()
-        current = Agent(instructions="Current policy.", tools=[risky], provider=agent.provider)
+        current = (
+            agent
+            if graph
+            else Agent(instructions="Current policy.", tools=[risky], provider=agent.provider)
+        )
         responses.respond(function_call("risky", {"value": "later"}, "updated-later"))
         responses.respond(assistant_output("done"))
         async with current.session(
@@ -708,6 +718,68 @@ async def test_remembered_decision_uses_updated_effective_instructions(responses
                     result.cancel()
                     await asyncio.gather(result, return_exceptions=True)
     assert effects == ["first", "later"]
+
+
+@pytest.mark.parametrize("restore", [False, True], ids=["live", "portable"])
+async def test_updated_graph_instructions_require_a_new_remembered_approval(responses, restore):
+    effects = []
+
+    @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    agent = Agent(
+        name="root",
+        instructions="Opening policy.",
+        tools=[risky],
+        handoffs=[Agent(name="delegate", instructions="Delegate policy.")],
+        provider=provider(responses),
+    )
+
+    async def require_approval(session):
+        responses.respond(function_call("risky", {"value": "later"}, "changed-policy-later"))
+        responses.respond(assistant_output("done"))
+        turn = await session.submit("continue")
+        result = asyncio.create_task(turn.get_result())
+        approval = asyncio.create_task(next_request(session.interactions(), risky))
+        try:
+            done, _ = await asyncio.wait(
+                {result, approval}, return_when=asyncio.FIRST_COMPLETED, timeout=10
+            )
+            assert approval in done, "An earlier instruction policy bypassed approval"
+            assert effects == ["first"]
+            await approval.result().reject()
+            await result
+        finally:
+            for task in (approval, result):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(approval, result, return_exceptions=True)
+
+    async with timeout(25):
+        async with agent.session() as source:
+            responses.respond(function_call("risky", {"value": "first"}, "opening-policy-first"))
+            responses.respond(assistant_output("done"))
+            turn = await source.submit("begin")
+            await (await next_request(source.interactions(), risky)).approve(always=True)
+            await turn.get_result()
+            before = await source.save_state()
+            assert len(before.remembered_approvals) == 1
+
+            await source.update(instructions="Changed policy.")
+            if not restore:
+                await require_approval(source)
+                return
+            saved = await source.save_state()
+            assert saved.remembered_approvals == []
+
+        # A checkpoint saved by the older writer can still carry this decision.
+        saved = saved.model_copy(update={"remembered_approvals": before.remembered_approvals})
+        async with agent.session(
+            state=saved, verify_remembered_approvals=lambda _: True
+        ) as restored:
+            await require_approval(restored)
 
 
 @pytest.mark.parametrize("change", ["key", "profile", "schema", "policy", "unkeyed"])

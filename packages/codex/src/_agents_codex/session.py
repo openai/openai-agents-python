@@ -7227,12 +7227,18 @@ class Session(Generic[ContextT, OutputT]):
     def _approval_profile(self, profile_id: str | None) -> str:
         runtime = self._profiles.get(profile_id) if profile_id is not None else None
         agent = runtime.profile.declaration if runtime is not None else self._opening_agent
+        active_profile = self._profile_current is not None and (
+            self._profile_current[0] == profile_id
+        )
+        instructions = self._instructions
+        if runtime is not None and not active_profile:
+            instructions = runtime.instructions
         return hashlib.sha256(
             json.dumps(
                 [
                     self._agent_profile_fingerprint,
                     getattr(agent, "name", None),
-                    runtime.instructions if runtime is not None else self._instructions,
+                    instructions,
                 ]
             ).encode()
         ).hexdigest()
