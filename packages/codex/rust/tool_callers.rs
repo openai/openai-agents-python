@@ -65,7 +65,9 @@ impl<'de> Deserialize<'de> for ToolDeclarations {
             let limits = if let Some(callers) = callers {
                 if !matches!(
                     spec,
-                    DynamicToolSpec::Function(_) | DynamicToolSpec::Namespace(_)
+                    DynamicToolSpec::Function(_)
+                        | DynamicToolSpec::Custom(_)
+                        | DynamicToolSpec::Namespace(_)
                 ) {
                     return Err(D::Error::custom(
                         "allowedCallers requires a function declaration",

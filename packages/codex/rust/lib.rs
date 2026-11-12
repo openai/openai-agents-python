@@ -4625,7 +4625,7 @@ fn config_schema() -> &'static str {
 
 #[pyfunction]
 fn _validate_python_tool_declarations(specs_json: &str) -> PyResult<()> {
-    let specs: Vec<codex_protocol::dynamic_tools::DynamicToolSpec> =
+    let specs: tool_callers::ToolDeclarations =
         serde_json::from_str(specs_json)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
     python_tools::validate_declarations(&specs)
@@ -4634,8 +4634,9 @@ fn _validate_python_tool_declarations(specs_json: &str) -> PyResult<()> {
 
 #[pyfunction]
 fn _python_tool_parameters(specs_json: &str) -> PyResult<String> {
-    let specs = serde_json::from_str(specs_json).map_err(py_error)?;
-    let parameters = python_tools::model_parameters(specs).map_err(py_error)?;
+    let specs: tool_callers::ToolDeclarations =
+        serde_json::from_str(specs_json).map_err(py_error)?;
+    let parameters = python_tools::model_parameters(&specs).map_err(py_error)?;
     serde_json::to_string(&parameters).map_err(py_error)
 }
 

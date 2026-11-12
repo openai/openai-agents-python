@@ -921,9 +921,9 @@ pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
 
 // Return the actual model parameter schemas before the caller elects to publish
 // a candidate. Names, policy, and generation remain the live thread's authority.
-pub fn model_parameters(specs: Vec<DynamicToolSpec>) -> Result<Value> {
-    validate_slots(&specs)?;
-    let parameters = functions(&specs)
+pub fn model_parameters(specs: &[DynamicToolSpec]) -> Result<Value> {
+    validate_slots(specs)?;
+    let parameters = functions(specs)
         .into_iter()
         .map(|(_, tool)| dynamic_tool_to_responses_api_tool(&tool).map(|tool| tool.parameters))
         .collect::<Result<Vec<_>, _>>()?;
