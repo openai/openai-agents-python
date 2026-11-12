@@ -31,6 +31,7 @@ use crate::{
 pub struct ManagedModels {
     pub root: Option<String>,
     pub descendants: Vec<String>,
+    pub verify_current_default: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -174,6 +175,7 @@ impl Checkpoint {
     pub(crate) fn initial_managed_models(
         &self,
         python_specs: Option<&[DynamicToolSpec]>,
+        verify_current_default: bool,
     ) -> anyhow::Result<Option<ManagedModels>> {
         // This early read chooses the current native model services only.
         // restore_checkpoint validates a format-3 frame before lowering it
@@ -198,6 +200,7 @@ impl Checkpoint {
                 .filter(|child| child.status == "active")
                 .filter_map(|child| child.metadata.model.clone())
                 .collect(),
+            verify_current_default,
         }))
     }
 }

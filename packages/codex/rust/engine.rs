@@ -311,6 +311,10 @@ impl EngineState {
         let initial_model = initial_models
             .as_ref()
             .and_then(|models| models.root.clone());
+        let verify_current_default = initial_models
+            .as_ref()
+            .is_some_and(|models| models.verify_current_default);
+        let configured_model = config.model.clone();
         if native_agents {
             if let Some(model) = &initial_model {
                 config.model = Some(model.clone());
@@ -467,6 +471,21 @@ impl EngineState {
         models.set_api_key_model_discovery_enabled(
             config.features.enabled(Feature::ApiKeyModelDiscovery),
         );
+        if verify_current_default {
+            // Use the current root selection before admitting checkpoint model names.
+            let default = models
+                .get_default_model(
+                    &configured_model,
+                    false,
+                    RefreshStrategy::OnlineIfUncached,
+                    config.http_client_factory(),
+                )
+                .await;
+            ensure!(
+                initial_model.as_deref() == Some(default.as_str()),
+                "Authorize the saved manual checkpoint default model on the Agent"
+            );
+        }
         let models: SharedModelsManager = if sdk_user_input_enabled == Some(false) {
             Arc::new(ConfiguredModels { inner: models })
         } else {

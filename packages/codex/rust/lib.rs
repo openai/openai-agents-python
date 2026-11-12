@@ -4508,7 +4508,7 @@ fn create_engine<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, initial_checkpoint=None, initial_specs_json=None, initial_options_json="{}"))]
+#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, initial_checkpoint=None, initial_specs_json=None, initial_options_json="{}", _verify_current_default_model=false))]
 fn create_checkpoint_engine<'py>(
     py: Python<'py>,
     config_json: &str,
@@ -4518,6 +4518,7 @@ fn create_checkpoint_engine<'py>(
     initial_checkpoint: Option<&str>,
     initial_specs_json: Option<&str>,
     initial_options_json: &str,
+    _verify_current_default_model: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let lease = provider_lease.map(|lease| lease.inner.clone());
     let config_json = config_json.to_owned();
@@ -4551,11 +4552,16 @@ fn create_checkpoint_engine<'py>(
             let checkpoint: checkpoint::Checkpoint =
                 serde_json::from_value(payload).map_err(py_error)?;
             checkpoint
-                .initial_managed_models(specs.as_deref())
+                .initial_managed_models(specs.as_deref(), _verify_current_default_model)
                 .map_err(py_error)
         })
         .transpose()?
         .flatten();
+    if _verify_current_default_model && initial_model.is_none() {
+        return Err(py_error(
+            "Manual checkpoint has invalid accepted model settings",
+        ));
+    }
     async_bridge::future_into_py(py, async move {
         if let Some(lease) = &lease {
             lease.check_live()?;

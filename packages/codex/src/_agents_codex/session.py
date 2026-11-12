@@ -446,7 +446,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
 
 
 def _manual_restore_model_settings(
-    state: SessionState, *, authorized_override: str | None, declared_model: str | None
+    state: SessionState, *, authorized_model: str | None, trusted_default: str | None
 ) -> tuple[str, dict[str, Any]]:
     """Read only accepted model fields; connection and tool authority stay current."""
     metadata = state.root_metadata
@@ -462,22 +462,22 @@ def _manual_restore_model_settings(
         ):
             captured = payload.get("thread_settings")
             break
+    if not isinstance(captured, dict):
+        raise ValueError("Manual checkpoint has invalid accepted model settings")
+    default = captured.get("model")
+    if not isinstance(default, str) or not default.strip():
+        raise ValueError("Manual checkpoint has invalid accepted model settings")
     continuation = state.native_continuation
     if continuation is not None and continuation.model_override is not None:
-        if authorized_override != continuation.model_override:
+        if authorized_model != continuation.model_override:
             raise ValueError("Authorize the saved manual checkpoint model override with model=...")
-        if model != authorized_override:
+        if model != authorized_model:
             raise ValueError("Manual checkpoint has invalid accepted model settings")
-        if declared_model is None:
-            raise ValueError("Declare the saved default model on the restoring Agent")
-        model = declared_model
-    if (
-        not isinstance(model, str)
-        or not model.strip()
-        or not isinstance(captured, dict)
-        or captured.get("model") != model
-    ):
+    elif model != default:
         raise ValueError("Manual checkpoint has invalid accepted model settings")
+    if trusted_default is not None and default != trusted_default:
+        raise ValueError("Authorize the saved manual checkpoint default model on the Agent")
+    model = default
     settings: dict[str, Any] = {"model": model}
     for source, target in (
         ("reasoning_effort", "effort"),
@@ -3818,10 +3818,8 @@ class Session(Generic[ContextT, OutputT]):
             reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
             authorized_restore_model = None
             if state is not None:
-                continuation = state.native_continuation
                 if model_settings is not None or (
-                    model is not None
-                    and (continuation is None or continuation.model_override is None)
+                    model is not None and state.native_continuation is None
                 ):
                     raise ValueError(
                         "Opening model and model_settings overrides cannot be used with state; "
@@ -4043,14 +4041,24 @@ class Session(Generic[ContextT, OutputT]):
                 if restored_profile is not None
                 else output
             )
+            trusted_restore_default = restored_declaration.model
+            if (
+                continuation is not None
+                and continuation.model_override is None
+                and authorized_restore_model is not None
+            ):
+                trusted_restore_default = authorized_restore_model
             restored_model_settings = (
                 _manual_restore_model_settings(
                     saved,
-                    authorized_override=authorized_restore_model,
-                    declared_model=restored_declaration.model,
+                    authorized_model=authorized_restore_model,
+                    trusted_default=trusted_restore_default,
                 )
                 if state is not None and manual_restore
                 else None
+            )
+            verify_current_default = (
+                restored_model_settings is not None and trusted_restore_default is None
             )
             model, settings = _prepare_opening_model_settings(
                 agent,
@@ -4339,7 +4347,7 @@ class Session(Generic[ContextT, OutputT]):
                         "enabled": True,
                         "disable_in_process_fallback": True,
                     }
-                if model is not None:
+                if model is not None and not verify_current_default:
                     config["model"] = model
                 if codex_login is not None:
                     # Apps require an explicit MCP registration with its own credentials.
@@ -4578,6 +4586,11 @@ class Session(Generic[ContextT, OutputT]):
                                     "initial_checkpoint": checkpoint,
                                     "initial_specs_json": native_specs,
                                     "initial_options_json": json.dumps(options),
+                                    **(
+                                        {"_verify_current_default_model": True}
+                                        if verify_current_default
+                                        else {}
+                                    ),
                                 }
                                 if checkpoint is not None
                                 else {}

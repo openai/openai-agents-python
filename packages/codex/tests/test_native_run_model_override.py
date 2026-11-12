@@ -144,7 +144,10 @@ def test_run_sync_forwards_model_override_to_native_admission():
         asyncio.run(provider.aclose())
 
 
-async def test_manual_restore_keeps_the_admitted_override_and_future_root_default():
+@pytest.mark.parametrize(
+    "declare_default", [True, False], ids=["agent-default", "provider-default"]
+)
+async def test_manual_restore_keeps_the_admitted_override_and_future_root_default(declare_default):
     initial, forced, different = model_names()
     calls = []
     lookup = FunctionTool(
@@ -168,7 +171,12 @@ async def test_manual_restore_keeps_the_admitted_override_and_future_root_defaul
             return ModelResponse(message("done"))
 
     async with timeout(20), NativeProvider(model_backend=Model()) as provider:
-        agent = Agent(model=initial, instructions="Read A.", tools=[lookup], provider=provider)
+        agent = Agent(
+            model=initial if declare_default else None,
+            instructions="Read A.",
+            tools=[lookup],
+            provider=provider,
+        )
         async with agent.session() as source:
             await source.submit("read", model_override=forced)
             original_request = await next_request(source.interactions(), lookup)
@@ -198,7 +206,9 @@ async def test_manual_restore_keeps_the_admitted_override_and_future_root_defaul
             if row.get("type") == "turn_context" and payload.get("sdk_model_override") == forced:
                 turn_contexts.append(payload)
         assert changed_default and turn_contexts
-        with pytest.raises(ValueError, match="invalid accepted model settings"):
+        with pytest.raises(
+            (ValueError, RuntimeError), match="Authorize the saved manual checkpoint default"
+        ):
             async with agent.session(
                 state=SessionState.from_json(json.dumps(edited)), model=forced
             ):
@@ -211,6 +221,16 @@ async def test_manual_restore_keeps_the_admitted_override_and_future_root_defaul
         edited_state = SessionState.from_json(json.dumps(edited))
         with pytest.raises(ValueError, match="Authorize the saved manual checkpoint model"):
             async with agent.session(state=edited_state, model=forced):
+                pass
+        edited["native_continuation"].pop("model_override")
+        for payload in turn_contexts:
+            payload.pop("sdk_model_override")
+            if "model" in payload:
+                payload["model"] = different
+        with pytest.raises(
+            (ValueError, RuntimeError), match="Authorize the saved manual checkpoint default"
+        ):
+            async with agent.session(state=SessionState.from_json(json.dumps(edited))):
                 pass
         assert calls == [forced]
 
