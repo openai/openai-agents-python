@@ -36,7 +36,7 @@ index 427aa8d3b..d5a925c5a 100644
 +++ b/codex-rs/cli/src/doctor.rs
 @@ -2310,6 +2310,9 @@ async fn websocket_reachability_check(
      ));
- 
+
      let runtime_provider = create_model_provider(provider.clone(), auth_manager);
 +    let auth_changes = runtime_provider
 +        .auth_manager()
@@ -59,7 +59,7 @@ index 427aa8d3b..d5a925c5a 100644
 @@ -2355,6 +2361,34 @@ async fn websocket_reachability_check(
          }
      };
- 
+
 +    let api_auth = match codex_model_provider::prepare_websocket_auth(
 +        provider,
 +        auth.as_ref().map(CodexAuth::auth_mode),
@@ -97,7 +97,7 @@ index 716cbc7b8..8b3346826 100644
 +++ b/codex-rs/codex-api/Cargo.toml
 @@ -33,6 +33,7 @@ url = { workspace = true }
  uuid = { workspace = true }
- 
+
  [dev-dependencies]
 +tracing-subscriber = { workspace = true }
  anyhow = { workspace = true }
@@ -253,7 +253,7 @@ index 207a02ec7..ae6139291 100644
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -465,13 +465,16 @@ impl ResponsesWebsocketClient {
          self.auth.add_auth_headers(&mut headers);
- 
+
          let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
 -            ws_url,
 +            ws_url.clone(),
@@ -285,7 +285,7 @@ index 207a02ec7..ae6139291 100644
 @@ -530,6 +536,28 @@ impl ResponsesWebsocketClient {
      }
  }
- 
+
 +// A configured independent endpoint can reflect its private route in rejection fields.
 +// Keep typed retry/status metadata while leaving the ordinary response contract intact.
 +fn sanitize_handshake_rejection(error: ApiError, url: &Url, independent: bool) -> ApiError {
@@ -317,11 +317,11 @@ index 207a02ec7..ae6139291 100644
  ) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
 -    info!("connecting to websocket: {url}");
 +    info!("connecting to websocket");
- 
+
      let mut request = url
          .as_str()
 @@ -598,11 +626,11 @@ async fn connect_websocket(
- 
+
      let (stream, response) = match response {
          Ok((stream, response)) => {
 -            info!("successfully connected to websocket: {url}");
@@ -346,7 +346,7 @@ index 207a02ec7..ae6139291 100644
 @@ -1071,6 +1099,253 @@ mod tests {
      use std::collections::HashMap;
      use std::sync::Arc;
- 
+
 +    #[tokio::test]
 +    async fn independent_rejected_handshake_omits_reflected_response_fields() {
 +        use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -766,7 +766,7 @@ index 41a994202..d1b826237 100644
                  "query_params",
                  &self
 @@ -72,11 +77,15 @@ impl std::fmt::Debug for Provider {
- 
+
  impl Provider {
      pub fn url_for_path(&self, path: &str) -> String {
 +        self.url_for_path_from(&self.base_url, path)
@@ -785,7 +785,7 @@ index 41a994202..d1b826237 100644
              } else {
 @@ -112,7 +121,13 @@ impl Provider {
      }
- 
+
      pub fn websocket_url_for_path(&self, path: &str) -> Result<Url, url::ParseError> {
 -        let mut url = Url::parse(&self.url_for_path(path))?;
 +        let base = match path {
@@ -795,7 +795,7 @@ index 41a994202..d1b826237 100644
 +            _ => &self.base_url,
 +        };
 +        let mut url = Url::parse(&self.url_for_path_from(base, path))?;
- 
+
          let scheme = match url.scheme() {
              "http" => "ws",
 diff --git a/codex-rs/config/src/thread_config.rs b/codex-rs/config/src/thread_config.rs
@@ -820,7 +820,7 @@ index b9f89c95c..c8e078be2 100644
    optional string model_catalog_url = 19;
 +  optional string websocket_base_url = 20;
  }
- 
+
  message StringMap {
 diff --git a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs
 index 6ffc7bbdf..c65a0b8f0 100644
@@ -866,7 +866,7 @@ index da0af3bca..fec0c4a25 100644
 @@ -455,6 +458,22 @@ mod tests {
          assert_eq!(actual, expected);
      }
- 
+
 +    #[test]
 +    fn model_provider_proto_preserves_independent_websocket_endpoint() {
 +        use prost::Message;
@@ -1094,7 +1094,7 @@ index 02e69106b..a6b39bc2e 100644
 +++ b/codex-rs/ext/guardian-v2/Cargo.toml
 @@ -38,6 +38,7 @@ tracing = { workspace = true }
  uuid = { workspace = true }
- 
+
  [dev-dependencies]
 +codex-models-manager = { workspace = true }
  codex-model-provider-info = { workspace = true }
@@ -1177,7 +1177,7 @@ index cf5d463e6..367f64b3e 100644
              auth_changes,
 @@ -412,6 +432,14 @@ impl ConnectionPool {
          );
- 
+
          let provider_info = self.config.provider.info();
 +        let auth = codex_model_provider::prepare_websocket_auth(
 +            provider_info,
@@ -1473,7 +1473,7 @@ index 3a328dd22..f6686618e 100644
 @@ -296,7 +299,57 @@ other non-default provider fields are not supported"
          Ok(())
      }
- 
+
 +    fn validate_websocket_base_url(&self) -> std::result::Result<(), String> {
 +        if let Some(endpoint) = &self.websocket_base_url {
 +            let authority = endpoint
@@ -1529,7 +1529,7 @@ index 3a328dd22..f6686618e 100644
              gateway.validate(self)?;
          }
 @@ -434,6 +487,8 @@ other non-default provider fields are not supported"
- 
+
      /// Builds an API provider with managed residency taking precedence over configured headers.
      pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
 +        self.validate_websocket_base_url()
@@ -1769,7 +1769,7 @@ index f4d276465..fc0553aa8 100644
 @@ -181,6 +182,32 @@ pub fn unauthenticated_auth_provider() -> SharedAuthProvider {
      Arc::new(UnauthenticatedAuthProvider)
  }
- 
+
 +/// Freeze anonymous authentication before opening an independent WebSocket.
 +/// A lazy provider must not resolve a different credential during the handshake.
 +pub async fn prepare_websocket_auth(
@@ -1802,7 +1802,7 @@ index f4d276465..fc0553aa8 100644
 @@ -468,6 +495,82 @@ mod tests {
              .await;
      }
- 
+
 +    struct LazyWebsocketAuth {
 +        resolutions: Arc<AtomicUsize>,
 +        credential_on_first: bool,
