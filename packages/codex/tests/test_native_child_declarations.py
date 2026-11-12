@@ -21,6 +21,7 @@ from agents import (
     NativeRole,
     NativeRoleTool,
     NativeToolCall,
+    Session,
     ToolContext,
     function_tool,
 )
@@ -320,6 +321,17 @@ async def test_completed_native_role_tool_result_survives_a_root_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    terminal_received = asyncio.Event()
+    release_child = asyncio.Event()
+    settle = Session._settle_child_callbacks
+
+    async def delay_settlement(session: Session[Any, Any], child: Any) -> None:
+        await child.terminal
+        terminal_received.set()
+        await release_child.wait()
+        await settle(session, child)
+
+    monkeypatch.setattr(Session, "_settle_child_callbacks", delay_settlement)
     role_tool = NativeRoleTool(
         name="research_topic", role="research", description="Research a topic."
     )
@@ -343,7 +355,18 @@ async def test_completed_native_role_tool_result_survives_a_root_checkpoint(
             root = await original.submit("Read the record.")
             request = await next_request(original.interactions(), lookup)
             assert request.call_id == "root-manual"
-            state = SessionState.from_json((await original.suspend()).to_json())
+            await terminal_received.wait()
+            suspension = asyncio.create_task(original.suspend())
+            try:
+                started = asyncio.Event()
+                asyncio.get_running_loop().call_soon(started.set)
+                await started.wait()
+                if suspension.done():
+                    await suspension
+                    pytest.fail("Checkpoint finished before the child callbacks settled")
+            finally:
+                release_child.set()
+            state = SessionState.from_json((await suspension).to_json())
         async with agent.session(state=state, environment=declaration(executor)) as restored:
             pending = await next_request(restored.interactions(), lookup)
             assert pending.call_id == "root-manual"

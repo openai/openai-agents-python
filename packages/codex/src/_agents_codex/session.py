@@ -15179,10 +15179,19 @@ class Session(Generic[ContextT, OutputT]):
         assert active is not None
         # Waiting precedes checkpoint ownership: cancellation or close can
         # still stop a callback that has not reached a safe sealing boundary.
-        if self._child_admissions or any(
-            not child.completion.done() for child in self._child_callbacks.values()
-        ):
+        if self._child_admissions:
             raise RuntimeError("Cannot save while native child work or callbacks remain active")
+        children = tuple(
+            child.completion
+            for child in self._child_callbacks.values()
+            if not child.completion.done()
+        )
+        if children:
+            # Native settlement can precede delivery of the host terminal
+            # receipt. Join those owners before taking the checkpoint.
+            if not await self._native._manual_children_settled():
+                raise RuntimeError("Cannot save while native child work or callbacks remain active")
+            await asyncio.gather(*(asyncio.shield(child) for child in children))
         if not await self._wait_manual_boundary(active, require_request=True):
             raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
         self._check_open()
