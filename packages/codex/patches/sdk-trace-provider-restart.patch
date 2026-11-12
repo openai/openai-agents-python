@@ -157,7 +157,7 @@ index 8ed47834302b2aac0d7652b4594ea282228aa180..129a7b3a84484f9352e8bf1fb2556ee4
      let registration = {
          let span = context.span();
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2b084a855 100644
+index 7a3fdab5951012a4febbeec07a453805bf5c4755..64ffa471e071ca5e18f9fb8a085903587c6260f5 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -7,6 +7,7 @@ use serde::Deserialize;
@@ -168,7 +168,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
  use std::sync::{Arc, Mutex, OnceLock};
  use std::time::{Duration, Instant, UNIX_EPOCH};
  
-@@ -62,6 +63,41 @@ fn lock() -> std::sync::MutexGuard<'static, Routes> {
+@@ -62,6 +63,40 @@ fn lock() -> std::sync::MutexGuard<'static, Routes> {
      state().lock().unwrap_or_else(|e| e.into_inner())
  }
  
@@ -200,7 +200,6 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
 +        acknowledged: routes.sequence,
 +        delivered: routes.sequence,
 +        next_credential: routes.next_credential,
-+        credentials: std::mem::take(&mut routes.credentials),
 +        ..Routes::default()
 +    };
 +    GENERATION.fetch_add(1, Ordering::AcqRel);
@@ -210,7 +209,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
  pub fn register_trace_credentials(input: &str) -> Result<String, String> {
      if input.len() > 65536 {
          return Err("trace credential headers exceed limit".into());
-@@ -989,9 +1025,21 @@ impl SpanProcessor for TraceBatchProcessor {
+@@ -989,9 +1024,21 @@ impl SpanProcessor for TraceBatchProcessor {
  
  #[derive(Debug)]
  pub(crate) struct RoutedSpanProcessor<P> {
@@ -219,7 +218,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
 +    inner: P,
 +    default_enabled: bool,
 +    generation: TraceGeneration,
- }
++}
 +
 +impl<P> RoutedSpanProcessor<P> {
 +    pub(crate) fn new(inner: P, default_enabled: bool) -> Self {
@@ -229,12 +228,12 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
 +            generation: TraceGeneration::default(),
 +        }
 +    }
-+}
+ }
 +
  impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
      fn on_start(&self, span: &mut Span, cx: &Context) {
          let policy = crate::sdk_trace::policy_for_context(cx);
-@@ -1000,6 +1048,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+@@ -1000,6 +1047,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
          }
          self.inner.on_start(span, cx);
          let mut s = lock();
@@ -244,7 +243,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
          if let Some(data) = span.exported_data() {
              let descriptor =
                  retained_root_descriptor(&data, "start", policy.as_deref(), s.sequence + 1);
-@@ -1020,6 +1071,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+@@ -1020,6 +1070,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
              return;
          }
          let mut s = lock();
@@ -254,7 +253,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
          let descriptor = retained_root_descriptor(&span, "end", policy.as_deref(), s.sequence + 1);
          event(
              &mut s,
-@@ -1059,6 +1113,73 @@ mod tests {
+@@ -1059,6 +1112,73 @@ mod tests {
  
      static TEST_LOCK: Mutex<()> = Mutex::new(());
  
@@ -328,7 +327,7 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
      #[tokio::test]
      async fn detached_dispatch_wakes_on_acknowledgement_or_shutdown() {
          use std::future::Future;
-@@ -1132,10 +1253,7 @@ mod tests {
+@@ -1132,10 +1252,7 @@ mod tests {
          set_trace_routes(r#"{"processor_ids":["first"],"replace":false}"#).unwrap();
          let recorder = Recorder::default();
          let provider = SdkTracerProvider::builder()
@@ -340,7 +339,36 @@ index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2
              .build();
          let tracer = provider.tracer("route-test");
          let mut old = tracer.start("old");
-@@ -1581,14 +1699,14 @@ mod tests {
+@@ -1167,6 +1284,28 @@ mod tests {
+         assert!(s.dropped > 0);
+     }
+ 
++    #[test]
++    fn restart_rejects_unadmitted_credentials_and_preserves_counter() {
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        configure_default(true);
++        let stale = register_trace_credentials(r#"{"Authorization":"Bearer stale"}"#).unwrap();
++        let retained = Arc::downgrade(&credential(&stale).unwrap());
++        let counter = lock().next_credential;
++        begin_shutdown(Instant::now());
++        drop(HostTraceDeliveryShutdown);
++        restart_host_trace_delivery().unwrap();
++        configure_default(true);
++        assert!(credential(&stale).is_err());
++        assert!(retained.upgrade().is_none());
++        let fresh = register_trace_credentials(r#"{"Authorization":"Bearer fresh"}"#).unwrap();
++        assert_eq!(lock().next_credential, counter + 1);
++        assert_ne!(fresh, stale);
++        release_trace_credentials(&stale).unwrap();
++        assert!(credential(&fresh).is_ok());
++        release_trace_credentials(&fresh).unwrap();
++    }
++
+     #[test]
+     fn credentials_overlay_without_exposing_or_revoking_queued_lease() {
+         let _test = TEST_LOCK.lock().unwrap();
+@@ -1581,14 +1720,14 @@ mod tests {
          let release = Arc::new((Mutex::new(false), Condvar::new()));
          let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
          let provider = SdkTracerProvider::builder()

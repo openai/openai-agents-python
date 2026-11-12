@@ -151,6 +151,7 @@ def native_trace_child_env() -> dict[str, str]:
         "native_deadline_reset_case",
         "native_restart_case",
         "native_restart_credentials_case",
+        "native_restart_unadmitted_credentials_case",
         "native_restart_diagnostics_omitted_case",
         "native_restart_diagnostics_none_case",
         "native_outcome_privacy_case",
@@ -304,6 +305,58 @@ async def native_restart_credentials_case():
         with pytest.raises(RuntimeError, match="retired telemetry provider"):
             with telemetry.span("stale credential scope", options={"parent": old_scope.context}):
                 pass
+        await telemetry.shutdown()
+
+
+async def native_restart_unadmitted_credentials_case():
+    native = importlib.import_module("agents._native")
+    with collector() as (first_endpoint, first), collector() as (second_endpoint, second):
+        await telemetry.configure(
+            processors=[
+                telemetry.OpenAITraceExporter(api_key="synthetic-fallback", endpoint=first_endpoint)
+            ]
+        )
+        stale = native.register_trace_credentials(
+            json.dumps({"Authorization": "Bearer synthetic-stale-credential"})
+        )
+        await telemetry.shutdown()
+        await telemetry.configure(
+            processors=[
+                telemetry.OpenAITraceExporter(
+                    api_key="synthetic-fallback", endpoint=second_endpoint
+                )
+            ],
+            restart_after_shutdown=True,
+        )
+        with pytest.raises(RuntimeError, match="unknown trace credential reference"):
+            native.start_trace_span(
+                json.dumps(
+                    {"name": "paused old registration", "kind": "custom", "credential_ref": stale}
+                )
+            )
+        fresh = native.register_trace_credentials(
+            json.dumps({"Authorization": "Bearer synthetic-fresh-credential"})
+        )
+        assert int(fresh.rsplit("_", 1)[1]) > int(stale.rsplit("_", 1)[1])
+        native.release_trace_credentials(stale)
+        span = json.loads(
+            native.start_trace_span(
+                json.dumps(
+                    {"name": "fresh registration", "kind": "custom", "credential_ref": fresh}
+                )
+            )
+        )
+        native.end_trace_span(span["handle"], "{}")
+        native.release_trace_context(span["handle"])
+        native.release_trace_credentials(fresh)
+        assert (await telemetry.force_flush()).status == "success"
+        assert first == []
+        assert second
+        assert all(
+            {key.lower(): value for key, value in request["headers"].items()}["authorization"]
+            == "Bearer synthetic-fresh-credential"
+            for request in second
+        )
         await telemetry.shutdown()
 
 
