@@ -150,6 +150,8 @@ async def capture(
         operation_slots=None,
         output=SimpleNamespace(mode=output_mode, schema={"type": "string"}, fingerprint="schema"),
         output_override=False,
+        budget=None,
+        original_input=None,
         run_usage=full,
         model_run_usage=model,
         stopping=False,
