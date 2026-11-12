@@ -41,7 +41,7 @@ python -I .github/scripts/release_automation.py qualify-distributions \
 
 The collector retains four wheels and the source distribution from the Linux x86_64 artifact. Only the wheels are release assets. Retain the qualification record. Before publication, inspect the source/build and installed-wheel receipts from the selected artifacts. For Linux ARM64, confirm that the local Session test passed at both Python endpoints. Confirm that the packaged Python source and native inputs match the candidate. Do not substitute a locally built wheel or an artifact from a different repository or commit.
 
-New preview candidates target standard CPython 3.10–3.14 on Linux x86_64 and ARM64 with glibc 2.39 or newer, Windows x64, and macOS 11 or newer on Apple Silicon.
+New preview candidates target standard CPython 3.10–3.14 on Linux x86_64 and ARM64 with glibc 2.28 or newer, Windows x64, and macOS 11 or newer on Apple Silicon.
 
 ### Create wheel checksums
 
