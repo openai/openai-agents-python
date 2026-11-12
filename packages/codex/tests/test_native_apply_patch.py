@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,10 +11,12 @@ from agents import (
     Agent,
     ApplyPatchOperation,
     ApplyPatchResult,
+    ChatCompletionsModel,
     NativeError,
     NativeProvider,
     SessionState,
     ToolRef,
+    apply_patch_batch_tool,
     apply_patch_tool,
 )
 from tests.native_fixtures import assistant_output, responses as responses
@@ -95,6 +99,115 @@ async def test_native_editor_preserves_typed_operation_result_and_current_select
     assert len(responses.requests) == 2
 
 
+@pytest.mark.parametrize(
+    ("status", "batch"), [("completed", False), ("failed", False), ("failed", True)]
+)
+async def test_chat_completions_replays_native_editor_operation_and_result(status, batch):
+    editor = Editor("completed" if batch else status)
+    operation = {
+        "type": "update_file",
+        "path": "tenant://source",
+        "diff": "application-specific diff",
+        "move_to": "tenant://destination",
+    }
+    name = "apply_patch"
+    arguments = {"operation": operation}
+    operations = [operation]
+    expected = {"status": status, "output": "exact editor output"}
+    tool = apply_patch_tool
+    if batch:
+        loop_thread = threading.get_ident()
+
+        def sync_edit(op):
+            assert threading.get_ident() != loop_thread
+            return Editor.create_file(editor, op)
+
+        async def failed_update(op):
+            assert threading.get_ident() == loop_thread
+            editor.operations.append(op)
+            return ApplyPatchResult("failed", "editor refused update")
+
+        editor.create_file = sync_edit
+        editor.update_file = failed_update
+        editor.delete_file = sync_edit
+        operations = [
+            {"type": "create_file", "path": "tenant://source", "diff": "initial"},
+            operation,
+            {"type": "delete_file", "path": "tenant://destination"},
+        ]
+        name = "apply_patch_batch"
+        arguments = {"operations": operations}
+        expected = {
+            "results": [
+                {"status": "completed", "output": "exact editor output"},
+                {"status": "failed", "output": "editor refused update"},
+                {"status": "completed", "output": "exact editor output"},
+            ]
+        }
+        tool = apply_patch_batch_tool
+    requests = []
+
+    async def create(**body):
+        requests.append(body)
+        if len(requests) == 1:
+            [declaration] = body["tools"]
+            assert declaration["type"] == "function"
+            assert declaration["function"]["name"] == name
+            assert arguments.keys() <= declaration["function"]["parameters"]["properties"].keys()
+            message = {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_editor",
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(arguments),
+                        },
+                    }
+                ],
+            }
+            finish = "tool_calls"
+        else:
+            assistant = next(item for item in body["messages"] if item.get("tool_calls"))
+            [call] = assistant["tool_calls"]
+            assert call["id"] == "call_editor"
+            assert json.loads(call["function"]["arguments"]) == arguments
+            result = next(
+                item for item in body["messages"] if item.get("tool_call_id") == "call_editor"
+            )
+            assert json.loads(result["content"]) == expected
+            message = {"content": "done"}
+            finish = "stop"
+        return {
+            "id": f"chat_editor_{len(requests)}",
+            "choices": [{"finish_reason": finish, "message": message}],
+        }
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    async with NativeProvider(
+        base_url="https://example.invalid/v1",
+        api_key="synthetic",
+        model_backend=ChatCompletionsModel(client),
+    ) as provider:
+        agent = Agent(
+            instructions="Use the editor.",
+            model="gpt-5",
+            provider=provider,
+            tools=[tool(editor)],
+            model_settings={"tool_choice": ToolRef(name)},
+        )
+        assert (await agent.run("edit")).final_output == "done"
+
+    assert len(requests) == 2
+    assert [
+        (op.type, op.path, op.diff, op.move_to, op.ctx_wrapper.call_id) for op in editor.operations
+    ] == [
+        (op["type"], op["path"], op.get("diff"), op.get("move_to"), "call_editor")
+        for op in operations
+    ]
+
+
 async def test_native_editor_checkpoint_retains_accepted_result_without_replay(responses):
     editor = Editor()
     responses.respond(patch_call({"type": "delete_file", "path": "application-owned"}))
@@ -155,7 +268,8 @@ async def test_function_payload_cannot_enter_typed_editor(responses):
     assert any(tool.get("type") == "apply_patch" for tool in responses.requests[0]["tools"])
 
 
-async def test_editor_cancellation_joins_callback_before_provider_retirement(responses):
+@pytest.mark.parametrize("batch", [False, True])
+async def test_editor_cancellation_joins_callback_before_provider_retirement(responses, batch):
     entered, retired = asyncio.Event(), asyncio.Event()
     effects = []
     editor = Editor()
@@ -169,13 +283,31 @@ async def test_editor_cancellation_joins_callback_before_provider_retirement(res
             retired.set()
 
     editor.create_file = blocked
-    responses.respond(patch_call({"type": "create_file", "path": "application-owned", "diff": "d"}))
+    operation = {"type": "create_file", "path": "application-owned", "diff": "d"}
+    if batch:
+        responses.respond(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_editor_batch",
+                    "call_id": "editor-batch",
+                    "name": "apply_patch_batch",
+                    "arguments": json.dumps(
+                        {"operations": [operation, {"type": "delete_file", "path": "must-not-run"}]}
+                    ),
+                    "status": "completed",
+                },
+            }
+        )
+    else:
+        responses.respond(patch_call(operation))
     async with NativeProvider(base_url=responses.url, api_key="synthetic") as provider:
         agent = Agent(
             instructions="Use editor.",
             model="gpt-5",
             provider=provider,
-            tools=[apply_patch_tool(editor)],
+            tools=[(apply_patch_batch_tool if batch else apply_patch_tool)(editor)],
         )
         task = asyncio.create_task(agent.run("edit"))
         await asyncio.wait_for(entered.wait(), 10)
@@ -184,6 +316,7 @@ async def test_editor_cancellation_joins_callback_before_provider_retirement(res
             await task
         assert retired.is_set()
     assert effects == []
+    assert editor.operations == []
 
 
 async def _loss_worker():

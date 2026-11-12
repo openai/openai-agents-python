@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable
@@ -10,7 +11,8 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PlainValidator, StrictStr, TypeAdapter
 
-from ._function_tools import FunctionTool, ToolContext
+from ._compat import cancellation_requested
+from ._function_tools import FunctionTool, ToolContext, function_tool
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolOutput, _CapturedFunction
 
@@ -64,29 +66,40 @@ class _Delete(BaseModel):
     path: StrictStr
 
 
+_Operation = Annotated[_Create | _Update | _Delete, Field(discriminator="type")]
+
+
+class _EditorPatchArguments(BaseModel):
+    operation: _Operation
+
+
 class _Call(BaseModel):
     model_config = ConfigDict(extra="ignore")
     type: Literal["apply_patch_call"]
     call_id: Annotated[StrictStr, Field(min_length=1)]
-    operation: Annotated[_Create | _Update | _Delete, Field(discriminator="type")]
+    operation: _Operation
+
+
+def _editor_result(value: Any) -> tuple[Literal["completed", "failed"], str | None]:
+    try:
+        if value is None or isinstance(value, str):
+            return "completed", value
+        if not isinstance(value, ApplyPatchResult):
+            raise TypeError("Apply Patch editor must return ApplyPatchResult, str, or None")
+        status = "completed" if value.status is None else value.status
+        if status not in ("completed", "failed") or (
+            value.output is not None and not isinstance(value.output, str)
+        ):
+            raise TypeError("Invalid Apply Patch result")
+        return status, value.output
+    finally:
+        value = None
 
 
 def _output(value: Any) -> ToolOutput:
     try:
-        if value is None or isinstance(value, str):
-            result = ApplyPatchResult(output=value)
-        elif isinstance(value, ApplyPatchResult):
-            result = value
-        else:
-            raise TypeError("Apply Patch editor must return ApplyPatchResult, str, or None")
-        status = "completed" if result.status is None else result.status
-        if status not in ("completed", "failed") or (
-            result.output is not None and not isinstance(result.output, str)
-        ):
-            raise TypeError("Invalid Apply Patch result")
-        output = ToolOutput.text(
-            json.dumps({"status": status, "output": result.output}, allow_nan=False)
-        )
+        status, text = _editor_result(value)
+        output = ToolOutput.text(json.dumps({"status": status, "output": text}, allow_nan=False))
         output.success = status == "completed"
         return output
     finally:
@@ -110,6 +123,15 @@ class _Dispatch:
             return self.callbacks[operation.type](public)
         finally:
             del public, context, operation, self
+
+
+def _capture_editor(editor: ApplyPatchEditor) -> _Dispatch:
+    callbacks = {
+        kind: getattr(editor, kind) for kind in ("create_file", "update_file", "delete_file")
+    }
+    if not all(callable(callback) for callback in callbacks.values()):
+        raise TypeError("Apply Patch editor methods must be callable")
+    return _Dispatch(callbacks)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -147,18 +169,13 @@ def apply_patch_tool(
         context: object, policy_context: object, tool: FunctionTool[Any, Any, Any]
     ) -> _CapturedFunction:
         assert context is policy_context
-        callbacks = {
-            kind: getattr(editor, kind) for kind in ("create_file", "update_file", "delete_file")
-        }
-        if not all(callable(callback) for callback in callbacks.values()):
-            raise TypeError("Apply Patch editor methods must be callable")
         return _CapturedFunction(
             name=tool.name,
             spec_json=tool._spec_json(),
             model=_Call,
             field_names=("operation",),
             output_adapter=TypeAdapter(Annotated[Any, PlainValidator(_output)]),
-            callback=_Dispatch(callbacks),
+            callback=_capture_editor(editor),
             context_parameter=inspect.Parameter("context", inspect.Parameter.POSITIONAL_ONLY),
             callback_timeout=tool.callback_timeout,
             timeout_behavior=tool.timeout_behavior,
@@ -178,6 +195,50 @@ def apply_patch_tool(
         output_type=ToolOutput,
         _bind=bind,
         needs_approval=needs_approval,
+    )
+
+
+def apply_patch_batch_tool(
+    editor: ApplyPatchEditor,
+    *,
+    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+) -> FunctionTool[Any, ToolOutput, Any]:
+    """Apply an ordered batch with a borrowed editor.
+
+    An explicit failed result does not prevent subsequent operations. A thrown
+    exception or cancellation stops the batch, with earlier effects retained.
+    """
+    from .session import _call_callback
+
+    dispatch = _capture_editor(editor)
+
+    async def apply(
+        context: ToolContext[Any],
+        operations: Annotated[list[_Operation], Field(min_length=1)],
+    ) -> ToolOutput:
+        task = asyncio.current_task()
+        assert task is not None
+
+        def admit() -> bool:
+            return not cancellation_requested(task)
+
+        results = []
+        for operation in operations:
+            if not admit():
+                raise asyncio.CancelledError
+            value = await _call_callback(dispatch, admit, context, operation)
+            status, text = _editor_result(value)
+            results.append({"status": status, "output": text})
+        output = ToolOutput.text(json.dumps({"results": results}, allow_nan=False))
+        output.success = all(result["status"] == "completed" for result in results)
+        return output
+
+    return function_tool(
+        apply,
+        name="apply_patch_batch",
+        description="Apply an ordered batch of patches with the application's editor",
+        needs_approval=needs_approval,
+        error_function=None,
     )
 
 
