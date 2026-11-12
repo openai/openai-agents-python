@@ -146,7 +146,7 @@ These programs use the current SDK and model credentials:
 
 ### Push a reviewed Git commit from macOS
 
-The [host Git example](host_git.py) has been using a Python function tool for an authenticated push. The function runs in the application process and uses its Git credential helper. The example uses scripted model responses and requires only Git credentials.
+The [host Git example](host_git.py) has been using a Python function tool for an authenticated push. The function runs in the application process and uses its Git credential helper. The example uses scripted model responses and requires only Git credentials. The application's host callback applies its own destination and operation policy. Native `NetworkPolicy` governs executor commands.
 
 Use a trusted checkout whose `origin` has one credential-free HTTPS GitHub URL for fetch and push. Review the commit, Git configuration, hooks, and credential helper before authorizing the push. Keep the checkout's Git configuration and hooks under application control throughout the operation. Run the example from the repository root with a matching SDK wheel installed.
 

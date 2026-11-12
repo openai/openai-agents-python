@@ -11,6 +11,8 @@ from _agents_codex.turn import (
     Literal as Literal,
     OutputT as OutputT,
     PendingRequests as PendingRequests,
+    RequestAttemptCount as RequestAttemptCount,
+    RequestAttempts as RequestAttempts,
     SteeringReceipt as SteeringReceipt,
     Turn as Turn,
     TurnNeedsAttention as TurnNeedsAttention,

@@ -1909,7 +1909,14 @@ impl NativeThread {
         })
     }
 
-    fn _submit<'py>(&self, py: Python<'py>, params_json: &str) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (params_json, model_attempts=None))]
+    fn _submit<'py>(
+        &self,
+        py: Python<'py>,
+        params_json: &str,
+        model_attempts: Option<PyRef<'_, model_attempts::NativeModelAttemptCapture>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let model_attempts = model_attempts.map(|capture| capture.0.clone());
         let params: Value = serde_json::from_str(params_json).map_err(py_error)?;
         let context = params
             .get("tracing_context")
@@ -1937,7 +1944,7 @@ impl NativeThread {
                         "managed submit requires a replaceable tool session",
                     ));
                 }
-                let result = ops::submit_replaceable(&inner, params)
+                let result = ops::submit_replaceable_with_attempts(&inner, params, model_attempts)
                     .await
                     .map_err(py_error)?;
                 serde_json::to_string(&result).map_err(py_error)
@@ -4638,6 +4645,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<python_tools::ManualToolGrant>()?;
     module.add_class::<NativeChildTurn>()?;
     module.add_class::<NativeThread>()?;
+    module.add_class::<model_attempts::NativeModelAttemptCapture>()?;
     module.add_class::<StoredHistoryClose>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapter>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapterRequest>()?;
@@ -4703,4 +4711,5 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+mod model_attempts;
 mod request_metadata;

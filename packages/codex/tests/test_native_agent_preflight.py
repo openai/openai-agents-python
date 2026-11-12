@@ -18,8 +18,16 @@ from tests.test_native_agent import function_declarations
 from tests.test_native_manual_tools import LookupArgs
 
 
-@pytest.mark.parametrize("kind", ["automatic", "manual", "managed"])
-async def test_run_restores_target_default_selection_with_current_bindings(responses, kind):
+@pytest.mark.parametrize(
+    ("kind", "budget"),
+    [
+        ("automatic", None),
+        ("manual", None),
+        ("managed", None),
+        pytest.param("managed", RunBudget(max_requests=2), id="managed-request-budget"),
+    ],
+)
+async def test_run_restores_target_default_selection_with_current_bindings(responses, kind, budget):
     calls = []
 
     @function_tool(name="lookup", needs_approval=kind == "managed")
@@ -46,24 +54,25 @@ async def test_run_restores_target_default_selection_with_current_bindings(respo
         async with timeout(20):
             if kind != "automatic":
                 with pytest.raises(InteractionRequired) as pending:
-                    await source.run("Read B.", state=saved)
+                    await source.run("Read B.", state=saved, budget=budget)
                 assert pending.value.state is not None
                 assert calls == []
                 result = await source.run(
                     None,
                     state=pending.value.state,
+                    budget=budget,
                     on_interaction=lambda request: request.reply(
                         True if kind == "managed" else "current reply"
                     ),
                 )
             else:
-                result = await source.run("Read B.", state=saved)
+                result = await source.run("Read B.", state=saved, budget=budget)
         assert result.final_output == "B completed"
         assert calls == ([] if kind == "manual" else ["B"])
         assert len(responses.requests) == 2
 
 
-async def test_budgeted_restore_rejects_captured_active_profile_managed_approval(responses):
+async def test_token_budgeted_restore_rejects_captured_active_profile_managed_approval(responses):
     calls = []
 
     @function_tool(name="lookup", needs_approval=True)
@@ -82,7 +91,9 @@ async def test_budgeted_restore_rejects_captured_active_profile_managed_approval
             saved = await session.save_state()
         async with timeout(20):
             with pytest.raises(CapabilityError, match="cannot be captured"):
-                await source.run("Read B.", state=saved, budget=RunBudget(max_requests=5))
+                await source.run(
+                    "Read B.", state=saved, budget=RunBudget(max_requests=5, max_tokens=1000)
+                )
         assert responses.requests == []
         assert calls == []
 
@@ -161,7 +172,7 @@ async def test_budget_preflight_follows_static_handoff_operation_ceiling(respons
         async with timeout(20):
             if selection is None:
                 with pytest.raises(CapabilityError, match="cannot be captured"):
-                    await source.run("Read B.", budget=RunBudget(max_requests=5))
+                    await source.run("Read B.", budget=RunBudget(max_requests=5, max_tokens=1000))
                 assert not responses.requests
             else:
                 if selection:
@@ -190,7 +201,9 @@ async def test_budget_preflight_respects_saved_handoff_defaults(responses, selec
         async with timeout(20):
             if select_route == "manual":
                 with pytest.raises(CapabilityError, match="cannot be captured"):
-                    await root.run("Read C.", state=saved, budget=RunBudget(max_requests=5))
+                    await root.run(
+                        "Read C.", state=saved, budget=RunBudget(max_requests=5, max_tokens=1000)
+                    )
                 assert not responses.requests
             else:
                 if route:

@@ -9,13 +9,14 @@ from agents import (
     ApprovalRequested,
     InteractionExpiredError,
     NativeProvider,
+    RunBudget,
     function_tool,
 )
 from agents.state import SessionState
 
 
 async def main():
-    state_path, effects_path, url, decision, turn_id, mode = sys.argv[1:]
+    state_path, effects_path, url, decision, turn_id, mode, *budget_args = sys.argv[1:]
     guarded = mode == "guarded"
     effects = Path(effects_path)
     predicates = []
@@ -54,7 +55,10 @@ async def main():
             base_url=url, api_key="synthetic-restore", supports_websockets=False
         ),
     )
-    async with agent.session(state=SessionState.from_json(Path(state_path).read_text())) as session:
+    async with agent.session(
+        state=SessionState.from_json(Path(state_path).read_text()),
+        resume_budget=RunBudget(max_requests=int(budget_args[0])) if budget_args else None,
+    ) as session:
         turn = session.restored_turn
         assert turn is not None and turn.turn_id == turn_id
         request = None

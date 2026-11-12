@@ -42,6 +42,7 @@ def attributes(row):
         ("tool-error", "completed"),
         ("validation", "output_validation_failure"),
         ("provider", "provider_failure"),
+        ("retry", "completed"),
     ],
 )
 def test_native_export_reaches_real_collector(tmp_path, scenario, outcome):
@@ -86,9 +87,13 @@ def test_native_export_reaches_real_collector(tmp_path, scenario, outcome):
     requests = [log for log in logs if log.get("event.name") == "codex.api_request"]
     assert requests
     assert all(log["conversation.id"] == receipt["session_id"] for log in requests)
-    assert {str(log["http.response.status_code"]) for log in requests} == (
-        {"401"} if scenario == "provider" else {"200"}
-    )
+    statuses = [str(log["http.response.status_code"]) for log in requests]
+    if scenario == "retry":
+        assert receipt["provider_requests"] == len(requests) == 2
+        assert receipt["completed_model_requests"] == 1
+        assert statuses == ["503", "200"]
+    else:
+        assert set(statuses) == ({"401"} if scenario == "provider" else {"200"})
     if scenario.startswith("tool"):
         assert receipt["tool_calls"] == ["A"]
         assert receipt["history"]["function_results"][0]["name"] == "lookup"
