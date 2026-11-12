@@ -215,12 +215,12 @@ from .mcp import (
 from .model_context import ModelContextSnapshot, ModelRequestContext
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
-    _native_agent_options,
     ChildInvocation as ChildInvocation,
     ChildStepContext as ChildStepContext,
     NativeAgents as NativeAgents,
     NativeRoleToolInvocation,
     NativeRoleToolResult,
+    _native_agent_options,
 )
 from .native_interception import (
     Allow as Allow,
