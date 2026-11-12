@@ -145,6 +145,7 @@ def native_trace_child_env() -> dict[str, str]:
     "case_name",
     [
         "native_case",
+        "native_external_parent_case",
         "native_deadline_case",
         "native_deadline_reset_case",
         "native_outcome_privacy_case",
@@ -255,6 +256,58 @@ async def native_case():
         await telemetry.shutdown()
 
 
+async def native_external_parent_case():
+    events = []
+
+    class Recorder:
+        def on_trace_event(self, event):
+            events.append(event)
+
+    local_id = "1" * 32
+    remote_id = "2" * 32
+    remote_parent = "3" * 16
+    with collector() as (endpoint, received):
+        await telemetry.configure(
+            processors=[
+                Recorder(),
+                telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint),
+            ]
+        )
+        try:
+            with telemetry.trace("local workflow", options={"trace_id": local_id}):
+                pass
+            assert (await telemetry.force_flush()).status == "success"
+            assert any(
+                record.get("id") == f"trace_{local_id}"
+                for request in received
+                for record in request["payload"]["data"]
+            )
+
+            async with ScriptedResponses([text("synthetic result")]) as peer:
+                result = await Agent(instructions="Respond.", provider=peer.provider).run(
+                    "synthetic request",
+                    parent_trace={"traceparent": f"00-{remote_id}-{remote_parent}-01"},
+                )
+                assert result.final_output == "synthetic result"
+            flush = await telemetry.force_flush()
+            assert flush.status == "partial"
+            assert flush.failed_deliveries > 0
+            assert flush.dropped_records == 0
+            remote_events = [event for event in events if event["trace_id"] == remote_id]
+            assert any(
+                event["parent_span_id"] == remote_parent and event["lifecycle"] == "end"
+                for event in remote_events
+            )
+            records = [record for request in received for record in request["payload"]["data"]]
+            assert all(
+                record.get("id") != f"trace_{remote_id}"
+                and record.get("trace_id") != f"trace_{remote_id}"
+                for record in records
+            )
+        finally:
+            await telemetry.shutdown()
+
+
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_export_deadline_and_cancellation_close_trickling_connection(cancelled):
     import asyncio
@@ -330,6 +383,8 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     try:
         if cancelled:
             await asyncio.wait_for(request_started.wait(), 1)
+            # Cancellation latency, excluding transport startup.
+            started = time.monotonic()
             delivery.cancel("synthetic caller cancellation")
             with pytest.raises(asyncio.CancelledError) as failure:
                 await delivery
