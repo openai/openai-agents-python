@@ -24,7 +24,12 @@ class NativeRealtimeNoiseReduction(TypedDict):
 
 
 class NativeRealtimeServerVad(TypedDict, total=False):
-    """Server VAD settings; provider_data supplies tuning without replacing typed keys."""
+    """Server VAD settings with provider tuning and authoritative typed keys.
+
+    Empty or None provider_data has been omitting vendor leaves from updates.
+    Providers merging partial VAD settings have been retaining earlier leaves.
+    A complete VAD reset has been using turn_detection=None before re-enabling it.
+    """
 
     type: Required[Literal["server_vad"]]
     create_response: bool
@@ -38,7 +43,12 @@ class NativeRealtimeServerVad(TypedDict, total=False):
 
 
 class NativeRealtimeSemanticVad(TypedDict, total=False):
-    """Semantic VAD settings; provider_data supplies tuning without replacing typed keys."""
+    """Semantic VAD settings with provider tuning and authoritative typed keys.
+
+    Empty or None provider_data has been omitting vendor leaves from updates.
+    Providers merging partial VAD settings have been retaining earlier leaves.
+    A complete VAD reset has been using turn_detection=None before re-enabling it.
+    """
 
     type: Required[Literal["semantic_vad"]]
     create_response: bool

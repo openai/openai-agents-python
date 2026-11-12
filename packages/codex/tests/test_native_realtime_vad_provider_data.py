@@ -1,5 +1,6 @@
 """Vendor VAD data uses the existing native configuration owner."""
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -35,11 +36,30 @@ async def test_native_vad_provider_data_uses_one_wire_route(
         async with session.realtime(config=config) as voice:
             initial = await peer.frame(lambda frame: frame["type"] == "session.update")
             assert initial["session"]["audio"]["input"]["turn_detection"] == expected
+            peer.auto_ack_updates = False
+
+            async def acknowledged_update(update: Any) -> Any:
+                pending = asyncio.create_task(voice.update(update))
+                try:
+                    acknowledgement = await peer.pending_updates.get()
+                    assert peer.socket is not None
+                    await peer.socket.send_json(acknowledgement)
+                    await pending
+                    return acknowledgement["session"]["audio"]["input"]["turn_detection"]
+                finally:
+                    if not pending.done():
+                        pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
+
             for provider_data in ({"vendor_tuning": {"delay_ms": 5}}, {}, None):
                 after = len(peer.frames)
-                await voice.update(
+                acknowledged = await acknowledged_update(
                     {"turn_detection": {"type": mode, "provider_data": provider_data}}
                 )
+                assert acknowledged == {
+                    "type": mode,
+                    "vendor_tuning": {"enabled": False, "delay_ms": 5},
+                }
                 update = await peer.frame(
                     lambda frame: frame["type"] == "session.update", after=after
                 )
@@ -48,7 +68,8 @@ async def test_native_vad_provider_data_uses_one_wire_route(
                     **(provider_data or {}),
                 }
             after = len(peer.frames)
-            await voice.update({"output_speed": 1.25})
+            acknowledged = await acknowledged_update({"output_speed": 1.25})
+            assert acknowledged["vendor_tuning"] == {"enabled": False, "delay_ms": 5}
             sparse = await peer.frame(lambda frame: frame["type"] == "session.update", after=after)
             vad = sparse["session"]["audio"].get("input", {}).get("turn_detection", {"type": mode})
             assert vad == {"type": mode}
@@ -59,6 +80,7 @@ async def test_native_vad_provider_data_uses_one_wire_route(
                 )
             assert len(peer.frames) == after
             after = len(peer.frames)
-            await voice.update({"turn_detection": None})
+            assert await acknowledged_update({"turn_detection": None}) is None
             update = await peer.frame(lambda frame: frame["type"] == "session.update", after=after)
             assert update["session"]["audio"]["input"]["turn_detection"] is None
+            assert await acknowledged_update({"turn_detection": {"type": mode}}) == {"type": mode}
