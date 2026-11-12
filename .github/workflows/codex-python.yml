@@ -199,6 +199,8 @@ jobs:
       - name: Install native build tools
         if: inputs.native_source_run == ''
         uses: ./.github/actions/setup-native
+        env:
+          OPENAI_AGENTS_RESTORE_NATIVE_DEPENDENCIES: ${{ inputs.native_dependency_run != '' && '1' || '0' }}
       - name: Report the Linux ARM64 build toolchain
         if: inputs.runner == 'ubuntu-24.04-arm'
         run: |

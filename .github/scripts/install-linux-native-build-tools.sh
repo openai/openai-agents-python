@@ -27,8 +27,42 @@ install_manylinux_openssl() (
   } >> "$GITHUB_ENV"
 )
 
+install_manylinux_github_cli() (
+  version=2.103.3
+  case "$(uname -m)" in
+    x86_64)
+      architecture=amd64
+      checksum=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
+      ;;
+    aarch64)
+      architecture=arm64
+      checksum=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
+      ;;
+    *)
+      echo "Unsupported manylinux GitHub CLI architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+  release="gh_${version}_linux_${architecture}"
+  archive=$(mktemp "$RUNNER_TEMP/gh-XXXXXX.tar.gz")
+  trap 'rm -f -- "$archive"' EXIT
+  destination="$RUNNER_TEMP/agents-gh-$version"
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 2 \
+    --connect-timeout 8 --max-time 60 --output "$archive" \
+    "https://github.com/cli/cli/releases/download/v$version/$release.tar.gz"
+  printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --strict
+  mkdir -p -- "$destination"
+  tar -xzf "$archive" -C "$destination" --strip-components=2 "$release/bin/gh"
+  "$destination/gh" --version
+  printf '%s\n' "$destination" >> "$GITHUB_PATH"
+)
+
 if [[ -n "${OPENAI_AGENTS_NATIVE_BUILD_IMAGE:-}" ]]; then
   dnf install --assumeyes clang cmake pkgconf-pkg-config perl-core
+  if [[ "${OPENAI_AGENTS_RESTORE_NATIVE_DEPENDENCIES:-0}" == 1 ]] &&
+    ! gh --version >/dev/null 2>&1; then
+    install_manylinux_github_cli
+  fi
   install_manylinux_openssl
 elif ! command -v clang >/dev/null ||
   ! command -v cmake >/dev/null ||
