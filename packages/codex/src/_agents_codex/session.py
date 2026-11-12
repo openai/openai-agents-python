@@ -276,6 +276,7 @@ from .state import (
     LocalStorage as LocalStorage,
     NativeGoal as NativeGoal,
     SessionState as SessionState,
+    _RememberedApproval,
     _RequestRunBudgetCheckpoint,
 )
 from .subagents import Subagent as Subagent, _subagent as _subagent
@@ -1307,6 +1308,7 @@ class _RestoreDeclaration:
     resume_budget: RunBudget | None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
+    verify_remembered_approvals: Callable[[SessionState], bool] | None = None
 
 
 _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
@@ -2661,6 +2663,14 @@ def _complete_profile_mcp(
         )
 
 
+def _profile_fingerprint(
+    native: Any, profiles: Sequence[_AgentProfile], roster: list[dict[str, Any]]
+) -> str | None:
+    if not profiles:
+        return None
+    return cast(str, native._agent_profiles_fingerprint(json.dumps(roster), profiles[0].id))
+
+
 def _install_profile_options(
     options: dict[str, Any],
     profiles: tuple[_AgentProfile, ...],
@@ -3065,6 +3075,7 @@ def _prepare_native_checkpoint(
     payload.pop("repair_turns", None)
     payload.pop("repair_items", None)
     payload.pop("application_tool_outputs", None)
+    payload.pop("remembered_approvals", None)
     if "_sdk_default_tools" in saved.agent_options:
         restored_defaults = tuple(
             ToolRef(**item) for item in saved.agent_options["_sdk_default_tools"]
@@ -3407,6 +3418,23 @@ def _validate_siwc_opening_tools(
         )
 
 
+async def _verify_remembered_approvals(
+    saved: SessionState | None,
+    verifier: Callable[[SessionState], bool | Awaitable[bool]] | None,
+) -> Sequence[_RememberedApproval]:
+    try:
+        if verifier is not None and not callable(verifier):
+            raise TypeError("verify_remembered_approvals must be callable")
+        if saved is None or not saved.remembered_approvals or verifier is None:
+            return ()
+        detached = SessionState.from_json(saved.to_json())
+        if await _call_callback(verifier, lambda: True, detached) is not True:
+            return ()
+        return tuple(saved.remembered_approvals)
+    finally:
+        del verifier
+
+
 async def _opening_provider_config(
     provider: NativeProvider,
     opening: _OpeningOwner,
@@ -3514,6 +3542,52 @@ def _capture_opening_agent(
     )
 
 
+def _private_default_opening_candidates(
+    agent: Agent[Any, Any],
+    *,
+    atomic_first_turn: bool,
+    private_text_run: bool,
+    tools: Sequence[Tool[Any]],
+    native_specs: str,
+) -> tuple[bool, bool]:
+    """Capture default-provider candidates before narrowing atomic opening intent."""
+    eligible = atomic_first_turn and private_text_run and agent.provider is None
+    return (
+        eligible
+        and bool(tools)
+        and all(spec["type"] in ("function", "namespace") for spec in json.loads(native_specs)),
+        eligible and not tools,
+    )
+
+
+def _default_private_tls_profile(
+    provider: NativeProvider, provider_config: Mapping[str, Any], websockets_enabled: bool
+) -> bool:
+    return (
+        provider_config["model_provider"] == "native_agent"
+        and provider.supports_websockets is None
+        and websockets_enabled
+        and not provider._routing_config()
+        and sys.platform == "linux"
+        and not any(
+            name in os.environ
+            for name in (
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "REQUEST_METHOD",
+                "CODEX_SANDBOX",
+                "CODEX_CA_CERTIFICATE",
+                "SSL_CERT_DIR",
+                "SSL_CERT_FILE",
+            )
+        )
+    )
+
+
 def _supports_atomic_first_turn(
     agent: Agent[Any, Any],
     *,
@@ -3579,6 +3653,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         context: ContextT | None = None,
         state: SessionState | ManagedWorkspaceCheckpoint | None = None,
+        verify_remembered_approvals: Callable[[SessionState], bool | Awaitable[bool]] | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         resume_budget: RunBudget | None = None,
         initial_messages_json: str | None = None,
@@ -3672,6 +3747,8 @@ class Session(Generic[ContextT, OutputT]):
                 agent = selected.declaration
                 if resume_budget is None:
                     resume_budget = selected.resume_budget
+                if verify_remembered_approvals is None:
+                    verify_remembered_approvals = selected.verify_remembered_approvals
                 if function_concurrency_omitted:
                     max_function_concurrency = selected.max_function_concurrency
                 if retention_omitted:
@@ -3709,6 +3786,7 @@ class Session(Generic[ContextT, OutputT]):
             if not isinstance(programmatic_tool_calling, bool):
                 raise TypeError("programmatic_tool_calling must be a bool")
             checkpoint = None
+            approval_checkpoint: SessionState | None = None
             manual_restore = False
             continuation = None
             restored_budget = None
@@ -3726,6 +3804,7 @@ class Session(Generic[ContextT, OutputT]):
                 # Capture caller-owned data before the first await. The native
                 # importer validates identities, revision, and current tool specs.
                 saved = SessionState.from_json(state.to_json())
+                approval_checkpoint = saved
                 restored_budget = _RunBudget.restore_checkpoint(saved.run_budget, resume_budget)
                 saved_plan_provider = _checkpoint_plan_provider(saved, auth)
                 if not uses_siwc:
@@ -3927,16 +4006,22 @@ class Session(Generic[ContextT, OutputT]):
                     tools=available,
                 )
             )
-            # Owned defaults keep ordinary startup and its existing close custody.
-            _private_default_opening = (
-                _atomic_first_turn
-                and _private_text_run
-                and agent.provider is None
-                and not available
+            # Capture owned eligibility before narrowing explicit-provider atomic admission.
+            _private_wss_candidate, _private_default_opening = _private_default_opening_candidates(
+                agent,
+                atomic_first_turn=_atomic_first_turn,
+                private_text_run=_private_text_run,
+                tools=available,
+                native_specs=native_specs,
             )
             _atomic_first_turn = _atomic_first_turn and agent.provider is not None
             environment = opening.environment
         try:
+            verification = _verify_remembered_approvals(
+                approval_checkpoint, verify_remembered_approvals
+            )
+            verify_remembered_approvals = None
+            remembered_approvals = await verification
             if environment is not None and not isinstance(environment, Environment):
                 if not isinstance(environment, AbstractAsyncContextManager):
                     raise TypeError("environment must be an Environment or async context manager")
@@ -4008,11 +4093,7 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 for server in declarations
             )
-            profile_fingerprint = (
-                native._agent_profiles_fingerprint(json.dumps(profile_roster), profiles[0].id)
-                if profiles
-                else None
-            )
+            profile_fingerprint = _profile_fingerprint(native, profiles, profile_roster)
             if executor is not None:
                 executor._check_context(context)
             home: TemporaryDirectory[str] | None = None
@@ -4089,7 +4170,7 @@ class Session(Generic[ContextT, OutputT]):
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
-                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
+                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool, bool]:
                     private_run = (
                         (_atomic_first_turn or _private_default_opening)
                         and observation_retention == "bounded"
@@ -4112,34 +4193,29 @@ class Session(Generic[ContextT, OutputT]):
                     if (
                         private_run
                         and (_private_text_run or use_completed_owner)
-                        and provider_config["model_provider"] == "native_agent"
-                        and provider.supports_websockets is None
-                        and websockets_enabled
-                        and not provider._routing_config()
-                        and sys.platform == "linux"
-                        and not any(
-                            name in os.environ
-                            for name in (
-                                "HTTP_PROXY",
-                                "http_proxy",
-                                "HTTPS_PROXY",
-                                "https_proxy",
-                                "ALL_PROXY",
-                                "all_proxy",
-                                "REQUEST_METHOD",
-                                "CODEX_SANDBOX",
-                                "CODEX_CA_CERTIFICATE",
-                                "SSL_CERT_DIR",
-                                "SSL_CERT_FILE",
-                            )
+                        and _default_private_tls_profile(
+                            provider, provider_config, websockets_enabled
                         )
                     ):
                         private_http = True
                         websockets_enabled = False
-                    return use_completed_owner, websockets_enabled, private_http
+                    private_wss_tls = (
+                        _private_wss_candidate
+                        and observation_retention == "bounded"
+                        and provider.model_backend is None
+                        and provider.auth is None
+                        and _tracing_context is None
+                        and not output.max_retries
+                        and _default_private_tls_profile(
+                            provider, provider_config, websockets_enabled
+                        )
+                    )
+                    return use_completed_owner, websockets_enabled, private_http, private_wss_tls
 
-                use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
-                _atomic_first_turn = _atomic_first_turn or use_completed_owner
+                use_completed_owner, websockets_enabled, private_http, private_wss_tls = (
+                    private_run_policy(provider)
+                )
+                _atomic_first_turn = any((_atomic_first_turn, use_completed_owner, private_wss_tls))
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
@@ -4195,6 +4271,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **({"_sdk_websocket_tls": True} if private_wss_tls else {}),
                     **guidance_options,
                     **(
                         {"user_instructions_appendix": lease._workspace_instructions}
@@ -4429,8 +4506,9 @@ class Session(Generic[ContextT, OutputT]):
                                 json.dumps(settings),
                                 api_key=opening.api_key or "",
                                 provider_lease=provider_lease,
-                                _share_model_http=True,
+                                _share_model_http=not private_wss_tls,
                                 _private_http=private_http,
+                                **({"_process_private_runtime": True} if private_wss_tls else {}),
                             )
                         ),
                     )
@@ -4635,6 +4713,7 @@ class Session(Generic[ContextT, OutputT]):
                     session._native._enable_model_producer(True)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
+                options.pop("_sdk_websocket_tls", None)
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
@@ -4730,6 +4809,7 @@ class Session(Generic[ContextT, OutputT]):
                         cast(str, _completed_input),
                     )
                     return session
+                session._restore_remembered_approvals(remembered_approvals)
                 session._start_readers()
                 opening.disown(session)
                 session._environment_lease = lease
@@ -4971,6 +5051,8 @@ class Session(Generic[ContextT, OutputT]):
         self._home = home
         self._catalog = catalog
         self._approval_decisions: dict[tuple[str | None, str, int, int], tuple[bool, str]] = {}
+        self._remembered_approvals: dict[tuple[str | None, str, str], _RememberedApproval] = {}
+        self._restored_approval_slots: dict[tuple[str | None, int, int], _RememberedApproval] = {}
         self._approval_preparations: set[int] = set()
         self._approval_ready: dict[int, _ApprovalArguments] = {}
         self._max_function_concurrency = max_function_concurrency
@@ -7111,6 +7193,33 @@ class Session(Generic[ContextT, OutputT]):
             if message.get("_sdk_restored_approval"):
                 required = True
             else:
+                restored_decision = (
+                    self._restored_approval_slots.pop(
+                        (message.get("profile_id"), request._approval_generation, request._slot),
+                        None,
+                    )
+                    if request.subagent_id is None
+                    else None
+                )
+                # The active instruction policy can change after verified import.
+                if (
+                    restored_decision is not None
+                    and restored_decision.profile
+                    == self._approval_profile(restored_decision.profile_id)
+                ):
+                    self._approval_decisions[
+                        (
+                            message.get("profile_id"),
+                            str(message.get("profile_epoch")),
+                            request._approval_generation,
+                            id(entry.declaration),
+                        )
+                    ] = (
+                        restored_decision.approve,
+                        _DEFAULT_APPROVAL_REASON
+                        if restored_decision.reason is None
+                        else restored_decision.reason,
+                    )
                 cached = self._approval_decisions.get(
                     (
                         message.get("profile_id"),
@@ -7165,6 +7274,90 @@ class Session(Generic[ContextT, OutputT]):
                 state.changed.set()
             self._observations.notify()
 
+    def _approval_profile(self, profile_id: str | None) -> str:
+        runtime = self._profiles.get(profile_id) if profile_id is not None else None
+        agent = runtime.profile.declaration if runtime is not None else self._opening_agent
+        active_profile = self._profile_current is not None and (
+            self._profile_current[0] == profile_id
+        )
+        instructions = self._instructions
+        if runtime is not None and not active_profile:
+            instructions = runtime.instructions
+        return hashlib.sha256(
+            json.dumps(
+                [
+                    self._agent_profile_fingerprint,
+                    getattr(agent, "name", None),
+                    instructions,
+                ]
+            ).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _approval_signature(entry: _CapturedApproval) -> str:
+        declaration = entry.declaration
+        return hashlib.sha256(
+            json.dumps(
+                [
+                    json.loads(entry.spec_json),
+                    entry.output_adapter.json_schema(),
+                    "predicate"
+                    if callable(declaration.needs_approval)
+                    else declaration.needs_approval,
+                    declaration.run_before_approval,
+                    declaration.before is not None,
+                    declaration.after is not None,
+                    declaration.finish_turn,
+                ],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    def _approval_catalog(self, profile_id: str | None) -> _ToolCatalog:
+        if profile_id is None or (
+            self._profile_current is not None and profile_id == self._profile_current[0]
+        ):
+            return self._catalog
+        return self._profiles[profile_id].catalog
+
+    def _current_remembered_approvals(self) -> list[_RememberedApproval]:
+        records = []
+        catalogs = (
+            [(key, self._approval_catalog(key)) for key in self._profiles]
+            if self._profiles
+            else [(None, self._catalog)]
+        )
+        for profile_id, catalog in catalogs:
+            for entry in catalog.tools:
+                if (
+                    not isinstance(entry, _CapturedApproval)
+                    or entry.declaration.approval_key is None
+                ):
+                    continue
+                key = (profile_id, entry.declaration.approval_key, self._approval_signature(entry))
+                record = self._remembered_approvals.get(key)
+                if record is not None and record.profile == self._approval_profile(profile_id):
+                    records.append(record)
+        return records
+
+    def _restore_remembered_approvals(self, records: Sequence[_RememberedApproval]) -> None:
+        for record in records:
+            profile_id = record.profile_id
+            if profile_id is not None and profile_id not in self._profiles:
+                continue
+            if record.profile != self._approval_profile(profile_id):
+                continue
+            catalog = self._approval_catalog(profile_id)
+            for slot, entry in enumerate(catalog.tools):
+                if (
+                    isinstance(entry, _CapturedApproval)
+                    and entry.declaration.approval_key == record.key
+                    and self._approval_signature(entry) == record.signature
+                ):
+                    self._remembered_approvals[(profile_id, record.key, record.signature)] = record
+                    # Bind once to the freshly admitted catalog, never to a later replacement.
+                    self._restored_approval_slots[(profile_id, catalog.generation, slot)] = record
+
     async def _decide_approval(
         self,
         request: ApprovalRequested[Any],
@@ -7191,6 +7384,28 @@ class Session(Generic[ContextT, OutputT]):
             request._approval_generation,
             id(request._declaration),
         )
+        record: _RememberedApproval | None = None
+        if (
+            always
+            and request.subagent_id is None
+            and isinstance(request._declaration, FunctionTool)
+            and request._declaration.approval_key is not None
+        ):
+            if not self._native._check_manual_tool(request._grant):
+                raise InteractionExpiredError("Managed approval is expired or already decided")
+            entry = self._profile_catalogs[(key[0], request._approval_generation)].tools[
+                request._slot
+            ]
+            assert isinstance(entry, _CapturedApproval)
+            assert entry.declaration.approval_key is not None
+            record = _RememberedApproval(
+                profile_id=key[0],
+                profile=self._approval_profile(key[0]),
+                key=entry.declaration.approval_key,
+                signature=self._approval_signature(entry),
+                approve=approve,
+                reason=None if isinstance(reason, _DefaultApprovalReason) else reason,
+            )
         if approve:
             approved = self._approval_ready.get(request._invocation)
             if approved is not None and approved.approved:
@@ -7236,7 +7451,12 @@ class Session(Generic[ContextT, OutputT]):
             await self._respond(request, reply_reason, _approval_rejection=True)
             self._approval_ready.pop(request._invocation, None)
         if always:
+            self._restored_approval_slots.pop(
+                (key[0], request._approval_generation, request._slot), None
+            )
             self._approval_decisions[key] = (approve, reason)
+            if record is not None:
+                self._remembered_approvals[(key[0], record.key, record.signature)] = record
 
     async def _respond(
         self,
@@ -9138,11 +9358,23 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native tool replacement acknowledgement did not match")
             # The binding publishes only after validation and its native idle check.
             # Keep Python definitions unchanged until that exact generation is accepted.
+            previous = self._catalog
+            profile_id = self._profile_current[0] if self._profile_current is not None else None
+            if len(previous.tools) == len(candidate.tools) and all(
+                old is current for old, current in zip(previous.tools, candidate.tools, strict=True)
+            ):
+                for slot in range(len(previous.tools)):
+                    record = self._restored_approval_slots.pop(
+                        (profile_id, previous.generation, slot), None
+                    )
+                    if record is not None:
+                        self._restored_approval_slots[(profile_id, candidate.generation, slot)] = (
+                            record
+                        )
             self._catalog = candidate
             self._profile_generation_high_water = max(
                 self._profile_generation_high_water, candidate.generation
             )
-            profile_id = self._profile_current[0] if self._profile_current is not None else None
             self._profile_catalogs[(profile_id, candidate.generation)] = candidate
             # An admitted opening leaf can be absent from a narrowed current descriptor.
             # Capture the effective MCP roster published for this generation.
@@ -15190,6 +15422,11 @@ class Session(Generic[ContextT, OutputT]):
             # Current launch options are authority. Saved options may hold MCP
             # endpoints or literal credentials.
             payload["agent_options"] = {}
+            remembered = self._current_remembered_approvals()
+            if remembered and not fork:
+                payload["remembered_approvals"] = [
+                    item.model_dump(mode="json") for item in remembered
+                ]
             if self._codex_login_binding is not None:
                 payload["codex_login_binding"] = self._codex_login_binding
                 # Core adds creator identity to its live history. Portable
