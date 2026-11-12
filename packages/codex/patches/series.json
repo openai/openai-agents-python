@@ -717,9 +717,13 @@
       "sha256": "36d245c076fdae420316ecd26218c7039307ec4877b385a30e769cda0cfc02f9"
     },
     {
+      "path": "sdk-tracing-id-annotations.patch",
+      "sha256": "cad546d517c72efe8294b4758da4551510bd2bc66f2f909133282b0efb0e4f2d"
+    },
+    {
       "path": "sdk-chat-completions-raw-response.patch",
       "sha256": "5adb96468cc0c98a5516ebec5acb2afdbd33129160b7705497cb83601063713c"
     }
   ],
-  "result_tree": "379c30ec78f54d7d701178808e6603a507f56c99"
+  "result_tree": "c51dcda691a9898c731b3ce98c6920642f4f842d"
 }
