@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 
-from agents import Agent, FunctionTool, NativeProvider, ToolRef, function_tool
+from agents import (
+    Agent,
+    FunctionTool,
+    ModelRequest,
+    ModelResponse,
+    NativeProvider,
+    ToolRef,
+    function_tool,
+)
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -160,6 +170,80 @@ async def test_manual_restore_releases_choice_without_reexecuting_accepted_sibli
     assert responses.requests[0]["tool_choice"] == "required"
     assert responses.requests[1].get("tool_choice", "auto") == "auto"
     assert_local_control(responses.requests)
+
+
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_application_completion_releases_choice_after_manual_restore(named, include_usage):
+    requests = []
+    effects = []
+    entered = asyncio.Event()
+
+    @function_tool
+    def echo(value: str) -> str:
+        effects.append(value)
+        entered.set()
+        return value
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            requests.append(request.body)
+            if len(requests) == 1:
+                output = [function_call("lookup", {"key": "pending"}, "manual")["item"]]
+                if not named:
+                    output.insert(0, function_call("echo", {"value": "once"}, "automatic")["item"])
+            elif named and len(requests) == 2:
+                output = [function_call("echo", {"value": "after-reset"}, "after-reset")["item"]]
+            else:
+                output = [assistant_output("done")["item"]]
+            usage = {"input_tokens": 3, "output_tokens": 2} if include_usage else None
+            return ModelResponse(output, usage)
+
+    lookup = FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
+    catalog_path = Path(__file__).parent / "fixtures" / "request-control-models.json"
+    model = next(
+        entry["slug"]
+        for entry in json.loads(catalog_path.read_text())["models"]
+        if entry.get("supported_in_api")
+        and not entry.get("use_responses_lite")
+        and entry.get("tool_mode") != "code_mode_only"
+    )
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url="https://example.invalid/v1",
+            api_key="synthetic-reset-key",
+            model_backend=Model(),
+        ) as native,
+    ):
+        agent = Agent(
+            model=model,
+            instructions="Use the tools.",
+            provider=native,
+            tools=[echo, lookup],
+            model_settings={
+                "tool_choice": ToolRef("lookup") if named else "required",
+                "reset_tool_choice": True,
+            },
+        )
+        async with agent.session() as original:
+            await original.submit("go")
+            request = await next_request(original.interactions(), lookup)
+            if not named:
+                await entered.wait()
+            saved = SessionState.from_json((await original.suspend()).to_json())
+        assert effects == ([] if named else ["once"])
+        assert len(requests) == 1
+        async with agent.session(state=saved) as restored:
+            current = await next_request(restored.interactions(), lookup)
+            assert current.call_id == request.call_id
+            await current.respond("accepted")
+            assert (await restored.restored_turn.get_result()).final_output == "done"
+    assert effects == (["after-reset"] if named else ["once"])
+    assert requests[0]["tool_choice"] == "required"
+    assert all(request.get("tool_choice", "auto") == "auto" for request in requests[1:])
+    assert {tool["name"] for tool in requests[1]["tools"]} == {"echo", "lookup"}
+    assert_local_control(requests)
 
 
 async def test_none_remains_disabled_when_reset_is_enabled(responses):
