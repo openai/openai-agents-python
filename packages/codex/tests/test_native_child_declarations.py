@@ -46,6 +46,7 @@ from tests.test_native_code_mode import code_call
 from tests.test_native_executor_tools import declaration
 from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_mcp_tools import declarations
+from tests.test_native_profile_model_controls import MODEL as NATIVE_ROLE_FIXTURE_MODEL
 
 
 def _role() -> NativeRole:
@@ -188,29 +189,36 @@ async def test_native_role_tool_returns_its_child_result_after_approval(
     assert _role().instructions in json.dumps(child_request)
 
 
+@pytest.mark.parametrize("allowed", [True, False])
 async def test_native_role_tool_from_code_mode(
-    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowed: bool
 ) -> None:
     calls: list[NativeToolCall] = []
+    callback_ids: list[str] = []
 
-    def approve(_context: ToolContext[object], call: NativeToolCall) -> bool:
+    def approve(context: ToolContext[object], call: NativeToolCall) -> bool:
+        callback_ids.append(context.call_id)
         calls.append(call)
-        return True
+        return allowed
 
     role_tool = NativeRoleTool(
         name="research_topic", role="research", description="Research a topic."
     )
     responses.respond(
         code_call(
+            'if (typeof tools.collaboration__spawn_agent !== "undefined") {'
+            'throw new Error("Built-in collaboration tools must be called directly");'
+            "} "
             'text(await tools.collaboration__research_topic({input: "Read the record."}));',
             "managed-code",
         )
     )
-    responses.respond(assistant_output("managed code child result"))
+    if allowed:
+        responses.respond(assistant_output("managed code child result"))
     responses.respond(assistant_output("parent final result"))
     agent = Agent(
         instructions="Use the named research tool from Code Mode.",
-        model="gpt-5.5",
+        model=NATIVE_ROLE_FIXTURE_MODEL,
         provider=provider(responses),
         programmatic_tool_calling=True,
         tools=[
@@ -222,14 +230,26 @@ async def test_native_role_tool_from_code_mode(
         trust(executor, tmp_path, monkeypatch)
         async with agent.session(environment=declaration(executor)) as session:
             turn = await session.submit("Research the record.")
-            assert (await turn.get_result()).final_output == "parent final result"
-            assert len([child async for child in session.subagents()]) == 1
+            result = await turn.get_result()
+            code_outputs = [
+                item.get("output")
+                for item in responses.requests[-1]["input"]
+                if item.get("call_id") == "managed-code" and "output" in item
+            ]
+            assert result.final_output == "parent final result", (calls, code_outputs)
+            assert len([child async for child in session.subagents()]) == int(allowed)
 
-    assert [(call.namespace, call.name) for call in calls].count(
-        ("collaboration", role_tool.name)
-    ) == 1
-    assert len(responses.requests) == 3
-    assert "managed code child result" in json.dumps(responses.requests[-1]["input"])
+    assert len(calls) == 1
+    call = calls[0]
+    assert (call.namespace, call.name) == ("collaboration", role_tool.name)
+    assert call.route == "programmatic_tool_calling"
+    assert call.outer_call_id == "managed-code"
+    assert call.call_id is None
+    assert call.runtime_tool_call_id
+    assert callback_ids == [call.runtime_tool_call_id]
+    assert len(responses.requests) == (3 if allowed else 2)
+    if allowed:
+        assert "managed code child result" in json.dumps(responses.requests[-1]["input"])
 
 
 async def test_completed_native_role_tool_result_survives_a_root_checkpoint(

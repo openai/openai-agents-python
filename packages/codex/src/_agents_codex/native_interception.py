@@ -626,6 +626,7 @@ class _NativeInterception:
     ) -> None:
         from ._function_tools import ToolContext
         from .mcp import _MCP, MCPCallContext, _tool_names
+        from .native_agents import NativeAgents
         from .session import (
             NativeError,
             _call_callback,
@@ -657,12 +658,16 @@ class _NativeInterception:
         try:
             if isinstance(state, _Submission):
                 await asyncio.wait((state.accepted,))
+            callback_id = call.call_id
+            if callback_id is None and (
+                isinstance(descriptor, _MCP)
+                or isinstance(descriptor, NativeAgents)
+                and call.route == "programmatic_tool_calling"
+            ):
+                callback_id = call.runtime_tool_call_id
             if (
                 not admitted()
-                or (
-                    call.call_id is None
-                    and (not isinstance(descriptor, _MCP) or call.runtime_tool_call_id is None)
-                )
+                or callback_id is None
                 or not native._handoff_native_interception(nonce)
             ):
                 return
@@ -805,11 +810,13 @@ class _NativeInterception:
             else:
                 approval = descriptor.approval
                 assert approval is not None
-                assert call.call_id is not None
+                if call.phase != "before":
+                    reply = '{"action":"continue"}'
+                    return
                 collab_context = ToolContext(
                     session._context,
                     state.handle,
-                    call.call_id,
+                    callback_id,
                     call=info,
                     realtime_usage=session.realtime_usage,
                 )
