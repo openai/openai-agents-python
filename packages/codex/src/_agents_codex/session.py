@@ -133,6 +133,7 @@ from .agent import (
     SignInWithChatGPT,
     _copy_model_settings as _copy_model_settings,
 )
+from .apply_patch import _ApplyPatchTool
 from .canonical_storage import (
     CustomStorage as CustomStorage,
     SessionStoreCleanup as SessionStoreCleanup,
@@ -1096,6 +1097,7 @@ class _Submission:
     completion_continuations: int = 0
     guardrail_results: list[GuardrailRecord] = field(default_factory=list)
     guardrail_input: UserInput | None = field(default=None, repr=False)
+    original_input: UserInput | None = field(default=None, repr=False)
     input_guardrails_started: bool = False
     input_guardrails_task: asyncio.Task[None] | None = field(default=None, repr=False)
     calls: set[str] = field(default_factory=set)
@@ -1302,6 +1304,7 @@ class _RestoreDeclaration:
     output: _PreparedOutput
     max_function_concurrency: int | None
     observation_retention: Literal["bounded", "all"]
+    resume_budget: RunBudget | None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
 
@@ -2310,6 +2313,19 @@ def _check_native_agents_provider(
         raise ValueError("model_backend does not yet support native child agents")
 
 
+def _check_environment_python_tool_collisions(
+    executor: Environment[Any] | None, allowed_tools: Sequence[FunctionTool[Any, Any, Any]]
+) -> None:
+    if executor is not None:
+        for tool in allowed_tools:
+            if (
+                tool.ref.namespace in (None, "functions")
+                and tool.name in executor.tools
+                and not isinstance(tool, _ApplyPatchTool)
+            ):
+                raise ValueError(f"Python tool collides with enabled environment tool: {tool.name}")
+
+
 def _check_native_agents_environment(
     native_agents: NativeAgents[Any] | None, executor: Environment[Any] | None
 ) -> None:
@@ -2695,6 +2711,8 @@ def _capture_tools(
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
     kind = spec.get("type")
+    if kind == "applyPatch":
+        return ToolRef("apply_patch")
     if kind in ("computer", "shell"):
         return ToolRef(kind)
     if kind == "toolSearch":
@@ -3035,6 +3053,7 @@ def _prepare_native_checkpoint(
             raise ValueError("Restore this turn with its restored_output_type override")
         restored_override = True
         payload["agent_options"].pop("_sdk_output_override")
+    payload.pop("original_input", None)
     payload.pop("codex_login_binding", None)
     payload.pop("executor_read_only", None)
     if saved.format_version in (8, 9):
@@ -3651,6 +3670,8 @@ class Session(Generic[ContextT, OutputT]):
                 and (selected.state is state or selected.state == state)
             ):
                 agent = selected.declaration
+                if resume_budget is None:
+                    resume_budget = selected.resume_budget
                 if function_concurrency_omitted:
                     max_function_concurrency = selected.max_function_concurrency
                 if retention_omitted:
@@ -3930,12 +3951,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise TypeError("environment must be an Environment")
             if project_guidance and executor is None:
                 raise ValueError("project_guidance requires an Environment")
-            if executor is not None:
-                for tool in allowed_tools:
-                    if tool.ref.namespace in (None, "functions") and tool.name in executor.tools:
-                        raise ValueError(
-                            f"Python tool collides with enabled environment tool: {tool.name}"
-                        )
+            _check_environment_python_tool_collisions(executor, allowed_tools)
             if state is not None:
                 _check_restored_environment(saved, executor)
             _check_native_agents_environment(native_agents, executor)
@@ -4640,6 +4656,7 @@ class Session(Generic[ContextT, OutputT]):
                     active = _Submission(
                         restored_output,
                         run_usage=_UsageCollector(saved.run_usage),
+                        original_input=saved.original_input,
                         restored_pending=True,
                         budget=restored_budget,
                         observation_after=session._observations.sequence,
@@ -4665,6 +4682,7 @@ class Session(Generic[ContextT, OutputT]):
                     active.output_override = restored_override or restored_output_type is not None
                     object.__setattr__(handle, "_guardrail_results", active.guardrail_results)
                     object.__setattr__(handle, "_run_usage", active.run_usage)
+                    object.__setattr__(handle, "_original_input", active.original_input)
                     session._usage_roots[continuation.turn_id] = active.run_usage
                     active.handle = handle
                     session._register_request_observation(active, handle)
@@ -8177,6 +8195,14 @@ class Session(Generic[ContextT, OutputT]):
         for event, owner in pending:
             self._dispatch_interaction(event, owner)
 
+    def _remember_run_error_input(self, turn: Turn[Any], input: UserInput | None) -> None:
+        if input is None:
+            return
+        state = self._owned_submission(turn)
+        if state is not None:
+            state.original_input = input
+            object.__setattr__(turn, "_original_input", input)
+
     async def _capture_run_error_details(
         self,
         turn: Turn[Any],
@@ -8191,7 +8217,8 @@ class Session(Generic[ContextT, OutputT]):
                 return None
             responses: list[dict[str, Any]] = []
             items: tuple[ProducedItem, ...] = ()
-            incomplete = not settled
+            original_input = input if input is not None else turn._original_input
+            incomplete = not settled or original_input is None
             if settled:
                 try:
                     async for event in turn.events(include_execution_details=True):
@@ -8224,7 +8251,7 @@ class Session(Generic[ContextT, OutputT]):
             except Exception:
                 incomplete = True
             return RunErrorDetails(
-                input=input,
+                input=deepcopy(original_input),
                 last_agent=last_agent,
                 items=items,
                 raw_responses=tuple(responses),
@@ -9933,6 +9960,7 @@ class Session(Generic[ContextT, OutputT]):
             self._last_turn = handle
         self._usage_roots[receipt["turn_id"]] = state.run_usage
         object.__setattr__(handle, "_run_usage", state.run_usage)
+        object.__setattr__(handle, "_original_input", state.original_input)
         state.handle = handle
         object.__setattr__(handle, "_guardrail_results", state.guardrail_results)
         assert handle.turn_id is not None
@@ -10438,6 +10466,7 @@ class Session(Generic[ContextT, OutputT]):
                     step_index=state.step_index,
                     budget=state.budget,
                     run_usage=state.run_usage,
+                    original_input=state.original_input,
                     guardrail_results=state.guardrail_results,
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
@@ -10819,7 +10848,10 @@ class Session(Generic[ContextT, OutputT]):
         )
 
     def _observe_accepted_tool_output(self, state: _CallbackState, item: Any) -> None:
-        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+        if not isinstance(item, dict) or item.get("type") not in {
+            "function_call_output",
+            "apply_patch_call_output",
+        }:
             return
         call_id = item.get("call_id")
         if not isinstance(call_id, str):
@@ -15233,6 +15265,8 @@ class Session(Generic[ContextT, OutputT]):
             if self._executor is not None and self._executor.read_only:
                 payload["executor_read_only"] = True
             if active is not None:
+                if active.original_input is not None:
+                    payload["original_input"] = active.original_input
                 usage = active.run_usage.snapshot()
                 payload["run_usage"] = {
                     name: getattr(usage, name) for name in RunUsage.__dataclass_fields__
