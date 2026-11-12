@@ -715,6 +715,7 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let private_http = options.private_http;
+        let private_wss_tls = options.private_wss_tls;
         let process_private_http = options.process_private_http
             && cfg!(target_os = "linux")
             && self.owns_runtime_services()
@@ -862,6 +863,7 @@ impl EngineState {
                     .collect(),
             );
         }
+        crate::private_wss::install(&mut startup, private_wss_tls);
         let native = self
             .start_prepared_with_transport(
                 startup,
@@ -1072,6 +1074,7 @@ impl EngineState {
             child_question_gate: Mutex::new(()),
             closed: AtomicBool::new(false),
             closing: watch::channel(false).0,
+            manual_event_drain: AtomicBool::new(false),
             close_lock: Mutex::new(()),
             mutations: Arc::new(Mutex::new(())),
             initial_messages: std::sync::Mutex::new(None),
@@ -2280,6 +2283,7 @@ pub struct ThreadState {
     closed: AtomicBool,
     close_lock: Mutex<()>,
     closing: watch::Sender<bool>,
+    manual_event_drain: AtomicBool,
     pub(crate) child_instances: RwLock<HashMap<ThreadId, crate::native_agents::Instance>>,
     child_questions: Mutex<HashMap<String, OwnedChildQuestion>>,
     child_question_gate: Mutex<()>,
@@ -2624,19 +2628,52 @@ impl ThreadState {
             .thread_extension_data()
             .get::<crate::python_tools::PythonTools>();
         let mut closing = self.closing.subscribe();
-        ensure!(!*closing.borrow(), "Codex thread is closed");
+        ensure!(
+            !*closing.borrow() || self.manual_event_drain.load(Ordering::Acquire),
+            "Codex thread is closed"
+        );
         let mut events = self.events.lock().await;
-        ensure!(!*closing.borrow(), "Codex thread is closed");
+        ensure!(
+            !*closing.borrow() || self.manual_event_drain.load(Ordering::Acquire),
+            "Codex thread is closed"
+        );
         if let Some(event) = events.initial.take() {
             return native_event(None, event, admission_ready, false);
         }
         loop {
+            if *closing.borrow() && self.manual_event_drain.load(Ordering::Acquire) {
+                // Suspension has joined all producers. Only the existing root FIFO
+                // remains readable; closing still revokes child interaction authority.
+                let Some(native) = events.native.as_mut() else {
+                    self.manual_event_drain.store(false, Ordering::Release);
+                    anyhow::bail!("Root event reader closed");
+                };
+                let result = native.await;
+                events.native = None;
+                if result.is_err() {
+                    self.manual_event_drain.store(false, Ordering::Release);
+                }
+                let event = result?;
+                events.native = if matches!(event.msg, EventMsg::ShutdownComplete) {
+                    self.manual_event_drain.store(false, Ordering::Release);
+                    None
+                } else {
+                    Some(next_native_event(self.thread.clone()))
+                };
+                return native_event(None, event, admission_ready, false);
+            }
+            ensure!(events.native.is_some(), "Root event reader closed");
             if let Some(metadata) = self.request_metadata.try_next() {
                 return Ok(metadata);
             }
             if let Some(terminal) = events.session_terminal.as_mut() {
                 let result = tokio::select! {
-                    _ = closing.changed() => anyhow::bail!("Codex thread is closed"),
+                    _ = closing.changed() => {
+                        if self.manual_event_drain.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        anyhow::bail!("Codex thread is closed");
+                    },
                     result = terminal => result,
                 };
                 events.session_terminal = None;
@@ -2682,7 +2719,12 @@ impl ThreadState {
                     ..
                 } = &mut *events;
                 let event = tokio::select! {
-                    _ = closing.changed() => anyhow::bail!("Codex thread is closed"),
+                    _ = closing.changed() => {
+                        if self.manual_event_drain.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        anyhow::bail!("Codex thread is closed");
+                    },
                     event = native.as_mut().context("Root event reader closed")? => event,
                 };
                 root_step_prefix.as_mut().expect("pending root step").1 -= 1;
@@ -2697,7 +2739,12 @@ impl ThreadState {
                     ..
                 } = &mut *events;
                 tokio::select! {
-                    _ = closing.changed() => anyhow::bail!("Codex thread is closed"),
+                    _ = closing.changed() => {
+                        if self.manual_event_drain.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        anyhow::bail!("Codex thread is closed");
+                    },
                     metadata = self.request_metadata.next() => return Ok(metadata),
                     request = async {
                         python_tools.as_ref().expect("guarded Python channel").next_request().await
@@ -2764,6 +2811,9 @@ impl ThreadState {
             };
             events.native = Some(next_native_event(self.thread.clone()));
             let event = event?;
+            if matches!(event.msg, EventMsg::ShutdownComplete) {
+                events.native = None;
+            }
             if retired_realtime_output(&event) {
                 continue;
             }
@@ -3004,6 +3054,7 @@ impl ThreadState {
             tools.retire_steps();
         }
         let _mutation = self.mutations.lock().await;
+        self.manual_event_drain.store(false, Ordering::Release);
         if self.closed.load(Ordering::Acquire) {
             if let Some(store) = &self.engine.local_checklist_store {
                 store.check_durability()?;
@@ -3089,7 +3140,7 @@ impl ThreadState {
 
     // Called only after Core has joined and the retained native writer has
     // finalized its suspension. Ordinary close must not send a second shutdown.
-    pub(crate) async fn retire_suspended(&self) {
+    pub(crate) async fn retire_suspended(&self, drain_events: bool) {
         self.engine
             .manager
             .remove_thread_if_matches(&self.id, &self.thread)
@@ -3099,6 +3150,9 @@ impl ThreadState {
             .lock()
             .await
             .retain(|_, owner| *owner != self.id);
+        // Portable capture drains only the joined root FIFO through ShutdownComplete.
+        self.manual_event_drain
+            .store(drain_events, Ordering::Release);
         self.closing.send_replace(true);
         self.child_questions.lock().await.clear();
         self.closed.store(true, Ordering::Release);
@@ -3160,6 +3214,84 @@ mod rebuild_consumer_tests {
         ResponseItem,
     };
     use serde_json::json;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn root_event_errors_do_not_repoll_completed_futures() {
+        use futures_util::FutureExt;
+
+        let directory = tempfile::TempDir::new().expect("isolated native home");
+        let home = directory.path().join("home");
+        let work = directory.path().join("work");
+        for path in [&home, &work] {
+            std::fs::create_dir(path).expect("create test-owned path");
+        }
+        // This inert engine uses the existing model-only constructor without inference.
+        let config = json!({
+            "model": "receipt-fixture",
+            "model_provider": "fixture",
+            "model_providers.fixture": {
+                "name": "Receipt fixture",
+                "base_url": "http://127.0.0.1:9/v1",
+                "wire_api": "responses",
+                "requires_openai_auth": false,
+                "supports_websockets": false,
+                "request_max_retries": 0,
+                "stream_max_retries": 0
+            },
+            "approval_policy": "never",
+            "sandbox_mode": "read-only",
+            "web_search": "disabled",
+            "agents.enabled": false,
+            "features.code_mode": false,
+            "features.instant_interrupt": false
+        });
+        let runtime = json!({"codex_home": home, "cwd": work, "ephemeral": true});
+        let engine = Arc::new(
+            EngineState::new(config.to_string(), runtime.to_string(), false, None)
+                .await
+                .expect("construct actual native engine"),
+        );
+        let probe = tokio::spawn({
+            let engine = engine.clone();
+            async move {
+                let native = engine
+                    .start_with_tools(options::ThreadOptions::default(), None, Some(vec![]), false)
+                    .await
+                    .expect("start inert managed root");
+                let state = native.current().expect("live native root");
+                state.events.lock().await.initial = None;
+                for drain in [false, true] {
+                    state.closing.send_replace(drain);
+                    state.manual_event_drain.store(drain, Ordering::Release);
+                    // Inject a receive failure at the existing private transport boundary.
+                    state.events.lock().await.native = Some(Box::pin(async {
+                        Err(codex_protocol::error::CodexErr::InternalAgentDied)
+                    }));
+                    assert!(
+                        state.next_event().await.is_err(),
+                        "propagate the receive error"
+                    );
+                    // A fresh normal read can await live Core; a retired drain must fail.
+                    // Polling either retry must never resume the completed error future.
+                    let retry = state.next_event().now_or_never();
+                    if drain {
+                        assert!(
+                            matches!(retry, Some(Err(_))),
+                            "retired drain must stay closed"
+                        );
+                    }
+                }
+            }
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), probe).await;
+        engine
+            .close()
+            .await
+            .expect("join actual native engine cleanup");
+        result
+            .expect("bounded EOF reads")
+            .expect("EOF reads must not panic");
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verified_status_survives_engine_rebuild_and_core_reconstruction() {

@@ -1,0 +1,195 @@
+diff --git a/codex-rs/codex-api/Cargo.toml b/codex-rs/codex-api/Cargo.toml
+index 8cbcac3c13bd3d5a57f2b8083104252748cac145..716cbc7b84a4713496184ff14e32127fe66fe8d9 100644
+--- a/codex-rs/codex-api/Cargo.toml
++++ b/codex-rs/codex-api/Cargo.toml
+@@ -17,6 +17,7 @@ codex-utils-rustls-provider = { workspace = true }
+ codex-websocket-client = { workspace = true }
+ futures = { workspace = true }
+ http = { workspace = true }
++rustls = { workspace = true }
+ schemars = { workspace = true }
+ serde = { workspace = true, features = ["derive"] }
+ serde_json = { workspace = true, features = ["raw_value"] }
+@@ -36,7 +37,6 @@ anyhow = { workspace = true }
+ assert_matches = { workspace = true }
+ pretty_assertions = { workspace = true }
+ rcgen = { workspace = true }
+-rustls = { workspace = true }
+ tempfile = { workspace = true }
+ tokio = { workspace = true, features = ["test-util"] }
+ tokio-test = { workspace = true }
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index a944a900cc534daed93252e1462bac479f744a70..cdb28c9991b60533634a9a17d305aa5616c0c9d0 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -375,6 +375,7 @@ impl ResponsesWebsocketConnection {
+ pub struct ResponsesWebsocketClient {
+     provider: Provider,
+     auth: SharedAuthProvider,
++    tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
+ }
+ 
+ /// Close frame information captured by a handshake probe.
+@@ -404,7 +405,20 @@ pub struct ResponsesWebsocketProbe {
+ impl ResponsesWebsocketClient {
+     /// Creates a Responses WebSocket client for an already-resolved provider and auth source.
+     pub fn new(provider: Provider, auth: SharedAuthProvider) -> Self {
+-        Self { provider, auth }
++        Self {
++            provider,
++            auth,
++            tls_selector: None,
++        }
++    }
++
++    /// Select SDK TLS only for this client; None retains the canonical connector.
++    pub fn with_tls_selector(
++        mut self,
++        selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
++    ) -> Self {
++        self.tls_selector = selector;
++        self
+     }
+ 
+     #[instrument(
+@@ -430,8 +444,14 @@ impl ResponsesWebsocketClient {
+             merge_request_headers(&self.provider.headers, extra_headers, default_headers);
+         self.auth.add_auth_headers(&mut headers);
+ 
+-        let (stream, _status, server_reasoning_included, server_model) =
+-            connect_websocket(ws_url, headers, http_client_factory, turn_state.clone()).await?;
++        let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
++            ws_url,
++            headers,
++            http_client_factory,
++            turn_state.clone(),
++            self.tls_selector.clone(),
++        )
++        .await?;
+         Ok(ResponsesWebsocketConnection::new(
+             stream,
+             self.provider.stream_idle_timeout,
+@@ -469,6 +489,7 @@ impl ResponsesWebsocketClient {
+             headers,
+             http_client_factory,
+             /*turn_state*/ None,
++            self.tls_selector.clone(),
+         )
+         .await?;
+         let immediate_close = tokio::time::timeout(immediate_close_timeout, stream.next())
+@@ -537,6 +558,7 @@ async fn connect_websocket(
+     headers: HeaderMap,
+     http_client_factory: &HttpClientFactory,
+     turn_state: Option<Arc<OnceLock<String>>>,
++    tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
+ ) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
+     info!("connecting to websocket: {url}");
+ 
+@@ -546,9 +568,12 @@ async fn connect_websocket(
+         .map_err(|err| ApiError::Stream(format!("failed to build websocket request: {err}")))?;
+     request.headers_mut().extend(headers);
+ 
+-    let connector =
+-        WebSocketConnector::new_with_tls_mode(http_client_factory, websocket_tls_mode(&url))
+-            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
++    let tls_mode = tls_selector
++        .and_then(|selector| (selector.0)(&url))
++        .map(WebSocketTlsMode::Rustls)
++        .unwrap_or_else(|| websocket_tls_mode(&url));
++    let connector = WebSocketConnector::new_with_tls_mode(http_client_factory, tls_mode)
++        .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
+     let response = connector.connect(request, websocket_config()).await;
+ 
+     let (stream, response) = match response {
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 88a38dec560cd078dae6175631f1b1803c68f302..628f299c76729594e1fe988fce7eecfb76f91532 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -173,3 +173,9 @@ pub use crate::endpoint::RealtimeHostedMcpApprovalFilter;
+ pub use crate::endpoint::RealtimeHostedMcpApprovalMode;
+ pub use crate::endpoint::RealtimeHostedMcpTool;
+ pub use crate::endpoint::RealtimeHostedMcpToolFilter;
++
++/// Private SDK TLS policy; each call selects a fresh connection configuration.
++#[derive(Clone, Copy, Debug)]
++pub struct SdkWebsocketTlsSelector(
++    pub fn(&url::Url) -> Option<std::sync::Arc<rustls::ClientConfig>>,
++);
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 9c4df15e3abd8000a5fd7323736bc95176fec643..6512ebe3ff678c07924f23e07c061fec171f234a 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -277,6 +277,7 @@ pub struct ModelClient {
+     event_sender: Option<Sender<ProtocolEvent>>,
+     http_client_factory: HttpClientFactory,
+     sdk_model_http_pool: Option<Arc<codex_http_client::SdkModelHttpPool>>,
++    sdk_websocket_tls_selector: Option<Arc<codex_api::SdkWebsocketTlsSelector>>,
+     restored_history: bool,
+     request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
+     executed_tool_calls: Option<ExecutedToolCalls>,
+@@ -629,6 +630,7 @@ impl ModelClient {
+             event_sender: None,
+             http_client_factory,
+             sdk_model_http_pool: None,
++            sdk_websocket_tls_selector: None,
+             restored_history: false,
+             request_contributors,
+             executed_tool_calls: None,
+@@ -645,6 +647,14 @@ impl ModelClient {
+         self
+     }
+ 
++    pub(crate) fn with_sdk_websocket_tls_selector(
++        mut self,
++        selector: Option<Arc<codex_api::SdkWebsocketTlsSelector>>,
++    ) -> Self {
++        self.sdk_websocket_tls_selector = selector;
++        self
++    }
++
+     pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
+         self.executed_tool_calls = Some(recorder);
+         self
+@@ -1544,13 +1554,15 @@ impl ModelClient {
+         let start = Instant::now();
+         let result = match tokio::time::timeout(
+             websocket_connect_timeout,
+-            ApiWebSocketResponsesClient::new(api_provider, api_auth).connect(
+-                &self.http_client_factory,
+-                headers,
+-                codex_login::default_client::default_headers(),
+-                /*turn_state*/ None,
+-                Some(websocket_telemetry),
+-            ),
++            ApiWebSocketResponsesClient::new(api_provider, api_auth)
++                .with_tls_selector(self.sdk_websocket_tls_selector.clone())
++                .connect(
++                    &self.http_client_factory,
++                    headers,
++                    codex_login::default_client::default_headers(),
++                    /*turn_state*/ None,
++                    Some(websocket_telemetry),
++                ),
+         )
+         .await
+         {
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 7d41253ba8eb959c16418e871d631a238ee4fbdb..3dd5fdf439c9fb98a529440168aacf6174ac73d1 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1799,6 +1799,7 @@ impl Session {
+                 &initial_history,
+             );
+             let sdk_model_http_pool = thread_extension_data.get::<codex_http_client::SdkModelHttpPool>();
++            let sdk_websocket_tls_selector = thread_extension_data.get::<codex_api::SdkWebsocketTlsSelector>();
+             let codex_responses_headers = thread_extension_data.get::<crate::CodexResponsesHeaders>();
+             // Ephemeral title requests use request-level effort even when managed settings
+             // enable overrides. The client-supplied tag selects cache behavior, not permissions.
+@@ -1886,6 +1887,7 @@ impl Session {
+                     extensions.model_request_contributors().to_vec(),
+                 )
+                 .with_sdk_model_http_pool(sdk_model_http_pool)
++                .with_sdk_websocket_tls_selector(sdk_websocket_tls_selector)
+                 .with_executed_tool_calls(executed_tool_calls.clone())
+                 .with_restored_history(matches!(
+                     &initial_history,

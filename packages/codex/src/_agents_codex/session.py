@@ -278,6 +278,7 @@ from .state import (
     SessionState as SessionState,
     _RememberedApproval,
     _RequestRunBudgetCheckpoint,
+    _TokenRunBudgetCheckpoint,
 )
 from .subagents import Subagent as Subagent, _subagent as _subagent
 from .telemetry import (
@@ -802,34 +803,58 @@ class _RunBudget:
     usage_missing: bool = False
     pending_estimates: list[TokenUsage] = field(default_factory=list)
 
-    def checkpoint(self) -> _RequestRunBudgetCheckpoint:
+    def checkpoint(self) -> _RequestRunBudgetCheckpoint | _TokenRunBudgetCheckpoint:
         limits = self.limits
-        if (
-            limits.max_requests is None
-            or limits.max_tokens is not None
-            or limits.max_estimated_cost_micros is not None
-        ):
-            raise CapabilityError("Only request-only run budgets support portable checkpoints")
+        if limits.max_estimated_cost_micros is not None:
+            raise CapabilityError("Estimated-cost run budgets do not support portable checkpoints")
+        if limits.max_tokens is not None:
+            return _TokenRunBudgetCheckpoint(
+                version=2,
+                max_requests=limits.max_requests,
+                admitted_requests=self.requests if limits.max_requests is not None else None,
+                max_tokens=limits.max_tokens,
+                consumed_tokens=min(self.tokens, limits.max_tokens),
+                usage_missing=self.usage_missing,
+                missing_usage=limits.missing_usage,
+            )
+        assert limits.max_requests is not None
         return _RequestRunBudgetCheckpoint(
             version=1, max_requests=limits.max_requests, admitted_requests=self.requests
         )
 
     @classmethod
     def restore_checkpoint(
-        cls, saved: _RequestRunBudgetCheckpoint | None, current: RunBudget | None
+        cls,
+        saved: _RequestRunBudgetCheckpoint | _TokenRunBudgetCheckpoint | None,
+        current: RunBudget | None,
     ) -> _RunBudget | None:
         if saved is None:
             return None
+        mismatch = (
+            "Restoring a request budget requires the original request-only ceiling"
+            if isinstance(saved, _RequestRunBudgetCheckpoint)
+            else "Restoring a run budget requires the original limits and policy"
+        )
         if not isinstance(current, RunBudget):
-            raise CapabilityError(
-                "Restoring a request budget requires the original request-only ceiling"
-            )
+            raise CapabilityError(mismatch)
         tracker = cls(current)
-        if tracker.checkpoint().max_requests != saved.max_requests:
-            raise CapabilityError(
-                "Restoring a request budget requires the original request-only ceiling"
+        expected = tracker.checkpoint()
+        if (
+            type(expected) is not type(saved)
+            or expected.max_requests != saved.max_requests
+            or (
+                isinstance(saved, _TokenRunBudgetCheckpoint)
+                and (
+                    current.max_tokens != saved.max_tokens
+                    or current.missing_usage != saved.missing_usage
+                )
             )
-        tracker.requests = saved.admitted_requests
+        ):
+            raise CapabilityError(mismatch)
+        tracker.requests = saved.admitted_requests or 0
+        if isinstance(saved, _TokenRunBudgetCheckpoint):
+            tracker.tokens = saved.consumed_tokens
+            tracker.usage_missing = saved.usage_missing
         return tracker
 
     def observe(self, usage: dict[str, Any] | None) -> None:
@@ -3543,6 +3568,52 @@ def _capture_opening_agent(
     )
 
 
+def _private_default_opening_candidates(
+    agent: Agent[Any, Any],
+    *,
+    atomic_first_turn: bool,
+    private_text_run: bool,
+    tools: Sequence[Tool[Any]],
+    native_specs: str,
+) -> tuple[bool, bool]:
+    """Capture default-provider candidates before narrowing atomic opening intent."""
+    eligible = atomic_first_turn and private_text_run and agent.provider is None
+    return (
+        eligible
+        and bool(tools)
+        and all(spec["type"] in ("function", "namespace") for spec in json.loads(native_specs)),
+        eligible and not tools,
+    )
+
+
+def _default_private_tls_profile(
+    provider: NativeProvider, provider_config: Mapping[str, Any], websockets_enabled: bool
+) -> bool:
+    return (
+        provider_config["model_provider"] == "native_agent"
+        and provider.supports_websockets is None
+        and websockets_enabled
+        and not provider._routing_config()
+        and sys.platform == "linux"
+        and not any(
+            name in os.environ
+            for name in (
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "REQUEST_METHOD",
+                "CODEX_SANDBOX",
+                "CODEX_CA_CERTIFICATE",
+                "SSL_CERT_DIR",
+                "SSL_CERT_FILE",
+            )
+        )
+    )
+
+
 def _supports_atomic_first_turn(
     agent: Agent[Any, Any],
     *,
@@ -3961,12 +4032,13 @@ class Session(Generic[ContextT, OutputT]):
                     tools=available,
                 )
             )
-            # Owned defaults keep ordinary startup and its existing close custody.
-            _private_default_opening = (
-                _atomic_first_turn
-                and _private_text_run
-                and agent.provider is None
-                and not available
+            # Capture owned eligibility before narrowing explicit-provider atomic admission.
+            _private_wss_candidate, _private_default_opening = _private_default_opening_candidates(
+                agent,
+                atomic_first_turn=_atomic_first_turn,
+                private_text_run=_private_text_run,
+                tools=available,
+                native_specs=native_specs,
             )
             _atomic_first_turn = _atomic_first_turn and agent.provider is not None
             environment = opening.environment
@@ -4124,7 +4196,7 @@ class Session(Generic[ContextT, OutputT]):
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
-                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
+                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool, bool]:
                     private_run = (
                         (_atomic_first_turn or _private_default_opening)
                         and observation_retention == "bounded"
@@ -4147,34 +4219,29 @@ class Session(Generic[ContextT, OutputT]):
                     if (
                         private_run
                         and (_private_text_run or use_completed_owner)
-                        and provider_config["model_provider"] == "native_agent"
-                        and provider.supports_websockets is None
-                        and websockets_enabled
-                        and not provider._routing_config()
-                        and sys.platform == "linux"
-                        and not any(
-                            name in os.environ
-                            for name in (
-                                "HTTP_PROXY",
-                                "http_proxy",
-                                "HTTPS_PROXY",
-                                "https_proxy",
-                                "ALL_PROXY",
-                                "all_proxy",
-                                "REQUEST_METHOD",
-                                "CODEX_SANDBOX",
-                                "CODEX_CA_CERTIFICATE",
-                                "SSL_CERT_DIR",
-                                "SSL_CERT_FILE",
-                            )
+                        and _default_private_tls_profile(
+                            provider, provider_config, websockets_enabled
                         )
                     ):
                         private_http = True
                         websockets_enabled = False
-                    return use_completed_owner, websockets_enabled, private_http
+                    private_wss_tls = (
+                        _private_wss_candidate
+                        and observation_retention == "bounded"
+                        and provider.model_backend is None
+                        and provider.auth is None
+                        and _tracing_context is None
+                        and not output.max_retries
+                        and _default_private_tls_profile(
+                            provider, provider_config, websockets_enabled
+                        )
+                    )
+                    return use_completed_owner, websockets_enabled, private_http, private_wss_tls
 
-                use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
-                _atomic_first_turn = _atomic_first_turn or use_completed_owner
+                use_completed_owner, websockets_enabled, private_http, private_wss_tls = (
+                    private_run_policy(provider)
+                )
+                _atomic_first_turn = any((_atomic_first_turn, use_completed_owner, private_wss_tls))
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
@@ -4230,6 +4297,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **({"_sdk_websocket_tls": True} if private_wss_tls else {}),
                     **guidance_options,
                     **(
                         {"user_instructions_appendix": lease._workspace_instructions}
@@ -4464,8 +4532,9 @@ class Session(Generic[ContextT, OutputT]):
                                 json.dumps(settings),
                                 api_key=opening.api_key or "",
                                 provider_lease=provider_lease,
-                                _share_model_http=True,
+                                _share_model_http=not private_wss_tls,
                                 _private_http=private_http,
+                                **({"_process_private_runtime": True} if private_wss_tls else {}),
                             )
                         ),
                     )
@@ -4670,6 +4739,7 @@ class Session(Generic[ContextT, OutputT]):
                     session._native._enable_model_producer(True)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
+                options.pop("_sdk_websocket_tls", None)
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
@@ -5109,12 +5179,12 @@ class Session(Generic[ContextT, OutputT]):
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         self._realtime: RealtimeSession | None = None
         # The sole native reader owns questions during opening publication.
-        self._reader: asyncio.Future[None]
+        self._reader: asyncio.Future[bool]
         if _start_event_reader:
             self._reader = _create_task(self._read_events())
         else:
             self._reader = _future()
-            self._reader.set_result(None)
+            self._reader.set_result(False)
         self._mcp_reader: asyncio.Task[None] | None = None
         if _start_readers:
             self._start_readers()
@@ -6339,8 +6409,8 @@ class Session(Generic[ContextT, OutputT]):
 
         budget limits this logical run's next root sampling admission. A
         queued submission has its own budget. Steering and live replies
-        keep the active run's budget. Only request-only limits have been
-        supporting manual suspension.
+        keep the active run's budget. Request and token limits have been
+        supporting manual suspension with matching trusted limits and policy.
         See RunBudget for the counted usage, errors, and overshoot behavior.
 
         trace_options overrides linkage and adds native tracing restrictions.
@@ -12879,7 +12949,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         prefix: Sequence[tuple[dict[str, Any] | None, bool]] = (),
         prefix_error: BaseException | None = None,
-    ) -> None:
+    ) -> bool:
         pending_prefix = iter(prefix)
         prefix = ()
         preparation_callbacks = {
@@ -12891,6 +12961,7 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_tool_batch_completion": self._propose_tool_completion,
         }
         reader_failure: BaseException | None = None
+        manual_shutdown = False
         pending_callback: dict[str, Any] | None = None
         event_native = self._native
         try:
@@ -12913,6 +12984,13 @@ class Session(Generic[ContextT, OutputT]):
                 if self._realtime is not None and self._realtime._ingest(event):
                     continue
                 message = event.get("msg", {})
+                if (
+                    message.get("type") == "shutdown_complete"
+                    and event.get("subagent_id") is None
+                    and self._sealing
+                ):
+                    manual_shutdown = True
+                    break
                 if (
                     message.get("type") == "agent_profile_changed"
                     and message.get("turn_id") is None
@@ -13440,6 +13518,7 @@ class Session(Generic[ContextT, OutputT]):
                             )
                         )
             self._finish_failed_observations()
+        return manual_shutdown
 
     async def _read_mcp_results(self) -> None:
         try:
@@ -15257,6 +15336,12 @@ class Session(Generic[ContextT, OutputT]):
         probe: bool = False,
         managed_retire: bool = False,
     ) -> str:
+        drain_budget_usage = (
+            active is not None
+            and active.budget is not None
+            and active.budget.limits.max_tokens is not None
+            and not active.restored_pending
+        )
         active_uses_executor = active is not None and (
             active.operation_refs is None
             or not _fixed_tool_refs(
@@ -15283,6 +15368,8 @@ class Session(Generic[ContextT, OutputT]):
                 raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
             if before_seal is not None:
                 before_seal()
+            if drain_budget_usage and self._reader.done():
+                raise NativeError("Native event reader ended before manual capture")
             # Block replies and suppress expected ShutdownComplete/EOF while
             # Core decides whether it can stop the original writer. Readers
             # must keep dispatching until native capture confirms suspension.
@@ -15375,16 +15462,24 @@ class Session(Generic[ContextT, OutputT]):
                                 "thread_id": payload["source_session_id"],
                             }
             else:
+                seal_options = {"drain_events": True} if drain_budget_usage else {}
                 if active.output.mode == "native":
-                    encoded = await self._native._seal_manual(json.dumps(active.output.schema))
+                    encoded = await self._native._seal_manual(
+                        json.dumps(active.output.schema), **seal_options
+                    )
                 else:
-                    encoded = await self._native._seal_manual()
+                    encoded = await self._native._seal_manual(**seal_options)
                 payload = json.loads(encoded)
             native_sealed = active is not None
             if active is not None:
                 if payload is None:
                     pre_seal_refused = True
                     raise RuntimeError("The active submission is not a settled manual boundary")
+                if drain_budget_usage:
+                    # Native seal stops the fresh writer. Drain its final usage
+                    # before saving counters; restored holds still have a reader.
+                    if not await asyncio.shield(self._reader):
+                        raise NativeError("Native manual checkpoint did not drain its final events")
                 active.stopping = True
                 self._model_api_key = None
             # Current launch options are authority. Saved options may hold MCP
