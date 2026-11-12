@@ -701,9 +701,13 @@
       "sha256": "a6e10d1e8a347c5a8623ffd275b858738b848380460cfbdace7f567fa1905705"
     },
     {
+      "path": "0163-sdk-followup-mailbox-trace.patch",
+      "sha256": "3b4b270ab86c1f76b39d1d49f8e1c17e1896c6e4c6fdecba17a011a0a97ffbaf"
+    },
+    {
       "path": "sdk-tracing-id-annotations.patch",
-      "sha256": "fd80731e8375804f80ea4134ce539f2b27aa1fc605b2eb31a6c3e2574577cfc4"
+      "sha256": "7b2427c80c3b33cb022f14354918e7d9a73dc5c2648e00021578bf0f3c1328cb"
     }
   ],
-  "result_tree": "d6e3f319665b4eedaae76c795ea896f5ef964d91"
+  "result_tree": "ff05dfc444ca825c3ded1510269129897b410233"
 }

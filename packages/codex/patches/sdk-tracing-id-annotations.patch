@@ -1,17 +1,17 @@
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
-index 71d0eeb8..e2278a5d 100644
+index 1a2e2a6dd724d543fe16dcad5b7577b5eac7a09e..389aa5c82ae20e2292c94c32ded7d00f8eefa947 100644
 --- a/codex-rs/otel/src/sdk_trace.rs
 +++ b/codex-rs/otel/src/sdk_trace.rs
-@@ -15,6 +15,8 @@ use opentelemetry_sdk::trace::ShouldSample;
- use serde::{Deserialize, Serialize};
+@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
  use serde_json::{Value, json};
+ use tracing_opentelemetry::OpenTelemetrySpanExt;
  
 +pub(crate) const MAX_COMPLETION_DATA_BYTES: usize = 32 * 1024;
 +
- #[derive(Debug)]
+ #[derive(Debug, Default)]
  pub struct ScopePolicy {
      pub disabled: bool,
-@@ -116,6 +118,23 @@ fn retain_policy(span: &SpanContext, policy: Arc<ScopePolicy>) -> Arc<PolicyRegi
+@@ -176,6 +178,23 @@ fn retain_policy(span: &SpanContext, policy: Arc<ScopePolicy>) -> Arc<PolicyRegi
      entries.insert(identity, Arc::downgrade(&owner));
      owner
  }
@@ -35,7 +35,7 @@ index 71d0eeb8..e2278a5d 100644
  pub fn policy_for_span(span: &SpanContext) -> Option<Arc<ScopePolicy>> {
      policy_registration(span).map(|registration| registration.policy.clone())
  }
-@@ -281,6 +300,7 @@ struct Options {
+@@ -349,6 +368,7 @@ struct Options {
      #[serde(default)]
      detached: bool,
      trace_id: Option<String>,
@@ -43,7 +43,7 @@ index 71d0eeb8..e2278a5d 100644
      group_id: Option<String>,
      metadata: Option<Box<serde_json::value::RawValue>>,
      disabled: Option<bool>,
-@@ -323,12 +343,25 @@ fn parse_trace_id(value: &str) -> Result<TraceId, String> {
+@@ -391,12 +411,25 @@ fn parse_trace_id(value: &str) -> Result<TraceId, String> {
      }
      Ok(id)
  }
@@ -70,7 +70,7 @@ index 71d0eeb8..e2278a5d 100644
          Value::Array(values) => {
              if values.len() > 64 {
                  return Err("Tracing arrays may contain at most 64 entries".into());
-@@ -510,7 +543,7 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+@@ -579,7 +612,7 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
              .unwrap_or_default()
      };
      let parent_span = parent_context.span().span_context().clone();
@@ -79,7 +79,7 @@ index 71d0eeb8..e2278a5d 100644
          .trace_id
          .as_deref()
          .map(parse_trace_id)
-@@ -518,10 +551,27 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+@@ -587,10 +620,27 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
      if parent_span.is_valid() && trace_id.is_some_and(|id| id != parent_span.trace_id()) {
          return Err("trace_id does not match the selected parent".into());
      }
@@ -107,7 +107,7 @@ index 71d0eeb8..e2278a5d 100644
      let span = build_span("codex_agents_sdk", builder, &context);
      let context = context.with_span(span);
      let handle = Arc::new(Handle {
-@@ -584,8 +634,8 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
+@@ -653,8 +703,8 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
      }
      if let Some(data) = &outcome.data {
          bounded_value(data, 0)?;
@@ -118,7 +118,7 @@ index 71d0eeb8..e2278a5d 100644
          }
      }
      let handle = resolve(key)?;
-@@ -693,7 +743,10 @@ mod tests {
+@@ -762,7 +812,10 @@ mod tests {
      }
      #[test]
      fn bounds_nested_fields() {
@@ -130,7 +130,7 @@ index 71d0eeb8..e2278a5d 100644
          assert!(bounded_value(&json!({"x":[1,2,3]}), 0).is_ok());
      }
      #[test]
-@@ -739,13 +792,26 @@ mod tests {
+@@ -808,13 +861,26 @@ mod tests {
      #[test]
      fn bounds_actual_metadata_attribute_encoding() {
          assert_eq!(
@@ -163,7 +163,7 @@ index 71d0eeb8..e2278a5d 100644
      #[test]
      fn disabled_sampling_has_no_recording() {
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index c9abc221..47464945 100644
+index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..47464945765514dc78d150d7e2ef2ef1e23fbab8 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -184,7 +184,14 @@ fn attributes(span: &SpanData) -> BTreeMap<String, Value> {
