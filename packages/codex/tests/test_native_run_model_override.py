@@ -150,6 +150,8 @@ def test_run_sync_forwards_model_override_to_native_admission():
 async def test_manual_restore_keeps_the_admitted_override_and_future_root_default(declare_default):
     initial, forced, different = model_names()
     calls = []
+    successor_models = []
+    measuring_default = True
     lookup = FunctionTool(
         name="lookup", description="Read a key", input_type=LookupArgs, output_type=str
     )
@@ -157,6 +159,16 @@ async def test_manual_restore_keeps_the_admitted_override_and_future_root_defaul
     class Model:
         def complete(self, request):
             calls.append(request.body.get("model"))
+            user_texts = [
+                part.get("text")
+                for item in request.body.get("input", [])
+                if item.get("role") == "user"
+                for part in item.get("content", [])
+            ]
+            if user_texts and user_texts[-1] == "later default":
+                successor_models.append(request.body.get("model"))
+            if measuring_default:
+                return ModelResponse(message("default control"))
             if len(calls) == 1:
                 return ModelResponse(
                     [
@@ -171,6 +183,14 @@ async def test_manual_restore_keeps_the_admitted_override_and_future_root_defaul
             return ModelResponse(message("done"))
 
     async with timeout(20), NativeProvider(model_backend=Model()) as provider:
+        assert (
+            await Agent(instructions="Report the configured default.", provider=provider).run(
+                "measure provider default"
+            )
+        ).final_output == ("default control")
+        provider_default = calls[-1]
+        calls.clear()
+        measuring_default = False
         agent = Agent(
             model=initial if declare_default else None,
             instructions="Read A.",
@@ -239,7 +259,8 @@ async def test_manual_restore_keeps_the_admitted_override_and_future_root_defaul
             assert request.call.model == forced
             await request.respond("answer-A")
             assert (await restored.restored_turn.get_result()).final_output == "done"
+            assert calls == [forced, forced]
             assert (
                 await (await restored.submit("later default")).get_result()
             ).final_output == "done"
-    assert calls == [forced, forced, initial]
+    assert successor_models == [initial if declare_default else provider_default]
