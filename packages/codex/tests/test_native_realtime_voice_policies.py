@@ -177,9 +177,10 @@ async def test_native_approval_formatter_preserves_explicit_reason(
         assert peer.responses.requests == []
 
 
-@pytest.mark.parametrize("outcome", ["invalid", "none", "exception"])
-async def test_native_approval_formatter_validates_returns_and_preserves_pending_owner(
-    realtime_peer: RealtimePeer, outcome: str
+@pytest.mark.parametrize("outcome", ["invalid", "none", "exception", "string"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_native_approval_formatter_falls_back_and_preserves_denial(
+    realtime_peer: RealtimePeer, outcome: str, asynchronous: bool
 ) -> None:
     peer = realtime_peer
     effects, formatted = [], []
@@ -189,11 +190,16 @@ async def test_native_approval_formatter_validates_returns_and_preserves_pending
         effects.append("forbidden")
         return "forbidden"
 
-    async def formatter(error):
+    def formatter(error):
         formatted.append(error)
         if outcome == "exception":
             raise RuntimeError("Application formatter failure")
+        if outcome == "string":
+            return "Application declined"
         return None if outcome == "none" else 42
+
+    async def async_formatter(error):
+        return formatter(error)
 
     async with (
         timeout(20),
@@ -202,28 +208,28 @@ async def test_native_approval_formatter_validates_returns_and_preserves_pending
         ) as provider,
         Agent(instructions="Use risky.", tools=[risky], provider=provider).session() as session,
         session.realtime(
-            config=RealtimeConfig(model="fixture-realtime", tool_error_formatter=formatter)
+            config=RealtimeConfig(
+                model="fixture-realtime",
+                tool_error_formatter=async_formatter if asynchronous else formatter,
+            )
         ),
     ):
         await peer.function("risky", {}, "formatter-return")
         request = await next_request(session.interactions(), risky)
-        if outcome == "invalid":
-            with pytest.raises(TypeError, match="formatter must return a string or None"):
-                await request.reject()
-            assert len(await session.pending_interactions()) == 1
-            assert not any(
-                frame.get("item", {}).get("call_id") == "formatter-return" for frame in peer.frames
-            )
-            await request.reject("Explicit recovery")
-        else:
-            await request.reject()
+        await request.reject()
         output = await peer.frame(
             lambda frame: frame.get("item", {}).get("call_id") == "formatter-return"
         )
         assert output["item"]["output"] == (
-            "Explicit recovery" if outcome == "invalid" else "Tool execution was rejected"
+            "Application declined" if outcome == "string" else "Tool execution was rejected"
         )
         assert len(formatted) == 1
+        assert formatted[0].kind == "approval_rejected"
+        assert formatted[0].tool_type == "function"
+        assert formatted[0].tool_name == "risky"
+        assert formatted[0].call_id == request.call_id
+        assert formatted[0].default_message == "Tool execution was rejected"
+        assert formatted[0].run_context.agent is await session.get_active_agent()
         assert effects == []
         assert await session.pending_interactions() == ()
         assert peer.responses.requests == []

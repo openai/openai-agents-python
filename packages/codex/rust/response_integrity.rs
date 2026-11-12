@@ -43,6 +43,11 @@ struct Interceptor {
 }
 
 impl ModelResponseInterceptor for Interceptor {
+    fn preserves_provider_message_window(&self) -> bool {
+        // Accepted events are unchanged; unsupported output rejects the stream.
+        true
+    }
+
     fn intercept_with_tool_admission(
         self: Box<Self>,
         stream: ModelResponseStream,

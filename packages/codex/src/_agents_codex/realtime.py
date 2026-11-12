@@ -1390,9 +1390,7 @@ class RealtimeSession:
         except Exception:
             pass
         self._check_live()
-        if result is not None and not isinstance(result, str):
-            raise TypeError("Realtime tool error formatter must return a string or None")
-        return default if result is None else result
+        return result if isinstance(result, str) else default
 
     async def _resolve_api_key(self) -> str | None:
         source = self._config.api_key
@@ -2647,8 +2645,8 @@ class RealtimeSession:
     def _record_guardrail_text(self, value: dict[str, Any], *, final: bool) -> None:
         if not self._guardrails and not getattr(self, "_has_agent_guardrails", False):
             return
-        agent = self._session._agent_for_profile(value.get("profile_receipt"))
-        defaults = getattr(agent, "realtime", None)
+        declaration = self._session._agent_for_profile(value.get("profile_receipt"))
+        defaults = getattr(declaration, "realtime", None)
         candidates = (
             *(defaults.output_guardrails if defaults is not None else ()),
             *self._guardrails,
@@ -2690,7 +2688,7 @@ class RealtimeSession:
                     content_index=value.get("content_index"),
                     output_index=value.get("output_index"),
                     output_kind=kind,
-                    agent=agent,
+                    agent=self._session._original_agent_for_profile(value.get("profile_receipt")),
                     context=self._session._context,
                     final=False,
                 ),

@@ -46,7 +46,11 @@ if TYPE_CHECKING:
         SQLAlchemySessionStore as SQLAlchemySessionStore,
         SQLiteSessionStore as SQLiteSessionStore,
     )
-    from .compaction import CompactionContext as CompactionContext
+    from .compaction import (
+        CompactionContext as CompactionContext,
+        ResponsesCompaction as ResponsesCompaction,
+        ResponsesCompactionContext as ResponsesCompactionContext,
+    )
     from .completion import (
         CompletionContext as CompletionContext,
         ContinueTurn as ContinueTurn,
@@ -306,6 +310,8 @@ _MODULES = {
     "DecisionResponse": ".decisions",
     "OpenAIDecisions": ".decisions",
     "CompactionContext": ".compaction",
+    "ResponsesCompaction": ".compaction",
+    "ResponsesCompactionContext": ".compaction",
     "GuardrailRecord": ".guardrails",
     "GuardrailResult": ".guardrails",
     "GuardrailTripwire": ".guardrails",

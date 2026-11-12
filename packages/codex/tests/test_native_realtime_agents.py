@@ -1115,3 +1115,84 @@ async def test_native_structured_handoff_interrupt_retires_callback_without_targ
                 )
             finally:
                 release.set()
+
+
+async def test_native_voice_combines_agent_and_session_speech_guards_across_handoff(realtime_peer):
+    from agents.realtime import RealtimeGuardrailResult, RealtimeOutputGuardrail
+
+    peer = realtime_peer
+    observed = []
+    checked = {name: asyncio.Event() for name in ("source-speech", "target-speech")}
+
+    def guard(name):
+        def check(value):
+            observed.append((name, value.response_id, value.agent))
+            if sum(item[1] == value.response_id for item in observed) == 2:
+                checked[value.response_id].set()
+            return RealtimeGuardrailResult(False)
+
+        return RealtimeOutputGuardrail(name, check)
+
+    async def speech(response_id):
+        assert peer.socket is not None
+        await peer.socket.send_json({"type": "response.created", "response": {"id": response_id}})
+        await peer.socket.send_json(
+            {
+                "type": "response.output_text.delta",
+                "response_id": response_id,
+                "item_id": f"item-{response_id}",
+                "content_index": 0,
+                "output_index": 0,
+                "delta": "Check this speech.",
+            }
+        )
+        await checked[response_id].wait()
+        await peer.socket.send_json({"type": "response.done", "response": {"id": response_id}})
+
+    target = Agent(
+        name="Target",
+        instructions="Target instructions",
+        realtime=RealtimeAgentConfig(output_guardrails=(guard("target"),)),
+    )
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-speech-guards",
+            supports_websockets=False,
+        ) as provider,
+    ):
+        source = Agent(
+            name="Source",
+            instructions="Source instructions",
+            provider=provider,
+            realtime=RealtimeAgentConfig(output_guardrails=(guard("source"),)),
+            handoffs=[realtime_handoff(target, name="switch_guarded_agent")],
+        )
+        async with (
+            source.session() as session,
+            session.realtime(
+                config=RealtimeConfig(
+                    model="fixture-realtime",
+                    output_guardrails=(guard("global"),),
+                    guardrail_text_threshold=1,
+                )
+            ) as voice,
+        ):
+            await speech("source-speech")
+            start = len(peer.frames)
+            await peer.function("switch_guarded_agent", {}, "guarded-handoff")
+            await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
+            assert await voice.get_active_agent() is target
+            await speech("target-speech")
+            assert {(name, response_id) for name, response_id, _ in observed} == {
+                ("source", "source-speech"),
+                ("global", "source-speech"),
+                ("target", "target-speech"),
+                ("global", "target-speech"),
+            }
+            assert all(
+                agent is (source if response_id == "source-speech" else target)
+                for _, response_id, agent in observed
+            )
+            assert peer.responses.requests == []

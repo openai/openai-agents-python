@@ -1,0 +1,747 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index b6a0b2ff07431078516e194fe5b11297406237a1..8fcfb2df08a23515478a33b1a62b3238b6e33070 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -300,6 +300,7 @@ pub struct ModelClient {
+ pub struct ModelClientSession {
+     client: ModelClient,
+     websocket_session: WebsocketSession,
++    pending_http_response: Option<(Option<String>, Option<u64>, oneshot::Receiver<LastResponse>)>,
+     /// Turn state for sticky routing.
+     ///
+     /// This is an `OnceLock` that stores the turn state value received from the server
+@@ -314,6 +315,33 @@ pub struct ModelClientSession {
+     turn_state: Arc<OnceLock<String>>,
+ }
+ 
++/// Minted from the native HTTP response collector, never from saved JSON.
++pub(crate) struct NativeProviderResponse {
++    pub(crate) anchor: codex_extension_api::ProviderResponseAnchor,
++    owner: std::sync::Weak<ModelClientState>,
++    auth_owner_generation: Option<u64>,
++}
++impl NativeProviderResponse {
++    pub(crate) fn matches_provider(
++        &self,
++        client: &ModelClient,
++        provider: &SharedModelProvider,
++    ) -> bool {
++        // Session and ModelClient construct separate provider wrappers from the
++        // same native definition. Bind the definition and credential owner,
++        // while retaining the exact issuing client and auth generation.
++        let same_auth_manager = match (provider.auth_manager(), client.auth_manager()) {
++            (None, None) => true,
++            (Some(left), Some(right)) => Arc::ptr_eq(&left, &right),
++            _ => false,
++        };
++        std::sync::Weak::ptr_eq(&self.owner, &Arc::downgrade(&client.state))
++            && provider.info() == client.state.provider.info()
++            && same_auth_manager
++            && self.auth_owner_generation == client.auth_owner_generation()
++    }
++}
++
+ #[derive(Debug, Clone)]
+ struct LastResponse {
+     response_id: String,
+@@ -714,6 +742,7 @@ impl ModelClient {
+         ModelClientSession {
+             client: self.clone(),
+             websocket_session,
++            pending_http_response: None,
+             turn_state: Arc::new(OnceLock::new()),
+         }
+     }
+@@ -1163,18 +1192,7 @@ impl ModelClient {
+             prefix.push(instructions);
+         }
+         input.splice(0..0, prefix);
+-        if !is_openai {
+-            for item in &mut input {
+-                item.clear_internal_chat_message_metadata_passthrough();
+-                if let ResponseItem::FunctionCall {
+-                    encrypted_function_args,
+-                    ..
+-                } = item
+-                {
+-                    *encrypted_function_args = None;
+-                }
+-            }
+-        }
++        filter_provider_response_metadata(&mut input, is_openai);
+         let reasoning = if prompt_owns_model {
+             Reasoning {
+                 effort,
+@@ -1274,18 +1292,19 @@ impl ModelClient {
+             tools: tools.filter(|_| {
+                 !hosted_prompt.is_some_and(|hosted| hosted.omit_tools && prompt.tools.is_empty())
+             }),
+-            tool_choice: (!(hosted_prompt.is_some() && controls.named_tool_choice.is_none()))
+-            .then(|| {
+-                if controls
+-                    .named_tool_choice
+-                    .as_ref()
+-                    .is_some_and(Option::is_some)
+-                {
+-                    "required".to_string()
+-                } else {
+-                    prompt.tool_choice.to_string()
+-                }
+-            }),
++            tool_choice: (!(hosted_prompt.is_some() && controls.named_tool_choice.is_none())).then(
++                || {
++                    if controls
++                        .named_tool_choice
++                        .as_ref()
++                        .is_some_and(Option::is_some)
++                    {
++                        "required".to_string()
++                    } else {
++                        prompt.tool_choice.to_string()
++                    }
++                },
++            ),
+             request_controls: codex_api::ResponsesRequestControls {
+                 prompt: prompt_reference,
+                 instructions: hosted_prompt
+@@ -2107,7 +2126,7 @@ impl ModelClientSession {
+         )
+     )]
+     async fn stream_responses_api(
+-        &self,
++        &mut self,
+         prompt: &Prompt,
+         model_info: &ModelInfo,
+         session_telemetry: &SessionTelemetry,
+@@ -2236,6 +2255,9 @@ impl ModelClientSession {
+             )?;
+             self.client
+                 .prepare_response_items_for_request(&mut request.input);
++            // Native formatting includes prompt-only instruction rows. Compare
++            // later custody edits against this exact native-built projection.
++            let native_input = request.store.then(|| request.input.clone());
+             if crate::guardian::is_basic_session_source(&self.client.state.session_source) {
+                 crate::guardian::observe_guardian_request(session_telemetry, &request);
+             }
+@@ -2299,6 +2321,22 @@ impl ModelClientSession {
+                     request_transport,
+                 )
+             };
++            let coverage = (request.store
++                && request.model.is_some()
++                && request.request_controls.prompt.is_none()
++                && prompt.prepared_request_admission.is_none()
++                && interceptors
++                    .iter()
++                    .all(|interceptor| interceptor.preserves_provider_message_window())
++                && provider_window_input_supported(&request.input)
++                && !matches!(
++                    responses_metadata.request_kind,
++                    Some(crate::responses_metadata::CodexResponsesRequestKind::Compaction(_))
++                )
++                && native_input
++                    .as_ref()
++                    .is_some_and(|input| input == &request.input))
++            .then(|| (request.model.clone(), client_setup.auth_owner_generation));
+             let produced = crate::model_request::produce_response(
+                 &interceptors,
+                 &request,
+@@ -2338,7 +2376,7 @@ impl ModelClientSession {
+ 
+             match stream_result {
+                 Ok((request_id, interrupt, events, producer_task, producer_stop)) => {
+-                    let (mut stream, _) = map_response_events(
++                    let (mut stream, response) = map_response_events(
+                         request_id,
+                         crate::model_request::intercept_stream(events, interceptors),
+                         request_session_telemetry,
+@@ -2354,6 +2392,8 @@ impl ModelClientSession {
+                     stream.producer_task = producer_task;
+                     stream.producer_stop = producer_stop;
+                     stream.request_observation = request_observation;
++                    self.pending_http_response =
++                        coverage.map(|(model, owner)| (model, owner, response));
+                     return Ok(stream);
+                 }
+                 Err(ApiError::Transport(unauthorized_transport))
+@@ -2707,7 +2747,10 @@ impl ModelClientSession {
+             let operation = responses_metadata.model_attempt_operation();
+             let send_observer = responses_metadata.model_attempt.clone().map(|attempt| {
+                 Arc::new(move || {
+-                    attempt.0.record(operation, codex_extension_api::ModelRequestTransport::Websocket);
++                    attempt.0.record(
++                        operation,
++                        codex_extension_api::ModelRequestTransport::Websocket,
++                    );
+                 }) as Arc<dyn Fn() + Send + Sync>
+             });
+             let stream_result = websocket_connection
+@@ -2894,6 +2937,7 @@ impl ModelClientSession {
+             ));
+         }
+         let thread_id = self.client.state.thread_id.to_string();
++        self.pending_http_response = None;
+         let mut transformed = None;
+         for contributor in &self.client.request_contributors {
+             if !contributor.transforms_context(&thread_id) {
+@@ -2906,7 +2950,10 @@ impl ModelClientSession {
+             let projected = transformed.get_or_insert_with(|| prompt.clone());
+             contributor
+                 .transform_context(codex_extension_api::ModelContextInput {
+-                    turn_store: prompt.tool_admission.as_ref().map(|admission| admission.turn_store()),
++                    turn_store: prompt
++                        .tool_admission
++                        .as_ref()
++                        .map(|admission| admission.turn_store()),
+                     step_store: prompt
+                         .tool_admission
+                         .as_ref()
+@@ -2933,6 +2980,9 @@ impl ModelClientSession {
+         {
+             recorder.invalidate_wire_inventory_loss(&prompt.input, &projected.input);
+         }
++        let unchanged = transformed.as_ref().is_none_or(|projected| {
++            projected.input == prompt.input && projected.request_controls == prompt.request_controls
++        });
+         let prompt = transformed.as_ref().unwrap_or(prompt);
+         let wire_api = self.client.state.provider.info().wire_api;
+         match wire_api {
+@@ -2963,22 +3013,77 @@ impl ModelClientSession {
+                     }
+                 }
+ 
+-                self.stream_responses_api(
+-                    prompt,
+-                    model_info,
+-                    session_telemetry,
+-                    effort,
+-                    summary,
+-                    service_tier,
+-                    responses_metadata,
+-                    inference_trace,
+-                    &mut auth_recovery,
+-                )
+-                .await
++                let response = self
++                    .stream_responses_api(
++                        prompt,
++                        model_info,
++                        session_telemetry,
++                        effort,
++                        summary,
++                        service_tier,
++                        responses_metadata,
++                        inference_trace,
++                        &mut auth_recovery,
++                    )
++                    .await;
++                if !unchanged {
++                    self.pending_http_response = None;
++                }
++                response
+             }
+         }
+     }
+ 
++    pub(crate) fn has_acknowledged_response_candidate(&self) -> bool {
++        self.pending_http_response.is_some()
++    }
++
++    /// Consume the existing collector after Core durably accepts the exact window.
++    /// The resulting receipt retains neither input nor provider output.
++    pub(crate) fn take_acknowledged_response(
++        &mut self,
++        prompt: &Prompt,
++        current: &[ResponseItem],
++    ) -> Option<NativeProviderResponse> {
++        let (model, owner, mut response) = self.pending_http_response.take()?;
++        let response = response.try_recv().ok()?;
++        if response.response_id.trim().is_empty()
++            || response.items_added.iter().any(|item| {
++                !matches!(
++                    item,
++                    ResponseItem::Message { .. } | ResponseItem::Reasoning { .. }
++                )
++            })
++        {
++            return None;
++        }
++        let expected = prompt.input.iter().chain(&response.items_added);
++        if expected.clone().count() != current.len()
++            || !expected.zip(current).all(|(expected, current)| {
++                let mut expected = expected.clone();
++                let mut current = current.clone();
++                let is_openai = self.client.state.provider.info().is_openai();
++                filter_provider_response_metadata(std::slice::from_mut(&mut expected), is_openai);
++                filter_provider_response_metadata(std::slice::from_mut(&mut current), is_openai);
++                self.client
++                    .prepare_response_items_for_request(std::slice::from_mut(&mut expected));
++                self.client
++                    .prepare_response_items_for_request(std::slice::from_mut(&mut current));
++                expected == current
++            })
++        {
++            return None;
++        }
++        Some(NativeProviderResponse {
++            anchor: codex_extension_api::ProviderResponseAnchor {
++                response_id: response.response_id,
++                model,
++            },
++            owner: Arc::downgrade(&self.client.state),
++            auth_owner_generation: owner,
++        })
++    }
++
+     /// Permanently disables WebSockets for this Codex session and resets WebSocket state.
+     ///
+     /// This is used after exhausting the provider retry budget, to force subsequent requests onto
+@@ -3746,6 +3851,71 @@ impl WebsocketTelemetry for ApiTelemetry {
+     }
+ }
+ 
++// Shared with native request construction: only metadata already omitted from
++// this provider's actual wire request may be ignored by lineage comparison.
++fn filter_provider_response_metadata(input: &mut [ResponseItem], is_openai: bool) {
++    if !is_openai {
++        for item in input {
++            item.clear_internal_chat_message_metadata_passthrough();
++            if let ResponseItem::FunctionCall {
++                encrypted_function_args,
++                ..
++            } = item
++            {
++                *encrypted_function_args = None;
++            }
++        }
++    }
++}
++
++#[test]
++fn provider_window_uses_existing_wire_metadata_projection() {
++    let original: ResponseItem = serde_json::from_value(serde_json::json!({
++        "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "exact"}]
++    })).unwrap();
++    let mut persisted = original.clone();
++    persisted.set_turn_id_if_missing("native-turn");
++    let mut openai = persisted.clone();
++    filter_provider_response_metadata(std::slice::from_mut(&mut openai), true);
++    assert_ne!(original, openai);
++    filter_provider_response_metadata(std::slice::from_mut(&mut persisted), false);
++    assert_eq!(original, persisted);
++    let mut changed: ResponseItem = serde_json::from_value(serde_json::json!({
++        "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "different"}]
++    })).unwrap();
++    filter_provider_response_metadata(std::slice::from_mut(&mut changed), false);
++    assert_ne!(original, changed);
++}
++
++// The SDK's final native schema restoration can rewrite these historical
++// declarations after typed request construction. They require a later exact
++// final-wire receipt and must not inherit the message-only attestation.
++fn provider_window_input_supported(items: &[ResponseItem]) -> bool {
++    !items.iter().any(|item| {
++        matches!(
++            item,
++            ResponseItem::AdditionalTools { .. } | ResponseItem::ToolSearchOutput { .. }
++        )
++    })
++}
++
++#[test]
++fn provider_window_rejects_schema_bearing_history() {
++    assert!(provider_window_input_supported(&[]));
++    for value in [
++        serde_json::json!({"type": "additional_tools", "role": "developer", "tools": []}),
++        serde_json::json!({"type": "tool_search_output", "status": "completed", "execution": "server", "tools": []}),
++    ] {
++        let item: ResponseItem = serde_json::from_value(value).unwrap();
++        assert!(!provider_window_input_supported(&[item]));
++    }
++    let message: ResponseItem = serde_json::from_value(serde_json::json!({
++        "type": "message", "role": "user", "content": [{"type": "input_text", "text": "current"}]
++    }))
++    .unwrap();
++    assert!(provider_window_input_supported(&[message]));
++}
++
+ #[cfg(test)]
+ #[path = "client_tests.rs"]
+ mod tests;
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index e05b6ad1f21a6462b91ffb15a7f1d6507406b3e7..5b3c6147a0bdad1ceb44f88fa39122361cbe41ee 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -2829,15 +2829,14 @@ async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Resu
+ #[tokio::test]
+ async fn explicit_output_cap_stops_after_retained_typed_limit_but_uncapped_policy_remains() {
+     for explicit_cap in [false, true] {
+-        let mut observation = ResponseEvent::ResponseObserved(
+-            codex_protocol::protocol::ResponseObservation {
++        let mut observation =
++            ResponseEvent::ResponseObserved(codex_protocol::protocol::ResponseObservation {
+                 response_id: Some("configured-output-cap".into()),
+                 upstream_request_id: None,
+                 status: codex_protocol::protocol::ResponseObservationStatus::Completed,
+                 incomplete_reason: None,
+                 usage: None,
+-            },
+-        );
++            });
+         if let ResponseEvent::ResponseObserved(value) = &mut observation {
+             value.status = codex_protocol::protocol::ResponseObservationStatus::Incomplete;
+             value.incomplete_reason =
+@@ -2977,3 +2976,41 @@ async fn explicit_realtime_call_and_hangup_keep_one_bearer_without_backend_auth(
+         assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
+     }
+ }
++
++#[test]
++fn acknowledged_window_requires_exact_client_provider_and_auth_scope() {
++    let mut client = test_model_client(SessionSource::Cli);
++    let info = client.state.provider.info().clone();
++    let auth =
++        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
++    Arc::get_mut(&mut client.state).unwrap().provider =
++        create_model_provider(info.clone(), Some(auth.clone()));
++    let same_scope = create_model_provider(info.clone(), Some(auth));
++    assert!(!Arc::ptr_eq(&client.state.provider, &same_scope));
++    let mut receipt = super::NativeProviderResponse {
++        anchor: codex_extension_api::ProviderResponseAnchor {
++            response_id: "response-native".into(),
++            model: Some("model".into()),
++        },
++        owner: Arc::downgrade(&client.state),
++        auth_owner_generation: client.auth_owner_generation(),
++    };
++    assert!(receipt.matches_provider(&client, &same_scope));
++    let other = test_model_client(SessionSource::Cli);
++    assert!(!receipt.matches_provider(&other, &same_scope));
++    let mut different_info = info.clone();
++    different_info.base_url = Some("https://other.example.invalid/v1".into());
++    let different_provider = create_model_provider(different_info, client.auth_manager());
++    assert!(!receipt.matches_provider(&client, &different_provider));
++    let different_auth =
++        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
++    let different_auth_provider = create_model_provider(info, Some(different_auth));
++    assert!(!receipt.matches_provider(&client, &different_auth_provider));
++    receipt.auth_owner_generation = Some(
++        client
++            .auth_owner_generation()
++            .unwrap_or_default()
++            .wrapping_add(1),
++    );
++    assert!(!receipt.matches_provider(&client, &same_scope));
++}
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 19d88f263d325e62c4b5c5d08807e2c121738505..2df4947a14e0e3aa8978ec4bc44892cfef88040b 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -376,6 +376,9 @@ pub(crate) async fn run_custom_post_turn_compaction(
+         automatic: true,
+         optional: true,
+         candidate_indexes: &candidate_indexes,
++        provider_response: sess
++            .provider_response_for_window(&step_context, &history)
++            .await,
+         items: &items,
+     };
+     for contributor in contributors {
+@@ -477,6 +480,9 @@ async fn try_custom_compaction_with_history(
+                 automatic: matches!(metadata.trigger(), CompactionTrigger::Auto),
+                 optional: matches!(metadata.phase(), CompactionPhase::PostTurn),
+                 candidate_indexes: &indexes,
++                provider_response: sess
++                    .provider_response_for_window(source_step_context, history)
++                    .await,
+                 items: &items,
+             };
+             &current_input
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index b3654ddc648463eca1b7ebbbca292241f635acc9..cc53553ab4fef3f566bd5bbf103775d6fdb0b97c 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -74,6 +74,7 @@ use std::ops::Deref;
+ use std::sync::Arc;
+ use std::sync::LazyLock;
+ use std::sync::OnceLock;
++use std::sync::Weak;
+ use std::sync::atomic::AtomicU64;
+ use std::sync::atomic::Ordering;
+ 
+@@ -87,6 +88,11 @@ fn next_guardian_review_context_revision() -> u64 {
+     GUARDIAN_REVIEW_CONTEXT_REVISION.fetch_add(/*val*/ 1, Ordering::Relaxed)
+ }
+ 
++/// Live identity of one immutable native history vector. This retains no items and
++/// cannot be reconstructed from serialized state. Arc::make_mut invalidates it.
++#[derive(Clone, Debug)]
++pub(crate) struct HistoryWindowReceipt(Weak<Vec<ResponseItemEnvelope>>);
++
+ /// Transcript of thread history
+ #[derive(Debug, Clone)]
+ pub(crate) struct ContextManager {
+@@ -250,6 +256,14 @@ impl ContextManager {
+         }
+     }
+ 
++    pub(crate) fn window_receipt(&self) -> HistoryWindowReceipt {
++        HistoryWindowReceipt(Arc::downgrade(&self.items))
++    }
++
++    pub(crate) fn matches_window_receipt(&self, receipt: &HistoryWindowReceipt) -> bool {
++        Weak::ptr_eq(&receipt.0, &Arc::downgrade(&self.items))
++    }
++
+     pub(crate) fn conversation_history_snapshot(&self) -> Arc<dyn ConversationHistorySnapshot> {
+         Arc::new(SharedConversationHistory {
+             items: Arc::clone(&self.items),
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index f146f130f2d91e073a597f85f48edc267bf05897..7d0f84c2e04411d1cfac0e31999099b447f51978 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -3714,3 +3714,18 @@ fn provider_compaction_accounting_ignores_old_files_and_reasoning() {
+     );
+     assert_eq!(raw_items(&history), audit);
+ }
++
++#[test]
++fn live_window_receipts_expire_on_append_and_replacement() {
++    let mut history = ContextManager::new();
++    let initial = history.window_receipt();
++    let snapshot = history.clone();
++    assert!(history.matches_window_receipt(&initial));
++    history.record_items([&user_msg("new input")], TruncationPolicy::Tokens(10_000));
++    assert!(!history.matches_window_receipt(&initial));
++    assert!(snapshot.matches_window_receipt(&initial));
++    let appended = history.window_receipt();
++    history.replace(vec![user_msg("replacement")]);
++    assert!(!history.matches_window_receipt(&appended));
++    assert!(!ContextManager::new().matches_window_receipt(&initial));
++}
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index ccce3d01fa4045b9333c889dc0b94805fcc90576..3106756ab3f445ddadef5a4254dd172e6d3b20ff 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -4,6 +4,7 @@ pub(crate) mod updates;
+ 
+ pub(crate) use history::ContextManager;
+ pub(crate) use history::HistoryReplacement;
++pub(crate) use history::HistoryWindowReceipt;
+ pub(crate) use history::estimate_image_reference_bytes;
+ pub(crate) use history::estimate_item_token_count;
+ pub(crate) use history::is_provider_compaction_boundary;
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 45466ca435b3fa5aa578d4f1ebc5fdbfc746f5a5..aa55d51ebbbb6b5f502bbfb226e4037d5bf2d5ec 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -102,6 +102,10 @@ struct BoundInterceptor {
+     admission: Option<Arc<dyn ModelToolAdmission>>,
+ }
+ impl ModelResponseInterceptor for BoundInterceptor {
++    fn preserves_provider_message_window(&self) -> bool {
++        self.inner.preserves_provider_message_window()
++    }
++
+     fn produces_response(&self) -> bool {
+         self.inner.produces_response()
+     }
+@@ -267,3 +271,34 @@ pub(crate) async fn produce_response(
+         .ok_or("Selected native model producer is unavailable")?;
+     producer.await.map(Some)
+ }
++
++#[test]
++fn bound_interceptor_forwards_provider_window_attestation() {
++    struct Passive(bool);
++    impl ModelResponseInterceptor for Passive {
++        fn preserves_provider_message_window(&self) -> bool {
++            self.0
++        }
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    struct Unknown;
++    impl ModelResponseInterceptor for Unknown {
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    for expected in [false, true] {
++        let wrapped = BoundInterceptor {
++            inner: Box::new(Passive(expected)),
++            admission: None,
++        };
++        assert_eq!(wrapped.preserves_provider_message_window(), expected);
++    }
++    let unknown = BoundInterceptor {
++        inner: Box::new(Unknown),
++        admission: None,
++    };
++    assert!(!unknown.preserves_provider_message_window());
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index e83df9eecf6ddf85cba254ebef3329967e4ebb0c..ecba441f4f5b194279d5dab68676afb17f172243 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -537,6 +537,16 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+ const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
+ const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
+ 
++/// Live response authority; no serialized checkpoint can mint this receipt.
++pub(crate) struct AcknowledgedProviderWindow {
++    provider: crate::client::NativeProviderResponse,
++    history: crate::context_manager::HistoryWindowReceipt,
++    settings: Arc<ResolvedStepSettings>,
++    base_instructions: BaseInstructions,
++    developer_instructions: Option<String>,
++    loaded_agents_md: Option<Arc<crate::agents_md::LoadedAgentsMd>>,
++}
++
+ impl Session {
+     /// Spawn and initialize a new session.
+     /// Hide the concrete startup future from callers while keeping initialization lazy.
+@@ -1657,6 +1667,40 @@ impl Session {
+         history.estimate_token_count(turn_context)
+     }
+ 
++    pub(crate) async fn provider_response_for_window(
++        &self,
++        step: &StepContext,
++        history: &crate::context_manager::ContextManager,
++    ) -> Option<codex_extension_api::ProviderResponseAnchor> {
++        let base = self.get_prompt_base_instructions().await;
++        let state = self.state.lock().await;
++        let receipt = state.acknowledged_provider_window.as_ref()?;
++        let same_profile = match (
++            &receipt.settings.agent_profile,
++            &step.settings.agent_profile,
++        ) {
++            (None, None) => true,
++            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
++            _ => false,
++        };
++        let same_instructions = match (&receipt.loaded_agents_md, &step.loaded_agents_md) {
++            (None, None) => true,
++            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
++            _ => false,
++        };
++        (history.matches_window_receipt(&receipt.history)
++            && receipt
++                .provider
++                .matches_provider(&self.services.model_client, &step.turn.provider)
++            && receipt.settings.selected() == step.settings.selected()
++            && receipt.settings.model_info.slug == step.settings.model_info.slug
++            && receipt.base_instructions.text == base.text
++            && receipt.developer_instructions == step.turn.developer_instructions
++            && same_profile
++            && same_instructions)
++            .then(|| receipt.provider.anchor.clone())
++    }
++
+     pub(crate) async fn get_base_instructions(&self) -> BaseInstructions {
+         let state = self.state.lock().await;
+         BaseInstructions {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 5dcb45c29e6336a94aa034a3c30bd1ff25480866..02ea39e3e1ad9bc6ea953499e4511c1048c18070 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -5198,6 +5198,24 @@ async fn try_run_sampling_request(
+         }
+     }
+ 
++    if outcome.is_ok() && client_session.has_acknowledged_response_candidate() {
++        let mut state = sess.state.lock().await;
++        let items = state
++            .history
++            .clone()
++            .for_prompt(&step_context.settings.model_info.input_modalities);
++        if let Some(provider) = client_session.take_acknowledged_response(prompt, &items) {
++            state.acknowledged_provider_window = Some(super::AcknowledgedProviderWindow {
++                provider,
++                history: state.history.window_receipt(),
++                settings: step_context.settings.clone(),
++                base_instructions: prompt.base_instructions.clone(),
++                developer_instructions: step_context.turn.developer_instructions.clone(),
++                loaded_agents_md: step_context.loaded_agents_md.clone(),
++            });
++        }
++    }
++
+     outcome.map(|mut result| {
+         result.settled_tools = settled_tools;
+         result.accepted_handoff = tool_runtime.accepted_handoff();
+diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
+index 519c65f64fc07f3d63e61b8a1b6754445a72e002..d2f64f3551c6dfd87dc28d12a092d7a3122942cb 100644
+--- a/codex-rs/core/src/state/session.rs
++++ b/codex-rs/core/src/state/session.rs
+@@ -70,6 +70,7 @@ pub(crate) struct SessionState {
+     /// Persisted origin of the session base instructions, when known.
+     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
+     pub(crate) history: ContextManager,
++    pub(crate) acknowledged_provider_window: Option<crate::session::AcknowledgedProviderWindow>,
+     pub(crate) sdk_originals: codex_history::sdk_originals::SdkOriginalHistoryCache,
+     pub(crate) sdk_originals_replay_policy: Option<codex_utils_output_truncation::TruncationPolicy>,
+     /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
+@@ -128,6 +129,7 @@ impl SessionState {
+             session_configuration,
+             base_instructions_provenance: None,
+             history,
++            acknowledged_provider_window: None,
+             sdk_originals,
+             sdk_originals_replay_policy: None,
+             history_reset: CancellationToken::new(),
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 19d758252c6a2a7527088fca5e6682cdc895ef01..1e2fc8180fbce7913bd088df5640274832ef25b8 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -157,6 +157,7 @@ pub use model_request::ModelResponseError;
+ pub use model_request::ModelResponseInterceptor;
+ pub use model_request::ModelResponseStream;
+ pub use model_request::ModelToolAdmission;
++pub use model_request::ProviderResponseAnchor;
+ pub use model_request::ResponseEvent;
+ pub use model_request::ToolsOnlyCallInput;
+ pub use model_request::ToolsOnlyWorkCancellation;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 2edda0a16095cd99e25696c6b71e0c98ec6d563b..c1ffae9564ef45f9da7d46d1d4c387f49016e3ef 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -157,6 +157,14 @@ pub struct ModelContextInput<'a> {
+     pub items: &'a mut Vec<ResponseItem>,
+ }
+ 
++/// An ordinary stored response acknowledged by the native provider for the exact
++/// captured model window. Compact-result IDs and imported IDs never create it.
++#[derive(Clone, Debug, serde::Serialize)]
++pub struct ProviderResponseAnchor {
++    pub response_id: String,
++    pub model: Option<String>,
++}
++
+ /// Active conversation input before native summarization begins.
+ #[derive(Clone)]
+ pub struct CompactionInput<'a> {
+@@ -170,6 +178,7 @@ pub struct CompactionInput<'a> {
+     pub automatic: bool,
+     pub optional: bool,
+     pub candidate_indexes: &'a [usize],
++    pub provider_response: Option<ProviderResponseAnchor>,
+     pub items: &'a [ResponseItem],
+ }
+ 
+@@ -400,6 +409,13 @@ pub struct ModelAttemptInput {
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Attest unchanged completed messages, reasoning and response IDs.
++    /// Core additionally rejects every other output kind when issuing lineage.
++    /// This native assertion must not cover application rewrites or producers.
++    fn preserves_provider_message_window(&self) -> bool {
++        false
++    }
++
+     /// Select a model producer before materializing the detached request JSON.
+     fn produces_response(&self) -> bool {
+         false

@@ -63,7 +63,7 @@ from ._media import _MAX_AUDIO_INPUT_BYTES, _check_audio_json, _contains_audio
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._tool_errors import ToolErrorFormatter as ToolErrorFormatter
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
-from .compaction import _BeforeCompact
+from .compaction import ResponsesCompaction, _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
@@ -995,6 +995,7 @@ class Agent(Generic[ContextT, OutputT]):
     output_guardrails: tuple[OutputGuardrail[ContextT], ...]
     tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     hosted_prompt: HostedPromptSource | None
+    compaction: ResponsesCompaction[ContextT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1091,6 +1092,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
+        compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
     ) -> None: ...
 
     @overload
@@ -1123,6 +1125,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
+        compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
     ) -> None: ...
 
     @overload
@@ -1153,6 +1156,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
+        compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
     ) -> None: ...
 
     @overload
@@ -1183,6 +1187,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
+        compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
     ) -> None: ...
 
     def __init__(
@@ -1212,6 +1217,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
+        compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None
@@ -1230,6 +1236,13 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("transform_context must be callable or None")
         if before_compact is not None and not callable(before_compact):
             raise TypeError("before_compact must be callable or None")
+        if isinstance(compaction, dict):
+            compaction = ResponsesCompaction(**compaction)
+        if compaction is not None and not isinstance(compaction, ResponsesCompaction):
+            raise TypeError("compaction must be ResponsesCompaction, a dictionary, or None")
+        if compaction is not None and before_compact is not None:
+            raise ValueError("compaction and before_compact are mutually exclusive")
+        object.__setattr__(self, "compaction", compaction)
         if before_complete is not None and not callable(before_complete):
             raise TypeError("before_complete must be callable or None")
         if tool_batch_completion is not None and not callable(tool_batch_completion):
@@ -2718,6 +2731,7 @@ def _private_text_run_eligible(
         and not agent.programmatic_tool_calling
         and agent.transform_context is None
         and agent.before_compact is None
+        and agent.compaction is None
         and agent.before_complete is None
         and agent.tool_batch_completion is None
         and not agent.output_guardrails

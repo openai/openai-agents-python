@@ -2626,10 +2626,37 @@ impl ModelRequestContributor for Boundary {
             .is_some_and(|tools| tools.customizes_compaction())
     }
 
-    fn before_compact<'a>(
+    fn schedules_post_turn_compaction(
+        &self,
+        thread_id: &str,
+        step_store: &codex_extension_api::ExtensionData,
+    ) -> bool {
+        self.context_tools(thread_id)
+            .is_some_and(|tools| tools.schedules_post_turn_compaction(step_store))
+    }
+
+    fn post_turn_compaction<'a>(
         &'a self,
         input: codex_extension_api::CompactionInput<'a>,
-    ) -> ExtensionFuture<'a, std::result::Result<Option<String>, String>> {
+    ) -> ExtensionFuture<'a, std::result::Result<Option<bool>, String>> {
+        Box::pin(async move {
+            let tools = self
+                .context_tools(input.thread_id)
+                .ok_or_else(|| "Expired compaction policy owner".to_owned())?;
+            tools
+                .post_turn_compaction(input)
+                .await
+                .map_err(|_| "Compaction policy callback failed".to_owned())
+        })
+    }
+
+    fn before_compact_result<'a>(
+        &'a self,
+        input: codex_extension_api::CompactionInput<'a>,
+    ) -> ExtensionFuture<
+        'a,
+        std::result::Result<Option<codex_extension_api::CompactionResult>, String>,
+    > {
         Box::pin(async move {
             let tools = self
                 .context_tools(input.thread_id)
@@ -2771,6 +2798,12 @@ struct AdmissionOnly {
     owner: Arc<DirectTurn>,
 }
 impl ModelResponseInterceptor for AdmissionOnly {
+    fn preserves_provider_message_window(&self) -> bool {
+        // Native admission preserves messages, reasoning and response IDs.
+        // Core excludes all other newly emitted item kinds from lineage.
+        true
+    }
+
     fn admit_request(&self) -> Result<(), String> {
         self.control.admit_model_request(&self.owner)
     }
@@ -3173,6 +3206,12 @@ impl DirectRequest {
 }
 
 impl ModelResponseInterceptor for DirectRequest {
+    fn preserves_provider_message_window(&self) -> bool {
+        // Native admission preserves messages, reasoning and response IDs.
+        // Core excludes all other newly emitted item kinds from lineage.
+        true
+    }
+
     fn admit_request(&self) -> Result<(), String> {
         self.control.admit_model_request(&self.owner)
     }

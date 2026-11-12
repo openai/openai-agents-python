@@ -813,9 +813,25 @@
       "sha256": "aa9744156b870e194d6dc7e6244e311a290332c7b453747a7440682e69cf674a"
     },
     {
+      "path": "sdk-stored-owner-retirement.patch",
+      "sha256": "6e2609766301ec2703199766402600eed66ada05e9ae5d497d7f46542dae76a5"
+    },
+    {
+      "path": "sdk-borrowed-responses-compaction.patch",
+      "sha256": "2bd50e43bafefb05a078af67760366c2e26fe2989140f647fcf55dded09e3583"
+    },
+    {
+      "path": "sdk-managed-receipt-original-identity.patch",
+      "sha256": "34fe1f7148b64f5c47be3106db23350ada4b22086e9d73bd4a4da7d50db71995"
+    },
+    {
+      "path": "sdk-acknowledged-provider-window.patch",
+      "sha256": "cbf049d3d03e9071d9100217c969138574df3735def89c74abe2037da3978513"
+    },
+    {
       "path": "sdk-native-sandbox-operation-events.patch",
       "sha256": "1d7c7fec2d0faf1956b48dfd7e48b135f3847748d88efb1835b233e39df2f765"
     }
   ],
-  "result_tree": "3a36ab20a06471607656fd6f6c002143d43d85ba"
+  "result_tree": "c9e8230bb2c4d0fe02925f8ba7071903834df92b"
 }
