@@ -927,6 +927,7 @@ pub async fn restore(
     let manual_slots = std::mem::take(&mut options.manual_tool_slots);
     let transform_context = options.transform_context;
     let before_compact = options.before_compact;
+    let post_turn_compact = options.post_turn_compact;
     let before_complete = options.before_complete;
     let tool_batch_completion = options.tool_batch_completion;
     let (mut startup, instructions) = engine.build_startup(options, None).await?;
@@ -971,6 +972,7 @@ pub async fn restore(
             before_compact,
             before_complete,
             tool_batch_completion,
+            post_turn_compact,
         )?;
     }
     if startup

@@ -755,6 +755,51 @@ impl ThreadStore for CanonicalStore {
         })
     }
 
+    fn canonical_tool_output<'a>(
+        &'a self,
+        thread_id: ThreadId,
+        output: &'a ResponseItem,
+    ) -> ThreadStoreFuture<'a, Option<ResponseItem>> {
+        Box::pin(async move {
+            if !self.managed_calls.owns_output_item(thread_id, output) {
+                return Ok(None);
+            }
+            let Some(identity) = crate::local_reconciliation::output_identity(output) else {
+                return Ok(None);
+            };
+            let mut writers = self.writers.lock().await;
+            let writer = writers.get_mut(&thread_id).ok_or_else(failure)?;
+            if writer.failed {
+                return Err(failure());
+            }
+            let accepted = writer
+                .snapshot
+                .as_ref()
+                .ok_or_else(failure)?
+                .items
+                .iter()
+                .rev()
+                .find_map(|row| {
+                    if let RolloutItem::ResponseItem(envelope) = row
+                        && crate::local_reconciliation::output_identity(&envelope.item)
+                            == Some(identity)
+                    {
+                        Some(envelope.item.clone())
+                    } else {
+                        None
+                    }
+                });
+            if accepted.as_ref().is_some_and(|accepted| {
+                !crate::local_reconciliation::same_acknowledged_output(accepted, output)
+            }) {
+                writer.failed = true;
+                self.failed.store(true, Ordering::Release);
+                return Err(failure());
+            }
+            Ok(accepted)
+        })
+    }
+
     fn load_history(
         &self,
         params: LoadThreadHistoryParams,

@@ -23,10 +23,10 @@ index a7011b90..67688a76 100644
          turn_id: Some(turn_id.to_string()),
          root_turn_id: None,
 diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
-index c7064934..ba212944 100644
+index 75606be3..abcdab1b 100644
 --- a/codex-rs/app-server/src/request_processors/turn_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
-@@ -1152,6 +1152,11 @@ impl TurnRequestProcessor {
+@@ -1156,6 +1156,11 @@ impl TurnRequestProcessor {
                          None,
                          Some(AnalyticsJsonRpcError::Input(InputError::Empty)),
                      ),
@@ -39,10 +39,10 @@ index c7064934..ba212944 100644
                          "active turn uses a different output schema".to_string(),
                          None,
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 855c832b..47aa88f5 100644
+index 3bf1797b..1141f4ce 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -647,12 +647,14 @@ impl LocalAgentControl {
+@@ -661,12 +661,14 @@ impl LocalAgentControl {
                  .shared_thread_instructions_provider
                  .get()
                  .cloned();
@@ -63,7 +63,7 @@ index 855c832b..47aa88f5 100644
          };
          // Reserving a slot can evict an idle nested parent. Capture its instructions
          // alongside its authority so the child does not depend on a later live lookup.
-@@ -949,6 +951,10 @@ impl LocalAgentControl {
+@@ -976,6 +978,10 @@ impl LocalAgentControl {
          let durability_wait = durability_wait_started_at.elapsed();
  
          let start_options = TurnStartOptions {
@@ -130,7 +130,7 @@ index b8d87220..4eac8e6f 100644
          self.session
              .inject_annotated_response_items(items, turn_context.as_ref())
 diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
-index f146f130..5a2c59ba 100644
+index 7d0f84c2..cb2e44cc 100644
 --- a/codex-rs/core/src/context_manager/history_tests.rs
 +++ b/codex-rs/core/src/context_manager/history_tests.rs
 @@ -708,6 +708,7 @@ fn developer_msg_with_fragments(texts: &[&str]) -> ResponseItem {
@@ -166,10 +166,10 @@ index f78368cd..bf46d305 100644
          let target = Arc::new(AgentProfile {
              mcp: Arc::new(
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index df24879d..a2439539 100644
+index 1584d4ad..1af3f87c 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -2098,6 +2098,15 @@ impl Session {
+@@ -2144,6 +2144,15 @@ impl Session {
                  return Ok(None);
              }
  
@@ -185,7 +185,7 @@ index df24879d..a2439539 100644
              let previous_config = notify_config_contributors
                  .then(|| self.build_effective_session_config(&state.session_configuration));
              let previous_permission_profile = state.session_configuration.permission_profile();
-@@ -4404,6 +4413,10 @@ impl Session {
+@@ -4486,6 +4495,10 @@ impl Session {
          {
              Arc::make_mut(&mut settings).set_captured_named_tool_choice(choice);
          }
@@ -196,7 +196,7 @@ index df24879d..a2439539 100644
          Ok(Arc::new(StepContext {
              preempt: turn_context
                  .config
-@@ -5649,7 +5662,7 @@ impl Session {
+@@ -5733,7 +5746,7 @@ impl Session {
                  .await;
              if let Some(turn_state) = turn_state {
                  turn_state.lock().await.token_usage_by_model.record(
@@ -206,10 +206,10 @@ index df24879d..a2439539 100644
                      token_usage,
                  );
 diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
-index 55af6be3..d3477c62 100644
+index f374924b..cda99394 100644
 --- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
 +++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
-@@ -440,6 +440,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
+@@ -441,6 +441,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -217,7 +217,7 @@ index 55af6be3..d3477c62 100644
          sdk_receipt: None,
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
-@@ -493,6 +494,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
+@@ -494,6 +495,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let mut previous_context_item = TurnContextItem {
@@ -225,7 +225,7 @@ index 55af6be3..d3477c62 100644
          sdk_receipt: None,
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
-@@ -2011,6 +2013,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+@@ -2027,6 +2029,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -233,7 +233,7 @@ index 55af6be3..d3477c62 100644
          sdk_receipt: None,
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: Some("root-turn".to_string()),
-@@ -2116,6 +2119,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+@@ -2133,6 +2136,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
          serde_json::to_value(session.reference_context_item().await)
              .expect("serialize seeded reference context item"),
          serde_json::to_value(Some(TurnContextItem {
@@ -241,7 +241,7 @@ index 55af6be3..d3477c62 100644
              sdk_receipt: None,
              turn_id: Some(turn_context.sub_id.clone()),
              root_turn_id: Some("root-turn".to_string()),
-@@ -2153,6 +2157,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
+@@ -2170,6 +2174,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -249,7 +249,7 @@ index 55af6be3..d3477c62 100644
          sdk_receipt: None,
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
-@@ -2301,6 +2306,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
+@@ -2320,6 +2325,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
      let current_turn_id = "current-turn".to_string();
      let unmatched_abort_turn_id = "other-turn".to_string();
      let current_context_item = TurnContextItem {
@@ -257,7 +257,7 @@ index 55af6be3..d3477c62 100644
          sdk_receipt: None,
          turn_id: Some(current_turn_id.clone()),
          root_turn_id: None,
-@@ -2440,6 +2446,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
+@@ -2462,6 +2468,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -265,7 +265,7 @@ index 55af6be3..d3477c62 100644
          sdk_receipt: None,
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
-@@ -2630,6 +2637,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
+@@ -2653,6 +2660,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -274,7 +274,7 @@ index 55af6be3..d3477c62 100644
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index e472317d..5323d4c9 100644
+index f74b9016..b06c448a 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -620,6 +620,7 @@ pub(crate) struct SessionSettingsUpdate {
@@ -311,7 +311,7 @@ index cdd5312c..75f69842 100644
      {
          return Err("the destination changes model-required approval authority".to_string());
 diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
-index ad08c4de..84e77081 100644
+index bb78d9c9..827f9718 100644
 --- a/codex-rs/core/src/session/step_settings.rs
 +++ b/codex-rs/core/src/session/step_settings.rs
 @@ -50,6 +50,8 @@ pub(crate) struct ResolvedStepSettings {
@@ -323,7 +323,7 @@ index ad08c4de..84e77081 100644
      /// Known or explicitly configured usable limit, captured with this model.
      reported_context_window: Option<i64>,
      /// Effective request summary: the configured value or the pinned model's default.
-@@ -88,6 +90,7 @@ impl ResolvedStepSettings {
+@@ -108,6 +110,7 @@ impl ResolvedStepSettings {
              };
          Self {
              agent_profile: None,
@@ -331,7 +331,7 @@ index ad08c4de..84e77081 100644
              selected,
              model_info,
              reported_context_window,
-@@ -120,6 +123,17 @@ impl ResolvedStepSettings {
+@@ -140,6 +143,17 @@ impl ResolvedStepSettings {
              .named_tool_choice = Some(Some(choice));
      }
  
@@ -349,7 +349,7 @@ index ad08c4de..84e77081 100644
      pub(crate) fn request_controls(
          &self,
      ) -> &codex_protocol::model_request_controls::ModelRequestControls {
-@@ -202,6 +216,7 @@ impl ResolvedStepSettings {
+@@ -222,6 +236,7 @@ impl ResolvedStepSettings {
          fast_mode_enabled: bool,
      ) -> ConstraintResult<Self> {
          let selected = self.selected.apply(update, constraints)?;
@@ -357,7 +357,7 @@ index ad08c4de..84e77081 100644
          let model_info = if selected.collaboration_mode.model()
              == self.selected.collaboration_mode.model()
              && selected.personality == self.selected.personality
-@@ -210,7 +225,15 @@ impl ResolvedStepSettings {
+@@ -243,7 +258,15 @@ impl ResolvedStepSettings {
          {
              Arc::clone(&self.model_info)
          } else {
@@ -374,7 +374,7 @@ index ad08c4de..84e77081 100644
          };
          selected
              .request_controls
-@@ -223,6 +246,7 @@ impl ResolvedStepSettings {
+@@ -256,6 +279,7 @@ impl ResolvedStepSettings {
              overrides.context_window,
          );
          next.agent_profile = self.agent_profile.clone();
@@ -382,7 +382,7 @@ index ad08c4de..84e77081 100644
          next.mcp_approvals_reviewer_override = update
              .approvals_reviewer
              .or(self.mcp_approvals_reviewer_override);
-@@ -239,6 +263,8 @@ impl ResolvedStepSettings {
+@@ -272,6 +296,8 @@ impl ResolvedStepSettings {
          // Sharing these checks would also make ordinary settings updates stricter
          // after a requirements refresh.
          self.selected.validate(constraints)?;
@@ -391,7 +391,7 @@ index ad08c4de..84e77081 100644
          constraints
              .requirements
              .approval_policy
-@@ -250,10 +276,8 @@ impl ResolvedStepSettings {
+@@ -283,10 +309,8 @@ impl ResolvedStepSettings {
      }
  
      pub(super) fn telemetry(&self, base: &SessionTelemetry) -> SessionTelemetry {
@@ -404,7 +404,7 @@ index ad08c4de..84e77081 100644
      }
  }
  
-@@ -331,10 +355,23 @@ impl StepSettings {
+@@ -364,10 +388,23 @@ impl StepSettings {
          &self,
          models_manager: &dyn ModelsManager,
          overrides: &ModelInfoOverrides,
@@ -429,7 +429,7 @@ index ad08c4de..84e77081 100644
              .await
      }
  
-@@ -407,6 +444,24 @@ impl StepSettings {
+@@ -445,6 +482,24 @@ impl StepSettings {
          Ok(next)
      }
  
@@ -455,10 +455,10 @@ index ad08c4de..84e77081 100644
      pub(super) fn validate(
          &self,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index c655bae4..f3e24bfc 100644
+index 00dc00f4..57f672f5 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -4329,6 +4329,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
+@@ -4330,6 +4330,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "forked-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -661,7 +661,7 @@ index fea30e1b..f8fa1fc0 100644
          for contributor in self.services.extensions.turn_lifecycle_contributors() {
              if contributor.turn_start_phase(&self.services.thread_extension_data) != phase {
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index 4dd2cd1c..5c9346b5 100644
+index 67334bc5..0077a405 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
 @@ -803,15 +803,17 @@ impl Session {
@@ -770,7 +770,7 @@ index 7c661a2e..cb03bda1 100644
              thread_settings: Default::default(),
              trace: None,
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index c88a52fe..95263c05 100644
+index 1e2fc818..0aabcd6a 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
 @@ -146,6 +146,7 @@ pub use codex_api::ModelInvocationDeadlineState;
@@ -779,13 +779,13 @@ index c88a52fe..95263c05 100644
  pub use codex_api::completed_model_response;
 +pub use model_request::CapturedRunModelOverride;
  pub use model_request::CompactionInput;
- pub use model_request::ModelContextInput;
- pub use model_request::ModelRequestContributor;
+ pub use model_request::CompactionResult;
+ pub use model_request::CompactionWindow;
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index f85f8279..5bcc20bb 100644
+index a6c2c4f4..cf9c02c0 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
-@@ -167,6 +167,10 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+@@ -333,6 +333,10 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
      }
  }
  
@@ -797,10 +797,10 @@ index f85f8279..5bcc20bb 100644
  /// Admission only parses and checks the retained runtime; it must not execute tools or hooks.
  pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 53ec0f6c..92538769 100644
+index 5a9db99b..e38f4d39 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -4073,6 +4073,11 @@ pub struct TurnContextNetworkItem {
+@@ -4117,6 +4117,11 @@ pub struct TurnContextNetworkItem {
  /// latest durable baseline.
  #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
  pub struct TurnContextItem {
@@ -812,7 +812,7 @@ index 53ec0f6c..92538769 100644
      /// SDK-only evidence captured at a regular model sampling boundary.
      #[serde(default, skip_serializing_if = "Option::is_none")]
      #[schemars(skip)]
-@@ -6978,6 +6983,7 @@ mod tests {
+@@ -7025,6 +7030,7 @@ mod tests {
      #[test]
      fn turn_context_item_serializes_network_when_present() -> Result<()> {
          let item = TurnContextItem {
@@ -901,10 +901,10 @@ index 0276240d..c0225b5f 100644
                  turn_id: Some("turn-1".to_string()),
                  root_turn_id: None,
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 0611d061..5b3646e0 100644
+index 82b61b85..8d48c257 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -1252,6 +1252,7 @@ mod tests {
+@@ -1255,6 +1255,7 @@ mod tests {
          let cwd = std::env::current_dir().expect("current directory");
          let turn_context = |model: &str, approval_policy| {
              RolloutItem::TurnContext(TurnContextItem {

@@ -52,6 +52,156 @@ pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>
     Some((call, item.turn_id()))
 }
 
+pub(crate) fn same_acknowledged_output(left: &ResponseItem, right: &ResponseItem) -> bool {
+    if !same_output_payload(left, right) {
+        return false;
+    }
+    let normalize = |item: &ResponseItem| -> Option<serde_json::Value> {
+        let mut value = serde_json::to_value(item).ok()?;
+        let object = value.as_object_mut()?;
+        object.remove("id");
+        if let Some(metadata) = object
+            .get_mut("internal_chat_message_metadata_passthrough")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            metadata.remove("create_time");
+        }
+        Some(value)
+    };
+    normalize(left)
+        .zip(normalize(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+#[cfg(test)]
+mod acknowledged_original_tests {
+    use super::*;
+    #[test]
+    fn ignores_only_generated_id_and_time() {
+        let make = |name: &str, turn: &str, generated: bool| {
+            let mut value = serde_json::json!({
+                "type":"custom_tool_call_output", "name":name, "call_id":"call",
+                "output":"accepted", "internal_chat_message_metadata_passthrough":{"turn_id":turn}
+            });
+            if generated {
+                value["id"] = serde_json::json!("cto_generated");
+                value["internal_chat_message_metadata_passthrough"]["create_time"] =
+                    serde_json::json!(1.25);
+            }
+            serde_json::from_value::<ResponseItem>(value).unwrap()
+        };
+        let accepted = make("original", "turn", false);
+        assert!(same_acknowledged_output(
+            &accepted,
+            &make("original", "turn", true)
+        ));
+        assert!(!same_acknowledged_output(
+            &accepted,
+            &make("substitute", "turn", true)
+        ));
+        assert!(!same_acknowledged_output(
+            &accepted,
+            &make("original", "foreign", true)
+        ));
+    }
+
+    #[test]
+    fn completed_and_failed_patch_receipts_require_exact_status_and_output() {
+        let make = |status: &str, output: &str| {
+            serde_json::from_value::<ResponseItem>(serde_json::json!({
+                "type":"apply_patch_call_output", "call_id":"call", "status":status, "output":output
+            }))
+            .unwrap()
+        };
+        for status in ["completed", "failed"] {
+            let accepted = make(status, "accepted output");
+            assert!(matches!(
+                &accepted,
+                ResponseItem::ApplyPatchCallOutput { .. }
+            ));
+            assert!(same_output_payload(
+                &accepted,
+                &make(status, "accepted output")
+            ));
+            assert!(same_acknowledged_output(
+                &accepted,
+                &make(status, "accepted output")
+            ));
+            assert!(!same_output_payload(
+                &accepted,
+                &make(status, "modified output")
+            ));
+            assert!(!same_output_payload(
+                &accepted,
+                &make(
+                    if status == "completed" {
+                        "failed"
+                    } else {
+                        "completed"
+                    },
+                    "accepted output"
+                )
+            ));
+        }
+    }
+}
+
+pub(crate) fn same_output_payload(left: &ResponseItem, right: &ResponseItem) -> bool {
+    match (left, right) {
+        (
+            ResponseItem::FunctionCallOutput { output: left, .. },
+            ResponseItem::FunctionCallOutput { output: right, .. },
+        )
+        | (
+            ResponseItem::CustomToolCallOutput { output: left, .. },
+            ResponseItem::CustomToolCallOutput { output: right, .. },
+        ) => serde_json::to_value(left)
+            .ok()
+            .zip(serde_json::to_value(right).ok())
+            .is_some_and(|(left, right)| left == right),
+        (
+            ResponseItem::ApplyPatchCallOutput {
+                status: left_status,
+                output: left_output,
+                ..
+            },
+            ResponseItem::ApplyPatchCallOutput {
+                status: right_status,
+                output: right_output,
+                ..
+            },
+        ) => left_status == right_status && left_output == right_output,
+        (
+            ResponseItem::ComputerCallOutput {
+                output: left,
+                acknowledged_safety_checks: left_checks,
+                ..
+            },
+            ResponseItem::ComputerCallOutput {
+                output: right,
+                acknowledged_safety_checks: right_checks,
+                ..
+            },
+        ) => left == right && left_checks == right_checks,
+        (
+            ResponseItem::ShellCallOutput {
+                provider_fields: left,
+                ..
+            },
+            ResponseItem::ShellCallOutput {
+                provider_fields: right,
+                ..
+            },
+        ) => {
+            left.get("output")
+                .zip(right.get("output"))
+                .is_some_and(|(left, right)| left == right)
+                && left.get("max_output_length") == right.get("max_output_length")
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseItem) -> bool {
     match (call, result) {
         (

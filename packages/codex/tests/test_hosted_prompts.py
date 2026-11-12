@@ -215,7 +215,7 @@ async def test_prompt_composition_keeps_sync_callbacks_in_the_owned_worker(mode,
     )
 
     async def own(state, message, prepare, reply, reject):
-        callback, request = prepare()
+        callback, request = prepare(lambda: not state.stopping and not state.failure.done())
         reply(await callback(request))
 
     owner = SimpleNamespace(

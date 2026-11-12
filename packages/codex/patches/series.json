@@ -813,6 +813,22 @@
       "sha256": "aa9744156b870e194d6dc7e6244e311a290332c7b453747a7440682e69cf674a"
     },
     {
+      "path": "sdk-stored-owner-retirement.patch",
+      "sha256": "6e2609766301ec2703199766402600eed66ada05e9ae5d497d7f46542dae76a5"
+    },
+    {
+      "path": "sdk-borrowed-responses-compaction.patch",
+      "sha256": "2bd50e43bafefb05a078af67760366c2e26fe2989140f647fcf55dded09e3583"
+    },
+    {
+      "path": "sdk-managed-receipt-original-identity.patch",
+      "sha256": "34fe1f7148b64f5c47be3106db23350ada4b22086e9d73bd4a4da7d50db71995"
+    },
+    {
+      "path": "sdk-acknowledged-provider-window.patch",
+      "sha256": "cbf049d3d03e9071d9100217c969138574df3735def89c74abe2037da3978513"
+    },
+    {
       "path": "sdk-imported-provider-item-cleanup.patch",
       "sha256": "08b0c51af6002bdcdede8bc07ef7dcff9f83a34e774a70d5d3d65c7a52959cd3"
     },
@@ -826,12 +842,12 @@
     },
     {
       "path": "sdk-run-model-override.patch",
-      "sha256": "e72441752a8838e53f0ad4d5f8ac042f5a909e4c97e0564433bc448a0d2c0dfb"
+      "sha256": "50381199f8e50375fc0477ffe597ba229ec6ade39708779fc14ecd92565e1d69"
     },
     {
       "path": "sdk-trace-provider-restart.patch",
       "sha256": "93e8fc471464e573b070b5a972db1861527e94f86de0b64633893786ded2095f"
     }
   ],
-  "result_tree": "895aca323655f697a6f25dd1ea6f1444c1d5a148"
+  "result_tree": "24ce63fae5d905955e557d92346fc97f0d112b60"
 }

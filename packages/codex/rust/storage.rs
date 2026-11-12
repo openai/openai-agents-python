@@ -82,10 +82,14 @@ impl ManagedCalls {
     }
 
     pub(crate) fn owns_output(&self, thread: ThreadId, item: &RolloutItem) -> bool {
-        if let RolloutItem::ResponseItem(envelope) = item
-            && let Some((call, Some(turn))) =
-                crate::local_reconciliation::output_identity(&envelope.item)
-        {
+        if let RolloutItem::ResponseItem(envelope) = item {
+            return self.owns_output_item(thread, &envelope.item);
+        }
+        false
+    }
+
+    pub(crate) fn owns_output_item(&self, thread: ThreadId, item: &ResponseItem) -> bool {
+        if let Some((call, Some(turn))) = crate::local_reconciliation::output_identity(item) {
             return self
                 .calls
                 .lock()
@@ -1112,7 +1116,7 @@ struct ChecklistWriter {
     loss: Option<LossSuspension>,
     // Receipts acknowledged to the live SDK owner before Core's ordered
     // drain. Only that owner's later drain can consume an entry here.
-    early: HashSet<(String, String)>,
+    early: HashMap<(String, String), ResponseItem>,
 }
 
 #[derive(Default)]
@@ -1526,6 +1530,20 @@ fn observe_turn(turn_id: &mut Option<String>, item: &RolloutItem) {
 }
 
 impl LocalChecklistStore {
+    pub(crate) async fn retire_thread_owner(&self, id: ThreadId) -> ThreadStoreResult<()> {
+        let mut writers = self.writers.lock().await;
+        self.check_durability()?;
+        if let Some(writer) = writers.get(&id) {
+            writer.check()?;
+            if writer.loss.is_some() {
+                return Err(checklist_error("local writer is suspending its lost owner"));
+            }
+        }
+        self.inner.retire_thread_owner(id).await?;
+        writers.remove(&id);
+        Ok(())
+    }
+
     pub(crate) async fn list_threads_including_empty_preview(
         &self,
         params: codex_thread_store::ListThreadsParams,
@@ -1674,11 +1692,12 @@ impl LocalChecklistStore {
         {
             return Err(checklist_error("SDK computer receipt identity mismatch"));
         }
-        if writer.early.contains(&identity) {
+        if writer.early.contains_key(&identity) {
             return Err(checklist_error("SDK receipt was already committed"));
         }
         // Publish the actual result, not a promise of one, under the original
         // native OS writer. This survives loss behind an earlier parked call.
+        let authoritative = item.clone();
         let result = async {
             self.inner
                 .append_items(AppendThreadItemsParams {
@@ -1702,7 +1721,7 @@ impl LocalChecklistStore {
         // Consume once at Core drain, or at the idle Core history injection
         // for imported calls. Both must update Core memory without a second
         // durable receipt.
-        writer.early.insert(identity);
+        writer.early.insert(identity, authoritative);
         Ok(())
     }
 
@@ -2397,10 +2416,22 @@ impl LocalChecklistStore {
                     && let Some((call, Some(turn))) =
                         crate::local_reconciliation::output_identity(&envelope.item)
                 {
-                    return !writer.early.remove(&(turn.to_owned(), call.to_owned())) && !managed;
+                    if let Some(accepted) = writer.early.remove(&(turn.to_owned(), call.to_owned()))
+                    {
+                        if !crate::local_reconciliation::same_output_payload(
+                            &accepted,
+                            &envelope.item,
+                        ) {
+                            writer.failure =
+                                Some("Core drain changed an acknowledged SDK receipt".into());
+                        }
+                        return false;
+                    }
+                    return !managed;
                 }
                 !managed
             });
+            writer.check()?;
         }
         for item in &params.items {
             sampling.observe(item);
@@ -2758,6 +2789,37 @@ impl ThreadStore for LocalChecklistStore {
                 revision: None,
                 items,
             })
+        })
+    }
+
+    fn canonical_tool_output<'a>(
+        &'a self,
+        thread_id: ThreadId,
+        output: &'a ResponseItem,
+    ) -> ThreadStoreFuture<'a, Option<ResponseItem>> {
+        Box::pin(async move {
+            let mut writers = self.writers.lock().await;
+            let writer = writers
+                .get_mut(&thread_id)
+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+            writer.check()?;
+            if writer.loss.is_some() {
+                return Err(checklist_error("local writer is suspending its lost owner"));
+            }
+            let Some((call, Some(turn))) = crate::local_reconciliation::output_identity(output)
+            else {
+                return Ok(None);
+            };
+            let Some(accepted) = writer.early.get(&(turn.to_owned(), call.to_owned())) else {
+                return Ok(None);
+            };
+            if crate::local_reconciliation::output_identity(accepted) != Some((call, Some(turn)))
+                || !crate::local_reconciliation::same_acknowledged_output(accepted, output)
+            {
+                writer.failure = Some("Core drain changed an acknowledged SDK receipt".into());
+                writer.check()?;
+            }
+            Ok(Some(accepted.clone()))
         })
     }
 

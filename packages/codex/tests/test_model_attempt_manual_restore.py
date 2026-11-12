@@ -199,6 +199,7 @@ async def capture(
         _native=SimpleNamespace(_seal_manual=seal),
         _manual_ready=ready,
         _executor_policy_digest=executor_digest,
+        _checkpoint_guardrail_records=lambda _active: [],
         _reader=SimpleNamespace(done=lambda: False),
         _instructions="",
         _sealing=False,
