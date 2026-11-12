@@ -250,3 +250,73 @@ async def test_cancelled_run_joins_callback_and_saves_accepted_call(
         responses.respond(assistant_output("continued after cancellation"))
         assert (await history.run(agent, "continue")).final_output == "continued after cancellation"
     assert effects == ["once"]
+
+
+async def test_environment_acquisition_reentry_rejects_before_session_exists(responses, endpoint):
+    from contextlib import asynccontextmanager
+
+    peer, client, _transport = endpoint
+    history = ConversationsHistory(client)
+    checked = []
+
+    @asynccontextmanager
+    async def environment():
+        with pytest.raises(RuntimeError, match="owning operation"):
+            await asyncio.wait_for(history.get_items(), 0.2)
+        checked.append("rejected")
+        raise RuntimeError("synthetic acquisition complete")
+        yield  # establish the public async context-manager protocol
+
+    async with NativeProvider(base_url=responses.url, api_key="synthetic") as provider:
+        agent = Agent(instructions="Reply.", provider=provider, model="gpt-5")
+        with pytest.raises(RuntimeError, match="synthetic acquisition complete"):
+            await asyncio.wait_for(history.run(agent, "unused", environment=environment()), 2)
+    assert checked == ["rejected"]
+    assert peer.requests == []
+    assert responses.requests == []
+
+
+async def test_remote_image_urls_survive_public_native_history_replay(responses, endpoint):
+    peer, client, _transport = endpoint
+    image_url = "https://images.example.invalid/user-image.png"
+    screenshot_url = "https://images.example.invalid/computer-screenshot.png"
+    peer.items = [
+        {
+            "type": "message",
+            "id": "image-message",
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": image_url, "detail": "auto"}],
+        },
+        {
+            "type": "computer_call",
+            "id": "computer-item",
+            "call_id": "computer-call",
+            "action": {"type": "screenshot"},
+            "pending_safety_checks": [],
+            "status": "completed",
+        },
+        {
+            "type": "computer_call_output",
+            "id": "computer-output",
+            "call_id": "computer-call",
+            "output": {"type": "computer_screenshot", "image_url": screenshot_url},
+        },
+    ]
+    history = ConversationsHistory(client, conversation_id="conv_existing")
+    assert await history.get_items() == peer.items
+    responses.respond(assistant_output("images retained"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic") as provider:
+        agent = Agent(instructions="Inspect prior images.", provider=provider, model="gpt-5")
+        assert (await history.run(agent, "continue")).final_output == "images retained"
+    wire = responses.requests[0]["input"]
+    assert any(
+        content.get("image_url") == image_url
+        for item in wire
+        for content in item.get("content", [])
+    )
+    assert any(
+        item.get("type") == "computer_call_output"
+        and item.get("call_id") == "computer-call"
+        and item["output"]["image_url"] == screenshot_url
+        for item in wire
+    )

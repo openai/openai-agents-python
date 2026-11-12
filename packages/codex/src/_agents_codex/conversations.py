@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from openai import AsyncOpenAI
@@ -17,6 +19,16 @@ if TYPE_CHECKING:
     from .session import Completed, Session
 
 OutputT = TypeVar("OutputT")
+
+
+class _Operation:
+    def __init__(self, owner: object) -> None:
+        self.owner: object | None = owner
+
+
+_operations: ContextVar[tuple[_Operation, ...]] = ContextVar(
+    "conversations_history_operations", default=()
+)
 
 
 class ConversationsWriteError(RuntimeError):
@@ -58,6 +70,21 @@ class ConversationsHistory:
     def _check_callback(self) -> None:
         if self._active_session is not None:
             self._active_session._check_callback_operation("access its own Conversations history")
+        if any(scope.owner is self for scope in _operations.get()):
+            raise RuntimeError("Cannot access Conversations history from its owning operation")
+
+    @asynccontextmanager
+    async def _operation(self) -> AsyncIterator[None]:
+        self._check_callback()
+        async with self._lock:
+            scope = _Operation(self)
+            active = tuple(scope for scope in _operations.get() if scope.owner is not None)
+            token = _operations.set((*active, scope))
+            try:
+                yield
+            finally:
+                scope.owner = None
+                _operations.reset(token)
 
     async def _id(self) -> str:
         if self._conversation_id is None:
@@ -73,8 +100,7 @@ class ConversationsHistory:
         return self._conversation_id
 
     async def get_conversation_id(self) -> str:
-        self._check_callback()
-        async with self._lock:
+        async with self._operation():
             return await self._id()
 
     async def _get_items(self, limit: int | None) -> list[dict[str, Any]]:
@@ -85,7 +111,11 @@ class ConversationsHistory:
         async for item in self._client.conversations.items.list(
             conversation_id=conversation_id,
             order="asc" if limit is None else "desc",
-            include=["reasoning.encrypted_content"],
+            include=[
+                "reasoning.encrypted_content",
+                "message.input_image.image_url",
+                "computer_call_output.output.image_url",
+            ],
         ):
             items.append(item.model_dump(exclude_unset=True))
             if limit is not None and len(items) == limit:
@@ -97,8 +127,7 @@ class ConversationsHistory:
     async def get_items(self, limit: int | None = None) -> list[dict[str, Any]]:
         if limit is not None and (isinstance(limit, bool) or limit < 0):
             raise ValueError("limit must be a nonnegative integer or None")
-        self._check_callback()
-        async with self._lock:
+        async with self._operation():
             return await self._get_items(limit)
 
     @staticmethod
@@ -132,13 +161,11 @@ class ConversationsHistory:
 
     async def add_items(self, items: Sequence[Mapping[str, Any]]) -> None:
         captured = self._capture(items)
-        self._check_callback()
-        async with self._lock:
+        async with self._operation():
             await self._add_items(captured)
 
     async def pop_item(self) -> dict[str, Any] | None:
-        self._check_callback()
-        async with self._lock:
+        async with self._operation():
             items = await self._get_items(1)
             if not items:
                 return None
@@ -153,8 +180,7 @@ class ConversationsHistory:
             return items[0]
 
     async def clear(self) -> None:
-        self._check_callback()
-        async with self._lock:
+        async with self._operation():
             if self._conversation_id is None:
                 return
             conversation_id = self._conversation_id
@@ -184,8 +210,7 @@ class ConversationsHistory:
             for key in ("state", "resume", "storage", "initial_messages")
         ):
             raise ValueError("Conversations history requires a fresh native Session history owner")
-        self._check_callback()
-        async with self._lock:
+        async with self._operation():
             try:
                 async with agent.session(**session_options) as session:
                     self._active_session = session

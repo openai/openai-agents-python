@@ -29,6 +29,7 @@ class Endpoint:
         self.fail_batch = None
         self.entered = asyncio.Event()
         self.release = None
+        self.on_create = None
 
     async def __call__(self, request):
         body = json.loads(request.content) if request.content else None
@@ -36,11 +37,22 @@ class Endpoint:
         path = request.url.path
         if path == "/v1/conversations" and request.method == "POST":
             self.creates += 1
+            if self.on_create is not None:
+                await self.on_create()
             return httpx.Response(
                 200, json={"id": f"conv_{self.creates}", "object": "conversation", "created_at": 1}
             )
         if path.endswith("/items") and request.method == "GET":
-            values = list(self.items)
+            values = json.loads(json.dumps(self.items))
+            include = request.url.params.get_list("include[]")
+            for item in values:
+                if "message.input_image.image_url" not in include:
+                    for content in item.get("content", []):
+                        if content.get("type") == "input_image":
+                            content.pop("image_url", None)
+                if "computer_call_output.output.image_url" not in include:
+                    if item.get("type") == "computer_call_output":
+                        item["output"].pop("image_url", None)
             if request.url.params.get("order") == "desc":
                 values.reverse()
             after = request.url.params.get("after")
@@ -179,3 +191,37 @@ async def test_cancelled_append_joins_current_mutation_before_unlocking(endpoint
     assert await reading == [message(i) for i in range(20)]
     assert len(peer.batches) == 1
     assert not transport.is_closed
+
+
+async def test_create_callback_reentry_rejects_before_waiting_for_owned_lock(endpoint):
+    peer, client, _transport = endpoint
+    history = ConversationsHistory(client)
+
+    async def during_create():
+        with pytest.raises(RuntimeError, match="owning operation"):
+            await asyncio.wait_for(history.get_items(), 0.2)
+
+    peer.on_create = during_create
+    assert await asyncio.wait_for(history.get_conversation_id(), 2) == "conv_1"
+    assert peer.creates == 1
+    assert len(peer.requests) == 1
+
+
+async def test_retired_create_descendant_can_use_history(endpoint):
+    peer, client, _transport = endpoint
+    history = ConversationsHistory(client)
+    released = asyncio.Event()
+    descendants = []
+
+    async def later():
+        await released.wait()
+        return await history.get_items()
+
+    async def during_create():
+        descendants.append(asyncio.create_task(later()))
+
+    peer.on_create = during_create
+    assert await history.get_conversation_id() == "conv_1"
+    released.set()
+    assert await asyncio.wait_for(descendants[0], 2) == []
+    assert peer.creates == 1
