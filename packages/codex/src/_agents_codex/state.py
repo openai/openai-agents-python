@@ -20,6 +20,7 @@ from ._events import RequiredAction as RequiredAction, SessionItem as SessionIte
 from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .input import UserInput, _native_input
+from .models import ProviderHistory as ProviderHistory, _capture_provider_history
 from .subagents import SubagentConfig as SubagentConfig
 from .tools import ToolCallInfo as _ToolCallInfo, ToolRef as ToolRef
 from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage
@@ -315,6 +316,20 @@ class _RememberedApproval(BaseModel):
     reason: str | None
 
 
+def _saved_thread_settings(history: list[dict[str, Any]], thread_id: str) -> dict[str, Any] | None:
+    for row in reversed(history):
+        payload = row.get("payload")
+        if (
+            row.get("type") == "event_msg"
+            and isinstance(payload, dict)
+            and payload.get("type") == "thread_settings_applied"
+            and payload.get("thread_id") == thread_id
+        ):
+            settings = payload.get("thread_settings")
+            return settings if isinstance(settings, dict) else None
+    return None
+
+
 class SessionState(BaseModel):
     """Conversation state, not live execution or a workspace backup.
 
@@ -467,6 +482,15 @@ class SessionState(BaseModel):
         if self.codex_revision != native.CODEX_REVISION:
             raise ValueError("Checkpoint belongs to an unsupported Codex revision")
         return str(native._read_session_instructions(json.dumps(self.history)))
+
+    @property
+    def provider_history(self) -> ProviderHistory | None:
+        """Return the saved current anchor as detached data for explicit restore authorization."""
+        settings = _saved_thread_settings(self.history, self.source_session_id)
+        receipt = settings.get("provider_history") if settings is not None else None
+        if not isinstance(receipt, dict):
+            return None
+        return _capture_provider_history(receipt.get("selection"))
 
     def to_json(self) -> str:
         """Serialize for storage; the payload may contain sensitive conversation data."""

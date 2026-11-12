@@ -472,12 +472,68 @@ def _chat_patch_replay_arguments(kind: str, item: Mapping[str, Any]) -> Any:
     return item["arguments"]
 
 
-@dataclass(frozen=True)
+_MAX_CHAT_STREAM_BYTES = 8 * 1024 * 1024
+_MAX_CHAT_STREAM_CHUNKS = 128 * 1024
+
+
+class _ChatStreamEvent(dict[str, Any]):
+    """Process-local Chat provenance, preserved by delegating stream adapters."""
+
+
+class _RawChatChunk(_ChatStreamEvent):
+    """A process-local source tag; never part of provider JSON."""
+
+
+async def _close_chat_stream(value: Any) -> None:
+    close = result = None
+    try:
+        close = getattr(value, "aclose", None)
+        if not callable(close):
+            close = getattr(value, "close", None)
+        if callable(close):
+            from .session import _call_callback
+
+            result = await _call_callback(close, lambda: True)
+    finally:
+        del value, close, result
+
+
+def _chat_completion_usage(raw: Mapping[str, Any] | None) -> dict[str, int] | None:
+    usage: dict[str, Any] | None = None
+    try:
+        if raw is None:
+            return None
+        usage = {
+            "input_tokens": raw.get("prompt_tokens", 0),
+            "output_tokens": raw.get("completion_tokens", 0),
+            "total_tokens": raw.get("total_tokens", 0),
+            "cached_input_tokens": (raw.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+            "cache_write_input_tokens": (raw.get("prompt_tokens_details") or {}).get(
+                "cache_write_tokens", 0
+            ),
+            "reasoning_output_tokens": (raw.get("completion_tokens_details") or {}).get(
+                "reasoning_tokens", 0
+            ),
+        }
+        return {
+            key: 0
+            if value is None
+            and key
+            in ("cached_input_tokens", "cache_write_input_tokens", "reasoning_output_tokens")
+            else value
+            for key, value in usage.items()
+        }
+    finally:
+        del raw, usage
+
+
+@dataclass(frozen=True, init=False)
 class ChatCompletionsModel:
     """Use an injected asynchronous Chat Completions client with the native loop.
 
     The client must expose ``chat.completions.create``. This adapter requests one
-    complete response; it does not claim token streaming. Native function tools
+    complete response by default. ``stream=True`` selects incremental native events.
+    ``include_usage=False`` omits the streaming usage request. Native function tools
     and settled assistant/tool history retain their Core execution ownership.
     Native workspace ApplyPatch uses a function declaration on the provider wire.
     ``prompt_cache_key`` selects provider cache affinity for this adapter only;
@@ -497,6 +553,33 @@ class ChatCompletionsModel:
         default=None, init=False, repr=False, compare=False
     )
 
+    _stream_enabled: bool = field(default=False, init=False, repr=False)
+    _include_usage: bool = field(default=True, init=False, repr=False)
+
+    def __init__(
+        self,
+        client: Any,
+        model: str | None = None,
+        *,
+        prompt_cache_key: str | None = None,
+        request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = None,
+        stream: bool = False,
+        include_usage: bool = True,
+    ) -> None:
+        if type(stream) is not bool or type(include_usage) is not bool:
+            raise TypeError("stream and include_usage must be bool")
+        object.__setattr__(self, "client", client)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "prompt_cache_key", prompt_cache_key)
+        object.__setattr__(self, "request_options", request_options)
+        object.__setattr__(self, "_stream_enabled", stream)
+        object.__setattr__(self, "_include_usage", include_usage)
+        self.__post_init__()
+
+    @property
+    def stream(self) -> Callable[[ModelRequest], AsyncIterator[Mapping[str, Any]]] | None:
+        return self._stream_response if self._stream_enabled else None
+
     def __post_init__(self) -> None:
         if self.prompt_cache_key is not None and not isinstance(self.prompt_cache_key, str):
             raise TypeError("prompt_cache_key must be a string or None")
@@ -506,13 +589,23 @@ class ChatCompletionsModel:
         object.__setattr__(self, "_request_options_source", source)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        parameters = response = apply_patch_wire = None
+        try:
+            parameters, apply_patch_wire = self._parameters(request, False)
+            response = await self._create(request, **parameters)
+            return self._completed_response(request, response, apply_patch_wire)
+        finally:
+            del request, parameters, response, apply_patch_wire
+
+    def _parameters(
+        self, request: ModelRequest, streaming: bool
+    ) -> tuple[dict[str, Any], _PatchWire | None]:
         apply_patch_calls: dict[str, _PatchWire] = {}
         apply_patch_wire: _PatchWire | None = None
         audio_data: Any = None
         audio_format: Any = None
         audio_header: Any = None
         audio_separator: Any = None
-        call: Any = None
         choice: Any = None
         content: Any = None
         declaration: Any = None
@@ -520,27 +613,17 @@ class ChatCompletionsModel:
         item: Any = None
         kind: Any = None
         leaves: Any = None
-        message: Any = None
         messages: list[dict[str, Any]] | None = None
         native_tools: Any = None
         options: dict[str, Any] | None = None
         output: Any = None
-        output_content: list[dict[str, Any]] | None = None
         output_format: Any = None
         part: Any = None
-        probabilities: Any = None
-        provider_data: Any = None
         thinking: Any = None
-        raw_usage: Any = None
-        reason: Any = None
         reasoning: Any = None
-        response: Any = None
-        returned: ModelResponse | None = None
         text: Any = None
-        text_part: dict[str, Any] | None = None
         tool: Any = None
         tools: Any = None
-        usage: Any = None
         value: Any = None
         try:
             messages = []
@@ -817,48 +900,68 @@ class ChatCompletionsModel:
             thinking = (options.get("extra_body") or {}).get("thinking")
             if thinking is not None and thinking.get("type") != "disabled":
                 raise ValueError("Chat adapters do not support configured provider thinking")
-            response = await self._create(
-                request,
-                model=self.model or request.body["model"],
-                messages=messages,
-                stream=False,
+            return {
+                "model": self.model or request.body["model"],
+                "messages": messages,
+                "stream": streaming,
                 **options,
+                **(
+                    {"stream_options": {"include_usage": True}}
+                    if streaming and self._include_usage
+                    else {}
+                ),
+            }, apply_patch_wire
+        finally:
+            del (
+                request,
+                apply_patch_calls,
+                apply_patch_wire,
+                audio_data,
+                audio_format,
+                audio_header,
+                audio_separator,
+                choice,
+                content,
+                declaration,
+                extra_controls,
+                item,
+                kind,
+                leaves,
+                messages,
+                native_tools,
+                options,
+                output,
+                output_format,
+                part,
+                thinking,
+                reasoning,
+                text,
+                tool,
+                tools,
+                value,
             )
+
+    def _completed_response(
+        self, request: ModelRequest, response: Any, apply_patch_wire: _PatchWire | None
+    ) -> ModelResponse:
+        call: Any = None
+        choice: Any = None
+        message: Any = None
+        output: Any = None
+        output_content: list[dict[str, Any]] | None = None
+        probabilities: Any = None
+        provider_data: Any = None
+        raw_usage: Any = None
+        reason: Any = None
+        returned: ModelResponse | None = None
+        text_part: dict[str, Any] | None = None
+        usage: Any = None
+        value: Any = None
+        try:
             value = response.model_dump() if hasattr(response, "model_dump") else response
             if not isinstance(value, dict):
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
-            raw_usage = value.get("usage")
-            usage = (
-                None
-                if raw_usage is None
-                else {
-                    "input_tokens": raw_usage.get("prompt_tokens", 0),
-                    "output_tokens": raw_usage.get("completion_tokens", 0),
-                    "total_tokens": raw_usage.get("total_tokens", 0),
-                    "cached_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
-                        "cached_tokens", 0
-                    ),
-                    "cache_write_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
-                        "cache_write_tokens", 0
-                    ),
-                    "reasoning_output_tokens": (
-                        raw_usage.get("completion_tokens_details") or {}
-                    ).get("reasoning_tokens", 0),
-                }
-            )
-            if usage is not None:
-                usage = {
-                    key: 0
-                    if counter is None
-                    and key
-                    in (
-                        "cached_input_tokens",
-                        "cache_write_input_tokens",
-                        "reasoning_output_tokens",
-                    )
-                    else counter
-                    for key, counter in usage.items()
-                }
+            usage = _chat_completion_usage(value.get("usage"))
             if usage is not None:
                 request.report_usage(usage)
             if len(value.get("choices", [])) != 1:
@@ -949,44 +1052,309 @@ class ChatCompletionsModel:
                 object.__setattr__(returned, "_raw_chat_completion", deepcopy(value))
             return returned
         finally:
-            # Release SDK-owned payloads before exposing any callback failure.
             del (
                 request,
-                apply_patch_calls,
-                audio_data,
-                audio_format,
-                audio_header,
-                audio_separator,
+                response,
+                apply_patch_wire,
                 call,
                 choice,
-                content,
-                declaration,
-                extra_controls,
-                item,
-                kind,
-                leaves,
                 message,
-                messages,
-                native_tools,
-                options,
                 output,
                 output_content,
-                output_format,
-                part,
                 probabilities,
                 provider_data,
-                thinking,
                 raw_usage,
                 reason,
-                reasoning,
-                response,
                 returned,
-                text,
                 text_part,
-                tool,
-                tools,
                 usage,
                 value,
+            )
+
+    async def _stream_response(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]]:
+        parameters = apply_patch_wire = chunks = iterator = chunk = raw = choice = delta = None
+        retained = choices = probabilities = function = provider_data = ordered = measured = None
+        function_piece = None
+        completion_request = task = opening = index = None
+        usage = result = output = item = fragment = call = close = closed = None
+        text_parts: list[str] | None = None
+        refusal_parts: list[str] | None = None
+        response_id = finish_reason = None
+        calls: dict[int, dict[str, Any]] = {}
+        logprobs: list[Any] = []
+        buffered_bytes = 0
+        chunk_count = 0
+        message_id = "msg_chat_" + uuid4().hex
+        try:
+            parameters, apply_patch_wire = self._parameters(request, True)
+            chunks = await self._create(request, **parameters)
+            try:
+                task = asyncio.current_task()
+                if task is not None and cancellation_requested(task):
+                    raise asyncio.CancelledError()
+                iterator = aiter(chunks)
+                async for chunk in iterator:
+                    # Usage-only chunks bypass the retained-byte budget.
+                    chunk_count += 1
+                    if chunk_count > _MAX_CHAT_STREAM_CHUNKS:
+                        raise ValueError("Chat stream exceeded its chunk limit")
+                    raw = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk
+                    if not isinstance(raw, dict):
+                        raise TypeError("Chat stream chunks must be objects")
+                    opening = response_id is None
+                    if opening:
+                        response_id = raw.get("id")
+                        if not isinstance(response_id, str) or not response_id.strip():
+                            raise ValueError("Chat stream requires a response ID")
+                    if raw.get("id") != response_id:
+                        raise ValueError("Chat stream changed response ID")
+                    if raw.get("usage") is not None:
+                        usage = raw["usage"]
+                        measured = _chat_completion_usage(usage)
+                        if measured is not None:
+                            request.report_usage(measured)
+                    if chunk_count % 256 == 0:
+                        await asyncio.sleep(0)
+                    task = asyncio.current_task()
+                    if task is not None and cancellation_requested(task):
+                        raise asyncio.CancelledError()
+                    if getattr(request, "_observe_raw_provider_events", False):
+                        if (
+                            len(json.dumps(raw, ensure_ascii=False).encode("utf-8"))
+                            > _MAX_CHAT_STREAM_BYTES
+                        ):
+                            raise ValueError("Raw Chat chunk exceeds the stream frame limit")
+                        yield _RawChatChunk(deepcopy(raw))
+                    if opening:
+                        yield _ChatStreamEvent(
+                            {"type": "response.created", "response": {"id": response_id}}
+                        )
+                    choices = raw.get("choices")
+                    if choices == []:
+                        continue
+                    if (
+                        not isinstance(choices, list)
+                        or len(choices) != 1
+                        or choices[0].get("index") != 0
+                    ):
+                        raise ValueError("Chat stream requires exactly one response choice")
+                    if finish_reason is not None:
+                        raise ValueError("Chat stream continued after its final choice")
+                    choice = choices[0]
+                    delta = choice["delta"]
+                    probabilities = (choice.get("logprobs") or {}).get("content")
+                    retained = {
+                        "content": delta.get("content"),
+                        "refusal": delta.get("refusal"),
+                        "tool_calls": delta.get("tool_calls"),
+                        "logprobs": probabilities,
+                    }
+                    buffered_bytes += len(json.dumps(retained, ensure_ascii=False).encode("utf-8"))
+                    if buffered_bytes > _MAX_CHAT_STREAM_BYTES:
+                        raise ValueError("Chat stream exceeded its buffer limit")
+                    if (
+                        delta.get("reasoning_content") not in (None, "")
+                        or delta.get("thinking_blocks")
+                        or delta.get("reasoning")
+                    ):
+                        raise ValueError("Chat adapters do not support provider reasoning replay")
+                    if delta.get("content") is not None:
+                        if not isinstance(delta["content"], str):
+                            raise TypeError("Chat stream content must be a string")
+                        if text_parts is None:
+                            text_parts = []
+                            yield _ChatStreamEvent(
+                                {
+                                    "type": "response.output_item.added",
+                                    "output_index": 0,
+                                    "item": {
+                                        "id": message_id,
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [],
+                                    },
+                                }
+                            )
+                        text_parts.append(delta["content"])
+                        yield _ChatStreamEvent(
+                            {
+                                "type": "response.output_text.delta",
+                                "item_id": message_id,
+                                "output_index": 0,
+                                "content_index": 0,
+                                "delta": delta["content"],
+                                **(
+                                    {"logprobs": deepcopy(probabilities)}
+                                    if probabilities is not None
+                                    else {}
+                                ),
+                            }
+                        )
+                    if delta.get("refusal") is not None:
+                        if not isinstance(delta["refusal"], str):
+                            raise TypeError("Chat stream refusal must be a string")
+                        if refusal_parts is None:
+                            refusal_parts = []
+                        refusal_parts.append(delta["refusal"])
+                    if probabilities is not None:
+                        logprobs.extend(deepcopy(probabilities))
+                    for fragment in delta.get("tool_calls") or []:
+                        index = fragment.get("index")
+                        if (
+                            type(index) is not int
+                            or index < 0
+                            or fragment.get("type") not in (None, "function")
+                        ):
+                            raise ValueError("Chat stream received an unsupported tool call")
+                        provider_data = fragment.get("provider_specific_fields") or {}
+                        if (
+                            provider_data.get("thought_signature") is not None
+                            or ((fragment.get("extra_content") or {}).get("google") or {}).get(
+                                "thought_signature"
+                            )
+                            is not None
+                        ):
+                            raise ValueError(
+                                "Chat adapters do not support provider reasoning replay"
+                            )
+                        call = calls.setdefault(
+                            index,
+                            {
+                                "id": "",
+                                "type": "function",
+                                "function": {"name": [], "arguments": []},
+                            },
+                        )
+                        if fragment.get("id") is not None:
+                            if call["id"] and call["id"] != fragment["id"]:
+                                raise ValueError("Chat stream changed a tool call ID")
+                            call["id"] = fragment["id"]
+                        function = fragment.get("function") or {}
+                        for field in ("name", "arguments"):
+                            function_piece = function.get(field) or ""
+                            if not isinstance(function_piece, str):
+                                raise TypeError(f"Chat tool call {field} must be a string")
+                            call["function"][field].append(function_piece)
+                    finish_reason = choice.get("finish_reason")
+            finally:
+                try:
+                    await _close_chat_stream(iterator)
+                finally:
+                    if chunks is not iterator:
+                        await _close_chat_stream(chunks)
+            if response_id is None or finish_reason is None:
+                raise ValueError("Chat stream ended without a completed choice")
+            ordered = [calls[index] for index in sorted(calls)]
+            for call in ordered:
+                function = call["function"]
+                for field in ("name", "arguments"):
+                    function[field] = "".join(function[field])
+            if any(
+                not isinstance(call["id"], str)
+                or not call["id"].strip()
+                or not call["function"]["name"].strip()
+                for call in ordered
+            ) or len({call["id"] for call in ordered}) != len(ordered):
+                raise ValueError("Chat stream requires a name and unique ID for each tool call")
+            completion_request = replace(request)
+            result = self._completed_response(
+                completion_request,
+                {
+                    "id": response_id,
+                    "usage": usage,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": finish_reason,
+                            "logprobs": {"content": logprobs},
+                            "message": {
+                                "role": "assistant",
+                                "content": None if text_parts is None else "".join(text_parts),
+                                "refusal": None
+                                if refusal_parts is None
+                                else "".join(refusal_parts),
+                                "tool_calls": ordered,
+                            },
+                        }
+                    ],
+                },
+                apply_patch_wire,
+            )
+            output = [
+                {
+                    **item,
+                    "id": message_id if item["type"] == "message" else "item_chat_" + uuid4().hex,
+                }
+                for item in result.output
+            ]
+            for index, item in enumerate(output):
+                yield _ChatStreamEvent(
+                    {"type": "response.output_item.done", "output_index": index, "item": item}
+                )
+            measured = result.usage
+            yield _ChatStreamEvent(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": response_id,
+                        "status": "completed",
+                        "output": output,
+                        **(
+                            {
+                                "usage": {
+                                    "input_tokens": measured["input_tokens"],
+                                    "output_tokens": measured["output_tokens"],
+                                    "total_tokens": measured["total_tokens"],
+                                    "input_tokens_details": {
+                                        "cached_tokens": measured.get("cached_input_tokens", 0),
+                                        "cache_write_tokens": measured.get(
+                                            "cache_write_input_tokens", 0
+                                        ),
+                                    },
+                                    "output_tokens_details": {
+                                        "reasoning_tokens": measured.get(
+                                            "reasoning_output_tokens", 0
+                                        )
+                                    },
+                                }
+                            }
+                            if measured is not None
+                            else {}
+                        ),
+                    },
+                }
+            )
+        finally:
+            # Release provider payloads before exposing callback failures.
+            del request, parameters, apply_patch_wire, chunks, iterator, chunk, raw, choice, delta
+            del (
+                usage,
+                result,
+                output,
+                item,
+                fragment,
+                call,
+                close,
+                closed,
+                text_parts,
+                refusal_parts,
+                calls,
+                logprobs,
+                retained,
+                choices,
+                probabilities,
+                function,
+                function_piece,
+                provider_data,
+                ordered,
+                measured,
+                completion_request,
+                task,
+                opening,
+                index,
+                response_id,
+                finish_reason,
+                message_id,
             )
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:

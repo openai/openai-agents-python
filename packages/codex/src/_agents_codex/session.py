@@ -301,6 +301,7 @@ from .schema import (
     _prepare_spec as _prepare_spec,
     _PreparedOutput as _PreparedOutput,
 )
+from .shell import _CapturedShell
 from .state import (
     ApplicationToolOutput as ApplicationToolOutput,
     ChecklistState as ChecklistState,
@@ -311,6 +312,7 @@ from .state import (
     _GuardrailCheckpointRecord,
     _RememberedApproval,
     _RequestRunBudgetCheckpoint,
+    _saved_thread_settings,
     _TokenRunBudgetCheckpoint,
 )
 from .subagents import Subagent as Subagent, _subagent as _subagent
@@ -475,17 +477,7 @@ def _manual_restore_model_settings(
     """Read only accepted model fields; connection and tool authority stay current."""
     metadata = state.root_metadata
     model = metadata.get("model") if metadata is not None else None
-    captured = None
-    for row in reversed(state.history):
-        payload = row.get("payload")
-        if (
-            row.get("type") == "event_msg"
-            and isinstance(payload, dict)
-            and payload.get("type") == "thread_settings_applied"
-            and payload.get("thread_id") == state.source_session_id
-        ):
-            captured = payload.get("thread_settings")
-            break
+    captured = _saved_thread_settings(state.history, state.source_session_id)
     if not isinstance(captured, dict):
         raise ValueError("Manual checkpoint has invalid accepted model settings")
     default = captured.get("model")
@@ -3130,6 +3122,7 @@ class _EnvironmentLease:
         loop = asyncio.get_running_loop()
         self._ready: asyncio.Future[Environment[Any]] = loop.create_future()
         self._retired: asyncio.Future[None] = loop.create_future()
+        self.source = source
         self._borrower = asyncio.current_task()
         self._sync_run: _SyncRun | None = None
         self._woke_borrower = False
@@ -3371,6 +3364,7 @@ async def _opening_provider_config(
     captured_siwc_provider: str | None,
     saved_plan_provider: str | None,
     standalone_web_search: bool,
+    provider_history: ProviderHistory | None = None,
 ) -> dict[str, Any]:
     auth = provider.auth
     provider_id = "native_agent"
@@ -3406,7 +3400,8 @@ async def _opening_provider_config(
             "base_url": base_url,
             "wire_api": "responses",
             "requires_openai_auth": True,
-            "supports_websockets": provider._websockets_enabled,
+            "supports_websockets": provider._websockets_enabled
+            and not (provider_history is not None and provider.supports_websockets is None),
             **routing,
             # Both native web protocols require a compatible Responses
             # provider. The declaration admits that provider capability.
@@ -3646,6 +3641,19 @@ def _prepare_opening_model_settings(
     if provider_history is not None:
         if provider_history["type"] == "previous_response" and current_store is not True:
             raise ValueError("Previous-response HTTP history requires current store=True")
+        if provider_history["type"] == "previous_response" and profile_roster:
+            by_id = {row["id"]: row for row in profile_roster}
+            pending = [profile_roster[0]["id"]]
+            visited = set()
+            while pending:
+                profile_id = pending.pop()
+                if profile_id in visited:
+                    continue
+                visited.add(profile_id)
+                row = by_id[profile_id]
+                if row["model"]["request_controls"].get("store") is not True:
+                    raise ValueError("Every reachable handoff profile requires current store=True")
+                pending.extend(row["handoffs"].values())
         controls = settings.setdefault("request_controls", {})
         if current_store is None:
             controls.pop("store", None)
@@ -4218,6 +4226,7 @@ class Session(Generic[ContextT, OutputT]):
                     saved_plan_provider=saved_plan_provider,
                     standalone_web_search=web_search is not None
                     and web_search.route == "standalone",
+                    provider_history=provider_history,
                 )
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
@@ -4238,7 +4247,9 @@ class Session(Generic[ContextT, OutputT]):
                     use_completed_owner = (
                         private_run and not available and _completed_input is not None
                     )
-                    websockets_enabled = provider._websockets_enabled
+                    websockets_enabled = provider._websockets_enabled and not (
+                        provider_history is not None and provider.supports_websockets is None
+                    )
                     private_http = False
                     # Conservative subset of SdkModelHttpPool::client eligibility;
                     # explicit CA/proxy profiles keep their existing transport selection.
@@ -7362,6 +7373,12 @@ class Session(Generic[ContextT, OutputT]):
                 realtime_usage=self.realtime_usage,
             )
 
+            object.__setattr__(context, "_environment", self._executor)
+            object.__setattr__(
+                context,
+                "_sandbox_source",
+                self._environment_lease.source if self._environment_lease is not None else None,
+            )
             object.__setattr__(context, "_usage_reporter", self._tool_usage_reporter(state, admit))
 
             if not admit():
@@ -7395,6 +7412,14 @@ class Session(Generic[ContextT, OutputT]):
                     )
                     object.__setattr__(
                         context, "_usage_reporter", self._tool_usage_reporter(state, admit)
+                    )
+                    object.__setattr__(context, "_environment", self._executor)
+                    object.__setattr__(
+                        context,
+                        "_sandbox_source",
+                        self._environment_lease.source
+                        if self._environment_lease is not None
+                        else None,
                     )
                     object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
                 elif not isinstance(decision, Allow):
@@ -9260,6 +9285,14 @@ class Session(Generic[ContextT, OutputT]):
             captured_update_settings.get("retry") if captured_update_settings else None
         )
         settings = _native_model_settings(model, captured_update_settings)
+        controls = settings.get("request_controls", {})
+        if (
+            self._provider_history is not None
+            and self._provider_history["type"] == "previous_response"
+            and "store" in controls
+            and controls["store"] is not True
+        ):
+            raise ValueError("Previous-response HTTP history requires current store=True")
         captured_tools = tuple(tools) if tools is not None else None
         target = None
         if agent is not None:
@@ -12307,6 +12340,10 @@ class Session(Generic[ContextT, OutputT]):
         request_id: int,
         active: Callable[[], bool],
     ) -> bool:
+        from .models import _ChatStreamEvent, _RawChatChunk
+
+        started = False
+        observing_chat = False
         produced: Any = None
         iterator: Any = None
         event: Any = None
@@ -12318,19 +12355,39 @@ class Session(Generic[ContextT, OutputT]):
             if produced is None and not active():
                 return False
             iterator = aiter(produced)
-            if not active() or not native._start_model_producer_stream(request_id):
+            if not active():
                 return False
             while active():
                 try:
                     event = await anext(iterator)
                 except StopAsyncIteration:
+                    if not started:
+                        return bool(active() and native._start_model_producer_stream(request_id))
                     return active()
                 if not active():
                     return False
                 if not isinstance(event, Mapping):
                     raise TypeError("NativeModel.stream must yield Responses event mappings")
+                if not started:
+                    chat_stream = isinstance(event, _ChatStreamEvent)
+                    observing_chat = chat_stream and getattr(
+                        request, "_observe_raw_provider_events", False
+                    )
+                    started = (
+                        native._start_model_producer_stream(request_id, chat_stream=True)
+                        if chat_stream
+                        else native._start_model_producer_stream(request_id)
+                    )
+                    if not started:
+                        return False
                 data = json.dumps(dict(event), allow_nan=False)
-                if not await native._push_model_producer_event(request_id, data):
+
+                accepted = (
+                    await native._push_model_producer_event(request_id, data, raw_chat_chunk=True)
+                    if observing_chat and isinstance(event, _RawChatChunk)
+                    else await native._push_model_producer_event(request_id, data)
+                )
+                if not accepted:
                     return False
             return False
         finally:
@@ -12428,7 +12485,11 @@ class Session(Generic[ContextT, OutputT]):
             stream = getattr(backend, "stream", None)
             if callable(stream):
                 failed = not await self._produce_model_stream(
-                    native, stream, request, request_id, active
+                    native,
+                    stream,
+                    request,
+                    request_id,
+                    active,
                 )
                 return
             if not callable(complete):
@@ -15380,6 +15441,12 @@ class Session(Generic[ContextT, OutputT]):
                     realtime_usage=self.realtime_usage,
                     call=call,
                 )
+                object.__setattr__(tool_context, "_environment", self._executor)
+                object.__setattr__(
+                    tool_context,
+                    "_sandbox_source",
+                    self._environment_lease.source if self._environment_lease is not None else None,
+                )
                 object.__setattr__(
                     tool_context,
                     "_usage_reporter",
@@ -15441,6 +15508,13 @@ class Session(Generic[ContextT, OutputT]):
                     context = replace(
                         context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
                     )
+            if context is not None:
+                object.__setattr__(context, "_environment", self._executor)
+                object.__setattr__(
+                    context,
+                    "_sandbox_source",
+                    self._environment_lease.source if self._environment_lease is not None else None,
+                )
             if context is not None and context._usage_reporter is None:
                 object.__setattr__(
                     context,
@@ -15811,7 +15885,9 @@ class Session(Generic[ContextT, OutputT]):
                         namespace=started.namespace,
                         application_data=application_data,
                     )
-                    if code_origin is None and not isinstance(entry, _CapturedComputer):
+                    if code_origin is None and not isinstance(
+                        entry, (_CapturedComputer, _CapturedShell)
+                    ):
                         application_call_id = started.call_id
                         state.pending_application_outputs[application_call_id] = application_output
                     else:

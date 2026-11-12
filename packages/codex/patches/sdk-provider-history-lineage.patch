@@ -11,23 +11,34 @@ index 67688a764e73ccbcbe9ebed36092d2b43a25db40..8713386c0e018228bcb5cd99c77ab841
                  tool_choice: None,
                  disabled_plugin_ids: Vec::new(),
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index d91f201adc9672d0554cc6e686e5e20269055531..a7adfcd5bf4f9531581ff6cd96a49d22df1f3835 100644
+index d91f201adc9672d0554cc6e686e5e20269055531..602b22b44390dabfe8334751f1d7fc30aa7116ce 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
-@@ -285,6 +285,12 @@ impl Serialize for ResponsesApiTools {
+@@ -282,9 +282,23 @@ impl Serialize for ResponsesApiTools {
+     }
+ }
+ 
++/// Request-local canonical hashes and their unchanged wire occurrence map.
++#[derive(Debug, Clone, PartialEq)]
++pub struct ProviderHistoryInputProjection {
++    pub boundary: codex_protocol::provider_history::ProviderHistoryInputBoundary,
++    pub item_sha256: Vec<[u8; 32]>,
++    pub wire_input_indices: Vec<usize>,
++    pub prefix_len: usize,
++}
++
  /// Effective wire values. Cleared and omitted SDK settings emit no member here.
  #[derive(Debug, Default, Serialize, Clone, PartialEq)]
  pub struct ResponsesRequestControls {
 +    /// Local prepared-request data; never sent to the provider.
 +    #[serde(skip)]
-+    pub canonical_history_input:
-+        Option<codex_protocol::provider_history::ProviderHistoryInputBoundary>,
++    pub canonical_history_input: Option<ProviderHistoryInputProjection>,
 +    #[serde(flatten, serialize_with = "serialize_provider_history")]
 +    pub provider_history: Option<codex_protocol::provider_history::ProviderHistorySelection>,
      #[serde(skip_serializing_if = "Option::is_none")]
      pub prompt: Option<codex_protocol::model_request_controls::HostedPromptReference>,
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -312,6 +318,29 @@ pub struct ResponsesRequestControls {
+@@ -312,6 +326,29 @@ pub struct ResponsesRequestControls {
      pub prompt_cache_options: Option<PromptCacheOptions>,
  }
  
@@ -135,6 +146,16 @@ index b52d33a28d00ad2f620116d0d1c2e8402793788c..6b6d4be6d9b7311fb49958113b6f8583
      pub fn with_telemetry(
          self,
          request: Option<Arc<dyn RequestTelemetry>>,
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 628f299c76729594e1fe988fce7eecfb76f91532..08769c51907555fc2f0df1073043284c4a44c256 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -179,3 +179,5 @@ pub use crate::endpoint::RealtimeHostedMcpToolFilter;
+ pub struct SdkWebsocketTlsSelector(
+     pub fn(&url::Url) -> Option<std::sync::Arc<rustls::ClientConfig>>,
+ );
++
++pub use common::ProviderHistoryInputProjection;
 diff --git a/codex-rs/codex-api/tests/provider_history.rs b/codex-rs/codex-api/tests/provider_history.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..bf2ec0377bc7675b8181cb059591c62427837de2
@@ -387,7 +408,7 @@ index 6658db6865ca01f887b791209b5e47300b0f3cf0..b6bfd1710a925092c7fc119ad3c346b1
                          invocation_timeout_ms: None,
                          tool_choice: None,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847fe0cc970 100644
+index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..4ab9cb7a2d4b91a5b4a35f1b05210a964b598e84 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -34,6 +34,7 @@ use std::sync::atomic::Ordering;
@@ -503,16 +524,44 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
          controls
              .validate_profile(model_info)
              .map_err(CodexErr::InvalidRequest)?;
-@@ -1201,6 +1265,8 @@ impl ModelClient {
+@@ -1162,11 +1226,19 @@ impl ModelClient {
+             }
+         }
+         let mut input = prompt.get_formatted_input_for_request(model_info);
+-        if !self.reasoning_effort_override_enabled(model_info) {
+-            // Unsupported models and disabled overrides must also accept saved history.
+-            // Filter only the request copy; persisted history remains unchanged.
+-            input.retain(|item| !matches!(item, ResponseItem::ConfigurationUpdate { .. }));
+-        }
++        let mut wire_input_indices = self.provider_history.as_ref().map(|_| Vec::new());
++        let mut input_index = 0;
++        let allow_reasoning_overrides = self.reasoning_effort_override_enabled(model_info);
++        input.retain(|item| {
++            let index = input_index;
++            input_index += 1;
++            let keep = allow_reasoning_overrides
++                || !matches!(item, ResponseItem::ConfigurationUpdate { .. });
++            if keep && let Some(indices) = &mut wire_input_indices {
++                indices.push(index);
++            }
++            keep
++        });
+         let is_openai = self.state.provider.info().is_openai();
+         // These prompt-only items are rebuilt on every request. Hash their visible payloads
+         // within the thread so retries and resumed sessions preserve their identity.
+@@ -1201,6 +1273,11 @@ impl ModelClient {
              )));
              prefix.push(instructions);
          }
-+        let canonical_history_input = self.provider_history.as_ref()
-+            .map(|_| provider_history::canonical_input_boundary(&prompt.input)).transpose()?;
++        let canonical_history_input = wire_input_indices
++            .map(|indices| {
++                provider_history::canonical_input_projection(&prompt.input, indices, prefix.len())
++            })
++            .transpose()?;
          input.splice(0..0, prefix);
          filter_provider_response_metadata(&mut input, is_openai);
          let reasoning = if prompt_owns_model {
-@@ -1316,6 +1382,8 @@ impl ModelClient {
+@@ -1316,6 +1393,8 @@ impl ModelClient {
                  },
              ),
              request_controls: codex_api::ResponsesRequestControls {
@@ -521,7 +570,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
                  prompt: prompt_reference,
                  instructions: hosted_prompt
                      .filter(|prompt| !prompt.omit_instructions)
-@@ -1783,6 +1851,16 @@ impl ModelClientSession {
+@@ -1783,6 +1862,16 @@ impl ModelClientSession {
              .is_some_and(|manager| manager.uses_app_managed_model_oauth())
      }
  
@@ -538,7 +587,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
      pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
          let source = &self.client.state.session_source;
          // ThreadSpawn children expose the same attention API as root turns.
-@@ -1951,6 +2029,11 @@ impl ModelClientSession {
+@@ -1951,6 +2040,11 @@ impl ModelClientSession {
          if !self.client.responses_websocket_enabled() {
              return Ok(());
          }
@@ -550,7 +599,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
          let provider = Arc::clone(&self.client.state.provider);
          let auth_manager = provider.auth_manager();
          let mut auth_recovery = auth_manager
-@@ -2235,6 +2318,7 @@ impl ModelClientSession {
+@@ -2235,6 +2329,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -558,7 +607,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2273,16 +2357,6 @@ impl ModelClientSession {
+@@ -2273,16 +2368,6 @@ impl ModelClientSession {
                  prompt.cyber_access_program,
                  self.client.api_key_cyber_access_programs,
              )?;
@@ -575,7 +624,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
              let observation_is_reviewer = is_guardian_reviewer(&responses_headers);
              options.extra_headers.extend(responses_headers);
              let interceptors = crate::model_request::prepare(
-@@ -2294,6 +2368,31 @@ impl ModelClientSession {
+@@ -2294,6 +2379,31 @@ impl ModelClientSession {
                  &mut request.client_metadata,
                  prompt.tool_admission.clone(),
              );
@@ -607,7 +656,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
              let inference_trace_attempt = inference_trace.start_attempt();
              inference_trace_attempt.add_request_headers(&mut options.extra_headers);
              if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
-@@ -2302,7 +2401,13 @@ impl ModelClientSession {
+@@ -2302,7 +2412,13 @@ impl ModelClientSession {
                  }
                  request.input = input;
              }
@@ -622,7 +671,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
              let request_transport = if prompt.prefer_buffered_response {
                  codex_extension_api::ModelRequestTransport::HttpJson
              } else {
-@@ -2396,6 +2501,19 @@ impl ModelClientSession {
+@@ -2396,6 +2512,19 @@ impl ModelClientSession {
  
              match stream_result {
                  Ok((request_id, interrupt, events, producer_task, producer_stop)) => {
@@ -642,7 +691,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
                      let (mut stream, response) = map_response_events(
                          request_id,
                          crate::model_request::intercept_stream(events, interceptors),
-@@ -2412,8 +2530,13 @@ impl ModelClientSession {
+@@ -2412,8 +2541,13 @@ impl ModelClientSession {
                      stream.producer_task = producer_task;
                      stream.producer_stop = producer_stop;
                      stream.request_observation = request_observation;
@@ -658,15 +707,27 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
                      return Ok(stream);
                  }
                  Err(ApiError::Transport(unauthorized_transport))
-@@ -2430,6 +2553,7 @@ impl ModelClientSession {
+@@ -2430,6 +2564,7 @@ impl ModelClientSession {
                          response_debug_context.request_id.as_deref(),
                          /*output_items*/ &[],
                      );
-+                    if let Some(cursor) = &self.client.provider_history { cursor.reject_unauthorized().await?; }
++                    if let Some(cursor) = &self.client.provider_history { cursor.reject_pre_stream().await?; }
                      auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
                          handle_unauthorized(
                              unauthorized_transport,
-@@ -2488,6 +2612,9 @@ impl ModelClientSession {
+@@ -2445,6 +2580,11 @@ impl ModelClientSession {
+                     continue;
+                 }
+                 Err(err) => {
++                    if provider_history::definitive_pre_stream_rejection(&err)
++                        && let Some(cursor) = &self.client.provider_history
++                    {
++                        cursor.reject_pre_stream().await?;
++                    }
+                     let response_debug_context =
+                         extract_response_debug_context_from_api_error(&err);
+                     let err = self.client.state.provider.map_api_error(err);
+@@ -2488,6 +2628,9 @@ impl ModelClientSession {
          inference_trace: &InferenceTraceContext,
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<WebsocketStreamOutcome> {
@@ -676,7 +737,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
-@@ -2520,6 +2647,7 @@ impl ModelClientSession {
+@@ -2520,6 +2663,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -684,7 +745,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2615,7 +2743,11 @@ impl ModelClientSession {
+@@ -2615,7 +2759,11 @@ impl ModelClientSession {
              if let Some(turn_state) = self.turn_state.get() {
                  client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
              }
@@ -697,7 +758,7 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
              let (mode, reason) = if continuation.is_some() {
                  ("incremental", "incremental")
              } else {
-@@ -2875,6 +3007,10 @@ impl ModelClientSession {
+@@ -2875,6 +3023,10 @@ impl ModelClientSession {
          service_tier: Option<String>,
          responses_metadata: &CodexResponsesMetadata,
      ) -> Result<()> {
@@ -710,10 +771,10 @@ index 62b0ed1340c3ac8a7fd2dd3c4fa7084d930b68a5..677cdf21a89c8fc0ef9318b2331e4847
          // ordinary request run the awaited context policy before sending input.
 diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5e5e74dcfa87d62353fb8b2895bb272aa4fd1eaa
+index 0000000000000000000000000000000000000000..dd283f779d4a7d64cc6b1269f242371a9c3c0f05
 --- /dev/null
 +++ b/codex-rs/core/src/client/provider_history.rs
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,565 @@
 +use super::*;
 +use codex_protocol::provider_history::{
 +    ProviderHistoryInputBoundary, ProviderHistoryReference, ProviderHistorySelection,
@@ -883,6 +944,42 @@ index 0000000000000000000000000000000000000000..5e5e74dcfa87d62353fb8b2895bb272a
 +    })
 +}
 +
++pub(crate) fn canonical_input_projection(
++    items: &[ResponseItem],
++    wire_input_indices: Vec<usize>,
++    prefix_len: usize,
++) -> Result<codex_api::ProviderHistoryInputProjection> {
++    Ok(codex_api::ProviderHistoryInputProjection {
++        boundary: canonical_input_boundary(items)?,
++        item_sha256: items.iter().map(item_digest).collect::<Result<Vec<_>>>()?,
++        wire_input_indices,
++        prefix_len,
++    })
++}
++
++fn canonical_prefix_digest(items: &[[u8; 32]]) -> String {
++    let mut digest = Sha256::new();
++    digest.update(b"sdk-provider-history-input-v1\0");
++    for item in items {
++        digest.update(item);
++    }
++    hex(digest.finalize())
++}
++
++pub(crate) fn definitive_pre_stream_rejection(error: &codex_api::ApiError) -> bool {
++    let status = match error {
++        codex_api::ApiError::Api { status, .. }
++        | codex_api::ApiError::Transport(codex_client::TransportError::Http { status, .. }) => {
++            status.as_u16()
++        }
++        _ => return false,
++    };
++    matches!(
++        status,
++        400 | 401 | 403 | 404 | 405 | 410 | 413 | 415 | 422 | 429
++    )
++}
++
 +impl Cursor {
 +    pub(crate) fn new(start: Start) -> Self {
 +        Self {
@@ -966,20 +1063,74 @@ index 0000000000000000000000000000000000000000..5e5e74dcfa87d62353fb8b2895bb272a
 +        let full_len = request.input.len();
 +        let full_digest = input_digest(&request.input)?;
 +        let unsent = if let Some(window) = &saved.window {
-+            let prefix = request
-+                .input
-+                .get(..window.input_len)
-+                .ok_or_else(|| invalid("Provider history lost acknowledged input"))?;
-+            let tail = request.input[window.input_len..]
-+                .iter()
-+                .map(item_digest)
-+                .map(|digest| digest.map(hex))
-+                .collect::<Result<Vec<_>>>()?;
-+            Some(
-+                window
-+                    .unsent_input_indices(full_len, &input_digest(prefix)?, &tail)
-+                    .map_err(CodexErr::InvalidRequest)?,
-+            )
++            if let Some(boundary) = &window.canonical_input
++                && !request
++                    .input
++                    .get(..window.input_len)
++                    .map(input_digest)
++                    .transpose()?
++                    .is_some_and(|digest| digest == window.input_sha256)
++            {
++                if canonical_input.prefix_len + canonical_input.wire_input_indices.len() != full_len
++                    || canonical_input.item_sha256.len() != canonical_input.boundary.input_len
++                    || canonical_input
++                        .wire_input_indices
++                        .iter()
++                        .any(|index| *index >= canonical_input.item_sha256.len())
++                {
++                    return Err(invalid(
++                        "Provider history has an invalid current input projection",
++                    ));
++                }
++                let prefix = canonical_input
++                    .item_sha256
++                    .get(..boundary.input_len)
++                    .ok_or_else(|| invalid("Provider history lost acknowledged canonical input"))?;
++                let tail = canonical_input.item_sha256[boundary.input_len..]
++                    .iter()
++                    .map(hex)
++                    .collect::<Vec<_>>();
++                let canonical = ProviderHistoryWindowReceipt {
++                    input_len: boundary.input_len,
++                    input_sha256: boundary.input_sha256.clone(),
++                    output_sha256: window.output_sha256.clone(),
++                    canonical_input: None,
++                };
++                let unsent = canonical
++                    .unsent_input_indices(
++                        canonical_input.item_sha256.len(),
++                        &canonical_prefix_digest(prefix),
++                        &tail,
++                    )
++                    .map_err(CodexErr::InvalidRequest)?
++                    .into_iter()
++                    .collect::<std::collections::HashSet<_>>();
++                let mut indices = (0..canonical_input.prefix_len).collect::<Vec<_>>();
++                indices.extend(
++                    canonical_input
++                        .wire_input_indices
++                        .iter()
++                        .enumerate()
++                        .filter(|(_, index)| unsent.contains(*index))
++                        .map(|(offset, _)| canonical_input.prefix_len + offset),
++                );
++                Some(indices)
++            } else {
++                let prefix = request
++                    .input
++                    .get(..window.input_len)
++                    .ok_or_else(|| invalid("Provider history lost acknowledged input"))?;
++                let tail = request.input[window.input_len..]
++                    .iter()
++                    .map(item_digest)
++                    .map(|digest| digest.map(hex))
++                    .collect::<Result<Vec<_>>>()?;
++                Some(
++                    window
++                        .unsent_input_indices(full_len, &input_digest(prefix)?, &tail)
++                        .map_err(CodexErr::InvalidRequest)?,
++                )
++            }
 +        } else {
 +            None
 +        };
@@ -1006,7 +1157,7 @@ index 0000000000000000000000000000000000000000..5e5e74dcfa87d62353fb8b2895bb272a
 +            state.reference.provider_route = current_route;
 +            state.reference.pending = true;
 +            state.pending = Some(Pending {
-+                canonical_input,
++                canonical_input: canonical_input.boundary,
 +                input_len: full_len,
 +                input_sha256: full_digest,
 +                output_sha256: Vec::new(),
@@ -1133,7 +1284,7 @@ index 0000000000000000000000000000000000000000..5e5e74dcfa87d62353fb8b2895bb272a
 +        self.persist().await
 +    }
 +
-+    pub(crate) async fn reject_unauthorized(&self) -> Result<()> {
++    pub(crate) async fn reject_pre_stream(&self) -> Result<()> {
 +        {
 +            let mut state = self.state.lock().unwrap();
 +            state.pending = None;

@@ -192,7 +192,9 @@ async def test_conversations_bridge_refuses_competing_wire_history():
 def test_idle_profile_storage_uses_selected_current_declaration(profile_store):
     agent = Agent(instructions="Current.", model_settings={"store": not profile_store})
     profile = SimpleNamespace(profile=SimpleNamespace(id="selected"))
-    roster = [{"id": "selected", "model": {"request_controls": {"store": profile_store}}}]
+    roster = [
+        {"id": "selected", "model": {"request_controls": {"store": profile_store}}, "handoffs": {}}
+    ]
     args = (agent, "current-model", "Current.", None, None, profile, roster)
     if profile_store is not True:
         with pytest.raises(ValueError, match="current store=True"):

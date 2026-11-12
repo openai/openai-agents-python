@@ -12,7 +12,7 @@ from tests.native_fixtures import ResponsesFixture, assistant_output, function_c
 
 
 @asynccontextmanager
-async def history_peer():
+async def history_peer(rejection=None):
     model = ResponsesFixture()
     reads = []
     wire = []
@@ -34,7 +34,32 @@ async def history_peer():
         )
 
     app = web.Application(middlewares=[record_wire])
-    app.router.add_post("/v1/responses", model.handle)
+    rejected = False
+
+    async def submit(request):
+        nonlocal rejected
+        if rejection is not None and not rejected:
+            rejected = True
+            await request.read()
+            if rejection == 200:
+                reply = web.StreamResponse(
+                    status=200, headers={"Content-Type": "text/event-stream"}
+                )
+                await reply.prepare(request)
+                await reply.write_eof()
+                return reply
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Synthetic request rejection",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status=rejection,
+            )
+        return await model.handle(request)
+
+    app.router.add_post("/v1/responses", submit)
     app.router.add_get("/v1/{kind}/{identity}", read_anchor)
     async with TestServer(app, shutdown_timeout=1) as server:
         async with NativeProvider(
@@ -523,3 +548,166 @@ async def test_provider_history_stored_fork_keeps_its_owner(remote, tmp_path):
             assert after == (before if remote else before | {fork_id})
             await (await session.submit("After.")).get_result()
         assert len(model.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "status,restore",
+    [(400, False), (429, False), (500, False), (200, False), (400, True), (429, True)],
+)
+async def test_lineage_definitive_rejection_releases_only_safe_fence(status, restore):
+    async with (
+        timeout(30),
+        history_peer(rejection=status) as (provider, model, _reads, _base, wire),
+    ):
+        model.respond(assistant_output("Recovered."))
+        agent = Agent(instructions="Continue.", model="gpt-5.5", provider=provider)
+        async with agent.session(
+            provider_history={"type": "conversation", "id": "conv_current"}
+        ) as session:
+            with pytest.raises(NativeError):
+                await (await session.submit("Before.")).get_result()
+            if status in (400, 429):
+                if restore:
+                    state = await session.save_state()
+                    await session.aclose()
+                    async with agent.session(
+                        state=state, provider_history={"type": "conversation", "id": "conv_current"}
+                    ) as resumed:
+                        await (await resumed.submit("After.")).get_result()
+                else:
+                    await (await session.submit("After.")).get_result()
+                assert len([row for row in wire if row[0] == "POST"]) == 2
+            else:
+                with pytest.raises(RuntimeError, match="reconciliation"):
+                    await (await session.submit("After.")).get_result()
+                assert len([row for row in wire if row[0] == "POST"]) == 1
+
+
+async def test_lineage_instruction_update_keeps_request_rows_current():
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(instructions="Original instructions.", model="gpt-5.5", provider=provider)
+        async with agent.session(
+            provider_history={"type": "conversation", "id": "conv_current"}
+        ) as session:
+            await (await session.submit("Before.")).get_result()
+            await session.update(instructions="Current instructions.")
+            await (await session.submit("After.")).get_result()
+        assert len(model.requests) == 2
+        assert "Current instructions." in str(model.requests[1]["input"])
+
+
+@pytest.mark.parametrize("store", [None, False])
+async def test_lineage_all_handoff_profiles_require_current_store(store):
+    async with timeout(30), history_peer() as (provider, _model, _reads, _base, wire):
+        target = Agent(
+            name="Other",
+            instructions="Same instructions.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={} if store is None else {"store": store},
+        )
+        root = Agent(
+            name="Root",
+            instructions="Same instructions.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"store": True},
+            handoffs=[target],
+        )
+        with pytest.raises(ValueError, match="store=True"):
+            async with root.session(provider_history={"type": "previous_response"}):
+                pass
+        assert wire == []
+
+
+async def test_lineage_saved_anchor_is_public_and_detached():
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Accepted."))
+        root = Agent(
+            instructions="Continue.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"store": True},
+        )
+        async with root.session(provider_history={"type": "previous_response"}) as session:
+            await (await session.submit("Before.")).get_result()
+            state = await session.save_state()
+        selected = state.provider_history
+        assert selected == {"type": "previous_response", "id": "resp_1"}
+        selected["id"] = "modified"
+        assert state.provider_history == {"type": "previous_response", "id": "resp_1"}
+        model.respond(assistant_output("Restored."))
+        async with root.session(state=state, provider_history=state.provider_history) as restored:
+            await (await restored.submit("After.")).get_result()
+        assert model.requests[1]["previous_response_id"] == "resp_1"
+
+
+async def test_lineage_changed_handoff_instructions_remain_request_only():
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(function_call("transfer_to_other", {}, "handoff-other"))
+        model.respond(assistant_output("Other accepted."))
+        target = Agent(
+            name="Other",
+            instructions="Current target instructions.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"store": True},
+        )
+        root = Agent(
+            name="Root",
+            instructions="Original root instructions.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"store": True},
+            handoffs=[target],
+        )
+        async with root.session(provider_history={"type": "previous_response"}) as session:
+            await (await session.submit("Handoff.")).get_result()
+        assert len(model.requests) == 2
+        assert "Current target instructions." in str(model.requests[1]["input"])
+
+
+async def test_lineage_implicit_default_transport_uses_http(monkeypatch):
+    import _agents_codex.session as session_module
+
+    async with timeout(30), history_peer() as (_provider, model, _reads, base, _wire):
+        original = session_module._opening_provider_config
+
+        async def local_config(provider, opening, **kwargs):
+            config = await original(provider, opening, **kwargs)
+            selected = config[f"model_providers.{config['model_provider']}"]
+            assert provider.base_url is None and provider.supports_websockets is None
+            assert selected["supports_websockets"] is False
+            selected["base_url"] = base
+            return config
+
+        monkeypatch.setattr(session_module, "_opening_provider_config", local_config)
+        monkeypatch.setenv("OPENAI_API_KEY", "current-owner")
+        model.respond(assistant_output("Accepted."))
+        root = Agent(instructions="Continue.", model="gpt-5.5")
+        async with root.session(
+            provider_history={"type": "conversation", "id": "conv_current"}
+        ) as session:
+            await (await session.submit("Before.")).get_result()
+        assert len(model.requests) == 1
+
+
+@pytest.mark.parametrize("store", [False, None])
+async def test_lineage_refuses_incompatible_storage_update_before_publication(store):
+    async with timeout(30), history_peer() as (provider, model, _reads, _base, _wire):
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(
+            instructions="Continue.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"store": True},
+        )
+        async with agent.session(provider_history={"type": "previous_response"}) as session:
+            await (await session.submit("Before.")).get_result()
+            with pytest.raises(ValueError, match="store=True"):
+                await session.update(model_settings={"store": store})
+            await (await session.submit("After.")).get_result()
+        assert [body["store"] for body in model.requests] == [True, True]
