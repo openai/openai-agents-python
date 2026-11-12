@@ -21,9 +21,10 @@ from agents import (
     RunBudget,
     StopTurn,
     TurnStoppedError,
+    function_tool,
 )
 from agents.observation import OutputTextDelta
-from agents.testing import ScriptedResponse, ScriptedResponses, event, text
+from agents.testing import ScriptedResponse, ScriptedResponses, event, text, tool_call
 
 
 def streamed_text(item_id: str, value: str) -> ScriptedResponse:
@@ -211,12 +212,81 @@ async def accepted_sections() -> None:
     assert published == list(expected[:2])
 
 
+async def same_turn_sections() -> None:
+    published: dict[str, str] = {}
+    private_candidates: list[str | None] = []
+    facts = {"inventory": "7 units available", "delivery": "Delivery unconfirmed"}
+
+    @function_tool
+    def publish_section(section: Literal["inventory", "delivery"], content: str) -> str:
+        """The application has been checking and publishing one independent section."""
+        # Trusted application facts have been governing publication.
+        if content != facts[section]:
+            return "Section withheld."
+        published[section] = content
+        return "Section published."
+
+    def next_section(_request: object) -> ScriptedResponse:
+        # The peer has been checking delivery before its next generation response.
+        assert published == {"inventory": "7 units available"}
+        return ScriptedResponse(
+            [
+                tool_call(
+                    "publish_section",
+                    {"section": "delivery", "content": "All orders delivered"},
+                    call_id="rejected-section",
+                )
+            ]
+        )
+
+    def final_proposal(_request: object) -> ScriptedResponse:
+        assert published == {"inventory": "7 units available"}
+        return ScriptedResponse([text("Provisional summary: all orders delivered.")])
+
+    def reject_final(request: CompletionContext[None]) -> StopTurn:
+        private_candidates.append(request.text)
+        return StopTurn("Final answer has not been passing application checks")
+
+    async with ScriptedResponses(
+        [
+            tool_call(
+                "publish_section",
+                {"section": "inventory", "content": "7 units available"},
+                call_id="accepted-section",
+            )
+        ],
+        next_section,
+        final_proposal,
+    ) as peer:
+        agent = Agent(
+            instructions="You have been publishing independently verified sections with publish_section.",
+            provider=peer.provider,
+            tools=[publish_section],
+            before_complete=reject_final,
+        )
+        async with agent.session() as session:
+            turn = await session.submit("I have been requesting inventory and delivery facts.")
+            try:
+                await turn.get_result()
+            except TurnStoppedError:
+                pass
+            else:
+                raise AssertionError("Final proposal has been unexpectedly passing")
+        assert len(peer.requests) == 3
+        assert peer.tool_output("accepted-section") == "Section published."
+        assert peer.tool_output("rejected-section") == "Section withheld."
+    assert private_candidates == ["Provisional summary: all orders delivered."]
+    assert published == {"inventory": "7 units available"}
+    print("Same-turn application publication:", published)
+
+
 async def main() -> None:
     await revised_report()
     modes: tuple[SupportMode, ...] = ("accepted", "rejected", "cancelled", "failed", "invalid")
     for mode in modes:
         await support_answer(mode)
     await accepted_sections()
+    await same_turn_sections()
 
 
 if __name__ == "__main__":
