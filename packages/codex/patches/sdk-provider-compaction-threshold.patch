@@ -1,0 +1,202 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 1dfbfb7..ae12d87 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1369,7 +1369,8 @@ impl ModelClient {
+                     })
+                     .transpose()?,
+                 truncation: controls.truncation.clone().flatten(),
+-                context_management: controls.context_management.clone().flatten(),
++                context_management: controls
++                    .context_management_for_model((!prompt_owns_model).then_some(model_info)),
+                 extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
+                 max_output_tokens: controls.max_output_tokens.flatten(),
+                 temperature: controls.temperature.flatten(),
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 0f385ec..32afd5d 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -23,6 +23,37 @@ pub enum PromptCacheTtl {
+     Hours12,
+ }
+ 
++const MAX_PROVIDER_COMPACTION_THRESHOLD: u64 = 9_007_199_254_740_991;
++
++/// SDK policy for the in-band Responses compaction threshold.
++#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
++pub enum ProviderCompactionPolicy {
++    Static {
++        threshold: u64,
++    },
++    Dynamic {
++        threshold_ratio: f64,
++        fallback_threshold: u64,
++    },
++}
++
++impl ProviderCompactionPolicy {
++    fn threshold(self, context_window: Option<i64>) -> u64 {
++        match self {
++            Self::Static { threshold } => threshold,
++            Self::Dynamic {
++                threshold_ratio,
++                fallback_threshold,
++            } => context_window
++                .filter(|window| (1..=MAX_PROVIDER_COMPACTION_THRESHOLD as i64).contains(window))
++                .map_or(fallback_threshold, |window| {
++                    (window as f64 * threshold_ratio).floor() as u64
++                }),
++        }
++    }
++}
++
+ /// Provider-owned prompt reference; resolved factories use the admitted context hook.
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+@@ -151,6 +182,14 @@ pub struct ModelRequestControls {
+         skip_serializing_if = "Option::is_none",
+         with = "serde_with::rust::double_option"
+     )]
++    #[ts(optional = nullable, as = "Option<ProviderCompactionPolicy>")]
++    #[schemars(with = "Option<ProviderCompactionPolicy>")]
++    pub provider_compaction: Option<Option<ProviderCompactionPolicy>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
+     #[ts(optional = nullable, type = "unknown")]
+     #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>")]
+     pub extra_body: Option<Option<BTreeMap<String, serde_json::Value>>>,
+@@ -264,6 +303,7 @@ impl ModelRequestControls {
+             && self.truncation.is_none()
+             && self.include.is_none()
+             && self.context_management.is_none()
++            && self.provider_compaction.is_none()
+             && self.extra_body.is_none()
+             && self.max_output_tokens.is_none()
+             && self.temperature.is_none()
+@@ -303,6 +343,9 @@ impl ModelRequestControls {
+         if patch.context_management.is_some() {
+             self.context_management = patch.context_management.clone();
+         }
++        if patch.provider_compaction.is_some() {
++            self.provider_compaction = patch.provider_compaction;
++        }
+         if patch.extra_body.is_some() {
+             self.extra_body = patch.extra_body.clone();
+         }
+@@ -431,6 +474,26 @@ impl ModelRequestControls {
+                 return Err(format!("{name} must be finite"));
+             }
+         }
++        if let Some(policy) = self.provider_compaction.flatten() {
++            let valid = match policy {
++                ProviderCompactionPolicy::Static { threshold } => {
++                    threshold <= MAX_PROVIDER_COMPACTION_THRESHOLD
++                }
++                ProviderCompactionPolicy::Dynamic {
++                    threshold_ratio,
++                    fallback_threshold,
++                } => {
++                    (0.0..=1.0).contains(&threshold_ratio)
++                        && fallback_threshold <= MAX_PROVIDER_COMPACTION_THRESHOLD
++                }
++            };
++            if !valid {
++                return Err(
++                    "provider_compaction requires safe integer thresholds and a ratio in 0..=1"
++                        .into(),
++                );
++            }
++        }
+         if let Some(Some(target)) = &self.named_tool_choice {
+             if target.name.trim().is_empty()
+                 || target
+@@ -444,6 +507,27 @@ impl ModelRequestControls {
+         Ok(())
+     }
+ 
++    /// Explicit wire controls take precedence, including an explicit clear.
++    pub fn context_management_for_model(
++        &self,
++        model: Option<&crate::openai_models::ModelInfo>,
++    ) -> Option<Vec<serde_json::Value>> {
++        if let Some(context_management) = &self.context_management {
++            return context_management.clone();
++        }
++        let context_window = model
++            .filter(|info| !info.used_fallback_model_metadata)
++            .and_then(crate::openai_models::ModelInfo::resolved_context_window);
++        let threshold = self
++            .provider_compaction
++            .flatten()?
++            .threshold(context_window);
++        Some(vec![serde_json::json!({
++            "type": "compaction",
++            "compact_threshold": threshold,
++        })])
++    }
++
+     /// Metadata has no sampling-control discriminator. Reject only known loss;
+     /// unknown ordinary Responses model support remains the provider's decision.
+     pub fn validate_profile(&self, model: &crate::openai_models::ModelInfo) -> Result<(), String> {
+@@ -472,10 +556,10 @@ impl ModelRequestControls {
+                 .as_ref()
+                 .and_then(Option::as_ref)
+                 .is_some_and(|include| !include.is_empty())
+-            || self
+-                .context_management
+-                .as_ref()
+-                .is_some_and(Option::is_some)
++            || self.context_management.as_ref().map_or_else(
++                || self.provider_compaction.flatten().is_some(),
++                Option::is_some,
++            )
+             || self
+                 .extra_body
+                 .as_ref()
+@@ -503,9 +587,41 @@ impl ModelRequestControls {
+ 
+ #[cfg(test)]
+ mod sdk_extension_tests {
+-    use super::ModelRequestControls;
++    use super::{ModelRequestControls, ProviderCompactionPolicy};
+     use serde_json::json;
+ 
++    #[test]
++    fn provider_compaction_threshold_uses_the_current_context_window() {
++        let policy = ProviderCompactionPolicy::Dynamic {
++            threshold_ratio: 0.9,
++            fallback_threshold: 240_000,
++        };
++        assert_eq!(policy.threshold(Some(200_001)), 180_000);
++        assert_eq!(policy.threshold(None), 240_000);
++        assert_eq!(policy.threshold(Some(0)), 240_000);
++        assert_eq!(
++            ProviderCompactionPolicy::Static { threshold: 0 }.threshold(Some(200_001)),
++            0
++        );
++        let mut controls = ModelRequestControls {
++            provider_compaction: Some(Some(policy)),
++            ..Default::default()
++        };
++        assert!(controls.has_wire_values());
++        assert_eq!(
++            controls.context_management_for_model(None),
++            Some(vec![
++                json!({"type": "compaction", "compact_threshold": 240000})
++            ])
++        );
++        controls.apply_patch(&ModelRequestControls {
++            context_management: Some(None),
++            ..Default::default()
++        });
++        assert!(!controls.has_wire_values());
++        assert_eq!(controls.context_management_for_model(None), None);
++    }
++
+     #[test]
+     fn extended_controls_preserve_omission_clears_and_values() {
+         let mut controls: ModelRequestControls = serde_json::from_value(json!({
