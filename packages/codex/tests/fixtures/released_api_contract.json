@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "2e7fdc414a5f8d594b8f5ef0ab7b4519c17964d3",
+  "baseline_commit": "c98b28350f2ce02136798f5f723bd7dcc7f1914d",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -4563,7 +4563,7 @@
         "declarations": [
           "@dataclass(frozen=True)\nclass MaterializedFile:\n    path: Path\n    sha256: str",
           "@dataclass(frozen=True)\nclass MaterializationResult:\n    files: list[MaterializedFile]",
-          "class _SkillCopyBudget:\n\n    def __init__(self, *, trusted: bool=True) -> None:\n        pass\n\n    def reserve(self, *, members: int=0, bytes: int=0) -> None:\n        pass"
+          "class _SkillCopyBudget:\n\n    def __init__(self, *, trusted: bool=False) -> None:\n        pass\n\n    def reserve(self, *, members: int=0, bytes: int=0) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [

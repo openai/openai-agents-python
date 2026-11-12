@@ -1696,6 +1696,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 state=state,
                 removal_service=self._removal_service,
             )
+            inner._reset_skill_copy_budget_for_fresh_workspace()
             return self._wrap_session(inner, instrumentation=self._instrumentation)
         except BaseException:
             self._cleanup_failed_create_resources(
@@ -1867,6 +1868,8 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             )
             inner._resume_workspace_probe_pending = True
             inner._set_start_state_preserved(reused_existing_container)
+            if not reused_existing_container:
+                inner._reset_skill_copy_budget_for_fresh_workspace()
             return self._wrap_session(inner, instrumentation=self._instrumentation)
         except BaseException:
             if owns_replacement:

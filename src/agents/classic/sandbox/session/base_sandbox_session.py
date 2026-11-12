@@ -230,7 +230,7 @@ class BaseSandboxSession(abc.ABC):
 
     def _reset_skill_copy_budget_for_fresh_workspace(self) -> None:
         self.state._native_skill_copy_budget.trusted = False
-        self.state._native_skill_copy_budget = _SkillCopyBudget()
+        self.state._native_skill_copy_budget = _SkillCopyBudget(trusted=True)
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""

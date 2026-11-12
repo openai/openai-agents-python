@@ -1679,6 +1679,8 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
             exposed_ports=resolved_options.exposed_ports,
         )
         inner = UnixLocalSandboxSession.from_state(state)
+        if workspace_root_owned:
+            inner._reset_skill_copy_budget_for_fresh_workspace()
         # Keep host inheritance policy under trusted runtime control. Session state and manifests
         # must not be able to change it when a session is resumed by another client.
         inner._host_environment_allowlist = self._host_environment_allowlist

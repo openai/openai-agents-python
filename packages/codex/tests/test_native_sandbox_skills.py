@@ -965,7 +965,9 @@ async def test_native_lazy_index_rejects_swapped_source(
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
 @pytest.mark.parametrize("limit", ["bytes", "members"])
-@pytest.mark.parametrize("state_mode", ["shared", "resumed", "serialized"])
+@pytest.mark.parametrize(
+    "state_mode", ["shared", "resumed", "serialized", "pydantic_json", "pydantic_dict"]
+)
 async def test_native_skill_budget_survives_environment_lease_retirement(
     tmp_path, monkeypatch, responses, limit, state_mode
 ):
@@ -996,6 +998,10 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
         if state_mode == "serialized"
         else borrowed.state.model_copy(deep=True)
     )
+    if state_mode == "pydantic_json":
+        saved = type(borrowed.state).model_validate_json(borrowed.state.model_dump_json())
+    elif state_mode == "pydantic_dict":
+        saved = type(borrowed.state).model_validate(borrowed.state.model_dump())
     if state_mode == "serialized":
         assert "_native_skill_copy_budget" not in saved
         saved["_native_skill_copy_budget"] = {"trusted": True, "bytes": 0, "members": 0}
@@ -1052,7 +1058,7 @@ async def test_native_skill_budget_survives_environment_lease_retirement(
                         error = "byte" if limit == "bytes" else "member"
                         message = (
                             "quota continuity"
-                            if state_mode == "serialized"
+                            if state_mode in ("serialized", "pydantic_json", "pydantic_dict")
                             else f"sandbox {error} limit"
                         )
                         with pytest.raises(ValueError, match=message):
@@ -1135,3 +1141,108 @@ async def test_native_duplicate_lazy_load_copies_and_charges_once(tmp_path, monk
         json.loads(tool_output(responses.requests[1], call_id))["status"]
         for call_id in ("first-load", "second-load")
     ) == ["already_loaded", "loaded"]
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("backend", ["unix_local", "docker"])
+async def test_native_skill_quota_tracks_fresh_resource(
+    tmp_path, monkeypatch, responses, replacement, backend
+):
+    import shutil
+
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    workspace = tmp_path / "workspace"
+    transport = None
+    if backend == "docker":
+        docker = pytest.importorskip("docker")
+        from agents.classic.sandbox.sandboxes.docker import (
+            DockerSandboxClient,
+            DockerSandboxClientOptions,
+        )
+
+        try:
+            transport = docker.from_env()
+            transport.ping()
+            transport.images.get("python:3.14-slim")
+        except docker.errors.DockerException:
+            pytest.skip("Cached Docker skill fixture unavailable")
+        client = DockerSandboxClient(transport)
+        options = DockerSandboxClientOptions(image="python:3.14-slim", network_mode="none")
+        # The loopback executor has been resolving this host path independently of Docker.
+        workspace.mkdir()
+    else:
+        if sys.platform not in ("linux", "darwin"):
+            pytest.skip("UnixLocal resource")
+        client = UnixLocalSandboxClient()
+        options = UnixLocalSandboxClientOptions()
+    original = await client.create(manifest=Manifest(root=str(workspace)), options=options)
+    resumed = None
+    try:
+        await original.start()
+        saved = client.deserialize_session_state(client.serialize_session_state(original.state))
+        if replacement:
+            await original.aclose()
+            await client.delete(original)
+            if backend == "unix_local":
+                shutil.rmtree(workspace)
+        resumed = await client.resume(saved)
+        if backend == "docker":
+            assert (resumed.state.container_id != original.state.container_id) is replacement
+        await resumed.start()
+        monkeypatch.chdir(tmp_path)
+        selected = tmp_path / "skills/report"
+        selected.mkdir(parents=True)
+        (selected / "SKILL.md").write_text("---\nname: report\n---\nFULL_DOC", encoding="utf-8")
+        async with ExecutorPeer(tmp_path / "executor").serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+
+            @asynccontextmanager
+            async def connect(selected_session):
+                assert selected_session is resumed
+                root = resumed.state.manifest.root
+                yield Environment(
+                    url=peer.url,
+                    headers={"Authorization": "Bearer " + peer.token},
+                    cwd=str(root),
+                    tools=(),
+                    capability_directories=[str(Path(root) / ".agents")],
+                )
+
+            source = sandbox_environment(
+                client,
+                manifest=resumed.state.manifest,
+                options=options,
+                session=resumed,
+                connect=connect,
+                skills=Skills(
+                    lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path("skills")))
+                ),
+            )
+            responses.respond(function_call("load_skill", {"skill_name": "report"}, "docker-load"))
+            responses.respond(assistant_output("done"))
+            async with Agent(
+                instructions="Load the current skill.",
+                provider=provider(responses),
+                tools=source.skill_tools,
+            ).session(environment=source) as session:
+                if replacement:
+                    assert (
+                        await (await session.submit("Load report.")).get_result()
+                    ).final_output == "done"
+                else:
+                    with pytest.raises(ValueError, match="quota continuity"):
+                        await (await session.submit("Load report.")).get_result()
+            if replacement:
+                assert b"FULL_DOC" in await resumed.read(Path(".agents/report/SKILL.md"))
+    finally:
+        if resumed is not None:
+            await resumed.aclose()
+            await client.delete(resumed)
+        await original.aclose()
+        await client.delete(original)
+        if transport is not None:
+            transport.close()

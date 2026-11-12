@@ -17,7 +17,7 @@ class MaterializationResult:
 
 
 class _SkillCopyBudget:
-    def __init__(self, *, trusted: bool = True) -> None:
+    def __init__(self, *, trusted: bool = False) -> None:
         self.trusted = trusted
         self.lock = asyncio.Lock()
         self.members = 0
