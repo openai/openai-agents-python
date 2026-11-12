@@ -207,6 +207,19 @@ class ApplicationToolOutput(BaseModel):
     application_data: dict[str, JsonValue] = Field(repr=False)
 
 
+class _RememberedApproval(BaseModel):
+    """An application-keyed future policy, never a native invocation grant."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+
+    profile_id: str | None
+    profile: str = Field(pattern=r"^[0-9a-f]{64}$")
+    key: str = Field(min_length=1)
+    signature: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approve: bool
+    reason: str | None
+
+
 class SessionState(BaseModel):
     """Conversation state, not live execution or a workspace backup.
 
@@ -258,6 +271,7 @@ class SessionState(BaseModel):
     repair_turns: list[RecordedTurn] = Field(default_factory=list)
     repair_items: list[SessionItem] = Field(default_factory=list)
     application_tool_outputs: list[ApplicationToolOutput] = Field(default_factory=list, repr=False)
+    remembered_approvals: list[_RememberedApproval] = Field(default_factory=list, repr=False)
     network_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     executor_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     # Additive SDK overlay. Older writable checkpoints omit it.
@@ -267,6 +281,13 @@ class SessionState(BaseModel):
 
     @model_validator(mode="after")
     def validate_tree(self) -> "SessionState":
+        approvals = [
+            (item.profile_id, item.key, item.signature) for item in self.remembered_approvals
+        ]
+        if len(set(approvals)) != len(approvals):
+            raise ValueError("Remembered approvals must identify distinct declarations")
+        if approvals and self.format_version not in (4, 5, 6, 7):
+            raise ValueError("Remembered approvals require an SDK checkpoint")
         if (self.format_version in (3, 5, 7)) != (self.native_continuation is not None):
             raise ValueError("Settled manual continuation requires format_version 3, 5 or 7")
         if self.operation_tools is not None:

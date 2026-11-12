@@ -274,6 +274,7 @@ from .state import (
     LocalStorage as LocalStorage,
     NativeGoal as NativeGoal,
     SessionState as SessionState,
+    _RememberedApproval,
 )
 from .subagents import Subagent as Subagent, _subagent as _subagent
 from .telemetry import (
@@ -2987,6 +2988,7 @@ def _prepare_native_checkpoint(
     payload.pop("repair_turns", None)
     payload.pop("repair_items", None)
     payload.pop("application_tool_outputs", None)
+    payload.pop("remembered_approvals", None)
     if "_sdk_default_tools" in saved.agent_options:
         restored_defaults = tuple(
             ToolRef(**item) for item in saved.agent_options["_sdk_default_tools"]
@@ -3627,6 +3629,7 @@ class Session(Generic[ContextT, OutputT]):
             if not isinstance(programmatic_tool_calling, bool):
                 raise TypeError("programmatic_tool_calling must be a bool")
             checkpoint = None
+            remembered_approvals: Sequence[_RememberedApproval] = ()
             manual_restore = False
             continuation = None
             operation_slots = None
@@ -3643,6 +3646,7 @@ class Session(Generic[ContextT, OutputT]):
                 # Capture caller-owned data before the first await. The native
                 # importer validates identities, revision, and current tool specs.
                 saved = SessionState.from_json(state.to_json())
+                remembered_approvals = saved.remembered_approvals
                 saved_plan_provider = _checkpoint_plan_provider(saved, auth)
                 if not uses_siwc:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
@@ -4644,6 +4648,7 @@ class Session(Generic[ContextT, OutputT]):
                         cast(str, _completed_input),
                     )
                     return session
+                session._restore_remembered_approvals(remembered_approvals)
                 session._start_readers()
                 opening.disown(session)
                 session._environment_lease = lease
@@ -4882,6 +4887,8 @@ class Session(Generic[ContextT, OutputT]):
         self._home = home
         self._catalog = catalog
         self._approval_decisions: dict[tuple[str | None, str, int, int], tuple[bool, str]] = {}
+        self._remembered_approvals: dict[tuple[str | None, str, str], _RememberedApproval] = {}
+        self._restored_approval_slots: dict[tuple[str | None, int, int], _RememberedApproval] = {}
         self._approval_preparations: set[int] = set()
         self._approval_ready: dict[int, _ApprovalArguments] = {}
         self._max_function_concurrency = max_function_concurrency
@@ -7020,6 +7027,28 @@ class Session(Generic[ContextT, OutputT]):
             if message.get("_sdk_restored_approval"):
                 required = True
             else:
+                restored_decision = (
+                    self._restored_approval_slots.pop(
+                        (message.get("profile_id"), request._approval_generation, request._slot),
+                        None,
+                    )
+                    if request.subagent_id is None
+                    else None
+                )
+                if restored_decision is not None:
+                    self._approval_decisions[
+                        (
+                            message.get("profile_id"),
+                            str(message.get("profile_epoch")),
+                            request._approval_generation,
+                            id(entry.declaration),
+                        )
+                    ] = (
+                        restored_decision.approve,
+                        _DEFAULT_APPROVAL_REASON
+                        if restored_decision.reason is None
+                        else restored_decision.reason,
+                    )
                 cached = self._approval_decisions.get(
                     (
                         message.get("profile_id"),
@@ -7074,6 +7103,84 @@ class Session(Generic[ContextT, OutputT]):
                 state.changed.set()
             self._observations.notify()
 
+    def _approval_profile(self, profile_id: str | None) -> str:
+        agent = (
+            self._profiles[profile_id].profile.declaration
+            if profile_id is not None and profile_id in self._profiles
+            else self._opening_agent
+        )
+        return hashlib.sha256(
+            json.dumps(
+                [
+                    self._agent_profile_fingerprint,
+                    getattr(agent, "name", None),
+                    self._profiles[profile_id].instructions
+                    if profile_id is not None
+                    else getattr(agent, "instructions", self._instructions),
+                ]
+            ).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _approval_signature(entry: _CapturedApproval) -> str:
+        declaration = entry.declaration
+        return hashlib.sha256(
+            json.dumps(
+                [
+                    json.loads(entry.spec_json),
+                    entry.output_adapter.json_schema(),
+                    "predicate"
+                    if callable(declaration.needs_approval)
+                    else declaration.needs_approval,
+                    declaration.run_before_approval,
+                    declaration.before is not None,
+                    declaration.after is not None,
+                    declaration.finish_turn,
+                ],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    def _current_remembered_approvals(self) -> list[_RememberedApproval]:
+        records = []
+        catalogs = (
+            [(key, value.catalog) for key, value in self._profiles.items()]
+            if self._profiles
+            else [(None, self._catalog)]
+        )
+        for profile_id, catalog in catalogs:
+            for entry in catalog.tools:
+                if (
+                    not isinstance(entry, _CapturedApproval)
+                    or entry.declaration.approval_key is None
+                ):
+                    continue
+                key = (profile_id, entry.declaration.approval_key, self._approval_signature(entry))
+                record = self._remembered_approvals.get(key)
+                if record is not None and record.profile == self._approval_profile(profile_id):
+                    records.append(record)
+        return records
+
+    def _restore_remembered_approvals(self, records: Sequence[_RememberedApproval]) -> None:
+        for record in records:
+            profile_id = record.profile_id
+            if profile_id is not None and profile_id not in self._profiles:
+                continue
+            if record.profile != self._approval_profile(profile_id):
+                continue
+            catalog = (
+                self._profiles[profile_id].catalog if profile_id is not None else self._catalog
+            )
+            for slot, entry in enumerate(catalog.tools):
+                if (
+                    isinstance(entry, _CapturedApproval)
+                    and entry.declaration.approval_key == record.key
+                    and self._approval_signature(entry) == record.signature
+                ):
+                    self._remembered_approvals[(profile_id, record.key, record.signature)] = record
+                    # Bind once to the freshly admitted catalog, never to a later replacement.
+                    self._restored_approval_slots[(profile_id, catalog.generation, slot)] = record
+
     async def _decide_approval(
         self,
         request: ApprovalRequested[Any],
@@ -7100,6 +7207,28 @@ class Session(Generic[ContextT, OutputT]):
             request._approval_generation,
             id(request._declaration),
         )
+        record: _RememberedApproval | None = None
+        if (
+            always
+            and request.subagent_id is None
+            and isinstance(request._declaration, FunctionTool)
+            and request._declaration.approval_key is not None
+        ):
+            if not self._native._check_manual_tool(request._grant):
+                raise InteractionExpiredError("Managed approval is expired or already decided")
+            entry = self._profile_catalogs[(key[0], request._approval_generation)].tools[
+                request._slot
+            ]
+            assert isinstance(entry, _CapturedApproval)
+            assert entry.declaration.approval_key is not None
+            record = _RememberedApproval(
+                profile_id=key[0],
+                profile=self._approval_profile(key[0]),
+                key=entry.declaration.approval_key,
+                signature=self._approval_signature(entry),
+                approve=approve,
+                reason=None if isinstance(reason, _DefaultApprovalReason) else reason,
+            )
         if approve:
             approved = self._approval_ready.get(request._invocation)
             if approved is not None and approved.approved:
@@ -7146,6 +7275,8 @@ class Session(Generic[ContextT, OutputT]):
             self._approval_ready.pop(request._invocation, None)
         if always:
             self._approval_decisions[key] = (approve, reason)
+            if record is not None:
+                self._remembered_approvals[(key[0], record.key, record.signature)] = record
 
     async def _respond(
         self,
@@ -15042,6 +15173,11 @@ class Session(Generic[ContextT, OutputT]):
             # Current launch options are authority. Saved options may hold MCP
             # endpoints or literal credentials.
             payload["agent_options"] = {}
+            remembered = self._current_remembered_approvals()
+            if remembered and not fork:
+                payload["remembered_approvals"] = [
+                    item.model_dump(mode="json") for item in remembered
+                ]
             if self._codex_login_binding is not None:
                 payload["codex_login_binding"] = self._codex_login_binding
                 # Core adds creator identity to its live history. Portable

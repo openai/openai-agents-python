@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import sys
@@ -260,6 +261,186 @@ async def test_remembered_decision_is_session_and_binding_scoped(responses, appr
             await request.reject()
             await turn.get_result()
     assert effects == (["0", "1"] if approve else [])
+
+
+@pytest.mark.parametrize("approve", [True, False])
+async def test_portable_state_keeps_remembered_future_decision(responses, approve):
+    effects = []
+
+    def binding():
+        @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
+        def risky(value: str) -> str:
+            effects.append(value)
+            return value
+
+        return risky
+
+    risky = binding()
+    agent = Agent(instructions="Use the tool.", tools=[risky], provider=provider(responses))
+    async with timeout(25):
+        async with agent.session() as source:
+            responses.respond(function_call("risky", {"value": "first"}, "remember-first"))
+            responses.respond(assistant_output("done"))
+            turn = await source.submit("begin")
+            request = await next_request(source.interactions(), risky)
+            assert effects == []
+            if approve:
+                await request.approve(always=True)
+            else:
+                await request.reject(always=True)
+            await turn.get_result()
+            saved = await source.save_state()
+            portable = type(saved).from_json(saved.to_json())
+
+        responses.respond(function_call("risky", {"value": "later"}, "remember-later"))
+        responses.respond(assistant_output("restored"))
+        rebound = binding()
+        current = Agent(instructions="Use the tool.", tools=[rebound], provider=agent.provider)
+        assert rebound is not risky
+        async with current.session(state=portable) as restored:
+            turn = await restored.submit("continue")
+            result = asyncio.create_task(turn.get_result())
+            approval = asyncio.create_task(next_request(restored.interactions(), rebound))
+            try:
+                done, _ = await asyncio.wait(
+                    {result, approval}, return_when=asyncio.FIRST_COMPLETED, timeout=10
+                )
+                assert result in done, "Portable remembered decision requested approval again"
+                assert result.result().final_output == "restored"
+                assert await restored.pending_interactions() == ()
+            finally:
+                approval.cancel()
+                await asyncio.gather(approval, return_exceptions=True)
+                if not result.done():
+                    result.cancel()
+                    await asyncio.gather(result, return_exceptions=True)
+    assert effects == (["first", "later"] if approve else [])
+    assert "fixture.risky.v1" not in json.dumps(responses.requests)
+
+
+@pytest.mark.parametrize("approve", [True, False])
+async def test_remembered_future_decision_rebinds_in_fresh_process(responses, tmp_path, approve):
+    effects = tmp_path / "effects.txt"
+    effects.write_text("")
+
+    @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
+    def risky(value: str) -> str:
+        with effects.open("a") as stream:
+            stream.write(value + "\n")
+        return value
+
+    agent = Agent(
+        instructions="Use the tool.", model="fixture", tools=[risky], provider=provider(responses)
+    )
+    async with timeout(30):
+        responses.respond(function_call("risky", {"value": "first"}, "process-first"))
+        responses.respond(assistant_output("done"))
+        async with agent.session() as source:
+            turn = await source.submit("begin")
+            request = await next_request(source.interactions(), risky)
+            assert effects.read_text() == ""
+            if approve:
+                await request.approve(always=True)
+            else:
+                await request.reject(always=True)
+            await turn.get_result()
+            saved = await source.save_state()
+        state_path = tmp_path / "state.json"
+        state_path.write_text(saved.to_json())
+        responses.respond(function_call("risky", {"value": "later"}, "process-later"))
+        responses.respond(assistant_output("restored"))
+        root = Path(__file__).resolve().parents[3]
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-B",
+            str(Path(__file__).with_name("fixtures") / "remembered_approval_restore.py"),
+            str(state_path),
+            str(effects),
+            responses.url,
+            importlib.import_module("agents._native").__file__,
+            cwd=root,
+            env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(
+                    [str(root / "src"), str(root / "packages/codex/src")]
+                ),
+            },
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=20)
+            assert child.returncode == 0, stderr.decode()
+            assert json.loads(stdout)["effects"] == (["first", "later"] if approve else [])
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+
+
+@pytest.mark.parametrize("change", ["key", "profile", "schema", "policy", "unkeyed"])
+async def test_portable_remembered_approval_requires_current_authority(responses, change):
+    effects = []
+
+    def binding(key, *, altered_schema=False, predicate=False):
+        @function_tool(
+            name="risky",
+            needs_approval=(lambda _: True) if predicate else True,
+            approval_key=key,
+        )
+        def risky(value: str) -> str:
+            effects.append(value)
+            return value
+
+        @function_tool(name="risky", needs_approval=True, approval_key=key)
+        def different(value: int) -> str:
+            effects.append(str(value))
+            return str(value)
+
+        return different if altered_schema else risky
+
+    source_tool = binding("fixture.risky.v1")
+    agent = Agent(instructions="Use the tool.", tools=[source_tool], provider=provider(responses))
+    async with timeout(25):
+        async with agent.session() as source:
+            responses.respond(function_call("risky", {"value": "first"}, "original-policy"))
+            responses.respond(assistant_output("done"))
+            turn = await source.submit("begin")
+            request = await next_request(source.interactions(), source_tool)
+            await request.approve(always=True)
+            await turn.get_result()
+            saved = await source.save_state()
+        rebound = binding(
+            None if change == "unkeyed" else "other-key" if change == "key" else "fixture.risky.v1",
+            altered_schema=change == "schema",
+            predicate=change == "policy",
+        )
+        current = Agent(
+            instructions="Use the tool.",
+            tools=[rebound],
+            provider=agent.provider,
+            name="other-profile" if change == "profile" else None,
+        )
+        responses.respond(
+            function_call(
+                "risky", {"value": 2 if change == "schema" else "later"}, "different-authority"
+            )
+        )
+        responses.respond(assistant_output("done"))
+        try:
+            async with current.session(state=saved) as restored:
+                turn = await restored.submit("continue")
+                request = await next_request(restored.interactions(), rebound)
+                assert effects == ["first"]
+                await request.reject()
+                await turn.get_result()
+        except (ValueError, RuntimeError) as error:
+            # Native declaration admission may reject the incompatible schema first.
+            if change != "schema" or not any(
+                word in str(error).lower() for word in ("schema", "declaration", "tools")
+            ):
+                raise
+    assert effects == ["first"]
 
 
 async def test_approved_callback_cancellation_joins_physical_cleanup(responses):
