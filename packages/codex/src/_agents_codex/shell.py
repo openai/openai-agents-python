@@ -6,9 +6,9 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PlainValidator, TypeAdapter
 from typing_extensions import TypedDict
 
 from ._function_tools import (
@@ -20,7 +20,7 @@ from ._function_tools import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from .native_interception import Allow, Deny
-from .tools import _CapturedFunction
+from .tools import ToolOutput, _capture_application_data, _CapturedFunction
 
 _ContextT = TypeVar("_ContextT")
 
@@ -63,12 +63,35 @@ class ShellCommandOutput(BaseModel):
     stdout: str
     stderr: str
     outcome: ShellExit | ShellTimeout = Field(discriminator="type")
+    command: str | None = Field(default=None, exclude=True, repr=False)
+    provider_data: dict[str, JsonValue] | None = Field(default=None, exclude=True, repr=False)
 
 
 class ShellOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     output: list[ShellCommandOutput]
     max_output_length: int | None = Field(default=None, ge=0)
+    provider_data: dict[str, JsonValue] | None = Field(default=None, exclude=True, repr=False)
+
+
+def _shell_output(value: Any) -> ToolOutput:
+    result = ShellOutput.model_validate(value)
+    metadata: dict[str, JsonValue] = {}
+    if result.provider_data is not None:
+        metadata["provider_data"] = result.provider_data
+    entries: list[JsonValue] = []
+    for entry in result.output:
+        data: dict[str, JsonValue] = {}
+        if entry.command is not None:
+            data["command"] = entry.command
+        if entry.provider_data is not None:
+            data["provider_data"] = entry.provider_data
+        entries.append(data)
+    if any(entries):
+        metadata["shell_output"] = entries
+    output = ToolOutput.text(result.model_dump_json(warnings="error"))
+    output.application_data = _capture_application_data(metadata)
+    return output
 
 
 _ShellBinder: TypeAlias = Callable[
@@ -146,7 +169,7 @@ def shell_tool(
             spec_json=tool._spec_json(),
             model=ShellCall,
             field_names=(),
-            output_adapter=TypeAdapter(ShellOutput),
+            output_adapter=TypeAdapter(Annotated[Any, PlainValidator(_shell_output)]),
             callback=invoke,
             context_parameter=inspect.Parameter("context", inspect.Parameter.POSITIONAL_ONLY),
             callback_timeout=tool.callback_timeout,
