@@ -261,6 +261,7 @@ pub(crate) struct Frame {
     fresh: Option<crate::python_tools::FreshTerminalReceipts>,
     terminal_calls: HashSet<String>,
     batch_completion: bool,
+    staged_input: Vec<ResponseItem>,
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
@@ -520,7 +521,7 @@ fn validate_frame(
         .as_object()
         .context("Missing native manual continuation")?;
     ensure!(
-        (6..=9).contains(&frame.len())
+        (6..=11).contains(&frame.len())
             && frame.keys().all(|key| matches!(
                 key.as_str(),
                 "turn_id"
@@ -532,6 +533,8 @@ fn validate_frame(
                     | "output_schema"
                     | "model_override"
                     | "tool_outcomes"
+                    | "pending_input"
+                    | "staged_retry"
             ))
             && frame.get("output_schema").is_none_or(Value::is_object),
         "Invalid native continuation fields"
@@ -557,9 +560,13 @@ fn validate_frame(
     let pending = frame["pending_manual"]
         .as_array()
         .context("Invalid pending manual list")?;
+    let staged_retry = frame
+        .get("staged_retry")
+        .map_or(Some(false), Value::as_bool)
+        .context("Invalid staged retry status")?;
     ensure!(
-        !pending.is_empty(),
-        "Manual continuation has no pending action"
+        pending.is_empty() == staged_retry && (!staged_retry || !order.is_empty()),
+        "Manual continuation has no pending action or settled staged retry"
     );
     let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
     let restored_override: Option<String> =
@@ -910,6 +917,24 @@ fn validate_frame(
         }
         None => ToolOutcomes::capture(&history, source_id, &turn)?,
     };
+    let mut staged_input = Vec::new();
+    if let Some(items) = frame.get("pending_input") {
+        for item in items.as_array().context("Staged input must be an array")? {
+            ensure!(
+                item.get("call_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| !seen_calls.contains(id)),
+                "Staged input cannot reuse a call from the saved turn"
+            );
+            let item: ResponseItem = serde_json::from_value(item.clone())
+                .map_err(|_| anyhow::anyhow!("Staged input is not a supported Responses item"))?;
+            ensure!(
+                !matches!(item, ResponseItem::Other),
+                "Staged input is not a supported Responses item"
+            );
+            staged_input.push(item);
+        }
+    }
     Ok(Frame {
         profile_source: None,
         handoffs,
@@ -917,6 +942,7 @@ fn validate_frame(
         fresh: None,
         terminal_calls: HashSet::new(),
         batch_completion: false,
+        staged_input,
         turn,
         pending: admitted,
         order,
@@ -1190,28 +1216,54 @@ impl Frame {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> Result<Value> {
-        let mut value = self.state.clone();
-        value["native_continuation"]["accepted_replies"] = encode_accepted_replies(&self.accepted)?;
+    fn continuation_snapshot(&self, staged_retry: bool) -> Result<Value> {
+        let mut value = self.state["native_continuation"].clone();
+        value["accepted_replies"] = encode_accepted_replies(&self.accepted)?;
         if let Some(outcomes) = &self.tool_outcomes {
-            value["native_continuation"]["tool_outcomes"] = serde_json::to_value(outcomes)?;
+            value["tool_outcomes"] = serde_json::to_value(outcomes)?;
         }
-        value["native_continuation"]["pending_manual"]
+        let pending = value["pending_manual"]
             .as_array_mut()
-            .context("Missing pending manual calls")?
-            .retain(|call| {
-                call["call_id"]
-                    .as_str()
-                    .is_some_and(|id| !self.accepted.contains_key(id))
-            });
+            .context("Missing pending manual calls")?;
+        pending.retain(|call| {
+            call["call_id"]
+                .as_str()
+                .is_some_and(|id| !self.accepted.contains_key(id))
+        });
         ensure!(
-            value["native_continuation"]["pending_manual"]
-                .as_array()
-                .is_some_and(|pending| !pending.is_empty()),
-            "No pending manual replies remain"
+            pending.is_empty() == staged_retry,
+            "Manual checkpoint boundary changed"
         );
+        if staged_retry {
+            value["staged_retry"] = Value::Bool(true);
+        }
         Ok(value)
     }
+}
+
+struct StagedRetry {
+    turn: String,
+    continuation: Value,
+    batch: codex_extension_api::StagedInputBatch,
+}
+
+pub(crate) fn staged_retry(
+    thread: &crate::engine::ThreadState,
+    checkpoint: &Value,
+) -> Option<Value> {
+    let retry = thread.thread.thread_extension_data().get::<StagedRetry>()?;
+    if !retry.batch.is_pending() {
+        return None;
+    }
+    let last_turn = checkpoint["history"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|record| {
+            record["type"] == "event_msg" && record["payload"]["type"] == "task_started"
+        })?["payload"]["turn_id"]
+        .as_str()?;
+    (last_turn == retry.turn.as_str()).then(|| retry.continuation.clone())
 }
 
 pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Result<()> {
@@ -1289,6 +1341,11 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
         .map_or(tools.tool_batch_completion_enabled, |catalog| {
             catalog.tool_batch_completion
         });
+    ensure!(
+        frame.staged_input.is_empty()
+            || (!frame.batch_completion && frame.terminal_calls.is_empty()),
+        "Staged input requires a model continuation after the manual replies"
+    );
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
     let admitted_override = model_override(&history, &frame.turn);
     let model = admitted_override.as_deref().or_else(|| {
@@ -1459,6 +1516,21 @@ pub(crate) async fn continue_if_ready(
         .reset_tool_choice
         .flatten()
         == Some(true);
+    let staged_input = if frame.staged_input.is_empty() {
+        None
+    } else {
+        let continuation = frame.continuation_snapshot(true)?;
+        let batch = codex_extension_api::StagedInputBatch::new(
+            frame.turn.clone(),
+            std::mem::take(&mut frame.staged_input),
+        );
+        thread.thread.thread_extension_data().insert(StagedRetry {
+            turn: frame.turn.clone(),
+            continuation,
+            batch: batch.clone(),
+        });
+        Some(batch)
+    };
     let terminal = match frame.tool_outcomes.take() {
         Some(outcomes)
             if frame.fresh.is_some() || !held_outputs.is_empty() || reset_tool_choice =>
@@ -1478,6 +1550,7 @@ pub(crate) async fn continue_if_ready(
         frame.seen.into_iter().collect(),
         recovery_options,
         terminal,
+        staged_input,
     )
     .await?;
     ensure!(
@@ -1630,7 +1703,7 @@ pub(crate) async fn capture(
         } else {
             3
         });
-        snapshot["native_continuation"] = frame.snapshot()?["native_continuation"].clone();
+        snapshot["native_continuation"] = frame.continuation_snapshot(false)?;
         frame.sealed = true;
         frame.receivers.clear();
         return Ok(Some(snapshot));

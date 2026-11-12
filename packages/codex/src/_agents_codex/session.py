@@ -312,6 +312,7 @@ from .state import (
     NativeGoal as NativeGoal,
     SessionState as SessionState,
     _GuardrailCheckpointRecord,
+    _ManualContinuation,
     _RememberedApproval,
     _RequestRunBudgetCheckpoint,
     _TokenRunBudgetCheckpoint,
@@ -4760,6 +4761,8 @@ class Session(Generic[ContextT, OutputT]):
                     session._manual_source_digest = hashlib.sha256(
                         saved.to_json().encode()
                     ).hexdigest()
+                    if continuation.pending_input:
+                        session._staged_restore_checkpoint = saved
                     active = _Submission(
                         restored_output,
                         model_override=continuation.model_override,
@@ -4799,6 +4802,7 @@ class Session(Generic[ContextT, OutputT]):
                     session._active = active
                     thread._select_steps(
                         bool(session._profiles)
+                        or bool(continuation.pending_input)
                         or active.budget is not None
                         or bool(session._mcp_tools)
                         or restored_operation_refs is not None
@@ -4833,6 +4837,9 @@ class Session(Generic[ContextT, OutputT]):
                     )
                     session._start_output_acceptance(handle)
                     active.task = _create_task(session._execute(active, [], admitted=True))
+                    if continuation.staged_retry:
+                        driver = _create_task(session._continue_restored_turn(active))
+                        active.add_callback(driver)
                 if handoff is not None:
                     await session._finish_run_opening(
                         opening,
@@ -5144,6 +5151,7 @@ class Session(Generic[ContextT, OutputT]):
         self._repair_items: list[SessionItem] = []
         self._application_tool_outputs: list[ApplicationToolOutput] = []
         self._restored_turn: Turn[OutputT] | None = None
+        self._staged_restore_checkpoint: SessionState | None = None
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
         self._child_admissions: set[asyncio.Task[Turn[str]]] = set()
         self._graph_interrupts: set[asyncio.Task[None]] = set()
@@ -13690,6 +13698,41 @@ class Session(Generic[ContextT, OutputT]):
             source_agent = self._agent_for_message(message)
             checks = (*self._input_guardrails, *source_agent.input_guardrails)
             guardrail_agent = self._original_agent_for_message(message)
+            staged = message.get("staged_input") if isinstance(state, _Submission) else None
+            if (
+                isinstance(state, _Submission)
+                and staged is not None
+                and not state.input_guardrails_started
+            ):
+                if (
+                    not isinstance(staged, list)
+                    or not staged
+                    or not all(isinstance(item, dict) for item in staged)
+                ):
+                    raise NativeError("Invalid staged input from the native recovery boundary")
+                content: list[dict[str, Any]] = []
+                for item in staged:
+                    parts = item.get("content")
+                    if (
+                        item.get("type") != "message"
+                        or item.get("role") != "user"
+                        or not isinstance(parts, list)
+                        or not all(
+                            isinstance(part, dict)
+                            and part.get("type")
+                            in {"input_text", "input_image", "input_file", "input_audio"}
+                            for part in parts
+                        )
+                    ):
+                        state.guardrail_input = json.dumps(
+                            staged, ensure_ascii=False, allow_nan=False
+                        )
+                        break
+                    content.extend(parts)
+                else:
+                    state.guardrail_input = cast(
+                        UserInput, {"type": "message", "role": "user", "content": deepcopy(content)}
+                    )
             if isinstance(state, _ChildCallbacks):
                 checks = tuple(check for check in checks if check.child_callback is not None)
                 if checks and not state.input_guardrails_started:
@@ -13712,7 +13755,11 @@ class Session(Generic[ContextT, OutputT]):
                     step_index=guardrail_step_index,
                 )
                 parallel = tuple(check for check in checks if check.run_in_parallel)
-                if parallel:
+                if staged is not None:
+                    await self._run_input_guardrails(
+                        state, message, guardrail_agent, parallel, step_index=guardrail_step_index
+                    )
+                elif parallel:
 
                     async def run_parallel() -> None:
                         scope = _Invocation(self)
@@ -14064,7 +14111,13 @@ class Session(Generic[ContextT, OutputT]):
                     self._native._reply_step(
                         message["step_id"], selected_json, message["thread"], message["instance"]
                     )
-                    if budget is not None and selected_json is not None:
+                    # Recovered tool settlement prepares a context before
+                    # the staged input's sampling selection.
+                    if (
+                        budget is not None
+                        and selected_json is not None
+                        and message.get("staged_input_preparation") is not True
+                    ):
                         budget.requests += 1
             except RuntimeError:
                 # Cancellation can retire this exact native nonce first.
@@ -16773,6 +16826,28 @@ class Session(Generic[ContextT, OutputT]):
                         raise
                     raise NativeError("Native checkpoint readiness could not be verified") from None
                 payload = json.loads(encoded)
+                if (retry := payload.pop("_staged_manual_retry", None)) is not None:
+                    if fork:
+                        raise RuntimeError("fork requires settled staged input")
+                    saved = self._staged_restore_checkpoint
+                    if saved is None or saved.native_continuation is None:
+                        raise NativeError("Staged retry has no original checkpoint owner")
+                    continuation = _ManualContinuation.model_validate_json(json.dumps(retry))
+                    if (
+                        not continuation.staged_retry
+                        or continuation.turn_id != saved.native_continuation.turn_id
+                    ):
+                        raise NativeError("Staged retry does not match its original checkpoint")
+                    return saved.model_copy(
+                        update={
+                            "native_continuation": continuation,
+                            "remembered_approvals": self._current_remembered_approvals(),
+                            "application_tool_outputs": [
+                                record.model_copy(deep=True)
+                                for record in self._application_tool_outputs
+                            ],
+                        }
+                    ).to_json()
                 if fork:
                     if payload["descendants"]:
                         raise RuntimeError("fork cannot copy conversations with native descendants")
