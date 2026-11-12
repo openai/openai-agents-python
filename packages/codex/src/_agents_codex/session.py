@@ -15193,6 +15193,15 @@ class Session(Generic[ContextT, OutputT]):
         nonce = notice["nonce"]
         scope = _Invocation(self)
         token = _invocation.set(scope)
+
+        def admitted() -> bool:
+            return (
+                not self._closing
+                and not state.stopping
+                and not state.failure.done()
+                and self._native._check_native_mcp_result(nonce)
+            )
+
         try:
             server = next(
                 (
@@ -15214,14 +15223,6 @@ class Session(Generic[ContextT, OutputT]):
             if server is None or (callback is None and extractor is None):
                 raise NativeError("Native MCP callback does not match its captured declaration")
             assert state.handle is not None
-
-            def admitted() -> bool:
-                return (
-                    not self._closing
-                    and not state.stopping
-                    and not state.failure.done()
-                    and self._native._check_native_mcp_result(nonce)
-                )
 
             if not admitted():
                 return
@@ -15253,7 +15254,9 @@ class Session(Generic[ContextT, OutputT]):
                     notice["tool_name"],
                     MappingProxyType(deepcopy(notice["arguments"])),
                 )
-                value = await _call_callback(callback, admitted, context)
+                value = await _call_callback(
+                    _RecoverableFunctionCallback(callback), admitted, context
+                )
                 if not admitted():
                     return
                 if (
@@ -15282,10 +15285,17 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 value = notice["result"]
                 if callback is not None:
-                    value = await _call_callback(callback, admitted, context, value)
+                    value = await _call_callback(
+                        _RecoverableFunctionCallback(callback), admitted, context, value
+                    )
                 if extractor is not None and admitted() and isinstance(value, dict):
                     application_data = _capture_application_data(
-                        await _call_callback(extractor, admitted, context, deepcopy(value))
+                        await _call_callback(
+                            _RecoverableFunctionCallback(extractor),
+                            admitted,
+                            context,
+                            deepcopy(value),
+                        )
                     )
                     if application_data is not None:
                         application_output = ApplicationToolOutput(
@@ -15323,8 +15333,16 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native MCP result policy failed")
         except BaseException as error:
             if not state.stopping and not state.failure.done():
-                # Callback or result errors may contain the unaccepted peer data.
-                state.failure.set_result(NativeError("Native MCP result policy failed"))
+                failure = NativeError("Native MCP result policy failed")
+                if isinstance(error, _FunctionBodyFailure):
+                    try:
+                        cause_admitted = admitted()
+                    except Exception:
+                        cause_admitted = False
+                    if cause_admitted:
+                        failure.__cause__ = error.original
+                        failure.__suppress_context__ = True
+                state.failure.set_result(failure)
             elif not isinstance(error, asyncio.CancelledError):
                 state.retain_cleanup_error(NativeError("Native MCP result policy cleanup failed"))
         finally:

@@ -164,8 +164,11 @@ async def test_native_rejects_invalid_late_and_cancelled_decisions(
                 with pytest.raises(TurnStoppedError):
                     await (handle).get_result()
             else:
-                with pytest.raises(NativeError, match="Native MCP result policy failed"):
+                with pytest.raises(
+                    NativeError, match="Native MCP result policy failed"
+                ) as rejected:
                     await (handle).get_result()
+                assert rejected.value.__cause__ is None
             if decision != "invalid":
                 assert cancelled.is_set()
             assert [(p["name"], p["_meta"]["callId"]) for p in peer.calls] == [
@@ -562,3 +565,116 @@ async def test_cancelled_peer_request_does_not_synthesize_result_policy(
                 assert len(peer.calls) == 1
             finally:
                 peer.release_call.set()
+
+
+@pytest.mark.parametrize("phase", ["transform", "extract", "metadata"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_selected_callback_error_retains_private_cause(
+    responses: ResponsesFixture, phase: str, asynchronous: bool, caplog, capfd
+) -> None:
+    peer = Peer(label="SYNTHETIC_PRIVATE_MCP_RESULT", is_error=True)
+    selected = ValueError("SYNTHETIC_SELECTED_CALLBACK_FAILURE")
+
+    def result_policy(context: MCPResultContext[None], value: dict[str, Any]) -> dict[str, Any]:
+        assert context.call_id == "cause-call"
+        assert peer.label in json.dumps(value)
+        raise selected
+
+    async def async_result_policy(
+        context: MCPResultContext[None], value: dict[str, Any]
+    ) -> dict[str, Any]:
+        return result_policy(context, value)
+
+    def metadata_policy(context) -> dict[str, Any]:
+        assert context.call.call_id == "cause-call"
+        raise selected
+
+    async def async_metadata_policy(context) -> dict[str, Any]:
+        return metadata_policy(context)
+
+    callback = async_result_policy if asynchronous else result_policy
+    metadata = async_metadata_policy if asynchronous else metadata_policy
+    responses.respond(mcp_call("search", "mcp__vault", "cause-call"))
+    responses.respond(assistant_output("must not run"))
+    async with timeout(30), peer.serve() as url:
+        agent = Agent(
+            instructions="Read one record.",
+            model="gpt-5.5",
+            provider=provider(responses),
+            tools=[
+                HttpMCP(
+                    name="vault",
+                    url=url,
+                    tools=["search"],
+                    transform_result=callback if phase == "transform" else None,
+                    extract_application_data=callback if phase == "extract" else None,
+                    request_metadata=metadata if phase == "metadata" else None,
+                )
+            ],
+        )
+        async with agent.session() as session:
+            turn = await session.submit("Read one record.")
+            with pytest.raises(NativeError, match="^Native MCP result policy failed$") as caught:
+                await turn.get_result()
+            failure = caught.value
+            assert type(failure) is NativeError
+            assert failure.args == ("Native MCP result policy failed",)
+            assert failure.__cause__ is selected
+            with pytest.raises(NativeError) as reread:
+                await turn.get_result()
+            assert reread.value is failure and reread.value.__cause__ is selected
+            assert len(peer.calls) == (0 if phase == "metadata" else 1)
+            assert len(responses.requests) == 1
+            channels = [
+                json.dumps(responses.requests),
+                json.dumps([item async for item in session.items()]),
+                (await session.save_state()).to_json(),
+                caplog.text,
+            ]
+            captured = capfd.readouterr()
+            channels.extend((captured.out, captured.err))
+            for channel in channels:
+                assert peer.label not in channel
+                assert str(selected) not in channel
+
+
+async def test_failed_optional_cause_probe_preserves_generic_failure(
+    responses: ResponsesFixture,
+) -> None:
+    peer = Peer(label="SYNTHETIC_PRIVATE_UNADMITTED_RESULT")
+    selected = ValueError("SYNTHETIC_UNADMITTED_CALLBACK_FAILURE")
+
+    class UnavailableProbe:
+        def __init__(self, source):
+            self.source = source
+
+        def __getattr__(self, name):
+            return getattr(self.source, name)
+
+        def _check_native_mcp_result(self, nonce):
+            raise RuntimeError("native MCP result control was not initialized")
+
+    async def policy(context, value):
+        # Fault injection only at the optional authority probe after body failure.
+        session._native = UnavailableProbe(native)
+        raise selected
+
+    responses.respond(mcp_call("search", "mcp__vault", "cause-probe"))
+    async with timeout(30), peer.serve() as url:
+        async with Agent(
+            instructions="Read.",
+            provider=provider(responses),
+            tools=[HttpMCP(name="vault", url=url, tools=["search"], transform_result=policy)],
+        ).session() as session:
+            native = session._native
+            try:
+                turn = await session.submit("Read.")
+                with pytest.raises(
+                    NativeError, match="^Native MCP result policy failed$"
+                ) as caught:
+                    await asyncio.wait_for(turn.get_result(), timeout=2)
+                assert caught.value.__cause__ is None
+                assert len(peer.calls) == len(responses.requests) == 1
+                assert peer.label not in (await session.save_state()).to_json()
+            finally:
+                session._native = native
