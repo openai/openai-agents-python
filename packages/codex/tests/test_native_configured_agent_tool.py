@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
+import sys
 import traceback
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -16,6 +18,7 @@ from aiohttp.test_utils import TestServer
 from agents import (
     Agent,
     ApprovalRequested,
+    Environment,
     GuardrailResult,
     InputGuardrail,
     InteractionExpiredError,
@@ -136,6 +139,171 @@ async def fixture(*, sibling_approval=False, custom_output_extractor=None):
         finally:
             await child_provider.aclose()
             await root_provider.aclose()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires native Linux turn write policy")
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("roots", ["opening", "clear", "replace"])
+async def test_configured_child_has_been_inheriting_effective_turn_write_roots(tmp_path, roots):
+    work, opening, replacement = (tmp_path / name for name in ("work", "opening", "replacement"))
+    for directory in (work, opening, replacement):
+        directory.mkdir()
+    environment = Environment.local(cwd=work, writable_roots=[opening], tools=["exec_command"])
+    async with timeout(60), peer() as root_model, peer() as child_model:
+        root_provider = NativeProvider(base_url=root_model.url, api_key="synthetic-roots-parent")
+        child_provider = NativeProvider(base_url=child_model.url, api_key="synthetic-roots-child")
+        child = Agent(instructions="Run the write probe.", model=MODEL, provider=child_provider)
+        parent = Agent(
+            instructions="Run the configured child.",
+            model=MODEL,
+            provider=root_provider,
+            tools=[child.as_tool("roots_child")],
+        )
+        try:
+            async with parent.session(environment=environment) as session:
+                for index in range(2):
+                    paths = [
+                        directory / f"child-{index}" for directory in (work, opening, replacement)
+                    ]
+                    command = "; ".join(
+                        f"printf native-write > {shlex.quote(str(path))}" for path in paths
+                    )
+                    root_model.respond(
+                        function_call("roots_child", {"input": "Run the probe."}, f"parent-{index}")
+                    )
+                    root_model.respond(assistant_output("parent complete"))
+                    child_model.respond(
+                        function_call(
+                            "exec_command", {"cmd": command, "login": False}, f"write-{index}"
+                        )
+                    )
+                    child_model.respond(assistant_output("child complete"))
+                    overrides = {}
+                    if index == 0 and roots != "opening":
+                        overrides["writable_roots"] = [] if roots == "clear" else [replacement]
+                    turn = await session.submit("Run the child write probe.", **overrides)
+                    assert (await turn.get_result()).final_output == "parent complete"
+                    assert paths[0].read_text() == "native-write"
+                    assert paths[1].exists() is (roots == "opening")
+                    assert paths[2].exists() is (roots == "replace")
+                assert len(root_model.requests) == len(child_model.requests) == 4
+        finally:
+            await child_provider.aclose()
+            await root_provider.aclose()
+
+
+@pytest.mark.parametrize("roots", ["opening", "clear", "replace"])
+async def test_configured_child_has_been_retaining_effective_wss_root_receipts(
+    tmp_path, monkeypatch, native_executor_binary, roots
+):
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import trust
+
+    async with timeout(60), peer() as root_model, peer() as child_model:
+        async with ExecutorPeer(
+            tmp_path / "remote", synthetic_process_output="native probe"
+        ).serve() as executor:
+            trust(executor, tmp_path, monkeypatch)
+            work, opening, replacement = (
+                executor.root / name for name in ("work", "opening", "replacement")
+            )
+            for directory in (work, opening, replacement):
+                directory.mkdir()
+            environment = Environment(
+                url=executor.url,
+                headers={"Authorization": "Bearer " + executor.token},
+                cwd=str(work),
+                writable_roots=[opening],
+                tools=["exec_command"],
+            )
+            child_receipts = []
+            child_openings = []
+
+            class InstrumentedAgent(Agent):
+                @asynccontextmanager
+                async def session(self, **options):
+                    async with super().session(**options) as opened:
+                        child_openings.append(
+                            json.loads(opened._native_options)["runtime"]["environment"][
+                                "writable_roots"
+                            ]
+                        )
+                        yield opened
+
+            async def extract(result):
+                recorded = [
+                    item
+                    async for item in result.turn._session.turns()
+                    if item["id"] == result.turn.turn_id
+                ]
+                child_receipts.append(recorded[0]["receipt"]["executors"][0]["writable_roots"])
+                async with child.session(environment=environment):
+                    assert set(child_openings[-1]) == {opening.as_uri()}
+                return result.final_output
+
+            root_provider = NativeProvider(
+                base_url=root_model.url, api_key="synthetic-roots-parent"
+            )
+            child_provider = NativeProvider(
+                base_url=child_model.url, api_key="synthetic-roots-child"
+            )
+            child = InstrumentedAgent(
+                instructions="Run the probe.", model=MODEL, provider=child_provider
+            )
+            parent = Agent(
+                instructions="Run the child.",
+                model=MODEL,
+                provider=root_provider,
+                tools=[child.as_tool("roots_child", custom_output_extractor=extract)],
+            )
+            try:
+                async with parent.session(environment=environment) as session:
+                    for index in range(2):
+                        root_model.respond(
+                            function_call(
+                                "roots_child", {"input": "Run the probe."}, f"parent-{index}"
+                            )
+                        )
+                        root_model.respond(assistant_output("parent complete"))
+                        child_model.respond(
+                            function_call(
+                                "exec_command",
+                                {"cmd": "printf native-probe", "login": False},
+                                f"write-{index}",
+                            )
+                        )
+                        child_model.respond(assistant_output("child complete"))
+                        overrides = {}
+                        if index == 0 and roots != "opening":
+                            overrides["writable_roots"] = [] if roots == "clear" else [replacement]
+                        turn = await session.submit("Run the child probe.", **overrides)
+                        assert (await turn.get_result()).final_output == "parent complete"
+                        recorded = [
+                            item async for item in session.turns() if item["id"] == turn.turn_id
+                        ]
+                        parent_roots = recorded[0]["receipt"]["executors"][0]["writable_roots"]
+                        print(
+                            json.dumps(
+                                {
+                                    "mode": roots,
+                                    "turn": index,
+                                    "parent_roots": parent_roots,
+                                    "child_roots": child_receipts[-1],
+                                }
+                            )
+                        )
+                        expected = {work.as_uri()}
+                        if roots != "clear":
+                            expected.add((opening if roots == "opening" else replacement).as_uri())
+                        assert set(parent_roots) == expected
+                        assert set(child_receipts[-1]) == expected
+                        assert set(child_openings[2 * index]) == expected - {work.as_uri()}
+                    assert len(executor.synthetic_process_starts) == 2
+                    assert len(child_openings) == 4
+                    assert len(root_model.requests) == len(child_model.requests) == 4
+            finally:
+                await child_provider.aclose()
+                await root_provider.aclose()
 
 
 @pytest.mark.parametrize("approve", [True, False])

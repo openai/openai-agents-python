@@ -1209,6 +1209,23 @@ def hosted_handoff_type_contract() -> None:
         handoffs=[Handoff(typed, transfer)],
     )
 
+    routing = agents.DecisionHandoff(
+        name="delegate", description="Route.", question="Choose.", targets={"target": target}
+    )
+    Agent(hosted_prompt={"id": "pmpt_test"}, handoffs=[routing], decisions=decision_provider)
+    Agent[None, str](
+        hosted_prompt={"id": "pmpt_test"}, handoffs=[routing], decisions=decision_provider
+    )
+    typed_routing = agents.DecisionHandoff(
+        name="delegate", description="Route.", question="Choose.", targets={"target": typed}
+    )
+    Agent[None, PromptAnswer](
+        hosted_prompt={"id": "pmpt_test"},
+        output_type=PromptAnswer,
+        handoffs=[typed_routing],
+        decisions=decision_provider,
+    )
+
     def completed_batch(_context: agents.ToolBatchCompletionContext[None]) -> None:
         return None
 

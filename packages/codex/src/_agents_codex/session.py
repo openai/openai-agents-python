@@ -354,6 +354,7 @@ from .turn import (
     TurnT as TurnT,
     _child_turn as _child_turn,
     _root_turn as _root_turn,
+    _SubmissionRequestAttempts,
 )
 from .turn_receipt import (
     _load_instruction_files as _load_instruction_files,
@@ -1362,6 +1363,14 @@ class _BeforeStep(Protocol[_SelectionContextT_contra]):
     ): ...
 
 
+@dataclass(frozen=True)
+class _ConfiguredOpening:
+    agent: Agent[Any, Any]
+    environment: Environment[Any] | None
+    writable_roots: tuple[str, ...] | None
+    admitted: Callable[[], bool]
+
+
 @dataclass
 class _Invocation:
     session: object
@@ -1370,6 +1379,7 @@ class _Invocation:
     realtime_adapter: object | None = field(default=None, repr=False)
     # Keep enclosing guards live even in tasks copied from this context.
     parent: _Invocation | None = field(default_factory=lambda: _invocation.get(), repr=False)
+    configured_opening: _ConfiguredOpening | None = field(default=None, repr=False)
 
 
 _invocation: ContextVar[_Invocation | None] = ContextVar("native_agent_invocation", default=None)
@@ -2580,7 +2590,7 @@ def _capture_profile_runtimes(
         mcp = opening_tools.mcp
         catalog = (
             root_catalog
-            if index == 0 and not profile.handoff_callbacks
+            if index == 0 and not profile.handoff_callbacks and not profile.decision_handoffs
             else opening_tools.bind(
                 context, generation=root_catalog.generation if index == 0 else 0
             )
@@ -2590,8 +2600,9 @@ def _capture_profile_runtimes(
                 tool._ref
                 for slot, tool in enumerate(catalog.tools)
                 if slot not in profile.handoff_callbacks.values()
+                and slot not in {entry["slot"] for entry in profile.decision_handoffs.values()}
             ),
-            profile.handoffs,
+            {**profile.handoffs, **dict.fromkeys(profile.decision_handoffs, "")},
         )
         opening_tools.validate_collisions()
         output = _prepare_spec(declaration.output_type)
@@ -2652,6 +2663,11 @@ def _capture_profile_runtimes(
                 **(
                     {"handoff_callbacks": dict(profile.handoff_callbacks)}
                     if profile.handoff_callbacks
+                    else {}
+                ),
+                **(
+                    {"decision_handoffs": dict(profile.decision_handoffs)}
+                    if profile.decision_handoffs
                     else {}
                 ),
                 "transform_context": declaration.transform_context is not None
@@ -4190,8 +4206,25 @@ class Session(Generic[ContextT, OutputT]):
                     ),
                 }
             _configure_storage_runtime(runtime, storage, resume, goals)
+            inherited_writable_roots = None
             if executor is not None:
                 native_environment = cast(dict[str, Any], executor._to_native())
+                invocation = _invocation.get()
+                configured_opening = (
+                    invocation.configured_opening if invocation is not None else None
+                )
+                if (
+                    invocation is not None
+                    and configured_opening is not None
+                    and configured_opening.agent is policy_agent
+                    and configured_opening.environment is executor
+                ):
+                    invocation.configured_opening = None
+                    if not invocation.active or not configured_opening.admitted():
+                        raise InteractionExpiredError("Configured parent invocation is expired")
+                    inherited_writable_roots = configured_opening.writable_roots
+                    if inherited_writable_roots is not None:
+                        native_environment["writable_roots"] = list(inherited_writable_roots)
                 native_environment["local_mcp"] = has_host_mcp
                 runtime["environment"] = native_environment
                 runtime["sandbox_mode"] = "read-only"
@@ -4686,7 +4719,9 @@ class Session(Generic[ContextT, OutputT]):
                 session._catalog_bindings[(None, catalog.generation)] = agent.tools
                 session._executor = executor
                 session._project_guidance = project_guidance
-                if executor is not None and executor.writable_roots is not None:
+                if inherited_writable_roots is not None:
+                    session._writable_roots = inherited_writable_roots
+                elif executor is not None and executor.writable_roots is not None:
                     session._writable_roots = _writable_roots(executor.writable_roots)
                 session._bind_native_agents(native_agents)
                 session._storage = storage
@@ -5242,6 +5277,8 @@ class Session(Generic[ContextT, OutputT]):
         return None if self._realtime is None else self._realtime.usage
 
     def _check_realtime_provider(self) -> None:
+        if any(profile.profile.decision_handoffs for profile in self._profiles.values()):
+            raise CapabilityError("DecisionHandoff does not support Realtime")
         if self._uses_siwc:
             raise CapabilityError("Sign in with ChatGPT Sessions do not support Realtime")
 
@@ -9151,6 +9188,11 @@ class Session(Generic[ContextT, OutputT]):
                     slots = tuple(indices)
             state = _Submission(
                 output,
+                submission_request_attempts=(
+                    _SubmissionRequestAttempts()
+                    if self._include_request_attempts and realtime_tool is None
+                    else None
+                ),
                 guardrail_input=guardrail_input,
                 run_usage=run_usage or _UsageCollector(),
                 observation_after=self._observations.sequence,
@@ -9177,7 +9219,13 @@ class Session(Generic[ContextT, OutputT]):
             if input is not None:
                 # A queued root has no observation window until its own dispatch.
                 issued = _root_turn(
-                    self, None, uuid4().hex, state.completion, -1, state.guardrail_results
+                    self,
+                    None,
+                    uuid4().hex,
+                    state.completion,
+                    -1,
+                    state.guardrail_results,
+                    submission_request_attempts=state.submission_request_attempts,
                 )
                 state.issued = issued
                 self._queued_roots.register(state, input)
@@ -9436,7 +9484,10 @@ class Session(Generic[ContextT, OutputT]):
                     for tool in profile.declaration.tools
                     if isinstance(tool, FunctionTool)
                     and tool.namespace in (None, "functions")
-                    and tool.name in profile.handoff_callbacks
+                    and (
+                        tool.name in profile.handoff_callbacks
+                        or tool.name in profile.decision_handoffs
+                    )
                 }
                 for tool in python:
                     expected = callbacks.get(tool.ref)
@@ -10625,6 +10676,9 @@ class Session(Generic[ContextT, OutputT]):
         object.__setattr__(handle, "_run_usage", state.run_usage)
         object.__setattr__(handle, "_original_input", state.original_input)
         state.handle = handle
+        object.__setattr__(
+            handle, "_submission_request_attempts", state.submission_request_attempts
+        )
         object.__setattr__(handle, "_guardrail_results", state.guardrail_results)
         assert handle.turn_id is not None
         self._observations.append(
@@ -10824,7 +10878,12 @@ class Session(Generic[ContextT, OutputT]):
                             request["trace"] = state.parent_trace.to_headers()
                         if state.issued is None:
                             state.issued = _root_turn(
-                                self, None, uuid4().hex, state.completion, state.observation_after
+                                self,
+                                None,
+                                uuid4().hex,
+                                state.completion,
+                                state.observation_after,
+                                submission_request_attempts=state.submission_request_attempts,
                             )
                         route_id = self._register_request_observation(state, state.issued)
                         request["observation_submission_id"] = route_id
@@ -10855,9 +10914,11 @@ class Session(Generic[ContextT, OutputT]):
                                 confirmed_rejection = True
                                 raise
                             encoded = json.dumps(request)
-                            if self._include_request_attempts and state.continued_from is None:
+                            if self._include_request_attempts:
                                 native = importlib.import_module("agents._native")
                                 capture = native.NativeModelAttemptCapture()
+                                if state.submission_request_attempts is None:
+                                    state.submission_request_attempts = _SubmissionRequestAttempts()
                                 object.__setattr__(state.issued, "_request_attempts", capture)
                                 submitted = await self._native._submit(
                                     encoded, model_attempts=capture
@@ -11102,6 +11163,16 @@ class Session(Generic[ContextT, OutputT]):
         outcome: Completed[Any] | None,
     ) -> None:
         self._drain_terminal_observations(state)
+        if state.submission_request_attempts is not None and state.issued is not None:
+            # This producer has been owning this native capture exactly once.
+            if state.issued._request_attempts is not None:
+                snapshot = state.issued.request_attempts
+                if (
+                    snapshot is not None
+                    or state.handle is not None
+                    or getattr(error, "_effects", None) != "not_started"
+                ):
+                    state.submission_request_attempts.add(snapshot)
         continuation: _Submission | None = None
         if state.cleanup_error is not None:
             if error is None:
@@ -11132,6 +11203,7 @@ class Session(Generic[ContextT, OutputT]):
                     budget=state.budget,
                     model_override=state.model_override,
                     run_usage=state.run_usage,
+                    submission_request_attempts=state.submission_request_attempts,
                     original_input=state.original_input,
                     guardrail_results=state.guardrail_results,
                     operation_slots=state.operation_slots,
@@ -11362,6 +11434,7 @@ class Session(Generic[ContextT, OutputT]):
             parent_trace=state.parent_trace,
             include_model_output_items=self._observations.include_model_output_items,
             include_raw_provider_events=self._include_raw_provider_events,
+            include_request_attempts=state.submission_request_attempts is not None,
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
@@ -11369,6 +11442,7 @@ class Session(Generic[ContextT, OutputT]):
         repair._context_transform_purpose = "output_repair"
         repair._observations.repair_parent = (self._observations, handle.submission_id)
         repair._rate_limit_parent = self
+        attempt: Turn[Any] | None = None
         try:
             if active is not None and not active():
                 raise asyncio.CancelledError()
@@ -11436,6 +11510,10 @@ class Session(Generic[ContextT, OutputT]):
         else:
             await repair.aclose()
         finally:
+            if state.submission_request_attempts is not None:
+                captured_attempt = attempt or repair._last_turn
+                if captured_attempt is not None:
+                    state.submission_request_attempts.add(captured_attempt.request_attempts)
             if repair._closed and repair._environment_lease is None:
                 self._repair_session = None
         return cast(str, result.final_output)
@@ -15241,6 +15319,13 @@ class Session(Generic[ContextT, OutputT]):
 
         if not admitted():
             raise InteractionExpiredError("Configured parent invocation is expired")
+        invocation = _invocation.get()
+        if invocation is None or invocation.session is not self:
+            raise InteractionExpiredError("Configured parent invocation is expired")
+        previous_opening = invocation.configured_opening
+        invocation.configured_opening = _ConfiguredOpening(
+            declaration.agent, context._environment, self._writable_roots, admitted
+        )
         handler = self._interaction_handler
 
         async def answer(event: Interaction) -> ActionReply[Any]:
@@ -15325,6 +15410,7 @@ class Session(Generic[ContextT, OutputT]):
                         await _join(_create_task(retire_relay()))
 
         finally:
+            invocation.configured_opening = previous_opening
             if session is not None:
                 session._configured_environment_source = None
                 closed = session._close_task
@@ -15967,6 +16053,14 @@ class Session(Generic[ContextT, OutputT]):
                 failure_output = ToolOutput.error(text)
             if not self._admit_tool(state, request):
                 return
+            from .decision_handoff import _CapturedDecisionHandoff, _DecisionHandoffSelection
+
+            handoff_target_profile_id = None
+            if failure_output is None and isinstance(entry, _CapturedDecisionHandoff):
+                if not isinstance(value, _DecisionHandoffSelection):
+                    raise ValueError("Decision handoff selection failed")
+                handoff_target_profile_id = value.target_profile_id
+                value = None
             output: ToolOutput | None = failure_output
             background = False
             if failure_output is None:
@@ -16035,6 +16129,8 @@ class Session(Generic[ContextT, OutputT]):
             response: dict[str, Any] = {"request": message, "response": response_output}
             if background:
                 response["start_response"] = False
+            if handoff_target_profile_id is not None:
+                response["handoff_target_profile_id"] = handoff_target_profile_id
             reply = json.dumps(response)
             del response
             if not self._admit_tool(state, request):

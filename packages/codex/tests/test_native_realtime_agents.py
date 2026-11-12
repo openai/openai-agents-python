@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from agents import (
     Agent,
     Allow,
+    DecisionHandoff,
     DecisionRequest,
     DecisionResponse,
     NativeProvider,
@@ -21,6 +22,61 @@ from agents.realtime import RealtimeAgentConfig, RealtimeConfig, RealtimeSession
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response
 from tests.test_native_realtime import realtime_peer as realtime_peer
+
+
+@pytest.mark.parametrize("nested", [False, True])
+async def test_voice_agent_update_rejects_decisions_before_native_admission(
+    realtime_peer, monkeypatch, nested
+):
+    peer = realtime_peer
+    destination = Agent(name="destination", instructions="Destination.")
+    proposed = Agent(
+        name="proposed",
+        instructions="Proposed voice.",
+        handoffs=[
+            DecisionHandoff(
+                name="delegate",
+                description="Transfer.",
+                question="Choose.",
+                targets={"destination": destination},
+            )
+        ],
+    )
+    if nested:
+        proposed = Agent(name="wrapper", instructions="Wrapper.", handoffs=[proposed])
+    admissions = []
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-voice-decisions",
+            supports_websockets=False,
+        ) as provider,
+    ):
+        async with Agent(instructions="Opening.", provider=provider).session() as session:
+            async with session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice:
+                native = session._native
+
+                class Observe:
+                    def __getattr__(self, name):
+                        return getattr(native, name)
+
+                    async def _admit_realtime_agent_graph(self, *args, **kwargs):
+                        admissions.append(args)
+                        return await native._admit_realtime_agent_graph(*args, **kwargs)
+
+                monkeypatch.setattr(session, "_native", Observe())
+                active = await voice.get_active_agent()
+                before = len(peer.frames)
+                with pytest.raises(ValueError, match="DecisionHandoff.*Realtime"):
+                    await voice.update_agent(proposed)
+                assert admissions == []
+                assert await voice.get_active_agent() is active
+                assert not any(frame["type"] == "session.update" for frame in peer.frames[before:])
+                ordinary = Agent(instructions="Allowed voice.")
+                await voice.update_agent(ordinary)
+                assert len(admissions) == 1
+                assert await voice.get_active_agent() is ordinary
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
