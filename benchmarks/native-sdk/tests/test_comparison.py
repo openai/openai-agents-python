@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import runpy
 import signal
@@ -641,6 +642,70 @@ class InstrumentationTests(unittest.TestCase):
 
 
 class DefaultHostTransportTests(unittest.TestCase):
+    def test_fresh_tool_cases_reach_peer_launch_before_any_sdk_import(self):
+        class Admitted(RuntimeError):
+            pass
+
+        original_exists = Path.exists
+        for case in (
+            "oneshot_tool",
+            "oneshot_tool_output_16k_1",
+            "oneshot_tool_output_16k_16",
+            "oneshot_tool_output_16k_128",
+            "oneshot_tool_output_16k_128_active",
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                setup = Path(directory) / "setup.json"
+                setup.write_text(
+                    json.dumps(
+                        {
+                            "api_origin": "https://api.openai.com/v1",
+                            "files": {},
+                            "tls_cert": "/unused/test.crt",
+                            "tls_key": "/unused/test.key",
+                        }
+                    )
+                )
+                arguments = [
+                    "worker.py",
+                    "--engine",
+                    "v1",
+                    "--case",
+                    case,
+                    "--native-provider-mode",
+                    "omitted",
+                    "--native-transport",
+                    "websocket",
+                    "--default-host-setup",
+                    str(setup),
+                    "--output",
+                    str(Path(directory) / "result.json"),
+                ]
+                with (
+                    mock.patch.dict(
+                        os.environ, {"SDK_BENCH_SERVER_PYTHON": "/unused/peer"}, clear=True
+                    ),
+                    mock.patch.object(sys, "argv", arguments),
+                    mock.patch.object(
+                        Path,
+                        "exists",
+                        lambda path: str(path) == "/.dockerenv" or original_exists(path),
+                    ),
+                    mock.patch.object(
+                        worker.socket,
+                        "getaddrinfo",
+                        return_value=[(None, None, None, None, ("127.0.0.1", 443))],
+                    ),
+                    mock.patch.object(
+                        worker.subprocess, "Popen", side_effect=Admitted("peer launch reached")
+                    ) as spawn,
+                    mock.patch.object(worker.importlib, "import_module") as sdk_import,
+                ):
+                    with self.assertRaises(Admitted):
+                        worker.main()
+                    spawn.assert_called_once()
+                    sdk_import.assert_not_called()
+
     def test_omitted_provider_rejected_before_spawn_outside_its_profile(self):
         controller = [
             "compare.py",
@@ -688,7 +753,7 @@ class DefaultHostTransportTests(unittest.TestCase):
                 ],
             ),
         ]
-        for case in ("conversation_text", "oneshot_tool"):
+        for case in ("conversation_text", "streamed_tool"):
             cases.append(
                 (
                     compare,
