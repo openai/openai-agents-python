@@ -8526,6 +8526,23 @@ class Session(Generic[ContextT, OutputT]):
             options["_input_error_tool_slots"] = self._catalog.input_error_slots(
                 run_formatter=self._tool_error_formatter is not None
             )
+            transport_settings = {
+                key: value
+                for key, value in self._effective_agent().model_settings.items()
+                if key in ("extra_headers", "extra_query")
+            }
+            if (
+                self._repair_transport_settings is not None
+                and self._repair_transport_settings[0] == self._profile_current
+            ):
+                transport_settings.update(self._repair_transport_settings[1])
+            transport = (
+                _native_model_settings(None, cast(ModelSettings, transport_settings))
+                .get("request_controls", {})
+                .get("request_transport")
+            )
+            if transport is not None:
+                options["_sdk_request_transport"] = transport
             current_options = json.loads(change.options())
             options["_sdk_instruction_files"] = current_options["instruction_files"]
             applied_roots = current_options["executor_writable_roots"]

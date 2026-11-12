@@ -572,10 +572,15 @@ pub async fn submit_replaceable_with_attempts(
     if let Some(settings) = &p.start.model_settings_override {
         let mut controls = model_settings(serde_json::to_value(settings)?)?;
         controls.model = p.start.model_override.clone();
-        state
+        if let Err(error) = state
             .engine
             .validate_request_controls(&state.thread, &controls)
-            .await?;
+            .await
+        {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
     }
     let initial = state
         .initial_turn
@@ -885,10 +890,15 @@ pub async fn recover_prepared(
     if let Some(settings) = &p.model_settings_override {
         let mut controls = model_settings(serde_json::to_value(settings)?)?;
         controls.model = p.model_override.clone();
-        state
+        if let Err(error) = state
             .engine
             .validate_request_controls(&state.thread, &controls)
-            .await?;
+            .await
+        {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
     }
     let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;

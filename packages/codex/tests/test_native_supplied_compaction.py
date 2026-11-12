@@ -833,3 +833,64 @@ async def test_supplied_setup_failure_remains_primary_when_candidate_cleanup_fai
             assert (await (await session.submit("Continue.")).get_result()).final_output == (
                 "source survived"
             )
+
+
+@pytest.mark.parametrize("updated", [False, True])
+async def test_supplied_compaction_keeps_live_transport_private(monkeypatch, updated):
+    from tests.native_fixtures import assistant_output
+    from tests.test_native_provider_websockets import WebSocketPeer, peer as transport_peer
+
+    observed = []
+    original = WebSocketPeer.handle
+
+    async def record(self, request):
+        observed.append(
+            ({key.lower(): value for key, value in request.headers.items()}, dict(request.query))
+        )
+        return await original(self, request)
+
+    monkeypatch.setattr(WebSocketPeer, "handle", record)
+    async with timeout(30), transport_peer() as server:
+        provider = server.provider(websocket=False)
+        agent = Agent(
+            instructions="Answer.",
+            provider=provider,
+            model="gpt-5.5",
+            model_settings={
+                "extra_headers": {"x-route": "SYNTHETIC_INITIAL_HEADER"},
+                "extra_query": {"route": "SYNTHETIC_INITIAL_QUERY"},
+            },
+        )
+        async with agent.session() as session:
+            server.respond(assistant_output("before compaction"))
+            await (await session.submit("First request.")).get_result()
+            if updated:
+                await session.update(
+                    model_settings={"extra_headers": {"x-route": "SYNTHETIC_ACK_HEADER"}}
+                )
+                await session.update(
+                    model_settings={"extra_query": {"route": "SYNTHETIC_ACK_QUERY"}}
+                )
+            before = (await session.save_state()).to_json()
+            await session.compact(summary="SYNTHETIC_APPLICATION_SUMMARY")
+            server.respond(assistant_output("after compaction"))
+            assert (
+                await (await session.submit("Continue.")).get_result()
+            ).final_output == "after compaction"
+            headers, query = observed[-1]
+            assert headers["x-route"] == (
+                "SYNTHETIC_ACK_HEADER" if updated else "SYNTHETIC_INITIAL_HEADER"
+            )
+            assert query == {
+                "route": "SYNTHETIC_ACK_QUERY" if updated else "SYNTHETIC_INITIAL_QUERY"
+            }
+            after = (await session.save_state()).to_json()
+            assert "SYNTHETIC_APPLICATION_SUMMARY" in after
+            for snapshot in (before, after):
+                for marker in (
+                    "SYNTHETIC_INITIAL_HEADER",
+                    "SYNTHETIC_INITIAL_QUERY",
+                    "SYNTHETIC_ACK_HEADER",
+                    "SYNTHETIC_ACK_QUERY",
+                ):
+                    assert marker not in snapshot
