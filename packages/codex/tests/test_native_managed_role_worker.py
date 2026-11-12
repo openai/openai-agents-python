@@ -176,3 +176,27 @@ async def test_managed_worker_logs_no_callback_exception_payload(caplog) -> None
     assert record.exc_info is None
     assert record.exc_text is None
     assert "private" not in caplog.text
+
+
+async def test_managed_stream_cancels_only_once_during_cleanup() -> None:
+    entered, cleaning, release, cleaned = (asyncio.Event() for _ in range(4))
+
+    async def observe(value):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            cleaned.set()
+
+    stream = _ManagedToolStream(origin(), "child", observe, None, lambda: None)
+    async with timeout(5):
+        stream.append(event(1))
+        await entered.wait()
+        stream.abort()
+        await cleaning.wait()
+        stream.abort()
+        release.set()
+        await stream.drain()
+    assert cleaned.is_set()

@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 
+from ._compat import cancel_once
 from .native_agents import NativeRoleToolInvocation, NativeRoleToolStreamEvent
 from .observation import Observation, _observation_sizes
 
@@ -88,7 +89,7 @@ class _ManagedToolStream:
     def abort(self) -> None:
         self._finished = True
         self._pending.clear()
-        self.task.cancel()
+        cancel_once(self.task)
 
     async def _run(self, first: asyncio.Future[tuple[Observation, int] | None]) -> None:
         try:

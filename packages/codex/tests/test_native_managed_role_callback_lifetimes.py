@@ -251,7 +251,10 @@ async def test_direct_child_cancel_joins_managed_stream(responses, tmp_path, mon
             assert (await root.get_result()).final_output == "parent recovered"
 
 
-async def test_managed_extractor_activates_native_trace_context(responses, tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["extract", "stream"])
+async def test_managed_callbacks_activate_native_trace_context(
+    responses, tmp_path, monkeypatch, kind
+):
     if os.environ.get("SDK_MANAGED_TRACE_TEST_CHILD") != "1":
         process = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -260,7 +263,7 @@ async def test_managed_extractor_activates_native_trace_context(responses, tmp_p
             "-o",
             "pythonpath=",
             "-q",
-            __file__ + "::test_managed_extractor_activates_native_trace_context",
+            __file__ + "::test_managed_callbacks_activate_native_trace_context[" + kind + "]",
             env=dict(os.environ, SDK_MANAGED_TRACE_TEST_CHILD="1"),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -278,11 +281,13 @@ async def test_managed_extractor_activates_native_trace_context(responses, tmp_p
         seen = []
 
         def extract(value):
+            assert ("event" if kind == "stream" else "items") in value
             seen.append(telemetry.current_context())
-            return "selected result"
+            return "selected result" if kind == "extract" else None
 
         tool = NativeRoleTool(
-            name="research_topic", role="research", description="Research.", extract_result=extract
+            name="research_topic", role="research", description="Research.",
+            **({"extract_result": extract} if kind == "extract" else {"on_stream": extract}),
         )
         responses.respond(collaboration(tool.name, {"input": "Read."}, "traced-result"))
         responses.respond(assistant_output("child result"))
@@ -303,10 +308,10 @@ async def test_managed_extractor_activates_native_trace_context(responses, tmp_p
                     assert (
                         await (await session.submit("Research.")).get_result()
                     ).final_output == "parent result"
-        assert len(seen) == 1
-        assert seen[0] is not None
-        assert seen[0].trace_id == trace.context.trace_id
-        assert seen[0].trace_metadata == {"owner": "managed"}
-        assert seen[0].include_sensitive_data is False
+        assert seen
+        assert all(context is not None for context in seen)
+        assert all(context.trace_id == trace.context.trace_id for context in seen)
+        assert all(context.trace_metadata == {"owner": "managed"} for context in seen)
+        assert all(context.include_sensitive_data is False for context in seen)
     finally:
         await telemetry.shutdown()

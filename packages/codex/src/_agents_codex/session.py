@@ -11655,6 +11655,18 @@ class Session(Generic[ContextT, OutputT]):
             "runtime_tool_call_id": message["runtime_tool_call_id"],
         }
         callback = tool.on_stream
+        tracing_owner = parent if isinstance(parent, _Submission) else self._active
+        if isinstance(parent, _ChildCallbacks) and (
+            tracing_owner is None
+            or parent.root_turn_id is None
+            or self._usage_roots.get(parent.root_turn_id) is not tracing_owner.run_usage
+        ):
+            tracing_owner = None
+        tracing_context = (
+            tracing_owner.tracing.context
+            if tracing_owner is not None and tracing_owner.tracing is not None
+            else None
+        )
 
         def admitted() -> bool:
             return not (
@@ -11670,7 +11682,8 @@ class Session(Generic[ContextT, OutputT]):
             token = _invocation.set(guard)
             try:
                 if admitted():
-                    await _call_callback(callback, admitted, value)
+                    with _owned_span("managed stream callback", "callback", tracing_context):
+                        await _call_callback(callback, admitted, value)
             finally:
                 guard.active = False
                 _invocation.reset(token)
