@@ -1,4 +1,5 @@
 {
+  "result_tree": "e29792ff6321d9306b21ef71743774a1d3ed7add",
   "patches": [
     {
       "path": "0001-native-schema-recovery.patch",
@@ -703,7 +704,10 @@
     {
       "path": "0163-sdk-followup-mailbox-trace.patch",
       "sha256": "3b4b270ab86c1f76b39d1d49f8e1c17e1896c6e4c6fdecba17a011a0a97ffbaf"
+    },
+    {
+      "path": "sdk-trace-lifecycle-dispatch.patch",
+      "sha256": "7ad94085ca25e835088fa60efc140869944e889aa02fdd3689b9560b2b300c8c"
     }
-  ],
-  "result_tree": "5ba7742538a04e6596007564436dc7c37bca39ee"
+  ]
 }
