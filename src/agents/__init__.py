@@ -27,6 +27,12 @@ if TYPE_CHECKING:
         SignInWithChatGPT as SignInWithChatGPT,
         SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     )
+    from .apply_patch import (
+        ApplyPatchEditor as ApplyPatchEditor,
+        ApplyPatchOperation as ApplyPatchOperation,
+        ApplyPatchResult as ApplyPatchResult,
+        apply_patch_tool as apply_patch_tool,
+    )
     from .canonical_storage import (
         AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore,
         CustomStorage as CustomStorage,
@@ -410,6 +416,10 @@ _MODULES = {
     "HttpMCP": ".mcp",
     "HostedVerificationMCP": ".mcp",
     "ChatGPTAppsMCP": ".mcp",
+    "ApplyPatchEditor": ".apply_patch",
+    "ApplyPatchOperation": ".apply_patch",
+    "ApplyPatchResult": ".apply_patch",
+    "apply_patch_tool": ".apply_patch",
     "Computer": ".computer",
     "ComputerProvider": ".computer",
     "ComputerSafetyError": ".computer",

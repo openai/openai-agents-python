@@ -175,6 +175,7 @@ fn starts_tool_call(event: &ResponseEvent, admission: Option<&dyn ModelToolAdmis
         ResponseItem::FunctionCall { .. }
             | ResponseItem::LocalShellCall { .. }
             | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::ApplyPatchCall { .. }
             | ResponseItem::ComputerCall { .. }
             | ResponseItem::McpApprovalRequest { .. }
     ) || matches!(
@@ -226,6 +227,7 @@ impl Stream for Generation {
                             call_id: Some(_),
                             ..
                         } | ResponseItem::CustomToolCallOutput { .. }
+                            | ResponseItem::ApplyPatchCallOutput { .. }
                             | ResponseItem::ComputerCallOutput { .. }
                             | ResponseItem::McpApprovalResponse { .. }
                     ) || matches!(
@@ -275,6 +277,7 @@ impl Stream for Generation {
                         // WebSearch turn item. A later empty placeholder must
                         // not suppress that genuine native progress.
                         ResponseItem::FunctionCall { .. }
+                        | ResponseItem::ApplyPatchCall { .. }
                         | ResponseItem::ComputerCall { .. }
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::WebSearchCall { .. }

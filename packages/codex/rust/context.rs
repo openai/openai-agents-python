@@ -461,6 +461,10 @@ pub(crate) fn check_pairs(
             ResponseItem::FunctionCall { call_id, .. } => {
                 ("function", Some(call_id.as_str()), true)
             }
+            ResponseItem::ApplyPatchCall { call_id, .. } => ("apply_patch", Some(call_id), true),
+            ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
+                ("apply_patch", Some(call_id), false)
+            }
             ResponseItem::ShellCall {
                 provider_fields, ..
             }

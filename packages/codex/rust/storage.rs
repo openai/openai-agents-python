@@ -538,6 +538,7 @@ impl MemoryThreadStore {
             Function,
             Custom,
             Computer,
+            ApplyPatch,
         }
         let mut calls = HashMap::new();
         for item in prefix {
@@ -549,10 +550,13 @@ impl MemoryThreadStore {
                 RolloutItem::ResponseItem(item) => match &item.item {
                     ResponseItem::FunctionCall { call_id, .. }
                     | ResponseItem::CustomToolCall { call_id, .. }
-                    | ResponseItem::ComputerCall { call_id, .. } => {
+                    | ResponseItem::ApplyPatchCall { call_id, .. }
+                    | ResponseItem::ComputerCall { call_id, .. }
+            | ResponseItem::ApplyPatchCall { call_id, .. } => {
                         let kind = match &item.item {
                             ResponseItem::FunctionCall { .. } => CallKind::Function,
                             ResponseItem::CustomToolCall { .. } => CallKind::Custom,
+                            ResponseItem::ApplyPatchCall { .. } => CallKind::ApplyPatch,
                             _ => CallKind::Computer,
                         };
                         anyhow::ensure!(
@@ -571,7 +575,11 @@ impl MemoryThreadStore {
                             UnsupportedManualState::NativeWork
                         );
                     }
-                    ResponseItem::ComputerCallOutput { call_id, .. } => {
+                    ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
+                        anyhow::ensure!(calls.get(call_id.as_str()) == Some(&CallKind::ApplyPatch) && unfinished.remove(call_id.as_str()), UnsupportedManualState::NativeWork);
+                    }
+                    ResponseItem::ComputerCallOutput { call_id, .. }
+            | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
                         anyhow::ensure!(
                             calls.get(call_id.as_str()) == Some(&CallKind::Computer)
                                 && unfinished.remove(call_id.as_str()),
@@ -593,7 +601,7 @@ impl MemoryThreadStore {
         anyhow::ensure!(
             pending.iter().all(|key| !matches!(
                 calls.get(key.call.as_str()),
-                Some(CallKind::Custom | CallKind::Computer)
+                Some(CallKind::Custom | CallKind::Computer | CallKind::ApplyPatch)
             )),
             UnsupportedManualState::NativeWork
         );
@@ -1138,6 +1146,7 @@ impl SamplingState {
                     ResponseItem::FunctionCall { .. }
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::ComputerCall { .. }
+                        | ResponseItem::ApplyPatchCall { .. }
                 ) =>
             {
                 self.tool_calls += 1;
@@ -1193,7 +1202,7 @@ impl LossSuspension {
                 if let RolloutItem::ResponseItem(envelope) = item {
                     // Approval and manual keys bind functions only. A custom
                     // call sharing this ID makes cancellation attribution unsafe.
-                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. }
+                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } | ResponseItem::ApplyPatchCall { call_id, .. }
                         if *call_id == key.call)
                     {
                         return None;
@@ -1264,7 +1273,8 @@ impl LossSuspension {
                                 }
                             }
                             ResponseItem::CustomToolCall { call_id, .. }
-                            | ResponseItem::ComputerCall { call_id, .. } => {
+                            | ResponseItem::ComputerCall { call_id, .. }
+            | ResponseItem::ApplyPatchCall { call_id, .. } => {
                                 tool_calls += 1;
                                 if *call_id == key.call {
                                     // A later custom call must not turn a real
@@ -1273,6 +1283,7 @@ impl LossSuspension {
                                 }
                             }
                             ResponseItem::ComputerCallOutput { call_id, .. }
+                            | ResponseItem::ApplyPatchCallOutput { call_id, .. }
                                 if *call_id == key.call =>
                             {
                                 preserve = false;
@@ -1341,13 +1352,15 @@ fn sdk_import_allowed(history: &[RolloutItem], requested: &[ResponseItem]) -> bo
             unresolved.insert(call_id);
         }
         match &envelope.item {
-            ResponseItem::ComputerCall { call_id, .. } => {
+            ResponseItem::ComputerCall { call_id, .. }
+            | ResponseItem::ApplyPatchCall { call_id, .. } => {
                 if !existing.insert(call_id.as_str()) {
                     return false;
                 }
                 computers.insert(call_id.as_str());
             }
-            ResponseItem::ComputerCallOutput { call_id, .. } => {
+            ResponseItem::ComputerCallOutput { call_id, .. }
+            | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
                 computers.remove(call_id.as_str());
             }
             ResponseItem::FunctionCallOutput {
@@ -1404,13 +1417,15 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
                     unresolved.push((index, envelope.item.clone()));
                 }
                 match &envelope.item {
-                    ResponseItem::ComputerCall { call_id, .. } => {
+                    ResponseItem::ComputerCall { call_id, .. }
+            | ResponseItem::ApplyPatchCall { call_id, .. } => {
                         if !seen.insert(call_id.as_str()) {
                             return false;
                         }
                         computers.insert(call_id.as_str());
                     }
-                    ResponseItem::ComputerCallOutput { call_id, .. } => {
+                    ResponseItem::ComputerCallOutput { call_id, .. }
+            | ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
                         computers.remove(call_id.as_str());
                     }
                     _ => {}
@@ -1652,7 +1667,7 @@ impl LocalChecklistStore {
             ));
         }
         let identity = (key.turn.clone(), key.call.clone());
-        if matches!(&item, ResponseItem::ComputerCallOutput { .. })
+        if matches!(&item, ResponseItem::ApplyPatchCallOutput { .. } | ResponseItem::ComputerCallOutput { .. })
             && (key.reply.thread != id.to_string()
                 || crate::local_reconciliation::output_identity(&item)
                     != Some((key.call.as_str(), Some(key.turn.as_str()))))

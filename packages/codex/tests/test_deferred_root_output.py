@@ -5,7 +5,16 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from agents import Agent, InteractionRequired, NativeOutput, PromptedOutput, Turn, function_tool
+from agents import (
+    Agent,
+    InteractionRequired,
+    NativeError,
+    NativeOutput,
+    PromptedOutput,
+    RunBudget,
+    Turn,
+    function_tool,
+)
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -302,3 +311,40 @@ async def test_deferred_start_inherits_complete_observation_retention(responses,
             )
         with pytest.raises(InteractionRequired):
             await original_turn.get_result()
+
+
+@pytest.mark.parametrize("max_requests", [1, 2])
+async def test_deferred_start_preserves_request_budget_through_session_hook(
+    responses, monkeypatch, max_requests
+):
+    journal, backend = Journal(), Provider([done()])
+    jobs, manual = declared(journal, backend)
+    responses.respond(function_call("render", {"pages": 2}, "deferred-render"))
+    if max_requests == 2:
+        responses.respond(assistant_output("finished"))
+    agent = Agent(instructions="Render and answer.", tools=[manual], provider=provider(responses))
+    hook_states = []
+    async with timeout(20), agent.session() as original:
+        await original.submit("Render.", budget=RunBudget(max_requests=max_requests))
+        request = await next_request(original.interactions(), manual)
+        session_factory = agent.session
+
+        @asynccontextmanager
+        async def hook(*, state, context):
+            hook_states.append(state)
+            async with session_factory(state=state, context=context) as restored:
+                yield restored
+
+        monkeypatch.setattr(agent, "session", hook)
+        async with jobs.start(original, request) as (_, resumed):
+            assert isinstance(resumed, Turn)
+            if max_requests == 1:
+                with pytest.raises(NativeError) as stopped:
+                    await resumed.get_result()
+                assert stopped.value.code == "run_budget_exceeded"
+            else:
+                assert (await resumed.get_result()).final_output == "finished"
+    assert len(hook_states) == 1
+    assert hook_states[0].run_budget.max_requests == max_requests
+    assert hook_states[0].run_budget.admitted_requests == 1
+    assert len(responses.requests) == max_requests
