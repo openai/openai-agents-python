@@ -378,6 +378,83 @@ async def test_remembered_future_decision_rebinds_in_fresh_process(responses, tm
                 await child.wait()
 
 
+async def test_new_remembered_rejection_retires_imported_approval(responses):
+    effects = []
+
+    @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    agent = Agent(instructions="Use the tool.", tools=[risky], provider=provider(responses))
+    async with timeout(30):
+        responses.respond(
+            function_call("risky", {"value": "first"}, "decision-first"),
+            function_call("risky", {"value": "pending"}, "decision-pending"),
+        )
+        async with agent.session() as source:
+            await source.submit("begin")
+            stream = source.interactions()
+            first = await next_request(stream, risky)
+            pending = await next_request(stream, risky)
+            assert first.call_id != pending.call_id
+            assert effects == []
+            await first.approve(always=True)
+            saved = await source.suspend()
+        responses.respond(assistant_output("resumed"))
+        async with agent.session(state=saved) as restored:
+            pending = await next_request(restored.interactions(), risky)
+            await pending.reject(always=True)
+            assert restored.restored_turn is not None
+            await restored.restored_turn.get_result()
+            responses.respond(function_call("risky", {"value": "later"}, "decision-later"))
+            responses.respond(assistant_output("done"))
+            turn = await restored.submit("continue")
+            assert (await turn.get_result()).final_output == "done"
+    assert len(effects) == 1
+    assert "later" not in effects
+
+
+async def test_remembered_decision_uses_updated_effective_instructions(responses):
+    effects = []
+
+    @function_tool(needs_approval=True, approval_key="fixture.risky.v1")
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    agent = Agent(instructions="Opening policy.", tools=[risky], provider=provider(responses))
+    async with timeout(25):
+        async with agent.session() as source:
+            await source.update(instructions="Current policy.")
+            responses.respond(function_call("risky", {"value": "first"}, "updated-first"))
+            responses.respond(assistant_output("done"))
+            turn = await source.submit("begin")
+            await (await next_request(source.interactions(), risky)).approve(always=True)
+            await turn.get_result()
+            saved = await source.save_state()
+        current = Agent(instructions="Current policy.", tools=[risky], provider=agent.provider)
+        responses.respond(function_call("risky", {"value": "later"}, "updated-later"))
+        responses.respond(assistant_output("done"))
+        async with current.session(state=saved) as restored:
+            turn = await restored.submit("continue")
+            result = asyncio.create_task(turn.get_result())
+            approval = asyncio.create_task(next_request(restored.interactions(), risky))
+            try:
+                done, _ = await asyncio.wait(
+                    {result, approval}, return_when=asyncio.FIRST_COMPLETED, timeout=10
+                )
+                assert result in done, "Effective instruction policy lost its remembered decision"
+                await result
+            finally:
+                approval.cancel()
+                await asyncio.gather(approval, return_exceptions=True)
+                if not result.done():
+                    result.cancel()
+                    await asyncio.gather(result, return_exceptions=True)
+    assert effects == ["first", "later"]
+
+
 @pytest.mark.parametrize("change", ["key", "profile", "schema", "policy", "unkeyed"])
 async def test_portable_remembered_approval_requires_current_authority(responses, change):
     effects = []

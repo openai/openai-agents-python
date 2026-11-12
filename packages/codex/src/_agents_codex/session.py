@@ -7104,19 +7104,14 @@ class Session(Generic[ContextT, OutputT]):
             self._observations.notify()
 
     def _approval_profile(self, profile_id: str | None) -> str:
-        agent = (
-            self._profiles[profile_id].profile.declaration
-            if profile_id is not None and profile_id in self._profiles
-            else self._opening_agent
-        )
+        runtime = self._profiles.get(profile_id) if profile_id is not None else None
+        agent = runtime.profile.declaration if runtime is not None else self._opening_agent
         return hashlib.sha256(
             json.dumps(
                 [
                     self._agent_profile_fingerprint,
                     getattr(agent, "name", None),
-                    self._profiles[profile_id].instructions
-                    if profile_id is not None
-                    else getattr(agent, "instructions", self._instructions),
+                    runtime.instructions if runtime is not None else self._instructions,
                 ]
             ).encode()
         ).hexdigest()
@@ -7274,6 +7269,9 @@ class Session(Generic[ContextT, OutputT]):
             await self._respond(request, reply_reason, _approval_rejection=True)
             self._approval_ready.pop(request._invocation, None)
         if always:
+            self._restored_approval_slots.pop(
+                (key[0], request._approval_generation, request._slot), None
+            )
             self._approval_decisions[key] = (approve, reason)
             if record is not None:
                 self._remembered_approvals[(key[0], record.key, record.signature)] = record
