@@ -472,8 +472,8 @@ async def test_false_predicate_keeps_a_successful_skip_after_scope_rotation(resp
     assert not calls
 
 
-@pytest.mark.parametrize("mounted", [False, True])
-async def test_compaction_rejects_mounted_transport_store_identity(responses, mounted):
+@pytest.mark.parametrize("transport_kind", ["null", "mounted", "disguised-default"])
+async def test_compaction_rejects_mounted_transport_store_identity(responses, transport_kind):
     import httpx2 as httpx
     from openai._base_client import AsyncHttpxClientWrapper
 
@@ -501,8 +501,13 @@ async def test_compaction_rejects_mounted_transport_store_identity(responses, mo
             },
         )
 
-    transport = httpx.MockTransport(foreign) if mounted else None
-    http_client = AsyncHttpxClientWrapper(mounts={"all://": transport}, trust_env=False)
+    mounted = transport_kind != "null"
+    if transport_kind == "disguised-default":
+        disguised = type("AsyncHTTPTransport", (httpx.MockTransport,), {"__module__": "httpx2"})
+        http_client = AsyncHttpxClientWrapper(transport=disguised(foreign), trust_env=False)
+    else:
+        transport = httpx.MockTransport(foreign) if mounted else None
+        http_client = AsyncHttpxClientWrapper(mounts={"all://": transport}, trust_env=False)
     responses.respond(assistant_output("NATIVE_ACKNOWLEDGED"))
     async with _matching_compaction_client(responses, compact, http_client=http_client) as client:
         agent = Agent(

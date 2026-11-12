@@ -232,6 +232,8 @@ class ResponsesCompaction(Generic[ContextT]):
 
 def _responses_client_scope(client: Any) -> tuple[str, str, str | None, str | None] | None:
     try:
+        from importlib import import_module
+
         from openai import AsyncOpenAI
         from openai._base_client import AsyncHttpxClientWrapper
         from openai.resources.responses import AsyncResponses
@@ -254,6 +256,10 @@ def _responses_client_scope(client: Any) -> tuple[str, str, str | None, str | No
             "httpx2",
             "httpx._transports.default",
             "httpx2._transports.default",
+        ):
+            return None
+        if type(transport) is not getattr(
+            import_module(type(transport).__module__), "AsyncHTTPTransport", None
         ):
             return None
         if (
