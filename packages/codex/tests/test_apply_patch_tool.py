@@ -77,6 +77,15 @@ async def test_editor_result_retains_explicit_status_and_text(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["", False, 0])
+async def test_editor_rejects_invalid_falsy_status(status: Any) -> None:
+    editor = Editor()
+    editor.result = ApplyPatchResult(status=status)
+    with pytest.raises(TypeError, match="Invalid Apply Patch result"):
+        await invoke(editor, {"type": "create_file", "path": "custom", "diff": "diff"})
+
+
+@pytest.mark.asyncio
 async def test_async_editor_uses_existing_awaitable_callback_path() -> None:
     editor = Editor()
     loop_thread = threading.get_ident()

@@ -79,7 +79,7 @@ def _output(value: Any) -> ToolOutput:
             result = value
         else:
             raise TypeError("Apply Patch editor must return ApplyPatchResult, str, or None")
-        status = result.status or "completed"
+        status = "completed" if result.status is None else result.status
         if status not in ("completed", "failed") or (
             result.output is not None and not isinstance(result.output, str)
         ):
