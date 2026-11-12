@@ -45,6 +45,30 @@ Local commands can read the workspace, any additional `writable_roots`, and the 
 
 On macOS, the local sandbox has been isolating commands from host `launchd` services, including with `write_policy="trusted_workspace_write"`. Directory-backed account lookup in `id -F` and `ssh` has been failing inside that sandbox. For an authenticated Git push, use a Python function tool that runs in the application process and uses its Git credentials. The application selects the reviewed commit and destination before the model calls the tool. [Host Git example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/README.md#push-a-reviewed-git-commit-from-macos) · [Python functions](tools.md#python-functions)
 
+### Configure GitHub CLI TLS on macOS
+
+Sandboxed `gh` can report `x509: OSStatus -26276` when macOS certificate verification needs access to host services. With `gh` built using Go 1.27 or later, `SSL_CERT_FILE` selects a CA bundle for Go's certificate verifier. The SDK still applies the sandbox and its network policy. [Go 1.27 certificate changes](https://go.dev/doc/go1.27#crypto/x509)
+
+Use this setup with SDK version `0.24.0-alpha.8` or later. Use this environment with the Agent and Session in the local execution example above.
+
+```python
+from pathlib import Path
+
+from agents import Environment, NetworkPolicy
+
+environment = Environment.local(
+    cwd=Path("/jobs/worker/work"),
+    tools=("exec_command", "write_stdin"),
+    write_policy="trusted_workspace_write",
+    env={"SSL_CERT_FILE": "/etc/ssl/cert.pem"},
+    network=NetworkPolicy(allowed_domains=("api.github.com",)),
+)
+```
+
+Select a readable CA bundle maintained by your operating system or administrator. Keep it outside the job's writable roots. If your GitHub server uses an organization CA, select a bundle that includes the required roots and allow the server's API hostname. In this mode, Go uses file-based roots in place of macOS Keychain trust settings.
+
+GitHub authentication needs separate credentials. Use `trusted_workspace_write` only for trusted jobs because commands can read the application's files and inherit its environment. When Git credentials need to stay in the application, use the [host Git example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/README.md#push-a-reviewed-git-commit-from-macos).
+
 ### Allow the Linux sandbox helper to use user namespaces on Ubuntu 24.04
 
 Ubuntu 24.04 uses AppArmor to restrict unprivileged user namespaces. The local executor needs these namespaces to start its sandbox. If a local Session fails to start, ask an administrator to check the kernel log. [Ubuntu 24.04 release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)
