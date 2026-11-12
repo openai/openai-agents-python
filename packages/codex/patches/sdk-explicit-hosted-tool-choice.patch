@@ -321,10 +321,10 @@ index 0000000000000000000000000000000000000000..c2855f374ac788feb6846eb9b46953bd
 +    assert!(choice.validate().is_err());
 +}
 diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
-index f2848e73f316ea8dfd372b750d94e1709e81f7d1..278db90053145c8cb5bb9d93029b540305bc7bca 100644
+index f2848e73f316ea8dfd372b750d94e1709e81f7d1..3ab3b324fb968420c6072d160e195ca87bbba00b 100644
 --- a/codex-rs/tools/src/tool_spec.rs
 +++ b/codex-rs/tools/src/tool_spec.rs
-@@ -132,6 +132,53 @@ impl ToolSpec {
+@@ -132,6 +132,54 @@ impl ToolSpec {
          }
      }
  
@@ -360,11 +360,12 @@ index f2848e73f316ea8dfd372b750d94e1709e81f7d1..278db90053145c8cb5bb9d93029b5403
 +                                .any(|value| value.as_str() == Some(name.as_str())),
 +                            Some(Value::Object(filter)) => filter
 +                                .get("tool_names")
-+                                .and_then(Value::as_array)
-+                                .is_some_and(|names| {
-+                                    names
-+                                        .iter()
-+                                        .any(|value| value.as_str() == Some(name.as_str()))
++                                .is_none_or(|names| {
++                                    names.as_array().is_some_and(|names| {
++                                        names
++                                            .iter()
++                                            .any(|value| value.as_str() == Some(name.as_str()))
++                                    })
 +                                }),
 +                            _ => false,
 +                        }
@@ -380,10 +381,10 @@ index f2848e73f316ea8dfd372b750d94e1709e81f7d1..278db90053145c8cb5bb9d93029b5403
          match &mut self {
 diff --git a/codex-rs/tools/tests/hosted_tool_choice.rs b/codex-rs/tools/tests/hosted_tool_choice.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..7824f855b95a97c2072e00f18e5938e39ed86902
+index 0000000000000000000000000000000000000000..19220b1520f093b07ef5f3f2440a669a261f4290
 --- /dev/null
 +++ b/codex-rs/tools/tests/hosted_tool_choice.rs
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,87 @@
 +use codex_protocol::model_request_controls::HostedToolChoice as Choice;
 +use codex_tools::*;
 +use serde_json::json;
@@ -446,4 +447,28 @@ index 0000000000000000000000000000000000000000..7824f855b95a97c2072e00f18e5938e3
 +        spec.captured_hosted_choice(&select("search", "delete"))
 +            .is_none()
 +    );
++}
++
++#[test]
++fn hosted_mcp_filter_omission_does_not_create_an_empty_name_list() {
++    let choice = Choice::Mcp {
++        server_label: "docs".into(),
++        name: Some("lookup".into()),
++    };
++    for (filter, allowed) in [
++        (json!({"read_only": true}), true),
++        (json!({}), true),
++        (json!({"read_only": true, "tool_names": ["lookup"]}), true),
++        (json!({"read_only": true, "tool_names": []}), false),
++        (json!({"tool_names": ["other"]}), false),
++    ] {
++        let spec = ToolSpec::Mcp(HostedMcpTool {
++            server_label: "docs".into(),
++            provider_data: json!({"server_url":"https://docs.invalid/mcp", "allowed_tools":filter})
++                .as_object()
++                .unwrap()
++                .clone(),
++        });
++        assert_eq!(spec.captured_hosted_choice(&choice).is_some(), allowed);
++    }
 +}

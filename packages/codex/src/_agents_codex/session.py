@@ -577,7 +577,7 @@ def _manual_restore_model_settings(
             if target is None:
                 normalized["hosted_tool_choice"] = None
             else:
-                captured_choice = _copy_model_settings({"tool_choice": target})["tool_choice"]
+                captured_choice = _copy_model_settings({"tool_choice": target}).get("tool_choice")
                 if not isinstance(captured_choice, Mapping):
                     raise ValueError("Manual checkpoint has invalid hosted tool choice")
                 normalized["hosted_tool_choice"] = dict(captured_choice)

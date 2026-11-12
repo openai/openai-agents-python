@@ -878,8 +878,8 @@
     },
     {
       "path": "sdk-explicit-hosted-tool-choice.patch",
-      "sha256": "7d3895fa2d6fd5c941b4eff7781e487cfc7139fa26287a0ea6a543ae4053e69b"
+      "sha256": "c581d2069d883585f66d1ddf7fd87c31a8e428ce8dbb67d55d35287662839d68"
     }
   ],
-  "result_tree": "580d80efa54695ca62bf9acac7571758eb65c581"
+  "result_tree": "227e3246addb75ae57de2939780e4ab109631297"
 }
