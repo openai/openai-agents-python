@@ -6,6 +6,8 @@ from _agents_codex.model_context import (
     Callable as Callable,
     ContextT as ContextT,
     Generic as Generic,
+    HostedPromptReference as HostedPromptReference,
+    HostedPromptSource as HostedPromptSource,
     Literal as Literal,
     ModelContextSnapshot as ModelContextSnapshot,
     ModelRequestContext as ModelRequestContext,

@@ -1,0 +1,18 @@
+diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
+--- a/codex-rs/codex-api/src/received_response_facts.rs
++++ b/codex-rs/codex-api/src/received_response_facts.rs
+@@ -226,6 +226,14 @@
+         Ok(())
+     }
+ 
++    /// Returns the usage from the accepted terminal frame before producer settlement.
++    pub fn completed_usage(&self) -> Option<&codex_protocol::protocol::TokenUsage> {
++        match self.completion.as_ref() {
++            Some(ResponseEvent::Completed { token_usage, .. }) => token_usage.as_ref(),
++            _ => None,
++        }
++    }
++
+     /// Takes the deferred output and terminal event after the iterator has ended.
+     pub fn finish(mut self, producer_error: Option<&str>) -> Result<Vec<ResponseEvent>, ApiError> {
+         if let Some(error) = self.failure.take() {

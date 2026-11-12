@@ -1,0 +1,32 @@
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -76,17 +76,25 @@
+     }
+     /// Reserve each parent deadline before this scope; never await under either gate.
+     pub fn with_model_deadline_admission<T>(&self, enter: impl FnOnce() -> T) -> Option<T> {
++        let mut enter = Some(enter);
++        self.with_model_deadline_admission_inner(&mut || enter.take().map(|enter| enter()))
++    }
++
++    fn with_model_deadline_admission_inner<T>(
++        &self,
++        enter: &mut dyn FnMut() -> Option<T>,
++    ) -> Option<T> {
+         let own = self
+             .model_deadline
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner)
+             .clone();
+-        let enter = || match own {
+-            Some(state) => state.admit(enter),
+-            None => Some(enter()),
++        let mut enter = || match own.as_ref() {
++            Some(state) => state.admit(&mut *enter).flatten(),
++            None => enter(),
+         };
+         match &self.parent {
+-            Some(parent) => parent.with_model_deadline_admission(enter).flatten(),
++            Some(parent) => parent.with_model_deadline_admission_inner(&mut enter),
+             None => enter(),
+         }
+     }

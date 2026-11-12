@@ -2519,6 +2519,70 @@ impl TurnLifecycleContributor for Boundary {
 }
 
 impl ModelRequestContributor for Boundary {
+    fn model_attempt(
+        &self,
+        input: codex_extension_api::ModelAttemptInput,
+    ) -> std::result::Result<(), String> {
+        let Some(tools) = input
+            .admission
+            .turn_store()
+            .get::<Arc<crate::python_tools::TurnAdmission>>()
+            .and_then(|receipt| receipt.callback_tools())
+        else {
+            return Ok(());
+        };
+        tools
+            .publish_model_attempt(input)
+            .map_err(|error| error.to_string())
+    }
+
+    fn decide_model_retry(
+        &self,
+        input: codex_extension_api::ModelRetryInput,
+    ) -> Option<
+        futures_util::future::BoxFuture<
+            '_,
+            std::result::Result<codex_protocol::model_retry::ModelRetryResolution, String>,
+        >,
+    > {
+        let tools = input
+            .admission
+            .turn_store()
+            .get::<Arc<crate::python_tools::TurnAdmission>>()
+            .and_then(|receipt| receipt.callback_tools())?;
+        if !tools.needs_model_retry_callback(input.context.policy_enabled) {
+            return None;
+        }
+        Some(Box::pin(async move {
+            tools
+                .decide_model_retry(input)
+                .await
+                .map_err(|error| error.to_string())
+        }))
+    }
+
+    fn retire_model_attempt(
+        &self,
+        admission: Arc<dyn codex_extension_api::ModelToolAdmission>,
+    ) -> futures_util::future::BoxFuture<'_, std::result::Result<(), String>> {
+        Box::pin(async move {
+            let Some(attempt) = admission.model_attempt() else {
+                return Ok(());
+            };
+            let tools = admission
+                .turn_store()
+                .get::<Arc<crate::python_tools::TurnAdmission>>()
+                .and_then(|receipt| receipt.callback_tools());
+            if let Some(tools) = tools {
+                tools
+                    .retire_model_attempt_preparations(&attempt)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+    }
+
     fn admit_tools_only_call(
         &self,
         input: codex_extension_api::ToolsOnlyCallInput,
@@ -6952,6 +7016,7 @@ pub(crate) mod tests {
                     kind,
                     thread_id: "root",
                     model: "actual-model",
+                    model_omitted: false,
                     client_metadata: &mut metadata,
                 },
             );

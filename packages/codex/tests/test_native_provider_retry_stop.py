@@ -117,3 +117,59 @@ async def test_provider_request_retry_budget_controls_actual_attempts(budget: in
                 with pytest.raises(NativeError):
                     await agent.run("Reply.")
     assert attempts == budget + 1
+
+
+@pytest.mark.parametrize("with_hosted_shell", [False, True])
+async def test_affirmative_policy_cannot_replay_hosted_shell_after_disconnect(
+    with_hosted_shell: bool,
+) -> None:
+    from agents import HostedShell, ModelRetrySettings, NativeError, RetryDecision
+
+    requests = []
+    peer = ResponsesFixture()
+    peer.respond(assistant_output("retry recovered"))
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        requests.append(await request.json())
+        if len(requests) == 1:
+            transport = request.transport
+            assert transport is not None
+            transport.close()
+            return web.Response()
+        return await peer.handle(request)
+
+    def retry(_context) -> RetryDecision:
+        return RetryDecision(True, delay_ms=0)
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", handle)
+    async with timeout(15), TestServer(app) as server:
+        provider = NativeProvider(
+            base_url=str(server.make_url("/v1")),
+            api_key="synthetic-shell-retry",
+            supports_websockets=False,
+            request_max_retries=0,
+            stream_max_retries=0,
+        )
+        tools = (
+            [HostedShell(environment={"type": "container_reference", "container_id": "cntr_test"})]
+            if with_hosted_shell
+            else []
+        )
+        async with provider:
+            agent = Agent(
+                model="gpt-5.5",
+                instructions="Answer.",
+                tools=tools,
+                provider=provider,
+                model_settings={"retry": ModelRetrySettings(max_retries=1, policy=retry)},
+            )
+            if with_hosted_shell:
+                with pytest.raises(NativeError):
+                    await agent.run("Reply.")
+            else:
+                assert (await agent.run("Reply.")).final_output == "retry recovered"
+
+    assert len(requests) == (1 if with_hosted_shell else 2)
+    provider_tools = requests[0].get("tools", [])
+    assert any(tool["type"] == "shell" for tool in provider_tools) is with_hosted_shell

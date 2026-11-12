@@ -52,6 +52,7 @@ struct Entry {
     exposure: ToolExposure,
     manual: bool,
     finish_turn: bool,
+    input_error_recovery: bool,
 }
 
 pub(crate) struct Generation {
@@ -88,6 +89,7 @@ struct StepReply {
 }
 
 pub(crate) struct FinishToolSlots(pub(crate) Vec<usize>);
+pub(crate) struct InputErrorToolSlots(pub(crate) Vec<usize>);
 
 impl Generation {
     fn default_names(&self, defaults: Option<&[usize]>) -> Result<Option<Vec<ToolName>>> {
@@ -116,6 +118,18 @@ impl Generation {
                 .context("Invalid terminal tool slot")?;
             ensure!(!entry.finish_turn, "Duplicate terminal tool slot");
             entry.finish_turn = true;
+        }
+        Ok(())
+    }
+
+    fn set_input_errors(&mut self, slots: &[usize]) -> Result<()> {
+        for &slot in slots {
+            let entry = self
+                .entries
+                .get_mut(slot)
+                .context("Invalid input recovery slot")?;
+            ensure!(!entry.input_error_recovery, "Duplicate input recovery slot");
+            entry.input_error_recovery = true;
         }
         Ok(())
     }
@@ -227,6 +241,17 @@ pub struct PythonTools {
 pub(crate) enum ModelContextUpdate {
     Keep,
     Replace(Vec<ResponseItem>),
+    Hosted(HostedContextProjection),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostedContextProjection {
+    pub(crate) hosted_prompt: codex_protocol::model_request_controls::HostedPromptReference,
+    #[serde(default)]
+    pub(crate) items: Option<Vec<ResponseItem>>,
+    #[serde(default)]
+    pub(crate) explicit_tools: bool,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +262,17 @@ pub(crate) enum ToolCompletionReply {
 }
 
 enum PreparationReply {
+    ModelRetry(
+        oneshot::Sender<std::result::Result<codex_protocol::model_retry::ModelRetryResolution, ()>>,
+    ),
+    PreparedRequest {
+        ticket: Arc<prepared_requests::Ticket>,
+        reply: oneshot::Sender<prepared_requests::Reply>,
+    },
+    ModelProducer {
+        ticket: Arc<model_producer::Ticket>,
+        reply: model_producer::Delivery,
+    },
     ToolCompletion {
         reply: oneshot::Sender<std::result::Result<ToolCompletionReply, ()>>,
         stop: crate::native_interception::CapturedTurnStop,
@@ -253,6 +289,9 @@ enum PreparationReply {
 impl PreparationReply {
     fn is_closed(&self) -> bool {
         match self {
+            Self::ModelRetry(reply) => reply.is_closed(),
+            Self::PreparedRequest { ticket, reply } => reply.is_closed() || !ticket.admits(),
+            Self::ModelProducer { ticket, reply } => reply.is_closed() || !ticket.admits(),
             Self::ToolCompletion { reply, .. } => reply.is_closed(),
             Self::Step(reply) => reply.reply.is_closed(),
             Self::Context(reply) => reply.is_closed(),
@@ -269,7 +308,7 @@ struct PreparationSlot {
 }
 impl PreparationSlot {
     fn is_closed(&self) -> bool {
-        self.reply.as_ref().is_none_or(PreparationReply::is_closed)
+        !self.callback.admits_reply() || self.reply.as_ref().is_none_or(PreparationReply::is_closed)
     }
 }
 
@@ -317,14 +356,13 @@ struct PendingPreparation {
 
 impl Drop for PendingPreparation {
     fn drop(&mut self) {
-        self.tools.retire_preparation(self.id);
+        self.tools.retire_preparation(self.id, false);
     }
 }
 
 enum QueuedRequest {
     SandboxOperation(sandbox_events::Notice),
     Callback(Value),
-    Prepared(Value),
     Step(Value),
     Call(Weak<PythonTools>, PendingKey, u64, Value),
     Retired {
@@ -405,6 +443,7 @@ const LOCAL_COMMAND_CLEANUP_FAILED: &str = "Interrupted local command cleanup di
 // Core emits TurnComplete before releasing its active-turn slot. This receipt
 // proves only that another turn may be admitted, not that the thread has closed.
 pub(crate) struct TurnAdmission {
+    model_attempt: Mutex<Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>>>,
     thread_id: String,
     pub(crate) tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     turn_id: String,
@@ -443,6 +482,22 @@ tokio::task_local! {
 }
 
 impl TurnAdmission {
+    pub(crate) fn callback_tools(&self) -> Option<Arc<PythonTools>> {
+        self.owner.upgrade()
+    }
+
+    pub(crate) fn model_attempt_snapshot(
+        &self,
+    ) -> Result<Option<codex_protocol::model_retry::ModelAttemptSnapshot>> {
+        let attempt = self
+            .model_attempt
+            .lock()
+            .expect("Model attempt mirror poisoned")
+            .clone();
+        attempt
+            .map(|attempt| attempt.snapshot().map_err(anyhow::Error::msg))
+            .transpose()
+    }
     pub(crate) fn permits_integrity_reason(&self) -> bool {
         !self.same_id_recovery
     }
@@ -626,20 +681,37 @@ impl From<DynamicToolResponse> for ToolReply {
 /// Physical callback ownership attached to an existing native pending entry.
 struct CallbackRelease {
     receipt: Value,
+    model_attempt: Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
     entered: std::sync::atomic::AtomicBool,
     cancelled: std::sync::atomic::AtomicBool,
     released: std::sync::atomic::AtomicBool,
+    cleanup_failed: std::sync::atomic::AtomicBool,
     changed: tokio::sync::Notify,
 }
 impl CallbackRelease {
     fn new(receipt: Value) -> Arc<Self> {
+        Self::with_model_attempt(receipt, None)
+    }
+    fn with_model_attempt(
+        receipt: Value,
+        model_attempt: Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             receipt,
+            model_attempt,
             entered: std::sync::atomic::AtomicBool::new(false),
             cancelled: std::sync::atomic::AtomicBool::new(false),
             released: std::sync::atomic::AtomicBool::new(false),
+            cleanup_failed: std::sync::atomic::AtomicBool::new(false),
             changed: tokio::sync::Notify::new(),
         })
+    }
+    fn admits_reply(&self) -> bool {
+        !self.cancelled.load(Ordering::Acquire)
+            && !self.released.load(Ordering::Acquire)
+            && self.model_attempt.as_ref().is_none_or(|attempt| {
+                !attempt.cancellation().is_cancelled() && !attempt.sampling_stop().requested()
+            })
     }
     fn release(&self) -> bool {
         let first = !self.released.swap(true, Ordering::AcqRel);
@@ -901,7 +973,7 @@ impl PythonTools {
                 true
             }
             "cancelled" => callback.cancelled.load(Ordering::Acquire),
-            "release" => {
+            "release" | "release_failed" => {
                 let released = callback.release();
                 // Restored approval waiters have no live PendingReply drop guard.
                 // The accepted receipt is recorded before physical callback release.
@@ -984,14 +1056,16 @@ impl PythonTools {
             }
         }
     }
-    fn preparation_callback_operation(
+    fn preparation_callback_owner(
         self: &Arc<Self>,
         root: &str,
         receipt: &Value,
-        operation: &str,
-    ) -> bool {
+    ) -> Option<(Arc<Self>, u64)> {
+        if receipt.get("kind").and_then(Value::as_str) != Some("preparation") {
+            return None;
+        }
         let Some(thread) = receipt.get("thread").and_then(Value::as_str) else {
-            return false;
+            return None;
         };
         let instance = receipt.get("instance").and_then(Value::as_str);
         let Some(id) = receipt
@@ -999,14 +1073,62 @@ impl PythonTools {
             .and_then(Value::as_str)
             .and_then(|s| s.parse::<u64>().ok())
         else {
-            return false;
+            return None;
         };
         let Ok(owner) = self.step_owner(Some(thread), instance) else {
-            return false;
+            return None;
         };
         if thread != root && owner.instance.is_none() {
-            return false;
+            return None;
         }
+        Some((owner, id))
+    }
+
+    pub(crate) fn report_model_attempt_usage(
+        self: &Arc<Self>,
+        root: &str,
+        attempt_id: &str,
+        receipt: &Value,
+        usage: codex_protocol::protocol::TokenUsage,
+    ) -> Result<bool> {
+        let Some((owner, id)) = self.preparation_callback_owner(root, receipt) else {
+            return Ok(false);
+        };
+        let replies = owner
+            .preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned");
+        let Some(slot) = replies.as_ref().and_then(|pending| pending.get(&id)) else {
+            return Ok(false);
+        };
+        let callback = &slot.callback;
+        // Cancellation revokes execution, but an entered worker can still measure its own
+        // cleanup before physical release. Never consult a later current-attempt slot.
+        if callback.receipt != *receipt
+            || !callback.entered.load(Ordering::Acquire)
+            || callback.released.load(Ordering::Acquire)
+        {
+            return Ok(false);
+        }
+        let Some(attempt) = &callback.model_attempt else {
+            return Ok(false);
+        };
+        if attempt.id() != attempt_id {
+            return Ok(false);
+        }
+        attempt.report_usage(usage).map_err(anyhow::Error::msg)?;
+        Ok(true)
+    }
+
+    fn preparation_callback_operation(
+        self: &Arc<Self>,
+        root: &str,
+        receipt: &Value,
+        operation: &str,
+    ) -> bool {
+        let Some((owner, id)) = self.preparation_callback_owner(root, receipt) else {
+            return false;
+        };
         let mut replies = owner
             .preparation_replies
             .lock()
@@ -1032,9 +1154,15 @@ impl PythonTools {
                 !callback.entered.swap(true, Ordering::AcqRel)
             }
             "cancelled" => callback.cancelled.load(Ordering::Acquire),
-            "release" => {
+            "release" | "release_failed" => {
+                if operation == "release_failed" {
+                    callback.cleanup_failed.store(true, Ordering::Release);
+                }
                 callback.release();
-                if slot.is_closed() {
+                if slot.is_closed()
+                    && !(callback.model_attempt.is_some()
+                        && callback.cleanup_failed.load(Ordering::Acquire))
+                {
                     pending.remove(&id);
                 }
                 true
@@ -1044,10 +1172,19 @@ impl PythonTools {
     }
 
     fn preparation_callback(&self, id: u64, request: &mut Value) -> Arc<CallbackRelease> {
+        self.model_preparation_callback(id, request, None)
+    }
+
+    fn model_preparation_callback(
+        &self,
+        id: u64,
+        request: &mut Value,
+        model_attempt: Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
+    ) -> Arc<CallbackRelease> {
         let receipt = json!({"kind":"preparation", "thread":request["msg"]["thread"],
             "instance":self.instance, "id":id.to_string()});
         request["msg"]["_sdk_callback"] = receipt.clone();
-        CallbackRelease::new(receipt)
+        CallbackRelease::with_model_attempt(receipt, model_attempt)
     }
 
     fn cancel_preparation(&self, callback: &CallbackRelease, turn: &str) {
@@ -1065,7 +1202,7 @@ impl PythonTools {
         }
     }
 
-    fn retire_preparation(&self, id: u64) {
+    fn retire_preparation(&self, id: u64, physical_joined: bool) {
         let mut replies = self
             .preparation_replies
             .lock()
@@ -1080,7 +1217,11 @@ impl PythonTools {
         if !slot.callback.released.load(Ordering::Acquire) {
             self.cancel_preparation(&slot.callback, &slot.turn);
         }
-        if slot.callback.released.load(Ordering::Acquire) {
+        if slot.callback.released.load(Ordering::Acquire)
+            && (physical_joined
+                || slot.callback.model_attempt.is_none()
+                || !slot.callback.cleanup_failed.load(Ordering::Acquire))
+        {
             pending.remove(&id);
         }
     }
@@ -1096,7 +1237,7 @@ impl PythonTools {
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
-                    self.retire_preparation(id);
+                    self.retire_preparation(id, false);
                     Err(anyhow::anyhow!("Preparation callback cancelled"))
                 }
                 result = receive => result.context("Preparation callback cancelled"),
@@ -1105,7 +1246,7 @@ impl PythonTools {
             receive.await.context("Preparation callback cancelled")
         };
         if result.is_err() {
-            self.retire_preparation(id);
+            self.retire_preparation(id, false);
         } else {
             // Reply authority is already consumed. An unclaimed native-only reply
             // cannot have started application code, and future enter is fenced.
@@ -1124,6 +1265,41 @@ impl PythonTools {
         }
         callback.wait().await;
         result
+    }
+
+    pub(crate) async fn retire_model_attempt_preparations(
+        &self,
+        attempt: &Arc<dyn codex_extension_api::ModelAttemptAdmission>,
+    ) -> Result<()> {
+        let callbacks = {
+            let mut replies = self
+                .preparation_replies
+                .lock()
+                .expect("Python preparation replies poisoned");
+            let Some(pending) = replies.as_mut() else {
+                return Ok(());
+            };
+            pending
+                .iter_mut()
+                .filter_map(|(id, slot)| {
+                    let captured = slot.callback.model_attempt.as_ref()?;
+                    if !Arc::ptr_eq(captured, attempt) {
+                        return None;
+                    }
+                    slot.reply.take();
+                    self.cancel_preparation(&slot.callback, &slot.turn);
+                    Some((*id, slot.callback.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut failed = false;
+        for (id, callback) in callbacks {
+            callback.wait().await;
+            failed |= callback.cleanup_failed.load(Ordering::Acquire);
+            self.retire_preparation(id, true);
+        }
+        ensure!(!failed, "Model callback cleanup failed");
+        Ok(())
     }
 
     async fn finish_preparations(&self) {
@@ -1146,7 +1322,7 @@ impl PythonTools {
         };
         for (id, callback) in callbacks {
             callback.wait().await;
-            self.retire_preparation(id);
+            self.retire_preparation(id, true);
         }
     }
 
@@ -1189,11 +1365,20 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
         terminal_slots: &[usize],
+        input_error_slots: &[usize],
         defaults: Option<&[usize]>,
         flags: [bool; 5],
         _reuse_initial: bool,
     ) -> Result<ProfileCatalog> {
-        self.allocate_profile_catalog(specs, manual_slots, terminal_slots, defaults, flags, true)
+        self.allocate_profile_catalog(
+            specs,
+            manual_slots,
+            terminal_slots,
+            input_error_slots,
+            defaults,
+            flags,
+            true,
+        )
     }
 
     pub(crate) fn voice_profile_catalog(
@@ -1201,10 +1386,19 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
         terminal_slots: &[usize],
+        input_error_slots: &[usize],
         defaults: Option<&[usize]>,
         flags: [bool; 5],
     ) -> Result<ProfileCatalog> {
-        self.allocate_profile_catalog(specs, manual_slots, terminal_slots, defaults, flags, false)
+        self.allocate_profile_catalog(
+            specs,
+            manual_slots,
+            terminal_slots,
+            input_error_slots,
+            defaults,
+            flags,
+            false,
+        )
     }
 
     fn allocate_profile_catalog(
@@ -1212,6 +1406,7 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
         terminal_slots: &[usize],
+        input_error_slots: &[usize],
         defaults: Option<&[usize]>,
         flags: [bool; 5],
         managed: bool,
@@ -1224,6 +1419,7 @@ impl PythonTools {
         let mut generation = self.prepare_catalog(id, specs, policy)?;
         generation.set_manual(manual_slots)?;
         generation.set_finish(terminal_slots)?;
+        generation.set_input_errors(input_error_slots)?;
         let defaults = generation.default_names(defaults)?;
         let generation = Arc::new(generation);
         let mut catalogs = self
@@ -1269,10 +1465,17 @@ impl PythonTools {
             .enumerate()
             .filter_map(|(slot, entry)| entry.finish_turn.then_some(slot))
             .collect::<Vec<_>>();
+        let input_errors = generation
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| entry.input_error_recovery.then_some(slot))
+            .collect::<Vec<_>>();
         self.profile_catalog(
             generation.specs.clone(),
             &manual,
             &terminal,
+            &input_errors,
             defaults,
             flags,
             false,
@@ -2012,6 +2215,9 @@ impl PythonTools {
         if let Some(slots) = startup.thread_extension_init.get::<FinishToolSlots>() {
             seed.set_finish(&slots.0)?;
         }
+        if let Some(slots) = startup.thread_extension_init.get::<InputErrorToolSlots>() {
+            seed.set_input_errors(&slots.0)?;
+        }
         *tools.current.write().expect("Python catalog poisoned") = Arc::new(seed);
         startup.thread_extension_init.insert(tools);
         Ok(())
@@ -2259,6 +2465,7 @@ impl PythonTools {
             entries.push(Entry {
                 manual: false,
                 finish_turn: false,
+                input_error_recovery: false,
                 name,
                 spec,
                 exposure: if matches!(
@@ -2298,9 +2505,138 @@ impl PythonTools {
         self.context_transform_enabled
     }
 
+    pub(crate) fn needs_model_retry_callback(&self, policy_enabled: bool) -> bool {
+        policy_enabled
+            || self
+                .model_producer
+                .lock()
+                .expect("Model producer poisoned")
+                .enabled_for_retry()
+    }
+
+    pub(crate) fn publish_model_attempt(
+        &self,
+        input: codex_extension_api::ModelAttemptInput,
+    ) -> Result<()> {
+        let owner = input
+            .admission
+            .turn_store()
+            .get::<Arc<TurnAdmission>>()
+            .context("Missing model attempt owner")?;
+        ensure!(
+            owner.thread_id == input.admission.thread_id(),
+            "Mismatched model attempt owner"
+        );
+        // Retain the exact ledger view before the FIFO notice. Reads at manual sealing
+        // also include measurements received during joined cleanup, before a final fact.
+        *owner
+            .model_attempt
+            .lock()
+            .expect("Model attempt mirror poisoned") = input.admission.model_attempt();
+        let mut data = serde_json::to_value(input.snapshot)?;
+        data["attempt_id"] = json!(input.attempt_id);
+        data["phase"] = json!(input.phase);
+        let mut event = json!({"id":owner.turn_id,"msg":{"type":"_sdk_model_attempt","thread":owner.thread_id,"turn_id":owner.turn_id,"data":data,
+            "root_turn_id":input.admission.root_turn_id()}});
+        if let Some(instance) = &self.instance {
+            event["subagent_id"] = json!(owner.thread_id);
+            event["subagent_incarnation"] = json!(instance);
+        }
+        self.family
+            .requests
+            .send(QueuedRequest::Step(event))
+            .map_err(|_| anyhow::anyhow!("Model attempt reader closed"))
+    }
+
+    pub(crate) async fn decide_model_retry(
+        self: &Arc<Self>,
+        input: codex_extension_api::ModelRetryInput,
+    ) -> Result<codex_protocol::model_retry::ModelRetryResolution> {
+        let owner = input
+            .admission
+            .turn_store()
+            .get::<Arc<TurnAdmission>>()
+            .context("Missing model retry owner")?;
+        let mut source = self.source_metadata(input.admission.step_store())?;
+        if !source.contains_key("generation") {
+            source.insert(
+                "generation".into(),
+                json!(self.generation_for_step(input.admission.step_store())?.id),
+            );
+        }
+        let turn = owner.turn_id.clone();
+        let root_turn_id = input.admission.root_turn_id().map(str::to_owned);
+        self.exchange_preparation(
+            Arc::clone(owner.as_ref()),
+            None,
+            Some(input.cancellation),
+            [
+                "Expired model retry owner",
+                "Model retry reader closed",
+                "Model retry callback cancelled",
+            ],
+            PreparationReply::ModelRetry,
+            |id| {
+                let mut msg = source;
+                msg.insert("type".into(), json!("_sdk_model_retry"));
+                msg.insert("request_id".into(), json!(id));
+                msg.insert("thread".into(), json!(input.admission.thread_id()));
+                msg.insert("instance".into(), json!(self.instance));
+                msg.insert("turn_id".into(), json!(turn));
+                msg.insert("data".into(), json!(input.context));
+                msg.insert("root_turn_id".into(), json!(root_turn_id));
+                let mut event = json!({"id":turn,"msg":msg});
+                if let Some(instance) = &self.instance {
+                    event["subagent_id"] = json!(input.admission.thread_id());
+                    event["subagent_incarnation"] = json!(instance);
+                }
+                event
+            },
+            |reply| reply.map_err(|_| anyhow::anyhow!("Model retry callback failed")),
+        )
+        .await
+    }
+
+    pub(crate) fn reply_model_retry(
+        self: &Arc<Self>,
+        id: u64,
+        data: Option<&str>,
+        error: bool,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let owner = self.step_owner(thread, instance)?;
+        let mut replies = owner
+            .preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned");
+        let slot = replies
+            .as_mut()
+            .and_then(|pending| pending.get_mut(&id))
+            .context("Expired model retry callback")?;
+        ensure!(
+            !slot.is_closed() && matches!(slot.reply, Some(PreparationReply::ModelRetry(_))),
+            "Expired model retry callback"
+        );
+        let value = if error {
+            Err(())
+        } else {
+            let data = data.context("Missing model retry reply")?;
+            ensure!(data.len() <= 65_536, "Model retry reply exceeds capacity");
+            Ok(serde_json::from_str(data)?)
+        };
+        let Some(PreparationReply::ModelRetry(reply)) = slot.reply.take() else {
+            unreachable!()
+        };
+        reply
+            .send(value)
+            .map_err(|_| anyhow::anyhow!("Expired model retry callback"))
+    }
+
     async fn exchange_preparation<T, U>(
         self: &Arc<Self>,
         owner: Arc<TurnAdmission>,
+        model_attempt: Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
         [expired, reader_closed, cancelled]: [&'static str; 3],
         prepare: impl FnOnce(oneshot::Sender<T>) -> PreparationReply,
@@ -2310,7 +2646,7 @@ impl PythonTools {
         let id = self.family.next_invocation.fetch_add(1, Ordering::Relaxed);
         let (reply, receive) = oneshot::channel();
         let mut request = request(id);
-        let callback = self.preparation_callback(id, &mut request);
+        let callback = self.model_preparation_callback(id, &mut request, model_attempt);
         {
             let mut replies = self
                 .preparation_replies
@@ -2320,11 +2656,16 @@ impl PythonTools {
                 !self.preparations_stopped.load(Ordering::Acquire),
                 "{expired}"
             );
+            let prepared = prepare(reply);
+            ensure!(
+                !prepared.is_closed() && callback.admits_reply(),
+                "{expired}"
+            );
             replies.as_mut().context(expired)?.insert(
                 id,
                 PreparationSlot {
                     turn: request["id"].as_str().unwrap_or_default().to_owned(),
-                    reply: Some(prepare(reply)),
+                    reply: Some(prepared),
                     callback: callback.clone(),
                 },
             );
@@ -2366,7 +2707,7 @@ impl PythonTools {
 
     pub(crate) async fn transform_context(
         self: &Arc<Self>,
-        input: codex_extension_api::ModelContextInput<'_>,
+        mut input: codex_extension_api::ModelContextInput<'_>,
     ) -> Result<()> {
         let source = self.source_metadata(input.step_store)?;
         if input
@@ -2376,10 +2717,22 @@ impl PythonTools {
         {
             return Ok(());
         }
+        if let Some(prompt) = input.hosted_prompt.as_deref_mut() {
+            if !prompt.omit_instructions {
+                prompt.resolved_instructions = Some(
+                    crate::application_instructions::captured_prompt_text(input.step_store)?,
+                );
+            }
+            crate::application_instructions::remove_prompt_fragments(input.items)?;
+        }
         let owner = self.admission_ready(input.turn_id)?;
         let update = self
             .exchange_preparation(
                 owner,
+                input
+                    .step_store
+                    .and_then(|step| step.get::<codex_extension_api::CapturedModelAttempt>())
+                    .map(|captured| captured.0.clone()),
                 input
                     .step_store
                     .and_then(|step| step.get::<codex_extension_api::ToolsOnlyWorkCancellation>())
@@ -2398,6 +2751,11 @@ impl PythonTools {
                             "thread": input.thread_id, "instance": self.instance,
                             "step_id": id, "model": input.model,
                             "purpose": if input.compaction { "compaction" } else { "turn" },
+                            "hosted_prompt": input.hosted_prompt.is_some(),
+                            "hosted_prompt_omissions": input.hosted_prompt.as_deref().map(|prompt| json!({
+                                "omit_model":prompt.omit_model, "omit_instructions":prompt.omit_instructions,
+                                "omit_tools":prompt.omit_tools,
+                            })),
                             "items": input.items,
                         }
                     });
@@ -2410,8 +2768,22 @@ impl PythonTools {
                 |update| update.context("Model context transformation failed"),
             )
             .await?;
-        if let ModelContextUpdate::Replace(items) = update {
-            *input.items = items;
+        match update {
+            ModelContextUpdate::Keep => {}
+            ModelContextUpdate::Replace(items) => *input.items = items,
+            ModelContextUpdate::Hosted(reply) => {
+                let target = input
+                    .hosted_prompt
+                    .as_deref_mut()
+                    .context("Unexpected hosted prompt reply")?;
+                target.reference = Some(reply.hosted_prompt);
+                if reply.explicit_tools {
+                    target.omit_tools = false;
+                }
+                if let Some(items) = reply.items {
+                    *input.items = items;
+                }
+            }
         }
         Ok(())
     }
@@ -2435,6 +2807,7 @@ impl PythonTools {
         let owner = self.admission_ready(input.turn_id)?;
         self.exchange_preparation(
             owner,
+            None,
             input
                 .step_store
                 .and_then(|step| step.get::<codex_extension_api::ToolsOnlyWorkCancellation>())
@@ -2505,6 +2878,10 @@ impl PythonTools {
                 .context("Completion owner unavailable")?;
         self.exchange_preparation(
             owner,
+            input
+                .step_store
+                .and_then(|step| step.get::<codex_extension_api::CapturedModelAttempt>())
+                .map(|captured| captured.0.clone()),
             input
                 .step_store
                 .and_then(|step| step.get::<codex_extension_api::ToolsOnlyWorkCancellation>())
@@ -2641,6 +3018,7 @@ impl PythonTools {
             .as_mut()
             .context("Expired preparation")?
             .get_mut(&id)
+            .filter(|slot| !slot.is_closed())
             .and_then(|slot| slot.reply.take())
             .context("Expired preparation")
     }
@@ -2735,6 +3113,14 @@ impl PythonTools {
         // Revalidate against this candidate's policy. Only the revision number
         // survives: pending calls, graph admissions and reply owners stay local.
         let mut seed = self.prepare(original.id, current.specs.clone())?;
+        seed.set_input_errors(
+            &current
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, entry)| entry.input_error_recovery.then_some(slot))
+                .collect::<Vec<_>>(),
+        )?;
         seed.set_manual(
             &current
                 .entries
@@ -2762,7 +3148,7 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
     ) -> Result<u64> {
-        self.replace_with_defaults(thread, id, specs, manual_slots, None, None, &[])
+        self.replace_with_defaults(thread, id, specs, manual_slots, None, None, &[], &[])
             .await
     }
 
@@ -2775,6 +3161,7 @@ impl PythonTools {
         default_slots: Option<&[usize]>,
         profile_update: Option<&crate::agent_profiles::ProfileToolUpdate>,
         finish_slots: &[usize],
+        input_error_slots: &[usize],
     ) -> Result<u64> {
         if let Some(id) = crate::agent_profiles::replace_tools(
             thread,
@@ -2784,6 +3171,7 @@ impl PythonTools {
             default_slots,
             profile_update,
             finish_slots,
+            input_error_slots,
         )
         .await?
         {
@@ -2796,12 +3184,14 @@ impl PythonTools {
         let mut candidate = self.prepare(id, specs)?;
         candidate.set_manual(manual_slots)?;
         candidate.set_finish(finish_slots)?;
+        candidate.set_input_errors(input_error_slots)?;
         let defaults = candidate.default_names(default_slots)?;
         self.check_idle(thread).await?;
         let allocated = self.allocate_generation()?;
         ensure!(id == allocated, "Python tool generation is out of sequence");
         let generation = self.publish(candidate)?;
         *self.step_defaults.write().expect("Step defaults poisoned") = defaults;
+        crate::hosted_prompt::explicit_root_tools(thread).await?;
         Ok(generation)
     }
 
@@ -3470,6 +3860,7 @@ impl PythonTools {
             turn,
             call_id,
             serde_json::from_str(arguments)?,
+            None,
             &ToolCallSource::Direct,
             model,
             true,
@@ -3629,7 +4020,6 @@ impl PythonTools {
             match receiver.recv().await {
                 Some(QueuedRequest::SandboxOperation(notice)) => return notice.payload,
                 Some(QueuedRequest::Callback(notice)) => return notice,
-                Some(QueuedRequest::Prepared(request)) => return request,
                 Some(QueuedRequest::Step(request)) => return request,
                 Some(QueuedRequest::Call(owner, key, invocation, request)) => {
                     if owner.upgrade().is_some_and(|tools| {
@@ -3815,8 +4205,8 @@ impl PythonTools {
         media: Option<NativeMediaContext>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
-            thread, generation, slot, turn, call, arguments, source, model, reentry, None, media,
-            None,
+            thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
+            media, None,
         )
     }
 
@@ -3828,6 +4218,7 @@ impl PythonTools {
         turn: &str,
         call: &str,
         arguments: Value,
+        argument_error: Option<String>,
         source: &ToolCallSource,
         model: Option<&str>,
         reentry: bool,
@@ -3881,6 +4272,9 @@ impl PythonTools {
                 "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
         });
+        if let Some(error) = argument_error {
+            request["msg"]["_sdk_argument_error"] = json!(error);
+        }
         if let Some(callback) = &callback {
             request["msg"]["_sdk_callback"] = callback.receipt.clone();
         }
@@ -4504,6 +4898,10 @@ impl TurnLifecycleContributor for PythonContributor {
                     owner.clone(),
                     input
                         .step_store
+                        .get::<codex_extension_api::CapturedModelAttempt>()
+                        .map(|captured| captured.0.clone()),
+                    input
+                        .step_store
                         .get::<codex_extension_api::ToolsOnlyWorkCancellation>()
                         .map(|scope| scope.0.clone()),
                     [
@@ -4613,6 +5011,10 @@ impl TurnLifecycleContributor for PythonContributor {
                     owner.clone(),
                     input
                         .step_store
+                        .get::<codex_extension_api::CapturedModelAttempt>()
+                        .map(|captured| captured.0.clone()),
+                    input
+                        .step_store
                         .get::<codex_extension_api::ToolsOnlyWorkCancellation>()
                         .map(|scope| scope.0.clone()),
                     [
@@ -4717,6 +5119,7 @@ impl TurnLifecycleContributor for PythonContributor {
                     .as_ref()
                     .is_some_and(|prior| prior.turn_id == input.turn_id);
                 let receipt = Arc::new(TurnAdmission {
+                    model_attempt: Mutex::new(None),
                     thread_id: input.thread_store.level_id().to_owned(),
                     tracing: tracing.context.clone(),
                     turn_id: input.turn_id.to_owned(),
@@ -5269,12 +5672,7 @@ impl PythonContributor {
                     code_mode_enabled: self.code_mode_enabled,
                 })
                     as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>;
-                crate::agent_profiles::wrap_handoff_callback(
-                    thread,
-                    profile.as_ref(),
-                    slot,
-                    executor,
-                )
+                crate::agent_profiles::wrap_handoff_callback(thread, profile.as_ref(), executor)
             })
             .collect()
     }
@@ -5857,7 +6255,12 @@ impl ToolContributor for PythonContributor {
             if let Some(context) = &tracing {
                 request["msg"]["tracing_context"] = json!(context.token());
             }
-            let callback = tools.preparation_callback(id, &mut request);
+            let callback = tools.model_preparation_callback(
+                id,
+                &mut request,
+                step.get::<codex_extension_api::CapturedModelAttempt>()
+                    .map(|captured| captured.0.clone()),
+            );
             {
                 let mut replies = tools
                     .preparation_replies
@@ -5970,10 +6373,20 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 ));
             }
 
-            let arguments = match &call.payload {
-                ToolPayload::ClientToolSearch(search) => search.arguments.clone(),
-                _ => serde_json::from_str(call.function_arguments()?)
-                    .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?,
+            let (arguments, argument_error) = match &call.payload {
+                ToolPayload::ClientToolSearch(search) => (search.arguments.clone(), None),
+                _ => {
+                    let raw = call.function_arguments()?;
+                    match serde_json::from_str::<Value>(raw) {
+                        Ok(value) => (value, None),
+                        Err(error) if self.generation.entries[self.slot].input_error_recovery => {
+                            (Value::String(raw.to_owned()), Some(error.to_string()))
+                        }
+                        Err(error) => {
+                            return Err(FunctionCallError::RespondToModel(error.to_string()));
+                        }
+                    }
+                }
             };
             let shell_calls = self
                 .managed_calls
@@ -5994,6 +6407,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 &call.turn_id,
                 &call.call_id,
                 arguments,
+                argument_error,
                 &call.source,
                 Some(&call.model),
                 false,
@@ -7022,6 +7436,25 @@ pub(crate) mod managed_tests {
         }
     }
 
+    // Model-attempt observations share this FIFO but require no callback reply.
+    pub(super) async fn next_callback_request(tools: &PythonTools) -> Value {
+        loop {
+            let event = tools.next_request().await;
+            if event["msg"]["type"] != "_sdk_model_attempt" {
+                return event;
+            }
+            assert_eq!(event["id"], event["msg"]["turn_id"]);
+            assert!(event["msg"]["turn_id"].is_string());
+            assert!(
+                event["msg"]["data"]["attempt_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+            let _: codex_protocol::model_retry::ModelAttemptPhase =
+                serde_json::from_value(event["msg"]["data"]["phase"].clone()).unwrap();
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn prepared_request_rechecks_admission_after_no_edit_reply() {
         use codex_protocol::user_input::UserInput;
@@ -7050,6 +7483,16 @@ pub(crate) mod managed_tests {
             .await
             .unwrap();
             assert_eq!(started["status"], "started");
+            let attempt = tools.next_request().await;
+            assert_eq!(attempt["msg"]["type"], "_sdk_model_attempt");
+            assert_eq!(attempt["id"], started["turn_id"]);
+            assert_eq!(attempt["msg"]["turn_id"], started["turn_id"]);
+            assert_eq!(attempt["msg"]["data"]["phase"], "started");
+            assert!(
+                attempt["msg"]["data"]["attempt_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
             let request = tools.next_request().await;
             assert_eq!(request["msg"]["type"], "_sdk_prepare_request");
             assert_eq!(request["msg"]["turn_id"], started["turn_id"]);
@@ -7297,6 +7740,7 @@ pub(crate) mod managed_tests {
                 thread_id,
                 client_metadata: &mut metadata,
                 model: "fixture",
+                model_omitted: false,
             }));
         };
         steering_item(&state, &old_turn, None).await;
@@ -8062,7 +8506,7 @@ pub(crate) mod managed_tests {
                 "input":[UserInput::Text { text:"run the manual lookup".into(), text_elements:vec![] }]
             })).await.unwrap();
             assert_eq!(original["status"], "started");
-            let notice = tools.next_request().await;
+            let notice = next_callback_request(&tools).await;
             assert_eq!(notice["msg"]["callId"], "call-lookup");
             assert!(manual_checkpoint::ready(&state, &native.manual).await.unwrap());
             let mut payload = manual_checkpoint::capture(&state, &native.manual, None, false)
@@ -8092,7 +8536,7 @@ pub(crate) mod managed_tests {
             let resumed = restored.current().unwrap();
             let tools = resumed.thread.thread_extension_data().get::<PythonTools>().unwrap();
             manual_checkpoint::prepare(&resumed, &restored.manual).await.unwrap();
-            let notice = tools.next_request().await;
+            let notice = next_callback_request(&tools).await;
             assert_eq!(notice["msg"]["callId"], "call-lookup");
             let mut grants = tools.manual_snapshot(&resumed.id.to_string()).unwrap();
             assert_eq!(grants.len(), 1);
@@ -9325,7 +9769,7 @@ pub(crate) mod managed_tests {
         assert!(narrowed.default_names(Some(&[2])).is_err());
         assert!(narrowed.default_names(Some(&[0, 0])).is_err());
         let declared = tools
-            .profile_catalog(specs, &[], &[], None, [false; 5], false)
+            .profile_catalog(specs, &[], &[], &[], None, [false; 5], false)
             .unwrap();
         let thread = ExtensionData::new("source");
         thread.insert(Arc::try_unwrap(tools).ok().expect("exclusive fixture"));
@@ -9417,6 +9861,7 @@ pub(crate) mod managed_tests {
                 vec![DynamicToolSpec::Function(function("a"))],
                 &[],
                 &[],
+                &[],
                 None,
                 [false; 5],
                 true,
@@ -9425,6 +9870,7 @@ pub(crate) mod managed_tests {
         let b = parent
             .profile_catalog(
                 vec![DynamicToolSpec::Function(function("b"))],
+                &[],
                 &[],
                 &[],
                 None,
@@ -9503,6 +9949,7 @@ pub(crate) mod managed_tests {
         let a = parent
             .profile_catalog(
                 vec![DynamicToolSpec::Function(function("a"))],
+                &[],
                 &[],
                 &[],
                 None,

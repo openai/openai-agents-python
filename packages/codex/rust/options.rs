@@ -77,6 +77,8 @@ pub struct ThreadOptions {
     pub(crate) manual_tool_slots: Vec<usize>,
     #[serde(rename = "_terminal_tool_slots")]
     pub(crate) terminal_tool_slots: Vec<usize>,
+    #[serde(rename = "_input_error_tool_slots")]
+    pub(crate) input_error_tool_slots: Vec<usize>,
     #[serde(rename = "_transform_context")]
     pub(crate) transform_context: bool,
     #[serde(rename = "_before_compact")]
