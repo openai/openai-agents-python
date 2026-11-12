@@ -91,6 +91,7 @@ class Turn(Generic[OutputT]):
     _native: Any = field(repr=False, compare=False)
     _observation_after: int = field(repr=False, compare=False)
     _guardrail_results: list[Any] = field(repr=False, compare=False)
+    _original_input: UserInput | None = field(default=None, repr=False, compare=False)
 
     @property
     def application_tool_outputs(self) -> tuple[ApplicationToolOutput, ...]:
