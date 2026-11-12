@@ -254,7 +254,14 @@ class LocalDirLazySkillSource(LazySkillSource):
                     frontmatter = _parse_frontmatter(skill_md_path.read_text(encoding="utf-8"))
                 else:
                     read_limit = budget.read_limit()
-                    with skill_md_path.open("rb") as handle:
+                    descriptor = self.source._open_local_dir_file_for_copy(
+                        base_dir=Path.cwd(),
+                        src_root=src_root,
+                        rel_child=skill_md_path.relative_to(src_root),
+                        source_grants=source_grants,
+                        nonblocking=True,
+                    )
+                    with os.fdopen(descriptor, "rb") as handle:
                         payload = handle.read(read_limit)
                     frontmatter = budget.parse(payload, read_limit=read_limit)
             except OSError:

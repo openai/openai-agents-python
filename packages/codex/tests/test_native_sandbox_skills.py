@@ -561,7 +561,20 @@ async def test_current_manifest_rotation_revokes_loader(tmp_path, monkeypatch, r
         assert not (peer.root / ".agents/report/SKILL.md").exists()
 
 
-@pytest.mark.parametrize("mode", ["matching", "read_only", "host_path", "removed"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        pytest.param(
+            "matching",
+            marks=pytest.mark.skipif(
+                sys.platform not in ("linux", "darwin"), reason="Strict native executor policy"
+            ),
+        ),
+        "read_only",
+        "host_path",
+        "removed",
+    ],
+)
 async def test_borrowed_skill_grants_require_current_exact_configuration(
     tmp_path, monkeypatch, responses, mode
 ):
@@ -570,7 +583,7 @@ async def test_borrowed_skill_grants_require_current_exact_configuration(
     async with ExecutorPeer(tmp_path / "executor").serve() as peer:
         trust(peer, tmp_path, monkeypatch)
         client = Client([])
-        grant = SandboxPathGrant(path=str(tmp_path / "shared"), read_only=True)
+        grant = SandboxPathGrant(path="/shared", read_only=True)
         manifest = Manifest(root=str(peer.root), extra_path_grants=(grant,))
         borrowed = await client.create(manifest=manifest.model_copy(deep=True), options=Options())
         client.backend_id = borrowed.state.type
@@ -625,6 +638,7 @@ async def test_borrowed_skill_grants_require_current_exact_configuration(
             await borrowed.aclose()
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Strict native executor policy")
 async def test_native_skill_index_shares_workspace_utf8_budget(tmp_path, monkeypatch, responses):
     from tests.test_native_workspace_guidance import _latest_user_instructions
 
@@ -857,3 +871,76 @@ async def test_owned_cold_resume_stages_current_eager_skills_only(
         document = root / ".agents/report/SKILL.md"
         assert document.is_file(), "Published eager skill index without restored skill files"
         assert document.read_bytes() == document_bytes
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
+@pytest.mark.parametrize("replacement", ["ancestor", "leaf", "fifo"])
+@pytest.mark.parametrize("portable", [False, True])
+async def test_native_lazy_index_rejects_swapped_source(
+    tmp_path, monkeypatch, responses, replacement, portable
+):
+    from _agents_shared.sandbox_skills import _MetadataBudget
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    selected = tmp_path / "skills/report/SKILL.md"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("---\nname: report\n---\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(
+        "---\nname: report\ndescription: OUTSIDE_INDEX_SECRET\n---\n", encoding="utf-8"
+    )
+    if portable:
+        from agents.classic.sandbox.entries import artifacts
+
+        monkeypatch.setattr(artifacts, "_OPEN_SUPPORTS_DIR_FD", False)
+    original = _MetadataBudget.read_limit
+
+    def swap_before_read(budget):
+        if replacement == "ancestor":
+            selected.parent.rename(tmp_path / "original-report")
+            selected.parent.symlink_to(outside, target_is_directory=True)
+        else:
+            selected.unlink()
+            if replacement == "fifo":
+                os.mkfifo(selected)
+            else:
+                selected.symlink_to(outside / "SKILL.md")
+        return original(budget)
+
+    monkeypatch.setattr(_MetadataBudget, "read_limit", swap_before_read)
+
+    @asynccontextmanager
+    async def connect(sandbox):
+        root = Path(sandbox.state.manifest.root)
+        async with ExecutorPeer(tmp_path / "executor").serve() as executor:
+            trust(executor, tmp_path, monkeypatch)
+            yield Environment(
+                url=executor.url,
+                headers={"Authorization": "Bearer " + executor.token},
+                cwd=str(root),
+                tools=(),
+                capability_directories=[str(root / ".agents")],
+            )
+
+    source = sandbox_environment(
+        UnixLocalSandboxClient(),
+        manifest=Manifest(),
+        options=UnixLocalSandboxClientOptions(),
+        connect=connect,
+        skills=Skills(lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path("skills")))),
+    )
+    responses.respond(assistant_output("done"))
+    with pytest.raises(LocalDirReadError):
+        async with Agent(
+            instructions="Read the current index.",
+            model="gpt-5.5",
+            provider=provider(responses),
+            tools=source.skill_tools,
+        ).session(environment=source) as session:
+            await (await session.submit("Read the index.")).get_result()
+    assert responses.requests == []
