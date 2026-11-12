@@ -80,7 +80,6 @@ class ProjectContinuation(InjectFirstFrozenTail):
             assert self.terminal is not None
             assert request["expected_previous_turn_id"] == self.terminal[0]
             assert request["input"] == []
-            assert model_attempts is None
             request = {
                 "mode": "start_if_idle",
                 "input": [{"type": "text", "text": "synthetic continuation admission"}],

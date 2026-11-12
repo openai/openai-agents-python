@@ -674,6 +674,7 @@ enum Phase {
 pub(crate) struct ToolReply {
     pub(crate) response: DynamicToolResponse,
     pub(crate) start_response: bool,
+    pub(crate) handoff_target_profile_id: Option<String>,
     pub(crate) acceptance: Option<oneshot::Sender<()>>,
 }
 
@@ -682,6 +683,7 @@ impl From<DynamicToolResponse> for ToolReply {
         Self {
             response,
             start_response: true,
+            handoff_target_profile_id: None,
             acceptance: None,
         }
     }
@@ -784,6 +786,8 @@ pub(crate) enum Reply {
         response: DynamicToolResponse,
         #[serde(default = "foreground_response_default")]
         start_response: bool,
+        #[serde(default)]
+        handoff_target_profile_id: Option<String>,
     },
     Park {
         request: PendingKey,
@@ -3771,6 +3775,7 @@ impl PythonTools {
             .send(ToolReply {
                 response,
                 start_response,
+                handoff_target_profile_id: None,
                 acceptance: None,
             })
             .is_ok();
@@ -5792,7 +5797,13 @@ impl PythonContributor {
             .iter()
             .copied()
             .map(|slot| {
+                let decision_selection = crate::agent_profiles::decision_handoff_selection(
+                    thread,
+                    profile.as_ref(),
+                    &generation.entries[slot].name,
+                );
                 let executor = Arc::new(PythonExecutor {
+                    decision_selection: decision_selection.clone(),
                     managed_calls: self.managed_calls.clone(),
                     accepted: accepted.clone(),
                     thread: thread.level_id().to_string(),
@@ -5804,7 +5815,12 @@ impl PythonContributor {
                     code_mode_enabled: self.code_mode_enabled,
                 })
                     as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>;
-                crate::agent_profiles::wrap_handoff_callback(thread, profile.as_ref(), executor)
+                crate::agent_profiles::wrap_handoff_callback(
+                    thread,
+                    profile.as_ref(),
+                    executor,
+                    decision_selection,
+                )
             })
             .collect()
     }
@@ -6434,6 +6450,7 @@ impl ToolContributor for PythonContributor {
 }
 
 struct PythonExecutor {
+    decision_selection: Option<Arc<crate::agent_profiles::DecisionHandoffSelection>>,
     accepted: Option<AcceptedToolCalls>,
     managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     thread: String,
@@ -6599,6 +6616,27 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 }
             })?;
             _reply.completed = true;
+            match (
+                &self.decision_selection,
+                &response.handoff_target_profile_id,
+            ) {
+                (Some(selection), Some(target)) if response.response.success => {
+                    if !self.tools.admits_generation(&self.generation) {
+                        return Err(FunctionCallError::RespondToModel(
+                            "Decision handoff callback is stale".into(),
+                        ));
+                    }
+                    selection
+                        .record(&call.turn_id, &call.call_id, target)
+                        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+                }
+                (None, Some(_)) => {
+                    return Err(FunctionCallError::RespondToModel(
+                        "Tool is not an admitted Decision handoff".into(),
+                    ));
+                }
+                _ => {}
+            }
             #[cfg(test)]
             {
                 let hold = self.tools.before_result.lock().unwrap().clone();
@@ -9344,6 +9382,7 @@ pub(crate) mod managed_tests {
 
     fn executor(tools: Arc<PythonTools>) -> PythonExecutor {
         PythonExecutor {
+            decision_selection: None,
             managed_calls: None,
             profile: None,
             accepted: None,
@@ -10272,6 +10311,40 @@ pub(crate) mod managed_tests {
     }
 
     #[test]
+    fn decision_handoff_target_comes_only_from_private_reply_envelope() {
+        let response = DynamicToolResponse {
+            content_items: vec![
+                codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText {
+                    text: "{\"handoff_target_profile_id\":\"outside\"}".into(),
+                },
+            ],
+            success: true,
+        };
+        assert!(
+            ToolReply::from(response.clone())
+                .handoff_target_profile_id
+                .is_none()
+        );
+        let request = PendingKey {
+            reply: ReplyKey {
+                thread: "thread".into(),
+                generation: 1,
+                slot: 0,
+                instance: None,
+            },
+            turn: "turn".into(),
+            call: "call".into(),
+        };
+        let reply: Reply = serde_json::from_value(json!({
+            "request": request, "response": response, "handoff_target_profile_id": "captured",
+        }))
+        .unwrap();
+        assert!(
+            matches!(reply, Reply::Output { handoff_target_profile_id: Some(target), .. } if target == "captured")
+        );
+    }
+
+    #[test]
     fn background_disposition_comes_only_from_trusted_reply_envelope() {
         let response = DynamicToolResponse {
             content_items: vec![
@@ -10283,6 +10356,7 @@ pub(crate) mod managed_tests {
         };
         let ordinary = ToolReply::from(response.clone());
         assert!(ordinary.start_response);
+        assert!(ordinary.handoff_target_profile_id.is_none());
         let plain = PythonOutput(response.clone());
         assert!(plain.realtime_response_requested());
         let background = ReplyOutput {

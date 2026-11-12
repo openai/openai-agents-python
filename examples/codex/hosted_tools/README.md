@@ -16,41 +16,73 @@ image generator.
 
 ## Compatibility evidence
 
+### Model and protocol reference
+
+OpenAI has been documenting the following combinations for the Responses API.
+The model references' Markdown pages have been supplying the tool lists. The
+[file search](https://developers.openai.com/api/docs/guides/tools-file-search),
+[Code Interpreter](https://developers.openai.com/api/docs/guides/tools-code-interpreter),
+[image generation](https://developers.openai.com/api/docs/guides/image-generation),
+and [shell](https://developers.openai.com/api/docs/guides/tools-shell) guides have
+been describing the Responses integration.
+
+| Agent model | Protocol | File search | Code Interpreter | Image generation | Hosted shell |
+| --- | --- | --- | --- | --- | --- |
+| [`gpt-6.1-sol`](https://developers.openai.com/api/docs/models/gpt-6.1-sol.md) | Responses | Provider-documented | Provider-documented | Provider-documented | Provider-documented |
+| [`gpt-5.2`](https://developers.openai.com/api/docs/models/gpt-5.2.md) | Responses | Provider-documented | Provider-documented | Provider-documented | Provider-documented |
+| [`gpt-4.1` (deprecated)](https://developers.openai.com/api/docs/models/gpt-4.1.md) | Responses | Provider-documented | Provider-documented | Provider-documented | Not documented in this model reference |
+| Any model | Responses Lite | SDK-rejected | SDK-rejected | SDK-rejected | SDK-rejected |
+
+`Provider-documented` has been identifying an explicit entry in the linked model
+reference, rather than a successful live request. `Not documented` has been
+identifying missing evidence, rather than a provider rejection. These references
+have been describing model capabilities without establishing account access,
+Azure deployment support, or support through another provider. These tables have
+been serving as a documentation reference rather than an SDK model allowlist.
+
+The image-generation column has been describing the agent model's ability to
+call the tool. The tool's own `model` field has been selecting the image
+generator separately. The shell guide has been documenting hosted containers
+through Responses and excluding Chat Completions. A model's support for the
+Chat Completions endpoint has not been establishing hosted-tool compatibility.
+
+The SDK's bundled native model catalog has been selecting Responses Lite for
+`gpt-6.1-sol`. The SDK has been rejecting these hosted declarations on that
+route, despite the provider's documented support through direct Responses.
+The `gpt-5.2` hosted-tool examples have been showing the standard Responses SDK
+configuration. Local fixtures have been verifying that route without proving
+live account access.
+
+### SDK and transport evidence
+
 The [Python source baseline](https://github.com/openai/openai-agents-python/tree/22562087f13e841a7ad00ff97356107c3200608b)
-has been providing the SDK behavior below. The local fixtures have been using an
-API-key `NativeProvider` with synthetic Responses over HTTP and streamed server
-events. They have been checking SDK request and history handling without calling
-OpenAI. Live provider verification has been remaining outstanding for every row.
+has been exposing `FileSearch`, `CodeInterpreter`, and `ImageGeneration`.
+The current source checkout has also been exposing `HostedShell`. The
+`0.24.0-alpha.7` preview has not been providing that declaration. The following
+coverage has been describing local synthetic peers, without live OpenAI calls.
 
-| Tool | Standard Responses over HTTP: local fixture coverage | Responses Lite: SDK restriction |
+| Declaration | Responses over streaming HTTP: fixture coverage | Other transport evidence |
 | --- | --- | --- |
-| `FileSearch` | Request fields, completed results, citations, and idle saved-state restore | Native tool planning has been rejecting the declaration |
-| `CodeInterpreter` | Container options, completed outputs, and idle saved-state restore | Native tool planning has been rejecting the declaration |
-| `ImageGeneration` | Generation, inline-image editing, partial events, cancellation, and idle saved-state restore | Native tool planning has been rejecting the declaration |
-| Hosted shell | This baseline has been exposing no native hosted-shell declaration | No admitted declaration |
-
-Newer Python source has been exposing `HostedShell`. Separate fixtures have been
-covering requests, streamed progress, completed output, and cold replay.
-[Hosted shell fixtures](../../../packages/codex/tests/test_native_hosted_shell.py)
+| `FileSearch` | Request fields, results, citations, and idle saved-state restore | Buffered HTTP and WebSocket fixtures: request fields, completed provider data, and saved history |
+| `CodeInterpreter` | Container options, completed outputs, and idle saved-state restore | No tool-specific buffered HTTP or WebSocket fixture evidence |
+| `ImageGeneration` | Generation, inline-image editing, partial events, cancellation, and idle saved-state restore | No tool-specific buffered HTTP or WebSocket fixture evidence |
+| `HostedShell` (current source) | Managed-container requests, streamed progress, completed output, and cold replay | No tool-specific buffered HTTP or WebSocket fixture evidence |
 
 The [hosted-tool fixtures](../../../packages/codex/tests/test_native_hosted_tools.py)
-have been covering the positive HTTP cases and the API-key authentication
-boundary. Session opening with `CodexLogin` has been raising
+have been exercising API-key `NativeProvider` sessions. The buffered HTTP and
+WebSocket probes have been using file search as a representative hosted tool.
+They have not been verifying every tool on those transports. Responses Lite
+fixtures have been checking rejection before a provider request. Session opening
+with `CodexLogin` has been rejecting hosted declarations with
 `Hosted tools require an API-key Responses provider, not Codex login`.
-Native tool planning for Responses Lite has been raising
-`Provider-hosted tools require Responses; Responses Lite is unsupported`.
-The hosted-tool fixtures have been checking that Lite rejection before any
-provider request for all three declarations. WebSocket transport, Azure
-deployments, other providers, and active-turn restore have been remaining outside
-this matrix's fixture evidence.
+The [hosted-shell fixtures](../../../packages/codex/tests/test_native_hosted_shell.py)
+have been covering the current source declaration with `container_auto` and
+`container_reference`, separately from application-owned local shell execution.
 
-The [GPT-5.2 model reference](https://developers.openai.com/api/docs/models/gpt-5.2)
-has been listing file search, Code Interpreter, image generation, and hosted shell
-among its supported tools. That service documentation has not been establishing
-support in every SDK or account. The provider has been validating model access
-and tool options; the agent model and image-generator model have been selecting
-different parts of image generation. No live request, uploaded resource, or
-customer runtime has been contributing verification to this matrix.
+Live model and account verification has been remaining outstanding for every
+row. Azure deployments, other providers, and active-turn restore have been
+remaining outside this evidence. No live request, uploaded resource, or customer
+runtime has been contributing verification to these tables.
 
 OpenAI executes these tools. They do not grant local Python execution or access
 to local files. Your application owns uploaded resources, durable downloads, and

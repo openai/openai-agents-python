@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     from ._function_tools import Tool
     from ._managed_workspace import ManagedWorkspaceCheckpoint
     from .canonical_storage import CustomStorage
+    from .decision_handoff import DecisionHandoff
     from .executor import Environment, EnvironmentSource
     from .handoffs import Handoff
     from .input import UserInput
@@ -878,6 +879,7 @@ class Agent(Generic[ContextT, OutputT]):
         Agent[ContextT, OutputT]
         | Handoff[ContextT, OutputT]
         | RealtimeHandoff
+        | DecisionHandoff
         | _Callable[[], Agent[ContextT, OutputT]],
         ...,
     ]
@@ -920,6 +922,7 @@ class Agent(Generic[ContextT, OutputT]):
                 Agent[ContextT, str]
                 | Handoff[ContextT, str]
                 | RealtimeHandoff
+                | DecisionHandoff
                 | _Callable[[], Agent[ContextT, str]]
             ]
             | None = None,
@@ -943,6 +946,7 @@ class Agent(Generic[ContextT, OutputT]):
                 Agent[ContextT, OutputT]
                 | Handoff[ContextT, OutputT]
                 | RealtimeHandoff
+                | DecisionHandoff
                 | _Callable[[], Agent[ContextT, OutputT]]
             ]
             | None = None,
@@ -975,6 +979,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, str]
             | Handoff[ContextT, str]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, str]]
         ]
         | None = None,
@@ -1009,6 +1014,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, str]
             | Handoff[ContextT, str]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, str]]
         ]
         | None = None,
@@ -1040,6 +1046,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, OutputT]
             | Handoff[ContextT, OutputT]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, OutputT]]
         ]
         | None = None,
@@ -1072,6 +1079,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, OutputT]
             | Handoff[ContextT, OutputT]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, OutputT]]
         ]
         | None = None,
@@ -1100,6 +1108,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, Any]
             | Handoff[ContextT, Any]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, Any]]
         ]
         | None = None,
@@ -1151,12 +1160,14 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
             raise TypeError("provider must be a NativeProvider or None")
+        from .decision_handoff import DecisionHandoff
         from .handoffs import Handoff
         from .realtime_agents import RealtimeAgentConfig, RealtimeHandoff
 
         captured_handoffs = tuple(handoffs or ())
         if any(
-            not isinstance(target, (Agent, Handoff, RealtimeHandoff)) and not callable(target)
+            not isinstance(target, (Agent, Handoff, RealtimeHandoff, DecisionHandoff))
+            and not callable(target)
             for target in captured_handoffs
         ):
             raise TypeError("handoffs must contain native Agents or synchronous target resolvers")
@@ -1497,9 +1508,11 @@ class Agent(Generic[ContextT, OutputT]):
         provider reasoning summaries in the Session's observation stream.
         include_request_attempts=True has been retaining content-free native send
         counts on Turn.request_attempts after settlement of each new explicit
-        native submission. Restored-only handles and private correction or child
-        turns have not been acquiring their own capture. Borrowed client sends
-        have been remaining unavailable. These counts have not been enforcing a cap.
+        native submission. Turn.submission_request_attempts has been additionally
+        counting owned private corrections and steering continuations after logical
+        settlement. Restored-only handles and child turns have been remaining
+        outside this root capture. Borrowed client sends have been remaining
+        unavailable. These native-model counts have not been enforcing a cap.
         include_raw_provider_events=True captures Responses and completed Chat client JSON. Use
         include_execution_details=True on the observation reader to receive it.
         Capture uses the Session's in-memory observation retention policy.

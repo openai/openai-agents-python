@@ -1610,7 +1610,7 @@ index abc8b35fe24d565c484191d70c2465cd1d5120a8..2fc0fa0f2a7160007e49c87b5eda8f4f
          thread_id: Some(session.thread_id()),
          thread_settings: snapshot,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 36e9a93c39b6dd18e480bdb899dd49d63fb8ed57..40b4e8acc7246ef7cb88174d464520722087297e 100644
+index 536e1f8eeb533ea49f7b5f941b402d9ba0b766a0..673b16c4ad3a41a512fc3d2859c1fd00227533cf 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -824,6 +824,11 @@ pub(crate) async fn run_turn(
@@ -1657,7 +1657,7 @@ index 36e9a93c39b6dd18e480bdb899dd49d63fb8ed57..40b4e8acc7246ef7cb88174d46452072
      let turn_context = &step_context.turn;
      if turn_context.config.features.enabled(Feature::TokenBudget) {
          return Ok(());
-@@ -4456,6 +4479,7 @@ async fn try_run_sampling_request(
+@@ -4449,6 +4472,7 @@ async fn try_run_sampling_request(
                      }
  
                      assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
@@ -1665,7 +1665,7 @@ index 36e9a93c39b6dd18e480bdb899dd49d63fb8ed57..40b4e8acc7246ef7cb88174d46452072
                      sess.reserve_assistant_message_order(&turn_context, &item)
                          .await;
                      if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
-@@ -5104,6 +5128,18 @@ async fn try_run_sampling_request(
+@@ -5097,6 +5121,18 @@ async fn try_run_sampling_request(
      if timeout_ms.is_some() || model_attempt.is_some() {
          deadline_cleanup_errors.extend(deadline.retire_tasks().await);
      }
@@ -1684,7 +1684,7 @@ index 36e9a93c39b6dd18e480bdb899dd49d63fb8ed57..40b4e8acc7246ef7cb88174d46452072
      let mut tool_cleanup = if !in_flight.is_empty() {
          let _tool_blocking_timing_guard = turn_context.turn_timing_state.begin_tool_blocking();
          let _tool_blocking_span = trace_span!(
-@@ -5190,6 +5226,8 @@ async fn try_run_sampling_request(
+@@ -5183,6 +5219,8 @@ async fn try_run_sampling_request(
          release_failed_tool_candidates(&sess, &step_context).await;
      }
      tool_cleanup?;

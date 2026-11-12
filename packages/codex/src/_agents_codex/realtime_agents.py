@@ -395,6 +395,8 @@ def _capture_voice_graph(
         agent, provider=opening.provider, model=None, model_settings=None, tool_selection=None
     )
     profiles = _capture_agent_graph(agent, root_declaration=declaration, id_prefix=prefix)
+    if any(profile.decision_handoffs for profile in profiles):
+        raise ValueError("DecisionHandoff does not support Realtime")
     functions, _, _ = _split_tools(
         profiles[0].declaration.tools, declaration.programmatic_tool_calling
     )
