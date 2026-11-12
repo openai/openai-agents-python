@@ -14,6 +14,7 @@ def accepted(controls):
     return SimpleNamespace(
         root_metadata={"model": "fixture"},
         source_session_id="source",
+        native_continuation=None,
         history=[
             {
                 "type": "event_msg",
