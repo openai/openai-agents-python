@@ -4653,10 +4653,17 @@ impl TurnLifecycleContributor for PythonContributor {
                 // This is presentation, not a grant. Resolve the actual native
                 // model; the SDK must never hide selected tools from a model
                 // which cannot request Core's search surface.
+                let run_model = input
+                    .turn_store
+                    .get::<codex_extension_api::CapturedRunModelOverride>();
+                let model_name = run_model.as_ref().map_or_else(
+                    || input.collaboration_mode.model(),
+                    |model| model.0.as_str(),
+                );
                 let use_deferred_specs = if let Some(manager) = self.manager.upgrade() {
                     let model = manager
                         .get_models_manager()
-                        .get_model_info(input.collaboration_mode.model(), &self.models_config)
+                        .get_model_info(model_name, &self.models_config)
                         .await;
                     // Core adds tool_search after its direct-namespace
                     // overrides. In CodeModeOnly it is hidden unless the
