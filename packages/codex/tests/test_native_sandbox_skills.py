@@ -1206,11 +1206,6 @@ async def test_native_skill_quota_tracks_fresh_resource(
 ):
     import shutil
 
-    from agents.classic.sandbox.sandboxes.unix_local import (
-        UnixLocalSandboxClient,
-        UnixLocalSandboxClientOptions,
-    )
-
     workspace = tmp_path / "workspace"
     transport = None
     if backend == "docker":
@@ -1233,6 +1228,11 @@ async def test_native_skill_quota_tracks_fresh_resource(
     else:
         if sys.platform not in ("linux", "darwin"):
             pytest.skip("UnixLocal resource")
+        from agents.classic.sandbox.sandboxes.unix_local import (
+            UnixLocalSandboxClient,
+            UnixLocalSandboxClientOptions,
+        )
+
         client = UnixLocalSandboxClient()
         options = UnixLocalSandboxClientOptions()
     original = await client.create(manifest=Manifest(root=str(workspace)), options=options)
