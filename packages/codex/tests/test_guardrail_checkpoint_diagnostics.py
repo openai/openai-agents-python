@@ -76,6 +76,8 @@ async def test_checkpoint_diagnostic_validation_precedes_irreversible_native_sea
         _native=SimpleNamespace(_seal_manual=seal),
     )
     with pytest.raises(ValueError) as caught:
-        await Session._capture_checkpoint(owner, SimpleNamespace(operation_refs=None, budget=None), None, False)
+        await Session._capture_checkpoint(
+            owner, SimpleNamespace(operation_refs=None, budget=None), None, False
+        )
     assert caught.value is failure
     seal.assert_not_called()

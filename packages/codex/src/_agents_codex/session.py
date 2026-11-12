@@ -2092,7 +2092,6 @@ def _fixed_tool_refs(
     project_guidance: bool = False,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
-    from .native_agents import _COLLABORATION_TOOLS
 
     fixed: set[ToolRef] = set()
     for tool in tools:
@@ -2119,7 +2118,9 @@ def _fixed_tool_refs(
     if project_guidance:
         fixed.update(ToolRef(name, "functions") for name in _PROJECT_GUIDANCE_TOOL_NAMES)
     if native_agents is not None:
-        fixed.update(ToolRef(name, "collaboration") for name in _COLLABORATION_TOOLS)
+        fixed.update(
+            ToolRef(name, "collaboration") for name in native_agents._collaboration_tool_names
+        )
     return fixed
 
 
@@ -4426,6 +4427,20 @@ class Session(Generic[ContextT, OutputT]):
                                 role.name for role in native_agents.additional_roles
                             ],
                             "_native_agent_max_depth": native_agents.max_depth,
+                            **(
+                                {
+                                    "_native_agent_tools": [
+                                        {
+                                            "name": tool.name,
+                                            "role": tool.role,
+                                            "description": tool.description,
+                                        }
+                                        for tool in native_agents.managed_tools
+                                    ],
+                                }
+                                if native_agents.managed_tools
+                                else {}
+                            ),
                         }
                         if native_agents is not None
                         else {}
@@ -4474,7 +4489,7 @@ class Session(Generic[ContextT, OutputT]):
                         + (
                             [
                                 {"name": name, "namespace": "collaboration"}
-                                for name in _COLLABORATION_TOOLS
+                                for name in native_agents._collaboration_tool_names
                             ]
                             if native_agents is not None
                             else []
@@ -15928,10 +15943,19 @@ class Session(Generic[ContextT, OutputT]):
         assert active is not None
         # Waiting precedes checkpoint ownership: cancellation or close can
         # still stop a callback that has not reached a safe sealing boundary.
-        if self._child_admissions or any(
-            not child.completion.done() for child in self._child_callbacks.values()
-        ):
+        if self._child_admissions:
             raise RuntimeError("Cannot save while native child work or callbacks remain active")
+        children = tuple(
+            child.completion
+            for child in self._child_callbacks.values()
+            if not child.completion.done()
+        )
+        if children:
+            # Native settlement can precede delivery of the host terminal
+            # receipt. Join those owners before taking the checkpoint.
+            if not await self._native._manual_children_settled():
+                raise RuntimeError("Cannot save while native child work or callbacks remain active")
+            await asyncio.gather(*(asyncio.shield(child) for child in children))
         if not await self._wait_manual_boundary(active, require_request=True):
             raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
         self._check_open()
