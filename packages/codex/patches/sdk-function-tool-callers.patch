@@ -1,0 +1,188 @@
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index af1c7872..0080c08e 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -47,6 +47,10 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
+         self.0.spec()
+     }
+
++    fn allowed_callers(&self) -> Option<codex_tools::ToolExposures> {
++        self.0.allowed_callers()
++    }
++
+     fn exposure(&self) -> crate::tools::registry::ToolExposure {
+         self.0.exposure()
+     }
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index ae80bc78..ae798b24 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -662,6 +662,25 @@ impl ToolRegistry {
+                 return Err(err);
+             }
+         };
++        if let Some(callers) = tool.allowed_callers() {
++            let allowed = match &invocation.source {
++                crate::tools::context::ToolCallSource::CodeMode { .. } => {
++                    callers.contains(codex_tools::ToolExposures::CODE_MODE)
++                }
++                crate::tools::context::ToolCallSource::Direct
++                | crate::tools::context::ToolCallSource::DirectPlaintextMessage => callers
++                    .intersects(
++                        codex_tools::ToolExposures::DIRECT | codex_tools::ToolExposures::DEFERRED,
++                    ),
++            };
++            if !allowed {
++                let err = FunctionCallError::RespondToModel(format!(
++                    "Tool {tool_name} does not allow calls from this source"
++                ));
++                dispatch_trace.record_failed(&err);
++                return Err(err);
++            }
++        }
+         let telemetry_tags = tool.telemetry_tags(&invocation);
+         let mut tool_result_tags = Vec::with_capacity(2 + telemetry_tags.len() + 1);
+         let mut extra_trace_fields = Vec::new();
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index c7c84623..9a0366bb 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -594,6 +594,11 @@ fn finalize_selected_tool_router(
+     hosted_specs.retain(|spec| registry.tool_policy.allows(&hosted_tool_policy_name(spec)));
+     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+     enforce_strict_3p_tools(turn_context, model_info, &mut registry);
++    for tool in registry.entries_mut() {
++        if let Some(callers) = tool.runtime.allowed_callers() {
++            tool.exposure = tool.exposure.restrict_to(callers);
++        }
++    }
+     let tool_mode = effective_tool_mode(turn_context, model_info);
+     let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
+     if code_mode_enabled {
+@@ -880,7 +885,12 @@ fn build_model_visible_specs(
+         }
+
+         let tool_name = tool.runtime.tool_name();
+-        if is_hidden_by_code_mode_only(turn_context, model_info, &tool_name, exposure) {
++        let explicit_direct = tool.runtime.allowed_callers().is_some_and(|callers| {
++            callers.intersects(ToolExposures::DIRECT | ToolExposures::DEFERRED)
++        });
++        if is_hidden_by_code_mode_only(turn_context, model_info, &tool_name, exposure)
++            && !explicit_direct
++        {
+             continue;
+         }
+
+@@ -1211,7 +1221,11 @@ fn register_code_mode_executors(
+             }
+         }
+
+-        if exposure == ToolExposure::Deferred {
++        let deferred_in_code_mode = exposure == ToolExposure::Deferred
++            || (exposure == ToolExposure::CodeModeOnly
++                && tool.runtime.allowed_callers().is_some()
++                && tool.runtime.exposure().is_deferred());
++        if deferred_in_code_mode {
+             if deferred_tools_guidance_enabled
+                 && (cached_runtime.is_none() || !included_deferred_mcp_output_schema)
+             {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index a738fca0..f2c37f1b 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -39,6 +39,7 @@ pub use codex_tools::ToolCallSource;
+ pub use codex_tools::ToolEnvironment;
+ pub use codex_tools::ToolExecutor;
+ pub use codex_tools::ToolExecutorFuture;
++pub use codex_tools::ToolExposures;
+ pub use codex_tools::ToolName;
+ pub use codex_tools::ToolOutput;
+ pub use codex_tools::ToolPayload;
+diff --git a/codex-rs/tools/src/tool_executor.rs b/codex-rs/tools/src/tool_executor.rs
+index 50a5e740..8d120e8b 100644
+--- a/codex-rs/tools/src/tool_executor.rs
++++ b/codex-rs/tools/src/tool_executor.rs
+@@ -96,6 +96,23 @@ pub enum ToolExposure {
+ }
+
+ impl ToolExposure {
++    /// Restrict visibility without adding a surface removed by host policy.
++    pub fn restrict_to(self, allowed: ToolExposures) -> Self {
++        match (
++            self.is_direct() && allowed.contains(ToolExposures::DIRECT),
++            self.is_deferred() && allowed.contains(ToolExposures::DEFERRED),
++            self.is_available_in_code_mode() && allowed.contains(ToolExposures::CODE_MODE),
++        ) {
++            (false, false, false) => Self::Hidden,
++            (false, false, true) => Self::CodeModeOnly,
++            (true, false, false) => Self::DirectModelOnly,
++            (true, false, true) => Self::Direct,
++            (false, true, false) => Self::DeferredModelOnly,
++            (false, true, true) => Self::Deferred,
++            (true, true, _) => unreachable!("direct and deferred exposure are exclusive"),
++        }
++    }
++
+     pub fn is_direct(self) -> bool {
+         matches!(self, Self::Direct | Self::DirectModelOnly)
+     }
+@@ -125,6 +142,11 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
+
+     fn spec(&self) -> ToolSpec;
+
++    /// An explicit caller ceiling. None preserves the host's legacy behavior.
++    fn allowed_callers(&self) -> Option<ToolExposures> {
++        None
++    }
++
+     /// The preferred exposure before the host applies step-specific policy.
+     fn exposure(&self) -> ToolExposure {
+         ToolExposure::Direct
+@@ -168,3 +190,47 @@ pub trait ToolExecutor<Invocation>: Send + Sync {
+     where
+         Invocation: 'a;
+ }
++
++#[cfg(test)]
++mod caller_policy_tests {
++    use super::{ToolExposure, ToolExposures};
++
++    #[test]
++    fn caller_masks_never_add_removed_surfaces() {
++        let exposures = [
++            ToolExposure::Direct,
++            ToolExposure::Deferred,
++            ToolExposure::DirectModelOnly,
++            ToolExposure::DeferredModelOnly,
++            ToolExposure::CodeModeOnly,
++            ToolExposure::Hidden,
++        ];
++        for exposure in exposures {
++            for bits in 0..=ToolExposures::ALL.bits() {
++                let mask = ToolExposures::from_bits_retain(bits);
++                let narrowed = exposure.restrict_to(mask);
++                assert!(
++                    !narrowed.is_direct()
++                        || exposure.is_direct() && mask.contains(ToolExposures::DIRECT)
++                );
++                assert!(
++                    !narrowed.is_deferred()
++                        || exposure.is_deferred() && mask.contains(ToolExposures::DEFERRED)
++                );
++                assert!(
++                    !narrowed.is_available_in_code_mode()
++                        || exposure.is_available_in_code_mode()
++                            && mask.contains(ToolExposures::CODE_MODE)
++                );
++            }
++        }
++        assert_eq!(
++            ToolExposure::Deferred.restrict_to(ToolExposures::CODE_MODE),
++            ToolExposure::CodeModeOnly
++        );
++        assert_eq!(
++            ToolExposure::Deferred.restrict_to(ToolExposures::DIRECT | ToolExposures::DEFERRED),
++            ToolExposure::DeferredModelOnly
++        );
++    }
++}

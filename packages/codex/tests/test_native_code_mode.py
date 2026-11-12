@@ -185,6 +185,148 @@ async def test_code_mode_python_validation_runs_before_immediate_code_consumers(
     assert "python-private-73bde" not in saved
 
 
+@pytest.mark.parametrize("deferred", [False, True], ids=["eager", "deferred"])
+async def test_function_tool_callers_control_schema_and_native_dispatch(
+    responses: ResponsesFixture, deferred: bool
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def before(ctx: ToolContext[None]) -> Allow:
+        seen.append(("code-only policy", ctx.call.route))
+        return Allow()
+
+    @function_tool(allowed_callers=("code",), defer_loading=deferred, before=before)
+    def code_only() -> str:
+        seen.append(("code-only body", "accepted"))
+        return "code-only accepted"
+
+    @function_tool(allowed_callers=("direct",))
+    def direct_only() -> str:
+        seen.append(("direct-only body", "accepted"))
+        return "direct-only accepted"
+
+    @function_tool(allowed_callers=("code", "direct"))
+    def either() -> str:
+        seen.append(("either body", "accepted"))
+        return "either route accepted"
+
+    agent = Agent(
+        instructions="Call the tools through their permitted routes.",
+        model="gpt-5.5",
+        tools=[code_only, direct_only, either],
+        provider=provider(responses),
+        programmatic_tool_calling=True,
+    )
+    responses.respond(function_call("code_only", {}, "forged-direct"))
+    responses.respond(assistant_output("Direct call blocked."))
+    responses.respond(
+        code_call(
+            "try { text(await tools.direct_only({})); } "
+            'catch { text("nested direct call blocked"); } '
+            "text(await tools.code_only({})); text(await tools.either({}));",
+            "caller-routes",
+        )
+    )
+    responses.respond(assistant_output("Code call finished."))
+    responses.respond(function_call("direct_only", {}, "allowed-direct"))
+    responses.respond(assistant_output("Direct call finished."))
+    responses.respond(function_call("either", {}, "either-direct"))
+    responses.respond(assistant_output("Either route finished."))
+    responses.respond(function_call("code_only", {}, "restored-forged-direct"))
+    responses.respond(assistant_output("Restored direct call blocked."))
+
+    async with timeout(45), agent.session() as session:
+        first = await session.submit("Try a forged direct call.")
+        assert (await first.get_result()).final_output == "Direct call blocked."
+        assert seen == []
+        assert {"direct_only", "either", "exec"} <= declared_names(responses.requests[0])
+        assert "code_only" not in declared_names(responses.requests[0])
+        assert "code-only accepted" not in tool_output(responses.requests[1], "forged-direct")
+
+        code = await session.submit("Try both tools in a code cell.")
+        assert (await code.get_result()).final_output == "Code call finished."
+        output = code_output(responses.requests[3], "caller-routes")
+        assert "code-only accepted" in output
+        assert "either route accepted" in output
+        assert "nested direct call blocked" in output
+        assert "direct-only accepted" not in output
+
+        direct = await session.submit("Call the direct tool.")
+        assert (await direct.get_result()).final_output == "Direct call finished."
+        assert "direct-only accepted" in tool_output(responses.requests[5], "allowed-direct")
+
+        either_direct = await session.submit("Call the tool that allows both routes.")
+        assert (await either_direct.get_result()).final_output == "Either route finished."
+        assert "either route accepted" in tool_output(responses.requests[7], "either-direct")
+        saved = await session.save_state()
+
+    async with timeout(45), agent.session(state=saved) as restored:
+        blocked = await restored.submit("Try a forged direct call after restore.")
+        assert (await blocked.get_result()).final_output == "Restored direct call blocked."
+        assert "code-only accepted" not in tool_output(
+            responses.requests[9], "restored-forged-direct"
+        )
+
+    assert seen == [
+        ("code-only policy", "code"),
+        ("code-only body", "accepted"),
+        ("either body", "accepted"),
+        ("direct-only body", "accepted"),
+        ("either body", "accepted"),
+    ]
+
+
+async def test_function_tool_callers_follow_the_restored_handoff_profile(
+    responses: ResponsesFixture,
+) -> None:
+    calls: list[str] = []
+
+    @function_tool(allowed_callers=("code",))
+    def worker_only(ctx: ToolContext[None]) -> str:
+        calls.append(ctx.call.route)
+        return "worker tool accepted"
+
+    current = provider(responses)
+    worker = Agent(
+        name="Worker",
+        model="gpt-5.5",
+        instructions="Use the worker tool.",
+        tools=[worker_only],
+        provider=current,
+        programmatic_tool_calling=True,
+    )
+    root = Agent(
+        name="Root",
+        model="gpt-5.5",
+        instructions="Hand off to Worker.",
+        handoffs=[worker],
+        provider=current,
+        programmatic_tool_calling=True,
+    )
+    responses.respond(function_call("transfer_to_worker", {}, "handoff"))
+    responses.respond(assistant_output("Worker ready."))
+    responses.respond(function_call("worker_only", {}, "restored-direct"))
+    responses.respond(assistant_output("Direct call blocked."))
+    responses.respond(code_call("text(await tools.worker_only({}));", "restored-code"))
+    responses.respond(assistant_output("Code call finished."))
+
+    async with timeout(45), root.session() as source:
+        assert (await (await source.submit("Switch to Worker.")).get_result()).final_output
+        assert await source.get_active_agent() is worker
+        saved = await source.save_state()
+
+    async with timeout(45), root.session(state=saved) as restored:
+        direct = await restored.submit("Try direct.")
+        assert (await direct.get_result()).final_output == "Direct call blocked."
+        assert calls == []
+        assert "worker_only" not in declared_names(responses.requests[2])
+        code = await restored.submit("Use a code cell.")
+        assert (await code.get_result()).final_output == "Code call finished."
+        assert "worker tool accepted" in code_output(responses.requests[5], "restored-code")
+
+    assert calls == ["code"]
+
+
 async def test_async_native_mcp_policy_precedes_code_and_preserves_unselected_tools(
     responses: ResponsesFixture,
 ) -> None:
