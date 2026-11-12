@@ -6,13 +6,10 @@ awaiting shutdown(). Native owns the exporters and the process lifetime.
 
 from __future__ import annotations
 
-from collections.abc import (
-    Callable as _Callable,  # noqa: F401 -- Public Protocol forward references.
-)
-
 from _agents_codex.telemetry import (
     _MAX_PROCESSOR_WORKERS as _MAX_PROCESSOR_WORKERS,
     Any as Any,
+    Callable as _Callable,  # noqa: F401 -- Resolves postponed public annotations.
     ConsoleDiagnostics as ConsoleDiagnostics,
     ConsoleTraceProcessor as ConsoleTraceProcessor,
     ContextVar as ContextVar,

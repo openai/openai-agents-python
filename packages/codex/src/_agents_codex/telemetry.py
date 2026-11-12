@@ -12,6 +12,7 @@ import inspect as _inspect
 import json as json
 from collections import deque as _deque
 from collections.abc import (
+    Callable as Callable,
     Callable as _Callable,
     Coroutine as Coroutine,
     Iterator as Iterator,
