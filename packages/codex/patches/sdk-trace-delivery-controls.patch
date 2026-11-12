@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index 72f25f3a..05d903fd 100644
+index 72f25f3a708658780e4d0324f750319a00681ee9..5fc8212282214ad1d7a9ee59e828fde2180507e0 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -13,6 +13,50 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -85,15 +85,7 @@ index 72f25f3a..05d903fd 100644
      }
      s.bytes += bytes;
      s.pending.insert(sequence);
-@@ -379,6 +435,7 @@ pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
-         if !enqueue_event(&mut s, sequence, value, descriptor, None, 65_536) {
-             return Err("Trace event exceeds processor queue capacity".into());
-         }
-+        s.draining = true;
-         let (sender, acknowledged) = tokio::sync::oneshot::channel();
-         s.dispatch_waiters.insert(sequence, sender);
-         acknowledged
-@@ -404,7 +461,20 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+@@ -404,7 +460,25 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
          .flush_snapshot
          .map(|(barrier, _, _)| barrier)
          .filter(|barrier| s.pending.range(..=*barrier).next().is_some());
@@ -105,7 +97,12 @@ index 72f25f3a..05d903fd 100644
 +        || s.queued_since.is_some_and(|since| {
 +            since.elapsed() >= Duration::from_millis(s.delivery.schedule_delay_ms as u64)
 +        });
-+    s.draining |= ready;
++    // Dispatch still needs a drain when a flush has reset the batch trigger.
++    let dispatch_pending = s
++        .queue
++        .front()
++        .is_some_and(|(seq, _, _, _)| s.dispatch_waiters.range(*seq..).next().is_some());
++    s.draining |= ready || dispatch_pending;
 +    let count = if s.draining || cutoff.is_some() {
 +        max_count.min(s.delivery.max_batch_size as usize)
 +    } else {
@@ -115,7 +112,7 @@ index 72f25f3a..05d903fd 100644
          if s.queue
              .front()
              .is_some_and(|(seq, _, _, _)| cutoff.is_some_and(|cutoff| *seq > cutoff))
-@@ -434,6 +504,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+@@ -434,6 +508,19 @@ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
          }
          events.push(value);
      }
@@ -135,7 +132,16 @@ index 72f25f3a..05d903fd 100644
      let through = cutoff.unwrap_or(s.sequence);
      if s.queue.front().is_none_or(|(seq, _, _, _)| *seq > through) {
          s.delivered = s.delivered.max(through);
-@@ -1125,6 +1208,12 @@ mod tests {
+@@ -1109,6 +1196,8 @@ mod tests {
+
+     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
++    const DETACHED_OBSERVATION: &str = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
++
+     #[tokio::test]
+     async fn detached_dispatch_wakes_on_acknowledgement_or_shutdown() {
+         use std::future::Future;
+@@ -1125,19 +1214,31 @@ mod tests {
  
          let _test = TEST_LOCK.lock().unwrap();
          *lock() = Routes::default();
@@ -146,16 +152,23 @@ index 72f25f3a..05d903fd 100644
 +            ..HostTraceDeliverySettings::default()
 +        });
          set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
-         let encoded = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
+-        let encoded = r#"{"lifecycle":"end","trace_id":"123","span_id":"456","name":"replay","kind":"internal","start_time_unix_nanos":"1","attributes":{},"outcome":"ok","dropped_attributes_count":0}"#;
          let first_wakes = Arc::new(WakeCounter::default());
-@@ -1137,7 +1226,14 @@ mod tests {
-         let mut second = std::pin::pin!(dispatch_trace_event(encoded));
+         let second_wakes = Arc::new(WakeCounter::default());
+         let first_waker = Waker::from(first_wakes.clone());
+         let second_waker = Waker::from(second_wakes.clone());
+         let mut first_context = std::task::Context::from_waker(&first_waker);
+         let mut second_context = std::task::Context::from_waker(&second_waker);
+-        let mut first = std::pin::pin!(dispatch_trace_event(encoded));
+-        let mut second = std::pin::pin!(dispatch_trace_event(encoded));
++        let mut first = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
++        let mut second = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
  
          assert!(first.as_mut().poll(&mut first_context).is_pending());
 +        let first_batch: Value = serde_json::from_str(&drain_trace_events(1).unwrap()).unwrap();
 +        assert_eq!(first_batch["events"].as_array().unwrap().len(), 1);
          assert!(second.as_mut().poll(&mut second_context).is_pending());
-+        let mut rejected = std::pin::pin!(dispatch_trace_event(encoded));
++        let mut rejected = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
 +        assert_eq!(
 +            rejected.as_mut().poll(&mut second_context),
 +            Poll::Ready(Err("Trace event exceeds processor queue capacity".into()))
@@ -163,10 +176,45 @@ index 72f25f3a..05d903fd 100644
          drain_trace_events(2).unwrap();
          ack_trace_events(1, 0).unwrap();
          assert_eq!(first_wakes.0.load(Ordering::Relaxed), 1);
-@@ -1154,6 +1250,173 @@ mod tests {
+@@ -1154,6 +1255,208 @@ mod tests {
          );
      }
  
++    #[test]
++    fn detached_dispatch_behind_flush_drains_after_prefix_ack() {
++        use std::future::Future;
++        use std::task::Poll;
++
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        configure_host_trace_delivery(HostTraceDeliverySettings {
++            max_queue_size: 8,
++            max_batch_size: 1,
++            schedule_delay_ms: 60_000,
++            export_trigger_ratio: 1.0,
++            ..HostTraceDeliverySettings::default()
++        });
++        set_trace_routes(r#"{"processor_ids":["recorder"]}"#).unwrap();
++        event(&mut lock(), &sample_span(), "end", None, None);
++        assert_eq!(capture_barrier(), 1);
++
++        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
++        let mut dispatch = std::pin::pin!(dispatch_trace_event(DETACHED_OBSERVATION));
++        assert!(dispatch.as_mut().poll(&mut context).is_pending());
++
++        let drain = || serde_json::from_str::<Value>(&drain_trace_events(100).unwrap()).unwrap();
++        assert_eq!(drain()["events"][0]["sequence"], 1);
++        assert_eq!(drain()["events"], json!([]));
++        ack_trace_events(1, 0).unwrap();
++
++        let later = drain();
++        assert_eq!(later["events"][0]["sequence"], 2);
++        assert_eq!(later["events"][0]["name"], "replay");
++        assert!(dispatch.as_mut().poll(&mut context).is_pending());
++        ack_trace_events(2, 0).unwrap();
++        assert_eq!(dispatch.poll(&mut context), Poll::Ready(Ok(())));
++    }
++
 +    #[test]
 +    fn host_delivery_options_reject_invalid_bounds_and_allow_small_queues() {
 +        for value in [
