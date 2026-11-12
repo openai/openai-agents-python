@@ -879,7 +879,11 @@
     {
       "path": "sdk-explicit-hosted-tool-choice.patch",
       "sha256": "c581d2069d883585f66d1ddf7fd87c31a8e428ce8dbb67d55d35287662839d68"
+    },
+    {
+      "path": "sdk-decision-handoff-admission.patch",
+      "sha256": "1a3130959a633e67c297f679c7cf9b275ef4f2105ef375ab19eb9370bf531451"
     }
   ],
-  "result_tree": "227e3246addb75ae57de2939780e4ab109631297"
+  "result_tree": "a7cd2218980f54ae4ce4b571b9b35980b00a4745"
 }

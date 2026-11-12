@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .state import ApplicationToolOutput
     from .telemetry import _CapturedTrace
     from .tools import ToolRef
-    from .turn import Turn
+    from .turn import Turn, _SubmissionRequestAttempts
 
 
 def _future() -> asyncio.Future[Any]:
@@ -45,6 +45,7 @@ class _Submission:
     output: _PreparedOutput
     run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     model_run_usage: _UsageCollector = field(default_factory=_UsageCollector, repr=False)
+    submission_request_attempts: _SubmissionRequestAttempts | None = None
     observation_after: int = 0
     accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
     completion: asyncio.Future[Any] = field(default_factory=_future)
