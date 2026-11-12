@@ -52,6 +52,36 @@ from tests.native_fixtures import (
 from tests.native_planning_fixtures import legacy_goal
 
 
+def _respond_until_command_done(responses: ResponsesFixture, call_id: str) -> list[str]:
+    command_outputs: list[str] = []
+    completion_id = call_id
+
+    class UntilCommandDone(deque[list[dict[str, Any]]]):
+        def __bool__(self) -> bool:
+            return True
+
+        def popleft(self) -> list[dict[str, Any]]:
+            nonlocal completion_id
+            if len(self):
+                return super().popleft()
+            output = tool_output(responses.requests[-1], completion_id)
+            command_outputs.append(output)
+            running = re.search(r"(?m)^Process running with session ID (-?\d+)\r?$", output)
+            if running:
+                completion_id = f"{call_id}-poll-{len(command_outputs)}"
+                return [
+                    function_call(
+                        "write_stdin",
+                        {"session_id": int(running[1]), "chars": "", "yield_time_ms": 1000},
+                        completion_id,
+                    )
+                ]
+            return [assistant_output("done")]
+
+    responses.replies = UntilCommandDone(responses.replies)
+    return command_outputs
+
+
 def test_local_declaration_has_no_transport_and_normalizes_additional_roots() -> None:
     local = Environment.local(
         cwd=PurePosixPath("/job/worktree"),
@@ -860,32 +890,7 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
             "exec_command", {"cmd": command, "login": False, "yield_time_ms": 1000}, "trusted"
         )
     )
-    command_outputs: list[str] = []
-    completion_id = "trusted"
-
-    class UntilCommandDone(deque[list[dict[str, Any]]]):
-        def __bool__(self) -> bool:
-            return True
-
-        def popleft(self) -> list[dict[str, Any]]:
-            nonlocal completion_id
-            if len(self):
-                return super().popleft()
-            output = tool_output(responses.requests[-1], completion_id)
-            command_outputs.append(output)
-            running = re.search(r"(?m)^Process running with session ID (-?\d+)\r?$", output)
-            if running:
-                completion_id = f"trusted-poll-{len(command_outputs)}"
-                return [
-                    function_call(
-                        "write_stdin",
-                        {"session_id": int(running[1]), "chars": "", "yield_time_ms": 1000},
-                        completion_id,
-                    )
-                ]
-            return [assistant_output("done")]
-
-    responses.replies = UntilCommandDone(responses.replies)
+    command_outputs = _respond_until_command_done(responses, "trusted")
     agent = Agent(
         instructions="Use the selected tools.",
         provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
@@ -968,23 +973,27 @@ async def test_trusted_local_runs_xcode_shims_and_homebrew(
     bash = Path(prefix) / "bin" / "bash"
     if bash.is_file():
         command += f"; {shlex.quote(str(bash))} -c 'printf homebrew-bash'"
-    responses.respond(function_call("exec_command", {"cmd": command, "login": False}, "dev-tools"))
-    responses.respond(assistant_output("done"))
+    responses.respond(
+        function_call(
+            "exec_command", {"cmd": command, "login": False, "yield_time_ms": 1000}, "dev-tools"
+        )
+    )
+    command_outputs = _respond_until_command_done(responses, "dev-tools")
     agent = Agent(
         instructions="Use the selected tools.",
         provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
     )
     selected = Environment.local(
         cwd=tmp_path,
-        tools=["exec_command"],
+        tools=["exec_command", "write_stdin"],
         write_policy="trusted_workspace_write",
         temp_dir=tmp_path,
     )
     async with timeout(40), agent.session(environment=selected) as session:
         turn = await session.submit("Run the developer tools.")
         assert (await turn.get_result()).final_output == "done"
-    output = tool_output(responses.requests[-1], "dev-tools")
-    assert "Process exited with code 0" in output
+    output = "\n".join(command_outputs)
+    assert "Process exited with code 0" in output, output
     assert "git version" in output
     assert "GNU Make" in output
     assert "Homebrew " in output
