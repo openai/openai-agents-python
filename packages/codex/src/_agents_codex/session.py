@@ -5528,7 +5528,8 @@ class Session(Generic[ContextT, OutputT]):
                 )
             )
             receipt = json.loads(encoded)
-            self._accept_profile_catalogs(receipt)
+            publish_catalogs = self._prepare_profile_catalogs(receipt)
+            publish_catalogs()
             if restored and not manual_restore:
                 # Pending continuations already have their current controls before
                 # the graph binds their sealed profile receipt.
@@ -5871,7 +5872,8 @@ class Session(Generic[ContextT, OutputT]):
             raise NativeError("Native request belongs to an expired captured catalog")
         return catalog
 
-    def _accept_profile_catalogs(self, receipt: Mapping[str, Any]) -> None:
+    def _prepare_profile_catalogs(self, receipt: Mapping[str, Any]) -> Callable[[], None]:
+        """Validate a candidate graph before publishing any of its catalogs."""
         catalogs, high_water = receipt.get("catalogs"), receipt.get("generation_high_water")
         if (
             not isinstance(catalogs, dict)
@@ -5889,24 +5891,19 @@ class Session(Generic[ContextT, OutputT]):
         if not isinstance(active, dict):
             raise NativeError("Invalid native active Agent receipt")
         self._agent_for_profile(active)
-        self._profiles = {
+        profiles = {
             key: replace(value, catalog=replace(value.catalog, generation=catalogs[key]))
             for key, value in self._profiles.items()
         }
-        self._profile_generation_high_water = high_water
-        self._profile_catalogs.update(
-            {
-                (key, value.catalog.generation): value.catalog
-                for key, value in self._profiles.items()
-            }
-        )
-        self._catalog_bindings.update(
-            {
-                (key, value.catalog.generation): value.profile.declaration.tools
-                for key, value in self._profiles.items()
-            }
-        )
-        current = self._profiles[active["profile_id"]]
+        profile_catalogs = {
+            (key, value.catalog.generation): value.catalog for key, value in profiles.items()
+        }
+        catalog_bindings = {
+            (key, value.catalog.generation): value.profile.declaration.tools
+            for key, value in profiles.items()
+        }
+        profile_id = active["profile_id"]
+        current = profiles[profile_id]
         active_catalog = receipt.get("active_catalog")
         if not isinstance(active_catalog, dict):
             raise NativeError("Missing native active Agent catalog")
@@ -5924,18 +5921,27 @@ class Session(Generic[ContextT, OutputT]):
         refs = [_saved_python_ref(spec) for spec in specs]
         if refs != [tool._ref for tool in source_catalog.tools]:
             raise NativeError("Active native Agent catalog differs from its captured declarations")
-        known = self._profile_catalogs.get((active["profile_id"], generation))
+        active_key = (profile_id, generation)
+        known = profile_catalogs.get(active_key, self._profile_catalogs.get(active_key))
         if known is not None and known.native_specs() != source_catalog.native_specs():
             raise NativeError("Native Agent reused a catalog generation with different slots")
-        self._profile_catalogs[(active["profile_id"], generation)] = source_catalog
-        self._catalog_bindings[(active["profile_id"], generation)] = (
-            current.profile.declaration.tools
-        )
-        self._catalog = source_catalog
-        self._bound_tools = source_catalog.tools
-        self._bindings = current.profile.declaration.tools
-        self._default_output = current.output
-        self._profile_current = (active["profile_id"], active["epoch"])
+        bindings = current.profile.declaration.tools
+        profile_catalogs[active_key] = source_catalog
+        catalog_bindings[active_key] = bindings
+        active_profile = (profile_id, active["epoch"])
+
+        def publish() -> None:
+            self._profiles = profiles
+            self._profile_generation_high_water = high_water
+            self._profile_catalogs.update(profile_catalogs)
+            self._catalog_bindings.update(catalog_bindings)
+            self._catalog = source_catalog
+            self._bound_tools = source_catalog.tools
+            self._bindings = bindings
+            self._default_output = current.output
+            self._profile_current = active_profile
+
+        return publish
 
     def _effective_agent(self) -> Agent[Any, Any]:
         if self._profile_current is not None:
@@ -8521,7 +8527,7 @@ class Session(Generic[ContextT, OutputT]):
         engine = None
         thread = None
         retiring = False
-        profile_receipt = None
+        publish_profile_catalogs: Callable[[], None] | None = None
         try:
             encoded = change.context()
             # Both native reads serialize the same full snapshot, including revisions.
@@ -8624,6 +8630,7 @@ class Session(Generic[ContextT, OutputT]):
                         candidate=thread,
                     )
                 )
+                publish_profile_catalogs = self._prepare_profile_catalogs(profile_receipt)
             available = opening
             _, allowed_mcp, _ = _split_tools(available)
             if allowed_mcp:
@@ -8660,8 +8667,8 @@ class Session(Generic[ContextT, OutputT]):
             await self._engine.close()
             self._engine = engine
             self._native = thread
-            if profile_receipt is not None:
-                self._accept_profile_catalogs(profile_receipt)
+            if publish_profile_catalogs is not None:
+                publish_profile_catalogs()
             self._model_context_snapshots.clear()
             engine = thread = None
             self._reader = _create_task(self._read_events())
