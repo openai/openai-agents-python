@@ -28,7 +28,7 @@ from contextlib import (
     contextmanager as contextmanager,
     suppress as suppress,
 )
-from contextvars import ContextVar as ContextVar, copy_context as copy_context
+from contextvars import Context as Context, ContextVar as ContextVar, copy_context as copy_context
 from copy import deepcopy as deepcopy
 from dataclasses import asdict as asdict, dataclass as dataclass, field as field, replace as replace
 from functools import partial as partial
@@ -58,6 +58,13 @@ from ._agent_profiles import (
     _capture_agent_graph,
     _check_handoff_tool_names,
     _python_tool_slot,
+)
+from ._callback_execution import (
+    _call_callback as _call_callback,
+    _call_callback_body as _call_callback_body,
+    _call_callback_entered as _call_callback_entered,
+    _FunctionBodyFailure as _FunctionBodyFailure,
+    _RecoverableFunctionCallback as _RecoverableFunctionCallback,
 )
 from ._compat import cancel_once as cancel_once, cancellation_requested
 from ._environment_lifetime import (
@@ -278,6 +285,10 @@ from .recovery import (
 )
 from .response_facts import _response_fact_record
 from .retry import _CombinedRetryPolicy
+from .sandbox_memory import (
+    _MAX_RECORDS as _MAX_MEMORY_RECORDS,
+    _current_memory_owner,
+)
 from .schema import (
     OutputSpec as OutputSpec,
     OutputValidationError as OutputValidationError,
@@ -1886,136 +1897,6 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
         if loop.time() >= deadline:
             raise first_error
         await asyncio.sleep(0.01)
-
-
-class _FunctionBodyFailure(Exception):
-    def __init__(self, original: Exception) -> None:
-        super().__init__("Function callback failed")
-        self.original = original
-
-
-@dataclass(frozen=True)
-class _RecoverableFunctionCallback:
-    callback: Callable[..., Any]
-
-
-async def _call_callback(
-    callback: Callable[..., Any] | _RecoverableFunctionCallback,
-    admit: Callable[[], bool],
-    /,
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    try:
-        return await _call_callback_entered(callback, admit, args, kwargs)
-    finally:
-        del callback, admit, args, kwargs
-
-
-async def _call_callback_entered(
-    callback: Callable[..., Any] | _RecoverableFunctionCallback,
-    admit: Callable[[], bool],
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    enter: Callable[[], None] | None = None,
-) -> Any:
-    try:
-        with _owned_span("callback", "callback"):
-            return await _call_callback_body(callback, admit, args, kwargs, enter)
-    finally:
-        # Release SDK-owned callback arguments only after the admitted body exits.
-        del callback, admit, args, kwargs, enter
-
-
-async def _call_callback_body(
-    callback: Callable[..., Any] | _RecoverableFunctionCallback,
-    admit: Callable[[], bool],
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    enter: Callable[[], None] | None = None,
-) -> Any:
-    """Run Python in its appropriate executor and retain ownership until exit."""
-    if isinstance(callback, _RecoverableFunctionCallback):
-        function = callback.callback
-        capture_error = True
-    else:
-        function = callback
-        capture_error = False
-    worker: asyncio.Future[Any] | None = None
-    value: Any = None
-    try:
-        if inspect.iscoroutinefunction(function):
-            if enter is not None:
-                if not admit():
-                    return None
-                enter()
-            try:
-                return await function(*args, **kwargs)
-            except Exception as error:
-                if capture_error:
-                    raise _FunctionBodyFailure(error) from error
-                raise
-        loop = asyncio.get_running_loop()
-
-        async def admission() -> bool:
-            # The asyncio and native ownership check belongs to the application's loop.
-            allowed = admit()
-            if allowed and enter is not None:
-                enter()
-            return allowed
-
-        def invoke_if_admitted() -> Any:
-            if asyncio.run_coroutine_threadsafe(admission(), loop).result():
-                try:
-                    return function(*args, **kwargs)
-                except Exception as error:
-                    if capture_error:
-                        raise _FunctionBodyFailure(error) from error
-                    raise
-            return None
-
-        worker = loop.run_in_executor(None, copy_context().run, invoke_if_admitted)
-        cancelled = None
-        while not worker.done():
-            try:
-                # Waiting must not cancel a running worker. A cancelled shield can
-                # also log the raw callback exception before its owner sanitizes it.
-                await asyncio.wait((worker,))
-            except asyncio.CancelledError as error:
-                cancelled = cancelled or error
-        value = worker.result()
-        if cancelled is not None:
-            # A synchronous wrapper may return a coroutine. Cancellation must
-            # not start that body after the callback's authority has expired.
-            if inspect.iscoroutine(value):
-                value.close()
-            raise cancelled
-        if inspect.isawaitable(value):
-            try:
-                allowed = admit()
-            except BaseException:
-                if inspect.iscoroutine(value):
-                    value.close()
-                raise
-            if not allowed:
-                # Declined work must not start the coroutine's body on the way out.
-                if inspect.iscoroutine(value):
-                    value.close()
-                return None
-            try:
-                return await value
-            except Exception as error:
-                if capture_error:
-                    raise _FunctionBodyFailure(error) from error
-                raise
-        return value
-    finally:
-        # Release SDK-owned callback arguments only after the admitted body exits.
-        args = ()
-        kwargs = {}
-        enter = None
-        callback = function = admit = cast(Any, None)
-        del worker, value
 
 
 _PROJECT_GUIDANCE_TOOL_NAMES = ("read_text_file", "view_image")
@@ -4838,7 +4719,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._restore_remembered_approvals(remembered_approvals)
                 session._start_readers()
                 opening.disown(session)
-                session._environment_lease = lease
+                session._attach_environment_lease(lease, state=state, resume=resume)
                 return session
             except BaseException as error:
                 _normalize_opening_error(error, opening.api_key)
@@ -5038,6 +4919,8 @@ class Session(Generic[ContextT, OutputT]):
         self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
         self._sandbox_events: _OperationObserver | None = None
+        self._memory_flush: asyncio.Task[None] | None = None
+        self._memory_restored = False
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
@@ -6380,6 +6263,11 @@ class Session(Generic[ContextT, OutputT]):
             if invocation.active and invocation.session is self:
                 raise RuntimeError(f"A tool callback cannot {operation}")
             invocation = invocation.parent
+        memory = _current_memory_owner()
+        if memory is not None:
+            lease = self._environment_lease
+            if lease is not None and lease._sandbox_memory is memory:
+                raise RuntimeError(f"A sandbox memory phase cannot {operation}")
 
     def _check_graph_admission(self) -> None:
         if self._graph_interrupts:
@@ -8090,6 +7978,60 @@ class Session(Generic[ContextT, OutputT]):
             )
         return tuple(produced)
 
+    def _attach_environment_lease(
+        self,
+        lease: _EnvironmentLease | None,
+        *,
+        state: SessionState | ManagedWorkspaceCheckpoint | None,
+        resume: str | None,
+    ) -> None:
+        self._environment_lease = lease
+        self._memory_restored = state is not None or resume is not None
+
+    async def flush_memory(self) -> None:
+        """Generate memory for the acquired sandbox from a successful settled text turn.
+
+        Configure memory on sandbox_environment. Concurrent callers share the same
+        flush, and the same history revision generates once. Restored Sessions and
+        non-text histories are outside this generation path.
+        """
+        self._check_callback_operation("flush sandbox memory on its source Session")
+        lease = self._environment_lease
+        memory = lease._sandbox_memory if lease is not None else None
+        active_memory = _current_memory_owner()
+        if (
+            memory is not None
+            and active_memory is not None
+            and active_memory._flush_lock is memory._flush_lock
+        ):
+            raise NativeError("A memory phase cannot flush another Session in the same sandbox")
+        pending = self._memory_flush
+        if pending is not None:
+            await asyncio.shield(pending)
+            return
+        self._check_idle_update()
+        if lease is None or memory is None:
+            raise TypeError("Configure memory on sandbox_environment before flushing")
+        if self._memory_restored:
+            raise NativeError("Native sandbox memory is unavailable on restored Sessions")
+        turn = self._last_turn
+        if turn is None:
+            raise NativeError("Native sandbox memory requires a successful source turn")
+        scope = lease._sandbox_memory_scope
+        assert scope is not None
+
+        async def flush() -> None:
+            await turn.get_result()
+            snapshot = await self._read_canonical_history(_MAX_MEMORY_RECORDS, for_replay=True)
+            await memory.flush(self.id, snapshot)
+
+        pending = scope.copy().run(_create_task, flush())
+        self._memory_flush = pending
+        try:
+            await self._join_mutation(pending)
+        finally:
+            self._memory_flush = None
+
     async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
         """Original JSON object records from an idle Session.
 
@@ -8110,15 +8052,19 @@ class Session(Generic[ContextT, OutputT]):
         ):
             raise ValueError("limit must be a nonnegative integer or None")
 
-        async def capture() -> CanonicalHistorySnapshot:
-            value = json.loads(await self._native._canonical_history(limit, for_replay))
-            return CanonicalHistorySnapshot(
-                value["revision"],
-                value["total"],
-                tuple(json.loads(item) for item in value["items"]),
-            )
+        return await self._join_mutation(
+            asyncio.create_task(self._read_canonical_history(limit, for_replay=for_replay))
+        )
 
-        return await self._join_mutation(asyncio.create_task(capture()))
+    async def _read_canonical_history(
+        self, limit: int | None, *, for_replay: bool
+    ) -> CanonicalHistorySnapshot:
+        value = json.loads(await self._native._canonical_history(limit, for_replay))
+        return CanonicalHistorySnapshot(
+            value["revision"],
+            value["total"],
+            tuple(json.loads(item) for item in value["items"]),
+        )
 
     def _start_raw_usage_on_restore(
         self, agent: Agent[Any, Any] | None, state: SessionState | None
@@ -15872,7 +15818,11 @@ class Session(Generic[ContextT, OutputT]):
         return await self._join_mutation(asyncio.create_task(write()))
 
     async def suspend_workspace(self) -> ManagedWorkspaceCheckpoint:
-        """Retire this owned sandbox Session and capture its paired workspace."""
+        """Retire this owned sandbox Session and capture its paired workspace.
+
+        Configured memory finishes generating for a successful settled turn
+        before workspace capture begins.
+        """
         self._check_loop()
         self._check_callback_operation("suspend its managed workspace")
         managed = self._managed_workspace
@@ -15893,10 +15843,33 @@ class Session(Generic[ContextT, OutputT]):
             for child in self._child_callbacks.values()
         ):
             raise SessionBusyError("Managed capture requires settled child continuations")
+        lease = self._environment_lease
+        memory_turn = (
+            self._last_turn
+            if active is None
+            and not self._memory_restored
+            and lease is not None
+            and lease._sandbox_memory is not None
+            else None
+        )
         # Intent precedes export, so racing close cannot skip provider serialization.
-        managed.capture_requested = True
+        managed.capture_requested = memory_turn is None
 
         async def retire() -> ManagedWorkspaceCheckpoint:
+            if memory_turn is not None:
+                try:
+                    try:
+                        await memory_turn.get_result()
+                    except Exception:
+                        # A failed source turn has no completed memory to generate.
+                        pass
+                    else:
+                        await self.flush_memory()
+                    self._check_open()
+                except BaseException:
+                    managed.capture_task = None
+                    raise
+                managed.capture_requested = True
             try:
                 state = await self._checkpoint(active, managed_retire=True)
             except BaseException as error:
@@ -16618,7 +16591,7 @@ class Session(Generic[ContextT, OutputT]):
             engine_closed = False
             try:
                 if self._mutation is not None:
-                    if self._mutation_cancellable:
+                    if self._mutation_cancellable or self._mutation is self._memory_flush:
                         cancel_once(self._mutation)
                     await asyncio.gather(self._mutation, return_exceptions=True)
                 if self._checkpoint_task is not None:

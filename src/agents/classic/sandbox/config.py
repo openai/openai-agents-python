@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 from openai.types.shared import Reasoning
 
+from _agents_shared.sandbox_memory_artifacts import MemoryLayoutConfig as MemoryLayoutConfig
+
 from ..model_settings import (
     ModelSettings,
     _coerce_model_settings,
@@ -21,17 +23,6 @@ def _default_memory_phase_one_model_settings() -> ModelSettings:
 
 def _default_memory_phase_two_model_settings() -> ModelSettings:
     return ModelSettings(reasoning=Reasoning(effort="medium"))
-
-
-@dataclass
-class MemoryLayoutConfig:
-    """Filesystem layout for sandbox-backed memory generation."""
-
-    memories_dir: str = "memories"
-    """Directory used for consolidated memory files."""
-
-    sessions_dir: str = "sessions"
-    """Directory used for per-rollout JSONL artifacts."""
 
 
 @dataclass

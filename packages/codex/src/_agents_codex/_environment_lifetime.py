@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import sys
 from contextlib import AbstractAsyncContextManager
+from contextvars import Context, copy_context
 from typing import TYPE_CHECKING, Any
 
 from ._compat import cancel_once
 from ._lifecycle import _close_after_error, _join, _SyncRun
 from ._managed_workspace import _SANDBOX_EVENTS_ATTRIBUTE, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE
 from .executor import Environment
+from .sandbox_memory import _MEMORY_OWNER_ATTRIBUTE, _SandboxMemoryOwner
 from .telemetry import _create_task
 
 if TYPE_CHECKING:
@@ -30,6 +32,8 @@ class _EnvironmentLease:
         self.interrupted = False
         self._workspace_instructions: str | None = None
         self._sandbox_events: _OperationObserver | None = None
+        self._sandbox_memory: _SandboxMemoryOwner | None = None
+        self._sandbox_memory_scope: Context | None = None
         self._owner = _create_task(self._hold(source))
 
     async def _hold(self, source: AbstractAsyncContextManager[Environment[Any]]) -> None:
@@ -51,6 +55,12 @@ class _EnvironmentLease:
                         "Native sandbox observations require a sandbox_environment source"
                     )
             self._sandbox_events = observer
+            memory = getattr(source, _MEMORY_OWNER_ATTRIBUTE, None)
+            if memory is not None:
+                if not isinstance(memory, _SandboxMemoryOwner):
+                    raise TypeError("Sandbox memory requires a native sandbox acquisition")
+                self._sandbox_memory = memory
+                self._sandbox_memory_scope = copy_context()
             self._ready.set_result(environment)
             try:
                 await asyncio.shield(self._retired)
