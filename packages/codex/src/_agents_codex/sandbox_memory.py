@@ -107,7 +107,7 @@ def _memory_transcript(
     for item in snapshot.items:
         kind = item.get("type")
         role = item.get("role")
-        if kind == "reasoning" or role in ("developer", "system"):
+        if kind == "reasoning":
             continue
         if kind == "function_call":
             call = {key: item.get(key) for key in ("name", "call_id", "arguments")}
@@ -119,15 +119,23 @@ def _memory_transcript(
             continue
         if kind == "function_call_output":
             call_id, output = item.get("call_id"), item.get("output")
-            if not isinstance(call_id, str) or not isinstance(output, (str, list)):
+            if not isinstance(call_id, str):
                 raise ValueError("Invalid native memory function output")
-            messages.append(
-                {
-                    "type": kind,
-                    "call_id": call_id,
-                    "output": _memory_text_parts(output) if isinstance(output, list) else output,
-                }
-            )
+            result: dict[str, Any] = {"type": kind, "call_id": call_id}
+            if item.get("status") == "failed":
+                result["status"] = "failed"
+            if isinstance(output, (str, list)):
+                result["output"] = (
+                    _memory_text_parts(output) if isinstance(output, list) else output
+                )
+            elif output is None and result.get("status") == "failed":
+                error = item.get("error")
+                if error is not None and not isinstance(error, str):
+                    raise ValueError("Invalid native memory function output")
+                result["error"] = error or ""
+            else:
+                raise ValueError("Invalid native memory function output")
+            messages.append(result)
             continue
         if kind != "message":
             if isinstance(kind, str) and (
