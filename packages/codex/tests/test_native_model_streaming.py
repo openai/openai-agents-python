@@ -15,6 +15,7 @@ from agents import (
     Agent,
     ModelRequest,
     ModelResponse,
+    ModelRetrySettings,
     NativeError,
     NativeProvider,
     Session,
@@ -288,6 +289,58 @@ async def test_model_stream_admits_tools_after_one_terminal(terminal: str) -> No
             with pytest.raises(RuntimeError):
                 await agent.run("Record once.")
     assert effects == (["once"] if valid_terminal else [])
+
+
+async def test_model_stream_records_completed_usage_when_cleanup_fails() -> None:
+    requests: list[ModelRequest] = []
+    effects: list[str] = []
+
+    @function_tool
+    def record(value: str) -> str:
+        effects.append(value)
+        return "recorded"
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            raise AssertionError("streaming request entered complete()")
+
+        async def stream(self, request: ModelRequest) -> AsyncIterator[dict[str, Any]]:
+            requests.append(request)
+            yield {"type": "response.created", "response": {"id": "failed-cleanup"}}
+            yield function_call("record", {"value": "must not run"}, "held-call")
+            yield {
+                "type": "response.completed",
+                "response": {
+                    "id": "failed-cleanup",
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 3,
+                        "total_tokens": 14,
+                        "input_tokens_details": {"cached_tokens": 0},
+                        "output_tokens_details": {"reasoning_tokens": 0},
+                    },
+                },
+            }
+            raise RuntimeError("application iterator cleanup failed")
+
+    async with timeout(20), NativeProvider(model_backend=Model()) as provider:
+        async with Agent(
+            instructions="Respond.",
+            model="custom-model",
+            provider=provider,
+            tools=[record],
+            model_settings={"retry": ModelRetrySettings(max_retries=0)},
+        ).session(include_request_attempts=True) as session:
+            turn = await session.submit("Record.")
+            with pytest.raises(RuntimeError, match="application iterator cleanup failed"):
+                await turn.get_result()
+            assert len(requests) == 1 and effects == []
+            usage = turn.run_usage
+            assert usage.requests == 1 and usage.missing_usage_requests == 0
+            assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (11, 3, 14)
+            [recorded] = [entry async for entry in session.turns()]
+            assert recorded["id"] == turn.turn_id
+            assert recorded["run_usage"] == asdict(usage)
 
 
 async def test_model_stream_cancellation_joins_iterator_before_reusing_session() -> None:

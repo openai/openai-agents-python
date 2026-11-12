@@ -329,18 +329,13 @@ impl PythonTools {
             Delivery::Streaming {
                 projection, finish, ..
             } => {
+                let usage = projection.completed_usage().cloned();
                 let result = projection.finish(error.then_some(FAILURE));
-                if let (Some(attempt), Ok(events)) = (&attempt, &result) {
-                    for event in events {
-                        if let ResponseEvent::Completed {
-                            token_usage: Some(usage),
-                            ..
-                        } = event
-                            && attempt.report_usage(usage.clone()).is_err()
-                        {
-                            return false;
-                        }
-                    }
+                if let (Some(attempt), Some(usage)) = (&attempt, usage)
+                    && attempt.report_usage(usage).is_err()
+                    && result.is_ok()
+                {
+                    return false;
                 }
                 return finish.send(result).is_ok();
             }
