@@ -1303,6 +1303,7 @@ class _RestoreDeclaration:
     output: _PreparedOutput
     max_function_concurrency: int | None
     observation_retention: Literal["bounded", "all"]
+    resume_budget: RunBudget | None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
 
@@ -3653,6 +3654,8 @@ class Session(Generic[ContextT, OutputT]):
                 and (selected.state is state or selected.state == state)
             ):
                 agent = selected.declaration
+                if resume_budget is None:
+                    resume_budget = selected.resume_budget
                 if function_concurrency_omitted:
                     max_function_concurrency = selected.max_function_concurrency
                 if retention_omitted:
