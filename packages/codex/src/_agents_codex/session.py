@@ -133,6 +133,7 @@ from .agent import (
     SignInWithChatGPT,
     _copy_model_settings as _copy_model_settings,
 )
+from .apply_patch import _ApplyPatchTool
 from .canonical_storage import (
     CustomStorage as CustomStorage,
     SessionStoreCleanup as SessionStoreCleanup,
@@ -1304,6 +1305,7 @@ class _RestoreDeclaration:
     output: _PreparedOutput
     max_function_concurrency: int | None
     observation_retention: Literal["bounded", "all"]
+    resume_budget: RunBudget | None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
     verify_remembered_approvals: Callable[[SessionState], bool] | None = None
@@ -2313,6 +2315,19 @@ def _check_native_agents_provider(
         raise ValueError("model_backend does not yet support native child agents")
 
 
+def _check_environment_python_tool_collisions(
+    executor: Environment[Any] | None, allowed_tools: Sequence[FunctionTool[Any, Any, Any]]
+) -> None:
+    if executor is not None:
+        for tool in allowed_tools:
+            if (
+                tool.ref.namespace in (None, "functions")
+                and tool.name in executor.tools
+                and not isinstance(tool, _ApplyPatchTool)
+            ):
+                raise ValueError(f"Python tool collides with enabled environment tool: {tool.name}")
+
+
 def _check_native_agents_environment(
     native_agents: NativeAgents[Any] | None, executor: Environment[Any] | None
 ) -> None:
@@ -2706,6 +2721,8 @@ def _capture_tools(
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
     kind = spec.get("type")
+    if kind == "applyPatch":
+        return ToolRef("apply_patch")
     if kind in ("computer", "shell"):
         return ToolRef(kind)
     if kind == "toolSearch":
@@ -3682,6 +3699,8 @@ class Session(Generic[ContextT, OutputT]):
                 and (selected.state is state or selected.state == state)
             ):
                 agent = selected.declaration
+                if resume_budget is None:
+                    resume_budget = selected.resume_budget
                 if verify_remembered_approvals is None:
                     verify_remembered_approvals = selected.verify_remembered_approvals
                 if function_concurrency_omitted:
@@ -3970,12 +3989,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise TypeError("environment must be an Environment")
             if project_guidance and executor is None:
                 raise ValueError("project_guidance requires an Environment")
-            if executor is not None:
-                for tool in allowed_tools:
-                    if tool.ref.namespace in (None, "functions") and tool.name in executor.tools:
-                        raise ValueError(
-                            f"Python tool collides with enabled environment tool: {tool.name}"
-                        )
+            _check_environment_python_tool_collisions(executor, allowed_tools)
             if state is not None:
                 _check_restored_environment(saved, executor)
             _check_native_agents_environment(native_agents, executor)
@@ -11010,7 +11024,10 @@ class Session(Generic[ContextT, OutputT]):
         )
 
     def _observe_accepted_tool_output(self, state: _CallbackState, item: Any) -> None:
-        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+        if not isinstance(item, dict) or item.get("type") not in {
+            "function_call_output",
+            "apply_patch_call_output",
+        }:
             return
         call_id = item.get("call_id")
         if not isinstance(call_id, str):
