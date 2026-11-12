@@ -18,6 +18,7 @@ from _agents_shared.sandbox_skills import (
     Skill as Skill,
     SkillMetadata as SkillMetadata,
     SkillSet,
+    _MetadataBudget,
     coerce_posix_path,
     posix_path_as_path,
 )
@@ -153,6 +154,16 @@ class _SkillLease:
         manifest = self.skills.process_manifest(Manifest(root=session.state.manifest.root))
         root = posix_path_as_path(coerce_posix_path(session.state.manifest.root))
         owner = session._inner
+        self.skills.bind(session)
+        previous = await self.skills._resolve_runtime_metadata(
+            session.state.manifest, budget=_MetadataBudget(), strict=True
+        )
+        for item in previous:
+            if _grant_stamp(session.state.manifest) != grants:
+                raise RuntimeError(
+                    "Skill staging requires its current sandbox environment and grants"
+                )
+            await owner._remove_workspace_entry_on_resume(root / item.path)
         await owner._apply_entry_batch(
             [(root / path, entry) for path, entry in manifest.entries.items()],
             base_dir=owner._manifest_base_dir(),

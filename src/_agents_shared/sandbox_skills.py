@@ -920,7 +920,7 @@ class SkillSet(BaseModel):
         }
 
     async def _resolve_runtime_metadata(
-        self, manifest: Manifest, *, budget: _MetadataBudget | None = None
+        self, manifest: Manifest, *, budget: _MetadataBudget | None = None, strict: bool = False
     ) -> list[SkillMetadata]:
         if self.session is None:
             return []
@@ -940,8 +940,20 @@ class SkillSet(BaseModel):
         except OverflowError:
             listing_overflow = True
             entries = []
-        except Exception:
+        except (FileNotFoundError, WorkspaceReadNotFoundError):
             return []
+        except Exception:
+            if not strict:
+                return []
+            # Listing backends can wrap missing directories. Reuse the bounded
+            # reader's typed absence classification; other failures remain fatal.
+            try:
+                await self.session.read_bounded(skills_root, max_bytes=1)
+            except (FileNotFoundError, WorkspaceReadNotFoundError):
+                return []
+            except Exception:
+                pass
+            raise
 
         if listing_overflow:
             raise ValueError("Skills metadata directory exceeds the listing byte limit")
@@ -960,7 +972,11 @@ class SkillSet(BaseModel):
             if budget is None:
                 try:
                     handle = await self.session.read(skill_md_path, user=self.run_as)
+                except (FileNotFoundError, WorkspaceReadNotFoundError):
+                    continue
                 except Exception:
+                    if strict:
+                        raise
                     continue
                 try:
                     frontmatter = _parse_frontmatter(_read_text(handle))
@@ -970,7 +986,11 @@ class SkillSet(BaseModel):
                 read_limit = budget.read_limit()
                 try:
                     payload = await self.session.read_bounded(skill_md_path, max_bytes=read_limit)
+                except (FileNotFoundError, WorkspaceReadNotFoundError):
+                    continue
                 except Exception:
+                    if strict:
+                        raise
                     continue
                 frontmatter = budget.parse(payload, read_limit=read_limit)
 

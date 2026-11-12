@@ -773,8 +773,19 @@ async def test_owned_unixlocal_skill_stages_before_relocated_subdirectory_index(
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal snapshot")
-@pytest.mark.parametrize("kind", ["inline", "from", "lazy"])
-async def test_owned_cold_resume_uses_current_skill_sources(tmp_path, monkeypatch, responses, kind):
+@pytest.mark.parametrize(
+    "kind,seed_old",
+    [
+        ("inline", True),
+        ("from", True),
+        ("local_from", True),
+        ("lazy", False),
+        ("from", False),
+    ],
+)
+async def test_owned_cold_resume_uses_current_skill_sources(
+    tmp_path, monkeypatch, responses, kind, seed_old
+):
     from agents.classic.sandbox.entries import Dir, File
     from agents.classic.sandbox.sandboxes.unix_local import (
         UnixLocalSandboxClient,
@@ -784,8 +795,23 @@ async def test_owned_cold_resume_uses_current_skill_sources(tmp_path, monkeypatc
 
     client = UnixLocalSandboxClient()
     options = UnixLocalSandboxClientOptions()
+    entries = {Path("keep.txt"): File(content=b"original snapshot data")}
+    if seed_old:
+        entries.update(
+            {
+                Path(".agents/keep.txt"): File(content=b"namespace configuration"),
+                Path(".agents/config/settings.txt"): File(content=b"unrelated configuration"),
+                Path(".agents/report/SKILL.md"): File(
+                    content=b"---\nname: report\ndescription: OLD_SKILL\n---\n"
+                ),
+                Path(".agents/report/scripts/retired.py"): File(content=b"retired script"),
+                Path(".agents/retired/SKILL.md"): File(
+                    content=b"---\nname: retired\ndescription: RETIRED_SKILL\n---\n"
+                ),
+            }
+        )
     original = await client.create(
-        manifest=Manifest(entries={Path("keep.txt"): File(content=b"original snapshot data")}),
+        manifest=Manifest(entries=entries),
         options=options,
         snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
     )
@@ -806,7 +832,7 @@ async def test_owned_cold_resume_uses_current_skill_sources(tmp_path, monkeypatc
                 )
             ]
         )
-    elif kind == "from":
+    elif kind in ("from", "local_from"):
         document_bytes = b"---\nname: report\ndescription: COLD_RESUME_INDEX\n---\n" + b"x" * (
             1024 * 1024
         )
@@ -824,6 +850,12 @@ async def test_owned_cold_resume_uses_current_skill_sources(tmp_path, monkeypatc
                 }
             )
         )
+        if kind == "local_from":
+            monkeypatch.chdir(tmp_path)
+            current = tmp_path / "current-source/report/SKILL.md"
+            current.parent.mkdir(parents=True)
+            current.write_bytes(document_bytes)
+            skills = Skills(from_=LocalDir(src=current.parent.parent))
 
     else:
         monkeypatch.chdir(tmp_path)
@@ -844,6 +876,15 @@ async def test_owned_cold_resume_uses_current_skill_sources(tmp_path, monkeypatc
             assert not (root / ".agents/report/SKILL.md").exists()
         else:
             assert (root / ".agents/report/SKILL.md").read_bytes() == document_bytes
+            assert (
+                (root / ".agents/retired").exists(),
+                (root / ".agents/report/scripts/retired.py").exists(),
+            ) == (False, False)
+            if seed_old:
+                assert (root / ".agents/keep.txt").read_bytes() == b"namespace configuration"
+                assert (
+                    root / ".agents/config/settings.txt"
+                ).read_bytes() == b"unrelated configuration"
         async with ExecutorPeer(tmp_path / "executor").serve() as peer:
             trust(peer, tmp_path, monkeypatch)
             yield Environment(
@@ -884,6 +925,7 @@ async def test_owned_cold_resume_uses_current_skill_sources(tmp_path, monkeypatc
         assert ".agents/report" in instructions
         assert "COLD_RESUME_INDEX" in instructions
         assert "- oversized:" not in instructions
+        assert "RETIRED_SKILL" not in instructions
         assert (root / "keep.txt").read_bytes() == b"original snapshot data"
         document = root / ".agents/report/SKILL.md"
         assert document.is_file(), "Missing the current skill document after resume and load"
@@ -1342,3 +1384,108 @@ async def test_nonseekable_snapshot_persist_retires_private_quota_receipt(tmp_pa
     finally:
         await resource.aclose()
         await client.delete(resource)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal snapshot")
+@pytest.mark.parametrize("failure", ["list", "read"])
+async def test_eager_restore_metadata_failure_precedes_environment_publication(
+    tmp_path, monkeypatch, responses, failure
+):
+    from agents.classic.sandbox.entries import Dir, File
+    from agents.classic.sandbox.errors import WorkspaceArchiveReadError
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+        UnixLocalSandboxSession,
+    )
+    from agents.sandbox import LocalSnapshotSpec
+
+    client = UnixLocalSandboxClient()
+    options = UnixLocalSandboxClientOptions()
+    original = await client.create(
+        manifest=Manifest(
+            entries={
+                Path("keep.txt"): File(content=b"unrelated workspace data"),
+                Path(".agents/retired/SKILL.md"): File(
+                    content=b"---\nname: retired\ndescription: RETIRED_SKILL\n---\n"
+                ),
+            }
+        ),
+        options=options,
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await original.start()
+    root = Path(original.state.manifest.root)
+    await original.aclose()
+    saved = original.state.model_copy(deep=True)
+    await client.delete(original)
+
+    attempted = False
+    connected = 0
+    method = "_ls_bounded" if failure == "list" else "_read_bounded"
+    previous = getattr(UnixLocalSandboxSession, method)
+
+    async def fail_once(self, path, **kwargs):
+        nonlocal attempted
+        target = root / ".agents" if failure == "list" else root / ".agents/retired/SKILL.md"
+        if Path(path) == target and not attempted:
+            attempted = True
+            raise OSError("synthetic one-shot skill metadata failure")
+        return await previous(self, path, **kwargs)
+
+    monkeypatch.setattr(UnixLocalSandboxSession, method, fail_once)
+
+    @asynccontextmanager
+    async def connect(selected):
+        nonlocal connected
+        connected += 1
+        assert not (root / ".agents/retired").exists()
+        assert (root / "keep.txt").read_bytes() == b"unrelated workspace data"
+        async with ExecutorPeer(tmp_path / "executor").serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+            yield Environment(
+                url=peer.url,
+                headers={"Authorization": "Bearer " + peer.token},
+                cwd=str(root),
+                tools=(),
+                capability_directories=[str(root / ".agents")],
+            )
+
+    def source():
+        return sandbox_environment(
+            UnixLocalSandboxClient(),
+            manifest=Manifest(root=str(root)),
+            options=options,
+            authorized_resume_state=saved,
+            connect=connect,
+            skills=Skills(
+                from_=Dir(
+                    children={
+                        "replacement": Dir(
+                            children={
+                                "SKILL.md": File(
+                                    content=(
+                                        b"---\nname: replacement\ndescription: CURRENT_SKILL\n---\n"
+                                    )
+                                )
+                            }
+                        ),
+                    }
+                )
+            ),
+        )
+
+    agent = Agent(instructions="Inspect current skills.", provider=provider(responses))
+    expected = OSError if failure == "list" else WorkspaceArchiveReadError
+    with pytest.raises(expected):
+        async with agent.session(environment=source(), discover_agents_md=False):
+            pytest.fail("An unreadable prior skill index reached environment publication")
+    assert attempted and connected == 0 and not responses.requests
+
+    responses.respond(assistant_output("done"))
+    async with agent.session(environment=source(), discover_agents_md=False) as session:
+        assert (await (await session.submit("Inspect")).get_result()).final_output == "done"
+    assert connected == 1
+    assert "CURRENT_SKILL" in str(responses.requests) and "RETIRED_SKILL" not in str(
+        responses.requests
+    )
