@@ -54,10 +54,11 @@ async def test_request_override_stays_on_independent_websocket_endpoint():
             assert (await turn.get_result()).final_output == label
 
         assert not http.request_paths
+        assert not websocket.http_requests
         admitted = [
             (urlsplit(target), headers["x-operation"])
             for (_, target), headers in zip(
-                websocket.request_paths, websocket.request_headers, strict=True
+                websocket.request_paths, websocket.upgrades, strict=True
             )
             if "x-operation" in headers
         ]
