@@ -30,6 +30,10 @@ else:
     import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parents[3]
+LINUX_ARM64_GLIBC_FLOORS = {
+    "cp310-abi3-manylinux_2_28_aarch64": (2, 28),
+    "cp310-abi3-manylinux_2_39_aarch64": (2, 39),
+}
 SOURCE = ROOT / "src/agents"
 SOURCES = {
     "agents": SOURCE,
@@ -165,7 +169,8 @@ def test_sdk_metadata_separates_native_classic_and_a2a_dependencies(
     assert wheel["Root-Is-Purelib"] == "false"
     assert set(wheel.get_all("Tag", [])) == {str(tag) for tag in tags}
     if sys.platform == "linux" and platform.machine() == "aarch64":
-        assert wheel.get_all("Tag") == ["cp310-abi3-manylinux_2_39_aarch64"]
+        (tag,) = wheel.get_all("Tag", [])
+        assert tag in LINUX_ARM64_GLIBC_FLOORS
 
 
 @pytest.mark.skipif(
@@ -173,7 +178,9 @@ def test_sdk_metadata_separates_native_classic_and_a2a_dependencies(
     reason="requires a Linux ARM64 wheel and readelf",
 )
 def test_linux_arm64_native_payload(sdk_wheel, tmp_path):
-    _, archive = sdk_wheel
+    path, archive = sdk_wheel
+    (tag,) = parse_wheel_filename(path.name)[3]
+    glibc_floor = LINUX_ARM64_GLIBC_FLOORS[str(tag)]
     scratch = tmp_path / "payload"
     for info in archive.infolist():
         if info.is_dir():
@@ -199,7 +206,7 @@ def test_linux_arm64_native_payload(sdk_wheel, tmp_path):
             tuple(map(int, version.split(".")))
             for version in re.findall(r"Name: GLIBC_(\d+(?:\.\d+)+)", result)
         ]
-        assert all(version <= (2, 39) for version in glibc), (info.filename, glibc)
+        assert all(version <= glibc_floor for version in glibc), (info.filename, glibc)
         libraries = re.findall(r"\(NEEDED\).*\[(.*?)\]", result)
         print(
             f"{info.filename}: AArch64 ELF64, GLIBC up to {max(glibc, default=None)}, {libraries}"

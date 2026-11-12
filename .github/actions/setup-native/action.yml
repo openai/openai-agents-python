@@ -4,14 +4,33 @@ runs:
   using: composite
   steps:
     - name: Free space for native compilation
-      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      if: runner.os == 'Linux' && runner.environment == 'github-hosted' && env.OPENAI_AGENTS_NATIVE_BUILD_IMAGE == ''
       shell: bash
       run: |
         sudo rm -rf /usr/local/lib/android /usr/share/dotnet
         df -h /
     - name: Install Rust
       shell: bash
-      run: rustup toolchain install 1.95.0 --profile minimal
+      run: |
+        if [[ -n "${OPENAI_AGENTS_NATIVE_BUILD_IMAGE:-}" ]] && ! command -v rustup >/dev/null; then
+          architecture=$(uname -m)
+          case "$architecture" in
+            x86_64) checksum=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c ;;
+            aarch64) checksum=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c ;;
+            *) echo "Unsupported manylinux Rust architecture: $architecture" >&2; exit 1 ;;
+          esac
+          installer=$(mktemp "$RUNNER_TEMP/rustup-init-XXXXXX")
+          trap 'rm -f "$installer"' EXIT
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 2 \
+            --connect-timeout 8 --max-time 45 --output "$installer" \
+            "https://static.rust-lang.org/rustup/archive/1.28.2/$architecture-unknown-linux-gnu/rustup-init"
+          printf '%s  %s\n' "$checksum" "$installer" | sha256sum --check --strict
+          chmod +x "$installer"
+          "$installer" -y --default-toolchain none --no-modify-path
+          printf '%s\n' "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$CARGO_HOME/bin:$PATH"
+        fi
+        rustup toolchain install 1.95.0 --profile minimal
     - name: Install matching LLVM profile tools
       if: env.MATURIN_PGO == 'true'
       shell: bash
