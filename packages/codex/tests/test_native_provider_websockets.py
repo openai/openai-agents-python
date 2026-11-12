@@ -56,6 +56,7 @@ class WebSocketPeer(ResponsesFixture):
     upgrade_status: int | None = None
     http_failure: tuple[int, str, str] | None = None
     tls_context: ssl.SSLContext | None = None
+    request_paths: list[tuple[str, str]] = field(default_factory=list)
     upgrades: list[dict[str, str]] = field(default_factory=list)
     frames: list[dict[str, Any]] = field(default_factory=list)
     http_requests: list[dict[str, Any]] = field(default_factory=list)
@@ -80,6 +81,7 @@ class WebSocketPeer(ResponsesFixture):
         return provider
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
+        self.request_paths.append((request.method, request.path_qs))
         self.http_requests.append(await request.json())
         if self.http_failure is not None:
             self.request_headers.append(
@@ -106,6 +108,7 @@ class WebSocketPeer(ResponsesFixture):
         return await super().handle(request)
 
     async def websocket(self, request: web.Request) -> web.StreamResponse:
+        self.request_paths.append((request.method, request.path_qs))
         headers = {key.lower(): value for key, value in request.headers.items()}
         self.upgrades.append(headers)
         if self.upgrade_status == 401:
@@ -221,6 +224,7 @@ class WebSocketPeer(ResponsesFixture):
 @asynccontextmanager
 async def peer(
     *,
+    base_path: str = "/v1",
     upgrade_status: int | None = None,
     tls_context: ssl.SSLContext | None = None,
     http_failure: tuple[int, str, str] | None = None,
@@ -229,13 +233,13 @@ async def peer(
         upgrade_status=upgrade_status, tls_context=tls_context, http_failure=http_failure
     )
     app = web.Application()
-    app.router.add_get("/v1/responses", fixture.websocket)
-    app.router.add_post("/v1/responses", fixture.handle)
+    app.router.add_get(f"{base_path}/responses", fixture.websocket)
+    app.router.add_post(f"{base_path}/responses", fixture.handle)
     app.on_shutdown.append(fixture.close_sockets)
     server = TestServer(app, shutdown_timeout=1, scheme="https" if tls_context else "http")
     await server.start_server(ssl=tls_context)
     try:
-        fixture.url = str(server.make_url("/v1"))
+        fixture.url = str(server.make_url(base_path))
         try:
             yield fixture
         finally:
