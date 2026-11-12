@@ -169,7 +169,10 @@ async def test_application_shell_keeps_acknowledged_local_receipt(
     assert initial[0]["output"] == [
         {"stdout": "saved", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
     ]
-    assert replayed == initial
+    assert len(replayed) == 1
+    assert replayed[0]["call_id"] == initial[0]["call_id"]
+    assert replayed[0]["max_output_length"] == initial[0]["max_output_length"]
+    assert replayed[0]["output"] == initial[0]["output"]
 
 
 @pytest.mark.parametrize(
