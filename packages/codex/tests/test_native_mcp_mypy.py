@@ -10,7 +10,9 @@ from agents import (
     Completed,
     HttpMCP,
     MCPCallContext,
+    MCPDiscoveryContext,
     MCPResultContext,
+    MCPToolDefinition,
     NativeToolCall,
     Session,
     Tool,
@@ -77,3 +79,20 @@ approved = HttpMCP(
     name="records", url="https://example.invalid/mcp", tools=["write"], approval_mode="preapproved"
 )
 assert_type(approved.approval_mode, Literal["native", "preapproved"])
+
+
+def discovery(ctx: MCPDiscoveryContext[Application], definition: MCPToolDefinition) -> bool:
+    assert_type(ctx.context, Application)
+    if "outputSchema" in definition:
+        assert_type(definition["outputSchema"], dict[str, Any])
+    if "icons" in definition:
+        assert_type(definition["icons"], list[dict[str, Any]])
+    if "_meta" in definition:
+        assert_type(definition["_meta"], dict[str, Any])
+    return definition["name"] == "search"
+
+
+discovery_server = HttpMCP(
+    name="discovery", url="https://example.invalid/mcp", tools=["search"], tool_filter=discovery
+)
+assert_type(discovery_server, HttpMCP[Application])
