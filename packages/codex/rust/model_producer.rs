@@ -367,10 +367,9 @@ impl ModelResponseInterceptor for Producer {
                         .and_then(Value::as_str)
                         .filter(|id| !id.trim().is_empty())
                     {
-                        ensure!(
-                            id == reply.response_id,
-                            "Original Chat Completion does not match model response"
-                        );
+                        if id != reply.response_id {
+                            return Err(FAILURE.into());
+                        }
                     }
                     let mut events = codex_extension_api::completed_model_response(
                         reply.response_id,

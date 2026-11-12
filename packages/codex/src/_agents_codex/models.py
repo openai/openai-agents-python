@@ -335,6 +335,7 @@ class ChatCompletionsModel:
         reason: Any = None
         reasoning: Any = None
         response: Any = None
+        returned: ModelResponse | None = None
         text: Any = None
         text_part: dict[str, Any] | None = None
         tool: Any = None
@@ -680,10 +681,10 @@ class ChatCompletionsModel:
                     else counter
                     for key, counter in usage.items()
                 }
-            response = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+            returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
             if getattr(request, "_observe_raw_provider_events", False):
-                object.__setattr__(response, "_raw_chat_completion", deepcopy(value))
-            return response
+                object.__setattr__(returned, "_raw_chat_completion", deepcopy(value))
+            return returned
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
             del (
@@ -715,6 +716,7 @@ class ChatCompletionsModel:
                 reason,
                 reasoning,
                 response,
+                returned,
                 text,
                 text_part,
                 tool,
