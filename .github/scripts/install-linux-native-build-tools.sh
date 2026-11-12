@@ -28,7 +28,7 @@ install_manylinux_openssl() (
 )
 
 if [[ -n "${OPENAI_AGENTS_NATIVE_BUILD_IMAGE:-}" ]]; then
-  dnf install --assumeyes clang cmake pkgconf-pkg-config perl-IPC-Cmd
+  dnf install --assumeyes clang cmake pkgconf-pkg-config perl-core
   install_manylinux_openssl
 elif ! command -v clang >/dev/null ||
   ! command -v cmake >/dev/null ||
