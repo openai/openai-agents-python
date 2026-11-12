@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/provider.rs b/codex-rs/otel/src/provider.rs
-index 8d066965ba8f55b8c509bb3b9e57b9272e043408..29860372cd6c85933232eb8332743d9dd096bdc3 100644
+index 8d066965..29860372 100644
 --- a/codex-rs/otel/src/provider.rs
 +++ b/codex-rs/otel/src/provider.rs
 @@ -785,12 +785,12 @@ fn build_tracer_provider(
@@ -34,7 +34,7 @@ index 8d066965ba8f55b8c509bb3b9e57b9272e043408..29860372cd6c85933232eb8332743d9d
      )
  }
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
-index 1a2e2a6dd724d543fe16dcad5b7577b5eac7a09e..2c76fbc7cbf11528ca35250437cd4f4467724ae5 100644
+index d8c2f4a9..48eddbcd 100644
 --- a/codex-rs/otel/src/sdk_trace.rs
 +++ b/codex-rs/otel/src/sdk_trace.rs
 @@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -123,16 +123,16 @@ index 1a2e2a6dd724d543fe16dcad5b7577b5eac7a09e..2c76fbc7cbf11528ca35250437cd4f44
      let mut builder =
          opentelemetry::trace::SpanBuilder::from_name(options.name).with_attributes(attributes);
      builder.trace_id = trace_id;
-@@ -613,7 +646,7 @@ pub fn trace_span_context(key: &str) -> Result<String, String> {
-     readback(key, resolve(key)?.as_ref())
+@@ -659,7 +692,7 @@ pub fn borrow_trace_context(
  }
+ 
  pub fn retain_trace_context(key: &str) -> Result<String, String> {
 -    let handle = resolve(key)?;
 +    let handle = resolve_live(key)?;
      let key = token("c");
      handles()
          .lock()
-@@ -687,7 +720,7 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
+@@ -733,7 +766,7 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
      Ok(())
  }
  pub fn context(key: &str) -> Result<Context, String> {
@@ -141,7 +141,7 @@ index 1a2e2a6dd724d543fe16dcad5b7577b5eac7a09e..2c76fbc7cbf11528ca35250437cd4f44
  }
  struct ExplicitSubmissionContext;
  
-@@ -724,6 +757,14 @@ pub fn current_context_token() -> Option<String> {
+@@ -770,6 +803,14 @@ pub fn current_context_token() -> Option<String> {
      // Native lifecycle hooks can inherit private values on the instrumented
      // span. A W3C round trip would discard those values before policy lookup.
      let context = crate::trace_context::current_span_context();
@@ -157,7 +157,7 @@ index 1a2e2a6dd724d543fe16dcad5b7577b5eac7a09e..2c76fbc7cbf11528ca35250437cd4f44
      let registration = {
          let span = context.span();
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..1807551369ac5fd04997213a639d258f3029b44d 100644
+index ee221eaa..affeb6db 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -7,6 +7,7 @@ use serde::Deserialize;
@@ -168,7 +168,7 @@ index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..1807551369ac5fd04997213a639d258f
  use std::sync::{Arc, Mutex, OnceLock};
  use std::time::{Duration, Instant, UNIX_EPOCH};
  
-@@ -61,6 +62,41 @@ fn lock() -> std::sync::MutexGuard<'static, Routes> {
+@@ -62,6 +63,41 @@ fn lock() -> std::sync::MutexGuard<'static, Routes> {
      state().lock().unwrap_or_else(|e| e.into_inner())
  }
  
@@ -210,7 +210,7 @@ index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..1807551369ac5fd04997213a639d258f
  pub fn register_trace_credentials(input: &str) -> Result<String, String> {
      if input.len() > 65536 {
          return Err("trace credential headers exceed limit".into());
-@@ -882,9 +918,21 @@ impl SpanProcessor for TraceBatchProcessor {
+@@ -965,9 +1001,21 @@ impl SpanProcessor for TraceBatchProcessor {
  
  #[derive(Debug)]
  pub(crate) struct RoutedSpanProcessor<P> {
@@ -234,7 +234,7 @@ index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..1807551369ac5fd04997213a639d258f
  impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
      fn on_start(&self, span: &mut Span, cx: &Context) {
          let policy = crate::sdk_trace::policy_for_context(cx);
-@@ -893,6 +941,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+@@ -976,6 +1024,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
          }
          self.inner.on_start(span, cx);
          let mut s = lock();
@@ -244,7 +244,7 @@ index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..1807551369ac5fd04997213a639d258f
          if let Some(data) = span.exported_data() {
              let descriptor =
                  retained_root_descriptor(&data, "start", policy.as_deref(), s.sequence + 1);
-@@ -913,6 +964,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+@@ -996,6 +1047,9 @@ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
              return;
          }
          let mut s = lock();
@@ -254,7 +254,7 @@ index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..1807551369ac5fd04997213a639d258f
          let descriptor = retained_root_descriptor(&span, "end", policy.as_deref(), s.sequence + 1);
          event(
              &mut s,
-@@ -980,10 +1034,7 @@ mod tests {
+@@ -1108,10 +1162,7 @@ mod tests {
          set_trace_routes(r#"{"processor_ids":["first"],"replace":false}"#).unwrap();
          let recorder = Recorder::default();
          let provider = SdkTracerProvider::builder()
@@ -266,7 +266,7 @@ index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..1807551369ac5fd04997213a639d258f
              .build();
          let tracer = provider.tracer("route-test");
          let mut old = tracer.start("old");
-@@ -1429,14 +1480,14 @@ mod tests {
+@@ -1557,14 +1608,14 @@ mod tests {
          let release = Arc::new((Mutex::new(false), Condvar::new()));
          let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
          let provider = SdkTracerProvider::builder()
