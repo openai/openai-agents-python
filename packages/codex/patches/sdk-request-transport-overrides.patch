@@ -1,0 +1,1213 @@
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index b52d33a28d00ad2f620116d0d1c2e8402793788c..aca02a2db0504a95d46698ec67671c83e5c5f908 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -28,6 +28,7 @@ const MAX_JSON_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
+ pub struct ResponsesClient<T: HttpTransport> {
+     session: EndpointSession<T>,
+     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
++    request_transport: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
+ }
+
+ #[derive(Default)]
+@@ -47,6 +48,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         Self {
+             session: EndpointSession::new(transport, provider, auth),
+             sse_telemetry: None,
++            request_transport: None,
+         }
+     }
+
+@@ -58,9 +60,18 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         Self {
+             session: self.session.with_request_telemetry(request),
+             sse_telemetry: sse,
++            request_transport: self.request_transport,
+         }
+     }
+
++    pub fn with_request_transport(
++        mut self,
++        overrides: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
++    ) -> Self {
++        self.request_transport = overrides;
++        self
++    }
++
+     #[instrument(
+         name = "responses.stream_request",
+         level = "info",
+@@ -226,6 +237,10 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             Compression::Zstd => RequestCompression::Zstd,
+         };
+
++        let prepared = crate::prepare_request_transport(
++            &self.session.provider().url_for_path("/responses"),
++            self.request_transport.as_ref(),
++        )?;
+         self.session
+             .stream_encoded_json_with(
+                 Method::POST,
+@@ -236,6 +251,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+                 |req| {
+                     req.headers
+                         .insert(http::header::ACCEPT, HeaderValue::from_static(accept));
++                    prepared.apply(req);
+                     req.compression = request_compression;
+                     req.response_body_limit_bytes = response_body_limit_bytes;
+                 },
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index ae61392914c06ab63b25dc2e6431ba9b743b0f6d..9afa4d55e37645074ab546602d2f08249152f6ad 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -394,6 +394,7 @@ impl ResponsesWebsocketConnection {
+ /// Client for connecting to the Responses WebSocket endpoint for one provider.
+ pub struct ResponsesWebsocketClient {
+     provider: Provider,
++    request_transport: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
+     auth: SharedAuthProvider,
+     tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
+ }
+@@ -429,9 +430,18 @@ impl ResponsesWebsocketClient {
+             provider,
+             auth,
+             tls_selector: None,
++            request_transport: None,
+         }
+     }
+
++    pub fn with_request_transport(
++        mut self,
++        overrides: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
++    ) -> Self {
++        self.request_transport = overrides;
++        self
++    }
++
+     /// Select SDK TLS only for this client; None retains the canonical connector.
+     pub fn with_tls_selector(
+         mut self,
+@@ -462,6 +472,12 @@ impl ResponsesWebsocketClient {
+
+         let mut headers =
+             merge_request_headers(&self.provider.headers, extra_headers, default_headers);
++        let mut effective_url = ws_url.to_string();
++        crate::prepare_request_transport(&effective_url, self.request_transport.as_ref())?
++            .apply_parts(&mut effective_url, &mut headers);
++        let ws_url = url::Url::parse(&effective_url).map_err(|_| ApiError::InvalidRequest {
++            message: "invalid request query URL".into(),
++        })?;
+         self.auth.add_auth_headers(&mut headers);
+
+         let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 628f299c76729594e1fe988fce7eecfb76f91532..100fabad82e1e1dcaf820d6a9f47a6ee62b69b90 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -8,6 +8,7 @@ pub(crate) mod error;
+ pub(crate) mod files;
+ pub(crate) mod images;
+ pub(crate) mod provider;
++mod request_transport;
+ pub(crate) mod rate_limits;
+ mod received_response_facts;
+ pub(crate) mod requests;
+@@ -21,6 +22,8 @@ pub use crate::requests::headers::build_session_headers;
+ pub use codex_client::RequestTelemetry;
+ pub use codex_client::ReqwestTransport;
+ pub use codex_client::TransportError;
++pub use crate::request_transport::prepare_request_transport;
++pub use crate::request_transport::PreparedRequestTransport;
+
+ pub use crate::api_bridge::map_api_error;
+ pub use crate::auth::AgentIdentityTelemetry;
+diff --git a/codex-rs/codex-api/src/request_transport.rs b/codex-rs/codex-api/src/request_transport.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6e44372d1cec1fcae829e29885b6c7f8c476528
+--- /dev/null
++++ b/codex-rs/codex-api/src/request_transport.rs
+@@ -0,0 +1,123 @@
++use crate::ApiError;
++use codex_client::Request;
++use codex_protocol::model_request_transport::RequestTransportOverrides;
++use http::header::{HeaderMap, HeaderName, HeaderValue};
++use serde_json::Value;
++use url::Url;
++
++/// Validated values for the existing pre-authentication request configuration hook.
++pub struct PreparedRequestTransport {
++    url: Option<String>,
++    headers: HeaderMap,
++    omitted: Vec<HeaderName>,
++}
++
++impl PreparedRequestTransport {
++    pub fn apply(&self, request: &mut Request) {
++        self.apply_parts(&mut request.url, &mut request.headers);
++    }
++
++    pub fn apply_parts(&self, url: &mut String, headers: &mut HeaderMap) {
++        if let Some(prepared_url) = &self.url {
++            url.clone_from(prepared_url);
++        }
++        for name in &self.omitted {
++            headers.remove(name);
++        }
++        headers.extend(self.headers.clone());
++    }
++}
++
++fn invalid(message: &str) -> ApiError {
++    ApiError::InvalidRequest {
++        message: message.into(),
++    }
++}
++
++fn query_pairs(
++    key: &str,
++    value: &Value,
++    nulls_as_empty: bool,
++    depth: usize,
++    pairs: &mut Vec<(String, String)>,
++) -> Result<(), ApiError> {
++    if depth > 64 {
++        return Err(invalid("request query nesting exceeds its limit"));
++    }
++    match value {
++        Value::Null if nulls_as_empty => pairs.push((key.into(), String::new())),
++        Value::Null => {}
++        Value::Bool(value) => pairs.push((key.into(), value.to_string())),
++        Value::Number(value) => pairs.push((key.into(), value.to_string())),
++        Value::String(value) => pairs.push((key.into(), value.clone())),
++        Value::Array(values) => {
++            for value in values {
++                query_pairs(&format!("{key}[]"), value, nulls_as_empty, depth + 1, pairs)?;
++            }
++        }
++        Value::Object(values) => {
++            for (name, value) in values {
++                query_pairs(
++                    &format!("{key}[{name}]"),
++                    value,
++                    nulls_as_empty,
++                    depth + 1,
++                    pairs,
++                )?;
++            }
++        }
++    }
++    Ok(())
++}
++
++/// Prepare without mutating a provider, a request, or its credential owner.
++pub fn prepare_request_transport(
++    url: &str,
++    overrides: Option<&RequestTransportOverrides>,
++) -> Result<PreparedRequestTransport, ApiError> {
++    let mut prepared = PreparedRequestTransport {
++        url: None,
++        headers: HeaderMap::new(),
++        omitted: Vec::new(),
++    };
++    let Some(overrides) = overrides else {
++        return Ok(prepared);
++    };
++    overrides
++        .validate()
++        .map_err(|message| ApiError::InvalidRequest { message })?;
++    if let Some(Some(headers)) = &overrides.headers {
++        for (name, value) in headers {
++            let name = HeaderName::from_bytes(name.as_bytes())
++                .map_err(|_| invalid("invalid request header name"))?;
++            match value {
++                Some(value) => {
++                    let mut value = HeaderValue::from_str(value)
++                        .map_err(|_| invalid("invalid request header value"))?;
++                    value.set_sensitive(true);
++                    prepared.headers.insert(name, value);
++                }
++                None => prepared.omitted.push(name),
++            }
++        }
++    }
++    if let Some(Some(query)) = &overrides.query
++        && !query.is_empty()
++    {
++        let mut url = Url::parse(url).map_err(|_| invalid("invalid request query URL"))?;
++        let mut pairs = url
++            .query_pairs()
++            .into_owned()
++            .filter(|(name, _)| !query.contains_key(name))
++            .collect::<Vec<_>>();
++        for (name, value) in query {
++            query_pairs(name, value, overrides.query_nulls_as_empty, 0, &mut pairs)?;
++        }
++        url.set_query(None);
++        if !pairs.is_empty() {
++            url.query_pairs_mut().extend_pairs(pairs);
++        }
++        prepared.url = Some(url.into());
++    }
++    Ok(prepared)
++}
+diff --git a/codex-rs/codex-api/tests/request_transport_overrides.rs b/codex-rs/codex-api/tests/request_transport_overrides.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e626dca99e6add268f142fb26d21b697eb2e949
+--- /dev/null
++++ b/codex-rs/codex-api/tests/request_transport_overrides.rs
+@@ -0,0 +1,310 @@
++use codex_api::{AuthHeadersFuture, AuthProvider, prepare_request_transport};
++use codex_client::{HttpTransport, Provider, ReqwestTransport, RetryConfig};
++use codex_protocol::model_request_transport::RequestTransportOverrides;
++use http::{HeaderMap, HeaderValue, Method};
++use serde_json::json;
++use std::collections::HashMap;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::time::Duration;
++use wiremock::{Mock, MockServer, ResponseTemplate};
++
++struct RefreshingAuth(AtomicUsize);
++impl AuthProvider for RefreshingAuth {
++    fn add_auth_headers(&self, _: &mut HeaderMap) {}
++    fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
++        Box::pin(async {
++            let next = self.0.fetch_add(1, Ordering::SeqCst) + 1;
++            let mut headers = HeaderMap::new();
++            headers.insert(
++                http::header::AUTHORIZATION,
++                HeaderValue::from_str(&format!("Bearer non-credential-{next}")).unwrap(),
++            );
++            Ok(headers)
++        })
++    }
++}
++
++fn provider(base: String) -> Provider {
++    let mut headers = HeaderMap::new();
++    headers.insert("x-routing", HeaderValue::from_static("default"));
++    headers.insert("x-omit", HeaderValue::from_static("default"));
++    Provider {
++        name: "request-transport-control".into(),
++        base_url: base,
++        query_params: Some(HashMap::from([("dup".into(), "provider".into())])),
++        headers,
++        retry: RetryConfig {
++            max_attempts: 1,
++            base_delay: Duration::from_millis(1),
++            retry_429: false,
++            retry_5xx: false,
++            retry_transport: false,
++        },
++        stream_idle_timeout: Duration::from_secs(5),
++    }
++}
++
++#[tokio::test]
++async fn request_overrides_reach_the_wire_without_replacing_provider_defaults_or_credentials() {
++    let server = MockServer::start().await;
++    Mock::given(wiremock::matchers::method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
++        .expect(2)
++        .mount(&server)
++        .await;
++    let provider = provider(format!("{}/v1?keep=one&keep=two&dup=base", server.uri()));
++    let auth = Arc::new(RefreshingAuth(AtomicUsize::new(0)));
++    let transport = ReqwestTransport::from_http_client(
++        codex_http_client::HttpClientBuilder::new()
++            .build_direct()
++            .unwrap(),
++    );
++    let overrides: RequestTransportOverrides = serde_json::from_value(json!({
++        "headers":{"x-routing":"request", "x-omit":null},
++        "query":{"dup":"request","count":2,"filter":{"enabled":true},"tags":["one","two"],"empty":null}
++    })).unwrap();
++    for overrides in [Some(&overrides), None] {
++        let mut request = provider.build_request(Method::POST, "/responses");
++        let prepared = prepare_request_transport(&request.url, overrides).unwrap();
++        prepared.apply(&mut request);
++        // The same native credential owner resolves after request preferences.
++        let request = auth.apply_auth(request).await.unwrap();
++        transport.execute(request).await.unwrap();
++    }
++    let requests = server.received_requests().await.unwrap();
++    assert_eq!(requests.len(), 2);
++    let first = &requests[0];
++    assert_eq!(first.url.path(), "/v1/responses");
++    let query = first.url.query_pairs().into_owned().collect::<Vec<_>>();
++    assert_eq!(
++        query
++            .iter()
++            .filter(|(key, _)| key == "keep")
++            .map(|(_, v)| v.as_str())
++            .collect::<Vec<_>>(),
++        ["one", "two"]
++    );
++    assert_eq!(
++        query
++            .iter()
++            .filter(|(key, _)| key == "dup")
++            .map(|(_, v)| v.as_str())
++            .collect::<Vec<_>>(),
++        ["request"]
++    );
++    assert!(query.contains(&("count".into(), "2".into())));
++    assert!(query.contains(&("filter[enabled]".into(), "true".into())));
++    assert_eq!(
++        query
++            .iter()
++            .filter(|(key, _)| key == "tags[]")
++            .map(|(_, v)| v.as_str())
++            .collect::<Vec<_>>(),
++        ["one", "two"]
++    );
++    assert!(!query.iter().any(|(key, _)| key == "empty"));
++    assert_eq!(first.headers["x-routing"], "request");
++    assert!(!first.headers.contains_key("x-omit"));
++    assert_eq!(
++        first.headers[http::header::AUTHORIZATION],
++        "Bearer non-credential-1"
++    );
++    let second = &requests[1];
++    assert_eq!(second.headers["x-routing"], "default");
++    assert_eq!(second.headers["x-omit"], "default");
++    assert_eq!(
++        second.headers[http::header::AUTHORIZATION],
++        "Bearer non-credential-2"
++    );
++    assert_eq!(auth.0.load(Ordering::SeqCst), 2);
++    assert_eq!(provider.headers["x-routing"], "default");
++    assert!(
++        second
++            .url
++            .query_pairs()
++            .any(|(key, value)| key == "dup" && value == "provider")
++    );
++}
++
++#[test]
++fn javascript_null_and_python_none_keep_their_query_distinction() {
++    for (empty, expected) in [(false, false), (true, true)] {
++        let overrides: RequestTransportOverrides = serde_json::from_value(json!({
++            "query":{"old":null},"query_nulls_as_empty":empty
++        }))
++        .unwrap();
++        let provider = provider("https://example.invalid/v1?old=default&keep=value".into());
++        let mut request = provider.build_request(Method::POST, "/responses");
++        prepare_request_transport(&request.url, Some(&overrides))
++            .unwrap()
++            .apply(&mut request);
++        let url = url::Url::parse(&request.url).unwrap();
++        assert_eq!(
++            url.query_pairs()
++                .any(|(key, value)| key == "old" && value.is_empty()),
++            expected
++        );
++        assert!(
++            url.query_pairs()
++                .any(|(key, value)| key == "keep" && value == "value")
++        );
++    }
++}
++
++#[test]
++fn native_auth_protocol_and_private_hop_headers_cannot_be_set_or_omitted() {
++    for name in [
++        "Authorization",
++        "api-key",
++        "x-codex-turn-state",
++        "x-sdk-sentinel-grant",
++        "Host",
++        "Sec-WebSocket-Key",
++    ] {
++        for value in [json!("replacement"), serde_json::Value::Null] {
++            let overrides: RequestTransportOverrides = serde_json::from_value(json!({
++                "headers":{name:value}
++            }))
++            .unwrap();
++            assert!(
++                prepare_request_transport("https://example.invalid/responses", Some(&overrides))
++                    .is_err(),
++                "{name}"
++            );
++        }
++    }
++    let overrides: RequestTransportOverrides = serde_json::from_value(json!({
++        "headers":{"x-private":"non-credential-value"}, "query":{"tenant":"private-routing-value"}
++    }))
++    .unwrap();
++    let debug = format!("{overrides:?}");
++    assert!(!debug.contains("non-credential-value"));
++    assert!(!debug.contains("private-routing-value"));
++}
++
++#[tokio::test]
++async fn responses_client_applies_transport_automatically_before_native_auth() {
++    let server = MockServer::start().await;
++    Mock::given(wiremock::matchers::method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_string(
++            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"output\":[]}}\n\n",
++        ))
++        .expect(2)
++        .mount(&server)
++        .await;
++    let auth = Arc::new(RefreshingAuth(AtomicUsize::new(0)));
++    let overrides = serde_json::from_value(json!({
++        "headers":{"x-routing":"request", "x-omit":null},
++        "query":{"dup":"request", "empty":null}, "query_nulls_as_empty":true
++    }))
++    .unwrap();
++    for overrides in [Some(overrides), None] {
++        let transport = ReqwestTransport::from_http_client(
++            codex_http_client::HttpClientBuilder::new()
++                .build_direct()
++                .unwrap(),
++        );
++        let client = codex_api::ResponsesClient::new(
++            transport,
++            provider(format!("{}/v1?keep=base", server.uri())),
++            auth.clone(),
++        )
++        .with_request_transport(overrides);
++        let _stream = client
++            .stream(
++                json!({"model":"test", "stream":true}),
++                HeaderMap::new(),
++                codex_api::Compression::None,
++                None,
++            )
++            .await
++            .unwrap();
++    }
++    let requests = server.received_requests().await.unwrap();
++    assert_eq!(requests[0].url.path(), "/v1/responses");
++    let pairs = requests[0]
++        .url
++        .query_pairs()
++        .into_owned()
++        .collect::<Vec<_>>();
++    assert!(pairs.contains(&("keep".into(), "base".into())));
++    assert!(pairs.contains(&("dup".into(), "request".into())));
++    assert!(pairs.contains(&("empty".into(), "".into())));
++    assert_eq!(requests[0].headers["x-routing"], "request");
++    assert!(!requests[0].headers.contains_key("x-omit"));
++    assert_eq!(
++        requests[0].headers["authorization"],
++        "Bearer non-credential-1"
++    );
++    assert_eq!(
++        requests[1].headers["authorization"],
++        "Bearer non-credential-2"
++    );
++    assert_eq!(requests[1].headers["x-routing"], "default");
++    assert_eq!(requests[1].headers["x-omit"], "default");
++    assert_eq!(
++        serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
++        json!({"model":"test", "stream":true})
++    );
++}
++
++struct StaticAuth;
++impl AuthProvider for StaticAuth {
++    fn add_auth_headers(&self, headers: &mut HeaderMap) {
++        headers.insert(
++            http::header::AUTHORIZATION,
++            HeaderValue::from_static("Bearer native-owner"),
++        );
++    }
++}
++
++#[tokio::test]
++async fn websocket_client_applies_transport_to_real_handshake_before_native_auth() {
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    let (send, received) = tokio::sync::oneshot::channel();
++    let server = tokio::spawn(async move {
++        let (stream, _) = listener.accept().await.unwrap();
++        let mut send = Some(send);
++        let mut config = tungstenite::protocol::WebSocketConfig::default();
++        config.extensions.permessage_deflate = Some(tungstenite::extensions::compression::deflate::DeflateConfig::default());
++        let _socket = tokio_tungstenite::accept_hdr_async_with_config(
++            stream,
++            move |request: &tungstenite::handshake::server::Request, response| {
++                send.take().unwrap().send(request.clone()).unwrap();
++                Ok(response)
++            },
++            Some(config),
++        )
++        .await
++        .unwrap();
++    });
++    let overrides = serde_json::from_value(json!({
++        "headers":{"x-routing":"request", "x-omit":null},
++        "query":{"dup":"request", "empty":null}, "query_nulls_as_empty":true
++    }))
++    .unwrap();
++    let factory = codex_http_client::HttpClientFactory::new(
++        codex_http_client::OutboundProxyPolicy::ReqwestDefault,
++    );
++    let client = codex_api::ResponsesWebsocketClient::new(
++        provider(format!("http://{address}/v1?keep=base")),
++        Arc::new(StaticAuth),
++    )
++    .with_request_transport(Some(overrides));
++    let connection = client
++        .connect(&factory, HeaderMap::new(), HeaderMap::new(), None, None)
++        .await
++        .unwrap();
++    let request = received.await.unwrap();
++    assert_eq!(request.uri().path(), "/v1/responses");
++    assert!(request.uri().query().unwrap().contains("dup=request"));
++    assert!(request.uri().query().unwrap().contains("keep=base"));
++    assert!(request.uri().query().unwrap().contains("empty="));
++    assert_eq!(request.headers()["x-routing"], "request");
++    assert!(!request.headers().contains_key("x-omit"));
++    assert_eq!(request.headers()["authorization"], "Bearer native-owner");
++    drop(connection);
++    server.await.unwrap();
++}
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7076407ee 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1674,6 +1674,9 @@ impl ModelClient {
+         auth_context: AuthRequestTelemetryContext,
+         request_route_telemetry: RequestRouteTelemetry,
+         responses_headers: &ApiHeaderMap,
++        request_transport: Option<
++            &codex_protocol::model_request_transport::RequestTransportOverrides,
++        >,
+     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
+         let mut headers = self.build_websocket_headers(responses_metadata).await;
+         headers.extend(responses_headers.clone());
+@@ -1688,6 +1691,7 @@ impl ModelClient {
+         let result = match tokio::time::timeout(
+             websocket_connect_timeout,
+             ApiWebSocketResponsesClient::new(api_provider, api_auth)
++                .with_request_transport(request_transport.cloned())
+                 .with_tls_selector(self.sdk_websocket_tls_selector.clone())
+                 .connect(
+                     &self.http_client_factory,
+@@ -2016,6 +2020,7 @@ impl ModelClientSession {
+                     auth_context,
+                     request_route_telemetry: RequestRouteTelemetry::for_endpoint("/responses"),
+                     responses_headers: &responses_headers,
++                    request_transport: None,
+                 })
+                 .await
+             {
+@@ -2085,6 +2090,7 @@ impl ModelClientSession {
+             auth_context,
+             request_route_telemetry,
+             responses_headers,
++            request_transport,
+         } = params;
+         let api_auth = codex_model_provider::prepare_websocket_auth(
+             self.client.state.provider.info(),
+@@ -2094,7 +2100,8 @@ impl ModelClientSession {
+         )
+         .await
+         .map_err(|message| ApiError::InvalidRequest { message })?;
+-        let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision);
++        let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision)
++            .with_request_transport(&api_provider, request_transport)?;
+         let reset_reason = match self.websocket_session.connection.as_ref() {
+             Some(_)
+                 if self.websocket_session.responses_headers != *responses_headers
+@@ -2129,6 +2136,7 @@ impl ModelClientSession {
+                     auth_context,
+                     request_route_telemetry,
+                     responses_headers,
++                    request_transport,
+                 )
+                 .await?;
+             self.websocket_session.connection = Some(new_conn);
+@@ -2352,7 +2360,8 @@ impl ModelClientSession {
+                 client_setup.api_provider,
+                 client_setup.api_auth,
+             )
+-            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
++            .with_telemetry(Some(request_telemetry), Some(sse_telemetry))
++            .with_request_transport(prompt.request_controls.request_transport.clone().flatten());
+             crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
+             if let Some(admission) = &prompt.prepared_request_admission {
+                 admission.admit_request().map_err(CodexErr::Fatal)?;
+@@ -2596,6 +2605,11 @@ impl ModelClientSession {
+                     auth_context: request_auth_context,
+                     request_route_telemetry: RequestRouteTelemetry::for_endpoint("/responses"),
+                     responses_headers: &responses_headers,
++                    request_transport: prompt
++                        .request_controls
++                        .request_transport
++                        .as_ref()
++                        .and_then(Option::as_ref),
+                 })
+                 .await
+             {
+@@ -3567,6 +3581,8 @@ struct WebsocketConnectParams<'a> {
+     auth_context: AuthRequestTelemetryContext,
+     request_route_telemetry: RequestRouteTelemetry,
+     responses_headers: &'a ApiHeaderMap,
++    request_transport:
++        Option<&'a codex_protocol::model_request_transport::RequestTransportOverrides>,
+ }
+
+ fn emit_auth_recovery_event(
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index aa55d51ebbbb6b5f502bbfb226e4037d5bf2d5ec..60968dc973d6c8dbcf4f801284c1989f370b5318 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -17,6 +17,7 @@ use codex_extension_api::ModelResponseInterceptor;
+ use codex_extension_api::ModelResponseStream;
+ use codex_extension_api::ModelToolAdmission;
+ use codex_extension_api::TurnSamplingStop;
++use codex_protocol::model_request_transport::RequestTransportOverrides;
+ use codex_protocol::models::ResponseItem;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+@@ -163,6 +164,15 @@ impl ModelToolAdmission for StepToolAdmission {
+     fn step_store(&self) -> Option<&ExtensionData> {
+         self.step.as_ref().map(|step| &step.extension_data)
+     }
++    fn request_transport(&self) -> Option<&RequestTransportOverrides> {
++        self.step
++            .as_ref()?
++            .settings
++            .request_controls()
++            .request_transport
++            .as_ref()?
++            .as_ref()
++    }
+     fn model_attempt(&self) -> Option<Arc<dyn codex_extension_api::ModelAttemptAdmission>> {
+         self.attempt.clone()
+     }
+diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
+index b59308436d9845f0aec7c605137c06ea84326133..29fc6e4e37b46cc9843bac6a6608f58c652b2ccb 100644
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -387,11 +387,19 @@ async fn schedule_startup_prewarm_inner(
+             );
+             Ok(step_context)
+         },
+-        client_session.preconnect_websocket(
+-            &preconnect_model_info,
+-            preconnect_service_tier,
+-            &startup_turn_context.session_telemetry,
+-            &handshake_metadata,
++        preconnect_without_request_transport(
++            startup_turn_context
++                .initial_settings
++                .request_controls()
++                .request_transport
++                .as_ref()
++                .and_then(Option::as_ref),
++            client_session.preconnect_websocket(
++                &preconnect_model_info,
++                preconnect_service_tier,
++                &startup_turn_context.session_telemetry,
++                &handshake_metadata,
++            ),
+         ),
+     )?;
+     let build_prompt_started_at = Instant::now();
+@@ -450,3 +458,88 @@ async fn schedule_startup_prewarm_inner(
+     );
+     Ok(client_session)
+ }
++
++// A speculative unscoped handshake must not disable WebSocket before the scoped warmup.
++async fn preconnect_without_request_transport(
++    transport: Option<&codex_protocol::model_request_transport::RequestTransportOverrides>,
++    preconnect: impl std::future::Future<Output = CodexResult<()>>,
++) -> CodexResult<()> {
++    if transport.is_some() {
++        return Ok(());
++    }
++    preconnect.await
++}
++
++#[cfg(test)]
++mod transport_boundary_tests {
++    use super::preconnect_without_request_transport;
++    use codex_protocol::model_request_controls::ModelRequestControls;
++    use serde_json::json;
++    use std::sync::Arc;
++    use std::time::Duration;
++
++    struct NoAuth;
++    impl codex_api::AuthProvider for NoAuth {
++        fn add_auth_headers(&self, _: &mut http::HeaderMap) {}
++    }
++
++    #[tokio::test]
++    async fn effective_transport_skips_unscoped_startup_handshake() {
++        for (selection, skipped) in [
++            (json!({}), false),
++            (json!({"request_transport":null}), false),
++            (
++                json!({"request_transport":{"query":{"route":"scoped"}}}),
++                true,
++            ),
++        ] {
++            let server = wiremock::MockServer::start().await;
++            wiremock::Mock::given(wiremock::matchers::method("GET"))
++                .respond_with(wiremock::ResponseTemplate::new(426))
++                .expect(if skipped { 0 } else { 1 })
++                .mount(&server)
++                .await;
++            let controls: ModelRequestControls = serde_json::from_value(selection).unwrap();
++            let provider = codex_api::Provider {
++                name: "startup-boundary".into(),
++                base_url: format!("{}/v1", server.uri()),
++                query_params: None,
++                headers: http::HeaderMap::new(),
++                retry: codex_api::RetryConfig {
++                    max_attempts: 1,
++                    base_delay: Duration::from_millis(1),
++                    retry_429: false,
++                    retry_5xx: false,
++                    retry_transport: false,
++                },
++                stream_idle_timeout: Duration::from_secs(1),
++            };
++            let client = codex_api::ResponsesWebsocketClient::new(provider, Arc::new(NoAuth));
++            let factory = codex_http_client::HttpClientFactory::new(
++                codex_http_client::OutboundProxyPolicy::ReqwestDefault,
++            );
++            let result = preconnect_without_request_transport(
++                controls.request_transport.as_ref().and_then(Option::as_ref),
++                async {
++                    client
++                        .connect(
++                            &factory,
++                            http::HeaderMap::new(),
++                            http::HeaderMap::new(),
++                            None,
++                            None,
++                        )
++                        .await
++                        .map(|_| ())
++                        .map_err(codex_api::map_api_error)
++                },
++            )
++            .await;
++            assert_eq!(result.is_ok(), skipped);
++            assert_eq!(
++                server.received_requests().await.unwrap().len(),
++                if skipped { 0 } else { 1 }
++            );
++        }
++    }
++}
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index cf9c02c0fe07ffb6dab707708cbc92884012086b..c5e4a121bc19dbc732ce41e4efa11572289eca44 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -3,6 +3,7 @@ use crate::ExtensionData;
+ use crate::ExtensionFuture;
+ pub use codex_api::ApiError as ModelResponseError;
+ pub use codex_api::ResponseEvent;
++use codex_protocol::model_request_transport::RequestTransportOverrides;
+ use codex_protocol::models::ResponseItem;
+ use futures::future::BoxFuture;
+ use futures::stream::BoxStream;
+@@ -352,6 +353,10 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+     fn step_store(&self) -> Option<&ExtensionData> {
+         None
+     }
++    /// Scoped HTTP preferences captured for this exact provider request.
++    fn request_transport(&self) -> Option<&RequestTransportOverrides> {
++        None
++    }
+     /// Immutable original attempt; never resolve a later step's mutable current slot.
+     fn model_attempt(&self) -> Option<Arc<dyn ModelAttemptAdmission>> {
+         None
+diff --git a/codex-rs/model-provider/src/workspace_routing.rs b/codex-rs/model-provider/src/workspace_routing.rs
+index 267a2644465dcc1142eea4d9e497bc5cc3acc9f8..77cd6e0cf16077a376b191a2f62bf73bfde72d0b 100644
+--- a/codex-rs/model-provider/src/workspace_routing.rs
++++ b/codex-rs/model-provider/src/workspace_routing.rs
+@@ -85,19 +85,106 @@ pub struct ResolvedResponsesProvider {
+ }
+
+ /// Effective destination and credentials that permit reusing a Responses socket.
+-#[derive(Debug, PartialEq, Eq)]
++#[derive(PartialEq, Eq)]
+ pub struct ResponsesConnectionKey {
+     base_url: String,
+     routing_header: Option<HeaderValue>,
+     auth_revision: Option<u64>,
++    request_transport: Option<(String, http::HeaderMap)>,
++}
++
++impl std::fmt::Debug for ResponsesConnectionKey {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ResponsesConnectionKey")
++            .field("base_url", &self.base_url)
++            .field("routing_header", &self.routing_header)
++            .field("auth_revision", &self.auth_revision)
++            .field(
++                "request_transport_configured",
++                &self.request_transport.is_some(),
++            )
++            .finish()
++    }
+ }
+
+ impl ResponsesConnectionKey {
++    pub fn with_request_transport(
++        mut self,
++        provider: &codex_api::Provider,
++        overrides: Option<&codex_protocol::model_request_transport::RequestTransportOverrides>,
++    ) -> Result<Self, codex_api::ApiError> {
++        if let Some(overrides) = overrides {
++            let mut url = provider
++                .websocket_url_for_path("/responses")
++                .map_err(|_| codex_api::ApiError::InvalidRequest {
++                    message: "invalid websocket URL".into(),
++                })?
++                .to_string();
++            let mut headers = provider.headers.clone();
++            codex_api::prepare_request_transport(&url, Some(overrides))?
++                .apply_parts(&mut url, &mut headers);
++            self.request_transport = Some((url, headers));
++        }
++        Ok(self)
++    }
++
+     pub fn new(provider: &codex_api::Provider, auth_revision: Option<u64>) -> Self {
+         Self {
+             base_url: provider.base_url.clone(),
+             routing_header: provider.headers.get(ACCOUNT_ROUTING_HEADER).cloned(),
+             auth_revision,
++            request_transport: None,
+         }
+     }
+ }
++
++#[cfg(test)]
++mod request_transport_key_tests {
++    use super::ResponsesConnectionKey;
++    use codex_protocol::model_request_transport::RequestTransportOverrides;
++    use serde_json::json;
++
++    #[test]
++    fn socket_identity_tracks_effective_query_and_headers_without_debug_values() {
++        let provider = codex_api::Provider {
++            name: "test".into(),
++            base_url: "https://example.invalid/v1".into(),
++            query_params: None,
++            headers: http::HeaderMap::new(),
++            retry: codex_api::RetryConfig {
++                max_attempts: 1,
++                base_delay: std::time::Duration::from_millis(1),
++                retry_429: false,
++                retry_5xx: false,
++                retry_transport: false,
++            },
++            stream_idle_timeout: std::time::Duration::from_secs(1),
++        };
++        let key = |value| {
++            let overrides: RequestTransportOverrides = serde_json::from_value(value).unwrap();
++            ResponsesConnectionKey::new(&provider, Some(1))
++                .with_request_transport(&provider, Some(&overrides))
++                .unwrap()
++        };
++        let first = key(
++            json!({"query":{"route":"private-route"},"headers":{"X-Routing":"private-header"}}),
++        );
++        assert_eq!(
++            first,
++            key(
++                json!({"headers":{"x-routing":"private-header"},"query":{"route":"private-route"}})
++            )
++        );
++        assert_ne!(
++            first,
++            key(json!({"query":{"route":"changed"},"headers":{"x-routing":"private-header"}}))
++        );
++        assert_ne!(
++            first,
++            key(json!({"query":{"route":"private-route"},"headers":{"x-routing":"changed"}}))
++        );
++        let debug = format!("{first:?}");
++        assert!(!debug.contains("private-route"));
++        assert!(!debug.contains("private-header"));
++    }
++}
+diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
+index 4b9c7f1538691710ea18d87e7cd57fe2be07b2f1..2b354ad52a1ce8a9cfcb75d8d3b37eb9833e6a8a 100644
+--- a/codex-rs/protocol/src/lib.rs
++++ b/codex-rs/protocol/src/lib.rs
+@@ -37,6 +37,7 @@ pub mod memory_citation;
+ mod memory_version;
+ pub use memory_version::MemoryVersion;
+ pub mod model_request_controls;
++pub mod model_request_transport;
+ pub mod model_retry;
+ pub mod models;
+ pub mod network_policy;
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 68c06eb388e2d69be268576c48890201a656bc37..37568d537a7bcf36bf63acd173a195234566bead 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -120,11 +120,48 @@ pub struct HostedPromptControls {
+     pub resolved_instructions: Option<String>,
+ }
+
++/// Sparse start-only preferences, retained independently of profile defaults.
++#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
++#[serde(default, deny_unknown_fields)]
++pub struct RunModelSettingsOverride {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub effort: Option<crate::openai_models::ReasoningEffort>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub summary: Option<crate::config_types::ReasoningSummary>,
++    #[serde(
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<String>")]
++    #[schemars(with = "Option<String>")]
++    pub service_tier: Option<Option<String>>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub tool_choice: Option<crate::config_types::ToolChoice>,
++    #[serde(
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<u32>")]
++    #[schemars(with = "Option<u32>")]
++    pub invocation_timeout_ms: Option<Option<u32>>,
++    pub request_controls: ModelRequestControls,
++}
++
+ /// Retain the caller's selection, including explicit clears, across capture/restore.
+ /// This is also a sparse update: omitted members leave each owner's selection intact.
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct ModelRequestControls {
++    /// Request-scoped headers and query; never provider body fields or credentials.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<crate::model_request_transport::RequestTransportOverrides>")]
++    #[schemars(with = "Option<crate::model_request_transport::RequestTransportOverrides>")]
++    pub request_transport:
++        Option<Option<crate::model_request_transport::RequestTransportOverrides>>,
+     /// Logical-generation retry preferences, never provider request-body fields.
+     #[serde(
+         default,
+@@ -311,7 +348,8 @@ pub struct ModelRequestControls {
+
+ impl ModelRequestControls {
+     pub fn is_empty(&self) -> bool {
+-        self.retry.is_none()
++        self.request_transport.is_none()
++            && self.retry.is_none()
+             && self.attempt_timeout_ms.is_none()
+             && self.hosted_prompt.is_none()
+             && self.input_modalities.is_none()
+@@ -336,6 +374,11 @@ impl ModelRequestControls {
+     }
+
+     pub fn apply_patch(&mut self, patch: &Self) {
++        match (&mut self.request_transport, &patch.request_transport) {
++            (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
++            (_, Some(update)) => self.request_transport = Some(update.clone()),
++            (_, None) => {}
++        }
+         match (&mut self.retry, &patch.retry) {
+             (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
+             (_, Some(update)) => self.retry = Some(update.clone()),
+@@ -409,6 +452,9 @@ impl ModelRequestControls {
+
+     /// Check wire shapes independently of uncertain model-level support.
+     pub fn validate_shape(&self) -> Result<(), String> {
++        if let Some(Some(transport)) = &self.request_transport {
++            transport.validate()?;
++        }
+         if let Some(Some(prompt)) = &self.hosted_prompt {
+             if prompt
+                 .reference
+@@ -728,3 +774,42 @@ mod empty_include_wire_tests {
+         assert!(controls.has_wire_values());
+     }
+ }
++
++#[cfg(test)]
++mod request_transport_carrier_tests {
++    use super::ModelRequestControls;
++    use serde_json::json;
++
++    #[test]
++    fn sparse_transport_capture_merge_and_clear_preserve_other_controls() {
++        let mut controls: ModelRequestControls = serde_json::from_value(json!({
++            "temperature":0.5,
++            "request_transport":{"headers":{"x-routing":"first"},"query":{"first":1}}
++        }))
++        .unwrap();
++        controls.validate_shape().unwrap();
++        assert!(!controls.is_empty());
++        let patch = serde_json::from_value(
++            json!({"request_transport":{"query":{"second":null},"query_nulls_as_empty":true}}),
++        )
++        .unwrap();
++        controls.apply_patch(&patch);
++        assert_eq!(
++            serde_json::to_value(&controls).unwrap(),
++            json!({
++                "temperature":0.5,
++                "request_transport":{"headers":{"x-routing":"first"},"query":{"second":null},"query_nulls_as_empty":true}
++            })
++        );
++        controls.apply_patch(&serde_json::from_value(json!({"request_transport":null})).unwrap());
++        assert_eq!(
++            serde_json::to_value(&controls).unwrap(),
++            json!({"temperature":0.5,"request_transport":null})
++        );
++        let invalid: ModelRequestControls = serde_json::from_value(
++            json!({"request_transport":{"headers":{"Authorization":"forbidden"}}}),
++        )
++        .unwrap();
++        assert!(invalid.validate_shape().is_err());
++    }
++}
+diff --git a/codex-rs/protocol/src/model_request_transport.rs b/codex-rs/protocol/src/model_request_transport.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5579c3ea444bbe2a474925145a52c364ca00fc2f
+--- /dev/null
++++ b/codex-rs/protocol/src/model_request_transport.rs
+@@ -0,0 +1,131 @@
++//! Captured, request-scoped transport preferences. These never supply native credentials.
++use schemars::JsonSchema;
++use serde::{Deserialize, Serialize};
++use std::collections::{BTreeMap, BTreeSet};
++use ts_rs::TS;
++
++#[derive(Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct RequestTransportOverrides {
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "Record<string, string | null> | null")]
++    #[schemars(with = "Option<BTreeMap<String, Option<String>>>")]
++    pub headers: Option<Option<BTreeMap<String, Option<String>>>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "Record<string, unknown> | null")]
++    #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>")]
++    pub query: Option<Option<BTreeMap<String, serde_json::Value>>>,
++    /// The JavaScript SDK encodes null as an empty query value; Python omits None.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub query_nulls_as_empty: bool,
++}
++
++// Like Provider's Debug implementation, retain names while withholding routing values.
++impl std::fmt::Debug for RequestTransportOverrides {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("RequestTransportOverrides")
++            .field(
++                "headers",
++                &self
++                    .headers
++                    .as_ref()
++                    .and_then(Option::as_ref)
++                    .map(|values| values.keys().collect::<Vec<_>>()),
++            )
++            .field(
++                "query",
++                &self
++                    .query
++                    .as_ref()
++                    .and_then(Option::as_ref)
++                    .map(|values| values.keys().collect::<Vec<_>>()),
++            )
++            .field("query_nulls_as_empty", &self.query_nulls_as_empty)
++            .finish()
++    }
++}
++
++impl RequestTransportOverrides {
++    pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.headers.is_some() {
++            self.headers = patch.headers.clone();
++        }
++        if patch.query.is_some() {
++            self.query = patch.query.clone();
++            self.query_nulls_as_empty = patch.query_nulls_as_empty;
++        }
++    }
++
++    pub fn validate(&self) -> Result<(), String> {
++        const RESERVED: &[&str] = &[
++            "authorization",
++            "proxy-authorization",
++            "api-key",
++            "cookie",
++            "host",
++            "connection",
++            "upgrade",
++            "content-length",
++            "transfer-encoding",
++            "te",
++            "trailer",
++            "keep-alive",
++            "proxy-connection",
++            "content-type",
++            "accept",
++            "accept-encoding",
++            "user-agent",
++            "openai-beta",
++            "originator",
++            "session_id",
++            "x-client-request-id",
++            "x-request-id",
++            "chatgpt-account-id",
++            "openai-organization",
++            "openai-project",
++            "x-responsesapi-include-timing-metrics",
++            "x-sdk-sentinel-grant",
++        ];
++        let mut seen = BTreeSet::new();
++        if let Some(Some(headers)) = &self.headers {
++            for (name, value) in headers {
++                let lower = name.to_ascii_lowercase();
++                if name.is_empty()
++                    || !name.bytes().all(|byte| {
++                        byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
++                    })
++                    || RESERVED.contains(&lower.as_str())
++                    || ["sec-websocket-", "x-codex-", "x-openai-"]
++                        .iter()
++                        .any(|prefix| lower.starts_with(prefix))
++                    || !seen.insert(lower)
++                {
++                    return Err("request header name is invalid, duplicated, or owned by native transport/auth".into());
++                }
++                if value
++                    .as_ref()
++                    .is_some_and(|value| !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte)))
++                {
++                    return Err("request header values must contain printable ASCII".into());
++                }
++            }
++        }
++        if self.query_nulls_as_empty && self.query.is_none() {
++            return Err("query null behavior requires an explicit query patch".into());
++        }
++        if let Some(Some(query)) = &self.query {
++            if query.keys().any(String::is_empty) {
++                return Err("request query names must be nonempty".into());
++            }
++        }
++        Ok(())
++    }
++}

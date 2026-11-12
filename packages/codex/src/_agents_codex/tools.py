@@ -443,6 +443,9 @@ class ToolSearchResult:
         object.__setattr__(self, "tool_refs", refs)
 
 
+ToolCaller = Literal["direct", "code"]
+
+
 @dataclass(frozen=True)
 class ToolCallInfo:
     """Observed identity, never authority to execute or answer a tool call.

@@ -24,8 +24,8 @@ class Handoff(Generic[ContextT, OutputT]):
     awaiting callback cleanup before publishing an accepted target. Failed or
     cancelled callbacks have not been activating the target.
 
-    Handoff has been accepting automatic callbacks in the default function
-    namespace and leaving final output to the target Agent.
+    Handoff callbacks must allow direct model calls and use the default
+    function namespace. The target Agent owns the final output.
     """
 
     target: Agent[ContextT, OutputT]

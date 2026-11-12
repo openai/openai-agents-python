@@ -14,6 +14,7 @@ from agents import (
     Agent,
     FunctionTool,
     ModelContextSnapshot,
+    ModelSettings,
     NativeError,
     RunBudget,
     ToolContext,
@@ -23,12 +24,152 @@ from agents.observation import SessionEnded
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import responses as responses
-from tests.test_native_agent_checkpoints import call, message, peer
+from tests.test_native_agent_checkpoints import Peer, call, message, peer
 from tests.test_native_instruction_updates import application_texts
 
 
 def has_text(item, text):
     return any(part.get("text") == text for part in item.get("content", []))
+
+
+@pytest.mark.parametrize("handoff_selected", [False, True], ids=["opening", "handoff"])
+async def test_graph_compaction_keeps_live_transport(handoff_selected, monkeypatch):
+    effects = []
+    transport = []
+    original_handle = Peer.handle
+
+    async def record(wire, request):
+        transport.append((request.headers.get("x-graph-state"), request.query.get("graph_state")))
+        return await original_handle(wire, request)
+
+    monkeypatch.setattr(Peer, "handle", record)
+    opening: ModelSettings = {
+        "extra_headers": {"x-graph-state": "opening"},
+        "extra_query": {"graph_state": "opening"},
+    }
+    live: ModelSettings = {
+        "extra_headers": {"x-graph-state": "acknowledged"},
+        "extra_query": {"graph_state": "acknowledged"},
+    }
+
+    @function_tool(name="profile_probe")
+    def root_probe(ctx: ToolContext[str]) -> str:
+        effects.append(("root", ctx.context))
+        return "root binding"
+
+    @function_tool(name="profile_probe")
+    def worker_probe(ctx: ToolContext[str]) -> str:
+        effects.append(("worker", ctx.context))
+        return "worker binding"
+
+    async with timeout(30), peer() as wire:
+        provider = wire.provider()
+        worker = Agent(
+            name="Worker",
+            instructions="Worker instructions.",
+            tools=[worker_probe],
+            provider=provider,
+            model="gpt-5.5",
+            model_settings=opening,
+        )
+        root = Agent(
+            name="Root",
+            instructions="Root instructions.",
+            tools=[root_probe],
+            handoffs=[worker],
+            provider=provider,
+            model="gpt-5.5",
+            model_settings=opening,
+        )
+        if handoff_selected:
+            wire.replies.append(call("transfer_to_worker", "selected-worker"))
+        wire.replies.append(message("before compaction"))
+        expected = worker if handoff_selected else root
+        label = "worker" if handoff_selected else "root"
+        async with root.session(context="same application context") as session:
+            turn = await session.submit("Start.")
+            assert (await turn.get_result()).final_output == "before compaction"
+            assert await session.get_active_agent() is expected
+            await session.update(model_settings=live)
+            wire.replies.append(message("live transport acknowledged"))
+            turn = await session.submit("Use the live settings.")
+            assert (await turn.get_result()).final_output == "live transport acknowledged"
+            assert transport[-1] == ("acknowledged", "acknowledged")
+            offset = len(transport)
+            await session.compact(summary="SYNTHETIC_GRAPH_SUMMARY")
+            wire.replies.extend(
+                (call("profile_probe", "after-compact-probe"), message("after compaction"))
+            )
+            turn = await session.submit("Continue.")
+            assert (await turn.get_result()).final_output == "after compaction"
+            assert await session.get_active_agent() is expected
+            assert effects == [(label, "same application context")]
+            assert "SYNTHETIC_GRAPH_SUMMARY" in json.dumps(wire.requests[-2]["input"])
+            assert transport[offset:] == [("acknowledged", "acknowledged")] * 2
+            assert not wire.replies
+
+
+@pytest.mark.parametrize(
+    ("field", "error"),
+    [
+        ("catalogs", "Invalid native Agent catalog allocation receipt"),
+        ("active_catalog", "Missing native active Agent catalog"),
+    ],
+)
+async def test_invalid_graph_catalog_receipt_keeps_source_usable(monkeypatch, field, error):
+    from agents import _native
+
+    effects: list[str] = []
+
+    @function_tool
+    def probe(ctx: ToolContext[str]) -> str:
+        effects.append(ctx.context)
+        return "source binding"
+
+    async with timeout(30), peer() as wire:
+        provider = wire.provider()
+        worker = Agent(
+            name="Worker", instructions="Worker instructions.", provider=provider, model="gpt-5.5"
+        )
+        root = Agent(
+            name="Root",
+            instructions="Root instructions.",
+            tools=[probe],
+            handoffs=[worker],
+            provider=provider,
+            model="gpt-5.5",
+        )
+        wire.replies.append(message("before compaction"))
+        async with root.session(context="unchanged context") as session:
+            await (await session.submit("Start.")).get_result()
+            source = session._native
+            profiles = session._profiles.copy()
+            catalogs = session._profile_catalogs.copy()
+            bindings = session._catalog_bindings.copy()
+            high_water = session._profile_generation_high_water
+            configure = _native.NativeThread._configure_agent_profiles
+
+            async def invalid_catalog_receipt(candidate, *args, **kwargs):
+                assert candidate is not source
+                receipt = json.loads(await configure(candidate, *args, **kwargs))
+                del receipt[field]
+                return json.dumps(receipt)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    _native.NativeThread, "_configure_agent_profiles", invalid_catalog_receipt
+                )
+                with pytest.raises(NativeError, match=error):
+                    await session.compact(summary="Rejected replacement.")
+            assert session._native is source
+            assert session._profiles == profiles
+            assert session._profile_catalogs == catalogs
+            assert session._catalog_bindings == bindings
+            assert session._profile_generation_high_water == high_water
+            wire.replies.extend((call("probe", "source-still-owned"), message("source survived")))
+            turn = await session.submit("Continue.")
+            assert (await turn.get_result()).final_output == "source survived"
+            assert effects == ["unchanged context"]
 
 
 async def test_supplied_selection_keeps_originals_in_order_and_round_trips():
@@ -833,3 +974,64 @@ async def test_supplied_setup_failure_remains_primary_when_candidate_cleanup_fai
             assert (await (await session.submit("Continue.")).get_result()).final_output == (
                 "source survived"
             )
+
+
+@pytest.mark.parametrize("updated", [False, True])
+async def test_supplied_compaction_keeps_live_transport_private(monkeypatch, updated):
+    from tests.native_fixtures import assistant_output
+    from tests.test_native_provider_websockets import WebSocketPeer, peer as transport_peer
+
+    observed = []
+    original = WebSocketPeer.handle
+
+    async def record(self, request):
+        observed.append(
+            ({key.lower(): value for key, value in request.headers.items()}, dict(request.query))
+        )
+        return await original(self, request)
+
+    monkeypatch.setattr(WebSocketPeer, "handle", record)
+    async with timeout(30), transport_peer() as server:
+        provider = server.provider(websocket=False)
+        agent = Agent(
+            instructions="Answer.",
+            provider=provider,
+            model="gpt-5.5",
+            model_settings={
+                "extra_headers": {"x-route": "SYNTHETIC_INITIAL_HEADER"},
+                "extra_query": {"route": "SYNTHETIC_INITIAL_QUERY"},
+            },
+        )
+        async with agent.session() as session:
+            server.respond(assistant_output("before compaction"))
+            await (await session.submit("First request.")).get_result()
+            if updated:
+                await session.update(
+                    model_settings={"extra_headers": {"x-route": "SYNTHETIC_ACK_HEADER"}}
+                )
+                await session.update(
+                    model_settings={"extra_query": {"route": "SYNTHETIC_ACK_QUERY"}}
+                )
+            before = (await session.save_state()).to_json()
+            await session.compact(summary="SYNTHETIC_APPLICATION_SUMMARY")
+            server.respond(assistant_output("after compaction"))
+            assert (
+                await (await session.submit("Continue.")).get_result()
+            ).final_output == "after compaction"
+            headers, query = observed[-1]
+            assert headers["x-route"] == (
+                "SYNTHETIC_ACK_HEADER" if updated else "SYNTHETIC_INITIAL_HEADER"
+            )
+            assert query == {
+                "route": "SYNTHETIC_ACK_QUERY" if updated else "SYNTHETIC_INITIAL_QUERY"
+            }
+            after = (await session.save_state()).to_json()
+            assert "SYNTHETIC_APPLICATION_SUMMARY" in after
+            for snapshot in (before, after):
+                for marker in (
+                    "SYNTHETIC_INITIAL_HEADER",
+                    "SYNTHETIC_INITIAL_QUERY",
+                    "SYNTHETIC_ACK_HEADER",
+                    "SYNTHETIC_ACK_QUERY",
+                ):
+                    assert marker not in snapshot

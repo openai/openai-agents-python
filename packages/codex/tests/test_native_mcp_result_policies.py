@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import logging
 import os
+import traceback
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
@@ -169,6 +172,7 @@ async def test_native_rejects_invalid_late_and_cancelled_decisions(
                 ) as rejected:
                     await (handle).get_result()
                 assert rejected.value.__cause__ is None
+                assert rejected.value.get_mcp_callback_error() is None
             if decision != "invalid":
                 assert cancelled.is_set()
             assert [(p["name"], p["_meta"]["callId"]) for p in peer.calls] == [
@@ -569,11 +573,11 @@ async def test_cancelled_peer_request_does_not_synthesize_result_policy(
 
 @pytest.mark.parametrize("phase", ["transform", "extract", "metadata"])
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_selected_callback_error_retains_private_cause(
+async def test_selected_callback_error_retains_explicit_private_diagnostic(
     responses: ResponsesFixture, phase: str, asynchronous: bool, caplog, capfd
 ) -> None:
     peer = Peer(label="SYNTHETIC_PRIVATE_MCP_RESULT", is_error=True)
-    selected = ValueError("SYNTHETIC_SELECTED_CALLBACK_FAILURE")
+    selected = ValueError("SYNTHETIC_SELECTED_CALLBACK_FAILURE:" + peer.label)
 
     def result_policy(context: MCPResultContext[None], value: dict[str, Any]) -> dict[str, Any]:
         assert context.call_id == "cause-call"
@@ -619,10 +623,24 @@ async def test_selected_callback_error_retains_private_cause(
             failure = caught.value
             assert type(failure) is NativeError
             assert failure.args == ("Native MCP result policy failed",)
-            assert failure.__cause__ is selected
+            assert failure.__cause__ is None and failure.__context__ is None
+            assert failure.get_mcp_callback_error() is selected
+            assert "_mcp_callback_error" not in vars(failure)
             with pytest.raises(NativeError) as reread:
                 await turn.get_result()
-            assert reread.value is failure and reread.value.__cause__ is selected
+            assert reread.value is failure and reread.value.get_mcp_callback_error() is selected
+            stream = io.StringIO()
+            handler = logging.StreamHandler(stream)
+            logger = logging.Logger("synthetic.mcp.callback")
+            logger.addHandler(handler)
+            try:
+                logger.error(
+                    "Synthetic callback failure",
+                    exc_info=(type(failure), failure, failure.__traceback__),
+                )
+            finally:
+                logger.removeHandler(handler)
+            assert peer.label in "".join(traceback.format_exception(selected))
             assert len(peer.calls) == (0 if phase == "metadata" else 1)
             assert len(responses.requests) == 1
             channels = [
@@ -630,6 +648,9 @@ async def test_selected_callback_error_retains_private_cause(
                 json.dumps([item async for item in session.items()]),
                 (await session.save_state()).to_json(),
                 caplog.text,
+                "".join(traceback.format_exception(failure)),
+                stream.getvalue(),
+                repr(vars(failure)),
             ]
             captured = capfd.readouterr()
             channels.extend((captured.out, captured.err))
@@ -674,6 +695,7 @@ async def test_failed_optional_cause_probe_preserves_generic_failure(
                 ) as caught:
                     await asyncio.wait_for(turn.get_result(), timeout=2)
                 assert caught.value.__cause__ is None
+                assert caught.value.get_mcp_callback_error() is None
                 assert len(peer.calls) == len(responses.requests) == 1
                 assert peer.label not in (await session.save_state()).to_json()
             finally:

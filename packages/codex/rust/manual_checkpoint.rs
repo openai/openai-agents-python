@@ -30,6 +30,25 @@ fn model_override(history: &[RolloutItem], turn: &str) -> Option<String> {
         .flatten()
 }
 
+fn model_settings_override(
+    history: &[RolloutItem],
+    turn: &str,
+) -> Option<codex_protocol::model_request_controls::RunModelSettingsOverride> {
+    history
+        .iter()
+        .rev()
+        .find_map(|row| match row {
+            RolloutItem::TurnContext(context) if context.turn_id.as_deref() == Some(turn) => Some(
+                context
+                    .sdk_model_settings_override
+                    .as_ref()
+                    .map(|settings| settings.for_persistence()),
+            ),
+            _ => None,
+        })
+        .flatten()
+}
+
 #[derive(Debug)]
 pub(crate) enum UnsupportedManualState {
     CodeState,
@@ -130,8 +149,11 @@ impl ToolOutcomes {
                     ResponseItem::CustomToolCallOutput {
                         call_id, output, ..
                     } => (Some(call_id.as_str()), output.success),
-                    ResponseItem::ApplyPatchCallOutput { call_id, status, .. } => (
-                        Some(call_id.as_str()), Some(*status == codex_protocol::models::ApplyPatchStatus::Completed)
+                    ResponseItem::ApplyPatchCallOutput {
+                        call_id, status, ..
+                    } => (
+                        Some(call_id.as_str()),
+                        Some(*status == codex_protocol::models::ApplyPatchStatus::Completed),
                     ),
                     ResponseItem::ToolSearchOutput {
                         call_id,
@@ -279,7 +301,8 @@ pub(crate) struct Frame {
 
 fn manual_call_id(item: &ResponseItem) -> Option<&String> {
     match item {
-        ResponseItem::FunctionCall { call_id, .. } | ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id),
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id),
         ResponseItem::ShellCall {
             provider_fields, ..
         } => crate::local_reconciliation::shell_call_id(provider_fields),
@@ -527,7 +550,7 @@ fn validate_frame(
         .as_object()
         .context("Missing native manual continuation")?;
     ensure!(
-        (6..=11).contains(&frame.len())
+        (6..=12).contains(&frame.len())
             && frame.keys().all(|key| matches!(
                 key.as_str(),
                 "turn_id"
@@ -538,6 +561,7 @@ fn validate_frame(
                     | "pending_manual"
                     | "output_schema"
                     | "model_override"
+                    | "model_settings_override"
                     | "tool_outcomes"
                     | "pending_input"
                     | "staged_retry"
@@ -584,18 +608,37 @@ fn validate_frame(
             && restored_override == model_override(&history, &turn),
         "Manual continuation changed its admitted model override"
     );
+    let restored_settings: Option<
+        codex_protocol::model_request_controls::RunModelSettingsOverride,
+    > = serde_json::from_value(
+        frame
+            .get("model_settings_override")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )?;
+    ensure!(
+        restored_settings == model_settings_override(&history, &turn),
+        "Manual continuation changed its admitted model settings override"
+    );
 
-    let mut retained_manual: HashSet<&str> = pending.iter()
-        .filter_map(|value| value["call_id"].as_str()).collect();
+    let mut retained_manual: HashSet<&str> = pending
+        .iter()
+        .filter_map(|value| value["call_id"].as_str())
+        .collect();
     // A sibling may still be pending after this exact typed result was accepted.
     // The canonical ownership and final partition checks remain independent.
-    retained_manual.extend(accepted.iter().filter_map(|(id, envelope)| {
-        match &envelope.item {
-            ResponseItem::ApplyPatchCallOutput { call_id, .. }
-                if call_id == id && envelope.item.turn_id() == Some(turn.as_str()) => Some(id.as_str()),
-            _ => None,
-        }
-    }));
+    retained_manual.extend(
+        accepted
+            .iter()
+            .filter_map(|(id, envelope)| match &envelope.item {
+                ResponseItem::ApplyPatchCallOutput { call_id, .. }
+                    if call_id == id && envelope.item.turn_id() == Some(turn.as_str()) =>
+                {
+                    Some(id.as_str())
+                }
+                _ => None,
+            }),
+    );
     ensure!(
         portable_manual_actions(&history, &retained_manual, |call| {
             accepted.get(call).is_some_and(|envelope| {
@@ -698,7 +741,12 @@ fn validate_frame(
                 }
                 if matches!(
                     raw["type"].as_str(),
-                    Some("function_call_output" | "custom_tool_call_output" | "shell_call_output" | "apply_patch_call_output")
+                    Some(
+                        "function_call_output"
+                            | "custom_tool_call_output"
+                            | "shell_call_output"
+                            | "apply_patch_call_output"
+                    )
                 ) {
                     let call = raw["call_id"]
                         .as_str()
@@ -847,10 +895,12 @@ fn validate_frame(
         if patch {
             if let Some(effective) = value["effective_arguments"].as_str() {
                 let effective: Value = serde_json::from_str(effective)?;
-                ensure!(effective["type"] == saved["type"]
-                    && effective["call_id"] == saved["call_id"]
-                    && effective["operation"] == saved["operation"],
-                    "Pending application patch action differs from accepted history");
+                ensure!(
+                    effective["type"] == saved["type"]
+                        && effective["call_id"] == saved["call_id"]
+                        && effective["operation"] == saved["operation"],
+                    "Pending application patch action differs from accepted history"
+                );
             }
         }
         let slot = specs
@@ -966,19 +1016,33 @@ fn validate_frame(
     })
 }
 
-pub(crate) fn manual_request(item: &ResponseItem) -> Result<(codex_tools::ToolName, String, Value)> {
+pub(crate) fn manual_request(
+    item: &ResponseItem,
+) -> Result<(codex_tools::ToolName, String, Value)> {
     match item {
-        ResponseItem::FunctionCall { name, namespace, arguments, call_id, .. } => Ok((
-            codex_tools::ToolName::new(namespace.clone(), name), call_id.clone(),
+        ResponseItem::FunctionCall {
+            name,
+            namespace,
+            arguments,
+            call_id,
+            ..
+        } => Ok((
+            codex_tools::ToolName::new(namespace.clone(), name),
+            call_id.clone(),
             serde_json::from_str(arguments)?,
         )),
         ResponseItem::ApplyPatchCall { call_id, .. } => Ok((
-            codex_tools::ToolName::new(None, "apply_patch"), call_id.clone(),
+            codex_tools::ToolName::new(None, "apply_patch"),
+            call_id.clone(),
             serde_json::to_value(item)?,
         )),
-        ResponseItem::ShellCall { provider_fields, .. } => Ok((
+        ResponseItem::ShellCall {
+            provider_fields, ..
+        } => Ok((
             codex_tools::ToolName::new(None, "shell"),
-            crate::local_reconciliation::shell_call_id(provider_fields).context("Pending Shell lacks identity")?.clone(),
+            crate::local_reconciliation::shell_call_id(provider_fields)
+                .context("Pending Shell lacks identity")?
+                .clone(),
             serde_json::to_value(item)?,
         )),
         _ => anyhow::bail!("Manual continuation requires an admitted application tool"),
@@ -1525,6 +1589,8 @@ pub(crate) async fn continue_if_ready(
     };
     recovery_options["model_override"] =
         frame.state["native_continuation"]["model_override"].clone();
+    recovery_options["model_settings_override"] =
+        frame.state["native_continuation"]["model_settings_override"].clone();
     recovery_options["trace"] = serde_json::json!(trace);
     recovery_options["observation_submission_id"] = serde_json::json!(observation_submission_id);
     if let Some(source) = operation_declaration_source {
@@ -1981,7 +2047,9 @@ pub(crate) async fn capture(
                         ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_ref(),
                         ResponseItem::CustomToolCallOutput { call_id, .. }
                         | ResponseItem::ApplyPatchCallOutput { call_id, .. } => Some(call_id),
-                        ResponseItem::ShellCallOutput { provider_fields, .. } => crate::local_reconciliation::shell_call_id(provider_fields),
+                        ResponseItem::ShellCallOutput {
+                            provider_fields, ..
+                        } => crate::local_reconciliation::shell_call_id(provider_fields),
                         _ => None,
                     };
                     if call_id.is_some_and(|id| order.contains(id)) {
@@ -1993,6 +2061,7 @@ pub(crate) async fn capture(
         })
         .collect();
     let admitted_override = model_override(&history, &turn);
+    let admitted_settings = model_settings_override(&history, &turn);
     snapshot["history"] = serde_json::to_value(history)?;
     snapshot["native_continuation"] = serde_json::json!({
         "turn_id":turn,"seen_call_ids":calls.iter().map(|(id,_)|id).collect::<Vec<_>>(),
@@ -2000,6 +2069,10 @@ pub(crate) async fn capture(
     });
     if let Some(name) = admitted_override {
         snapshot["native_continuation"]["model_override"] = Value::String(name);
+    }
+    if let Some(settings) = admitted_settings {
+        snapshot["native_continuation"]["model_settings_override"] =
+            serde_json::to_value(settings)?;
     }
     if let Some(outcomes) = tool_outcomes {
         snapshot["native_continuation"]["tool_outcomes"] = serde_json::to_value(outcomes)?;

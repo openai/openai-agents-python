@@ -1,0 +1,65 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 8087330..5558031 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -386,7 +386,7 @@ impl Session {
+         if restored {
+             if let Some((envelope, record)) = previous {
+                 if record.profile_id != target.profile_id
+-                    || record.model != target.model
++                    || record.model.for_persistence() != target.model.for_persistence()
+                     || envelope.item != target.application_instructions.item
+                     || envelope
+                         .metadata
+@@ -431,7 +431,8 @@ impl Session {
+                     || latest.service_tier != effective.service_tier
+                     || latest.tool_choice != effective.tool_choice
+                     || latest.personality != effective.personality
+-                    || latest.request_controls != effective.request_controls
++                    || latest.request_controls.for_persistence()
++                        != effective.request_controls.for_persistence()
+                     || latest.invocation_timeout_ms != effective.invocation_timeout_ms
+                 {
+                     return Err(invalid(
+@@ -470,7 +471,7 @@ impl Session {
+             serde_json::to_value(PersistedProfile {
+                 profile_id: receipt.profile_id.clone(),
+                 epoch,
+-                model: target.model.clone(),
++                model: target.model.for_persistence(),
+             })
+             .map_err(|error| invalid(error.to_string()))?,
+         );
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index e9de6ee..34467b8 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -225,6 +225,7 @@ impl ResolvedStepSettings {
+         if let Some(choice) = settings.tool_choice {
+             effective.tool_choice = Some(choice);
+             effective.request_controls.named_tool_choice = Some(None);
++            effective.request_controls.hosted_tool_choice = Some(None);
+         }
+         if let Some(timeout) = settings.invocation_timeout_ms {
+             effective.invocation_timeout_ms = timeout;
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 9d1179b..7167d2c 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -244,6 +244,16 @@ pub struct AgentProfileModelSettings {
+     pub invocation_timeout_ms: Option<u32>,
+ }
+
++impl AgentProfileModelSettings {
++    /// Keep durable choices while taking request transport from the current caller.
++    pub fn for_persistence(&self) -> Self {
++        Self {
++            request_controls: self.request_controls.for_persistence(),
++            ..self.clone()
++        }
++    }
++}
++
+ /// Immutable in-process profile supplied by an admitted host roster.
+ #[derive(Clone)]
+ pub struct AgentProfile {
