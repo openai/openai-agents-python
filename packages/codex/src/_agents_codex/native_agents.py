@@ -22,10 +22,14 @@ from typing import (
     overload as overload,
 )
 
-from typing_extensions import TypeVar as TypeVar
+from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar
 
+from agents.config import JsonValue as JsonValue
+
+from ._events import SessionItem as SessionItem
 from ._public import preserve_module_identity as _preserve_module_identity
 from .native_interception import NativeToolCall as NativeToolCall, StopTurn
+from .observation import Observation as Observation
 from .turn import _child_submission_id as _child_submission_id
 
 if TYPE_CHECKING:
@@ -90,15 +94,71 @@ class NativeRole:
             object.__setattr__(self, "model_settings", MappingProxyType(settings))
 
 
+class NativeRoleToolInvocation(TypedDict):
+    """The exact native call and physical child turn of a managed tool."""
+
+    tool_name: str
+    role: str
+    input: str
+    native_call_id: str
+    parent_thread_id: str
+    parent_turn_id: str
+    child_thread_id: str
+    child_turn_id: str
+    cell_id: str | None
+    runtime_tool_call_id: str | None
+
+
+class NativeRoleToolStreamEvent(TypedDict):
+    event: Observation
+    invocation: NativeRoleToolInvocation
+
+
+class NativeRoleToolResult(TypedDict):
+    """A successful managed child result, detached from its native capture."""
+
+    role: str
+    thread_id: str
+    turn_id: str
+    final_output: JsonValue
+    items: tuple[SessionItem, ...]
+
+
 @dataclass(frozen=True, kw_only=True)
 class NativeRoleTool:
-    """Expose a declared native role as a tool that returns its child turn result."""
+    """Expose a declared role as a tool that returns its child turn result.
+
+    on_stream receives ordered observations with the original input and exact
+    parent/child call identity. The parent waits for its queued callbacks before
+    accepting the result. Ordinary handler exceptions are logged. The pending
+    limit excludes the running handler; None allows an unlimited backlog.
+    Overflow cancels that child and withholds its result.
+
+    extract_result converts a successful child's final output and recorded items
+    into the string returned to its parent. An extractor error becomes a
+    recoverable tool failure. Callbacks cannot mutate their own Session.
+    """
 
     name: str
     role: str
     description: str
+    on_stream: Callable[[NativeRoleToolStreamEvent], None | Awaitable[None]] | None = field(
+        default=None, repr=False
+    )
+    on_stream_max_pending_events: int | None = 1024
+    extract_result: Callable[[NativeRoleToolResult], str | Awaitable[str]] | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
+        for callback in (self.on_stream, self.extract_result):
+            if callback is not None and not callable(callback):
+                raise TypeError("Managed role callbacks must be callable")
+        limit = self.on_stream_max_pending_events
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise ValueError("on_stream_max_pending_events must be a positive integer or None")
         if (
             not isinstance(self.name, str)
             or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.name) is None
@@ -110,6 +170,26 @@ class NativeRoleTool:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"Native role tool {name} must be a nonblank string")
+
+
+def _native_agent_options(declaration: NativeAgents[Any] | None) -> dict[str, Any]:
+    if declaration is None:
+        return {}
+    tools = []
+    for tool in declaration.managed_tools:
+        spec: dict[str, Any] = {
+            "name": tool.name,
+            "role": tool.role,
+            "description": tool.description,
+        }
+        if tool.on_stream is not None or tool.extract_result is not None:
+            spec.update(result_control=True, capture_items=tool.extract_result is not None)
+        tools.append(spec)
+    return {
+        "_native_agent_roles": [role.name for role in declaration.additional_roles],
+        "_native_agent_max_depth": declaration.max_depth,
+        **({"_native_agent_tools": tools} if tools else {}),
+    }
 
 
 _ChildStepResult: TypeAlias = (
