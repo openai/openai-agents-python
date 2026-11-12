@@ -240,8 +240,9 @@ async def test_native_realtime_advertises_only_direct_function_callers(
             api_key="synthetic-realtime-caller-policy",
             supports_websockets=False,
         ) as provider,
-        Agent(instructions="Use the direct tools.", tools=tools, provider=provider).session()
-        as session,
+        Agent(
+            instructions="Use the direct tools.", tools=tools, provider=provider
+        ).session() as session,
         session.realtime(
             config=RealtimeConfig(
                 model="fixture-realtime", tools=tools if explicit_selection else None

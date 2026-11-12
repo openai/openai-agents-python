@@ -9393,7 +9393,7 @@ pub(crate) mod managed_tests {
             current: RwLock::new(Arc::new(Generation {
                 id: 0,
                 entries: vec![],
-                specs: vec![],
+                specs: ToolDeclarations::default(),
             })),
             generation_high_water: AtomicU64::new(0),
             profile_catalogs: RwLock::new(HashMap::new()),
@@ -10122,7 +10122,7 @@ pub(crate) mod managed_tests {
         assert!(narrowed.default_names(Some(&[2])).is_err());
         assert!(narrowed.default_names(Some(&[0, 0])).is_err());
         let declared = tools
-            .profile_catalog(specs, &[], &[], &[], None, [false; 6], false)
+            .profile_catalog(specs.into(), &[], &[], &[], None, [false; 6], false)
             .unwrap();
         let thread = ExtensionData::new("source");
         thread.insert(Arc::try_unwrap(tools).ok().expect("exclusive fixture"));
@@ -10211,7 +10211,7 @@ pub(crate) mod managed_tests {
         );
         let a = parent
             .profile_catalog(
-                vec![DynamicToolSpec::Function(function("a"))],
+                vec![DynamicToolSpec::Function(function("a"))].into(),
                 &[],
                 &[],
                 &[],
@@ -10222,7 +10222,7 @@ pub(crate) mod managed_tests {
             .unwrap();
         let b = parent
             .profile_catalog(
-                vec![DynamicToolSpec::Function(function("b"))],
+                vec![DynamicToolSpec::Function(function("b"))].into(),
                 &[],
                 &[],
                 &[],
@@ -10301,7 +10301,7 @@ pub(crate) mod managed_tests {
         );
         let a = parent
             .profile_catalog(
-                vec![DynamicToolSpec::Function(function("a"))],
+                vec![DynamicToolSpec::Function(function("a"))].into(),
                 &[],
                 &[],
                 &[],

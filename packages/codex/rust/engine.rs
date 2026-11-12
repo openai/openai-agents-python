@@ -3610,7 +3610,7 @@ mod rebuild_consumer_tests {
                         .rebuild_local(
                             &original_state,
                             options::ThreadOptions::default(),
-                            specs,
+                            specs.into(),
                             expected,
                             prepared,
                             crate::storage::RebuildReceipt {
