@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/shared.rs b/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
-index 60e872e7..b657e8e8 100644
+index 60e872e7a065cafebb7d6c85d4b26064d24a02d3..b657e8e857923c4a00d423fae7f97940b7b36d5c 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/shared.rs
 @@ -77,6 +77,7 @@ pub enum CodexErrorInfo {
@@ -25,7 +25,7 @@ index 60e872e7..b657e8e8 100644
              CoreCodexErrorInfo::RateLimitExceeded => CodexErrorInfo::RateLimitExceeded,
              CoreCodexErrorInfo::FlexUnavailable => CodexErrorInfo::FlexUnavailable,
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index f319648a..d91f201a 100644
+index f319648ae99bd725f027c68d59ed6055cc73d472..d91f201adc9672d0554cc6e686e5e20269055531 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
 @@ -485,11 +485,15 @@ impl Stream for ResponseStream {
@@ -185,7 +185,7 @@ index f319648a..d91f201a 100644
          };
          self.notify(current);
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index be5cb579..09ec94fd 100644
+index 1c89558bb4d9e3ca3a9892336ed330653ef7fab6..eca5abe566c62ef3a3cf647658a2f5ca52a076bc 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -2226,6 +2226,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
@@ -197,10 +197,10 @@ index be5cb579..09ec94fd 100644
          .await;
      child_thread
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 728f3cb7..1eb65cce 100644
+index a41c3058abb8599370d60f6e9f429d5d3030f560..a5c919f4d818216f6f7c7340839e659f949a4711 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -2079,10 +2079,32 @@ impl ModelClientSession {
+@@ -2101,10 +2101,32 @@ impl ModelClientSession {
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<ResponseStream> {
          loop {
@@ -234,7 +234,7 @@ index 728f3cb7..1eb65cce 100644
              if prompt.prefer_buffered_response
                  && !client_setup
                      .auth
-@@ -2355,10 +2377,21 @@ impl ModelClientSession {
+@@ -2377,10 +2399,21 @@ impl ModelClientSession {
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
@@ -257,7 +257,7 @@ index 728f3cb7..1eb65cce 100644
              let include_internal = self
                  .client
                  .state
-@@ -2530,6 +2563,21 @@ impl ModelClientSession {
+@@ -2552,6 +2585,21 @@ impl ModelClientSession {
                  ),
                  ..ResponseCreateWsRequest::from(&request)
              };
@@ -280,10 +280,10 @@ index 728f3cb7..1eb65cce 100644
                  &mut ws_payload.client_metadata,
                  responses_metadata.parent_response_id.as_deref(),
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index d43452c1..ce0ff876 100644
+index 84e3cdb9681c7e2bbd713a24594698378f1dbc41..a743ae733ccb4b5dff5504658cf05056e2c65227 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -1020,6 +1020,7 @@ async fn drain_to_completed(
+@@ -1036,6 +1036,7 @@ async fn drain_to_completed(
                      response_observation_id.take(),
                      token_usage.as_ref(),
                      usage_metadata.as_ref(),
@@ -292,10 +292,10 @@ index d43452c1..ce0ff876 100644
                  .await;
                  sess.update_token_usage_info(turn_context, token_usage.as_ref())
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 591db25d..48481a97 100644
+index 8801c0e7d67bd6d79044fb3e533cff62a9520818..d7d6cded1991d91e3aef58e1e00e5d16fa5fe147 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -535,6 +535,7 @@ async fn collect_compaction_output(
+@@ -543,6 +543,7 @@ async fn collect_compaction_output(
                      response_observation_id.take(),
                      token_usage.as_ref(),
                      usage_metadata.as_ref(),
@@ -304,7 +304,7 @@ index 591db25d..48481a97 100644
                  .await;
                  completed_response_id = Some(response_id);
 diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
-index fa144767..7c94afcd 100644
+index fa144767f2e50b69eae9f19b35942bf62b497f4b..7c94afcd3fd8c3338c797b3f0d6488867e6bd42e 100644
 --- a/codex-rs/core/src/model_request.rs
 +++ b/codex-rs/core/src/model_request.rs
 @@ -89,12 +89,25 @@ struct BoundInterceptor {
@@ -424,7 +424,7 @@ index fa144767..7c94afcd 100644
      producer.await.map(Some)
  }
 diff --git a/codex-rs/core/src/realtime_conversation/transcript_tail.rs b/codex-rs/core/src/realtime_conversation/transcript_tail.rs
-index 787a9192..089c9987 100644
+index 787a9192a29cbaa295eb0f8170b00ca8e950ac4f..089c9987a727c48be3cd8355d763fdfe18d79838 100644
 --- a/codex-rs/core/src/realtime_conversation/transcript_tail.rs
 +++ b/codex-rs/core/src/realtime_conversation/transcript_tail.rs
 @@ -69,6 +69,7 @@ pub(super) async fn record(session: &Session, text: String) -> std::io::Result<(
@@ -436,7 +436,7 @@ index 787a9192..089c9987 100644
              turn_id: turn.sub_id.clone(),
              last_agent_message: None,
 diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
-index cb87601b..95c7103d 100644
+index cb87601b869a559d8238921ba16cce056f87d0bf..95c7103d9c87559ff9191b6c6e198ee3deb30f7e 100644
 --- a/codex-rs/core/src/responses_retry.rs
 +++ b/codex-rs/core/src/responses_retry.rs
 @@ -63,7 +63,10 @@ pub(crate) async fn handle_response_stream_error(
@@ -452,7 +452,7 @@ index cb87601b..95c7103d 100644
      }
      let turn_context = &step_context.turn;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 39e028aa..6da2d007 100644
+index df24879d8b6342087011ea4414b48bfb0ab012d2..3459678269232ced240431d49ef42cfb3ff6966d 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -256,6 +256,7 @@ mod mcp_prewarm;
@@ -463,7 +463,7 @@ index 39e028aa..6da2d007 100644
  pub(crate) mod model_invocation_deadline;
  pub(crate) mod multi_agents;
  mod plugin_selection;
-@@ -889,7 +890,8 @@ impl Session {
+@@ -898,7 +899,8 @@ impl Session {
                  tool_choice: config.sdk_tool_choice.or_else(|| {
                      persisted_thread_settings.and_then(|settings| settings.tool_choice)
                  }),
@@ -473,7 +473,7 @@ index 39e028aa..6da2d007 100644
                  request_controls: {
                      let mut selected = persisted_thread_settings
                          .map(|settings| settings.request_controls.clone())
-@@ -5486,10 +5488,12 @@ impl Session {
+@@ -5595,10 +5597,12 @@ impl Session {
          response_observation_id: Option<String>,
          usage: Option<&TokenUsage>,
          usage_metadata: Option<&ResponseUsageMetadata>,
@@ -488,7 +488,7 @@ index 39e028aa..6da2d007 100644
                  usage_metadata: usage_metadata.cloned(),
 diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
 new file mode 100644
-index 00000000..1f1efe52
+index 0000000000000000000000000000000000000000..1f1efe526536b2f6616779dcde10d1c922e49982
 --- /dev/null
 +++ b/codex-rs/core/src/session/model_attempts.rs
 @@ -0,0 +1,902 @@
@@ -1395,7 +1395,7 @@ index 00000000..1f1efe52
 +
 +}
 diff --git a/codex-rs/core/src/session/model_invocation_deadline.rs b/codex-rs/core/src/session/model_invocation_deadline.rs
-index 4e794f69..0a81c87d 100644
+index 4e794f69225f404134b285cbe9a6c22e95e992a6..0a81c87d2620e61e9da052a3296ce56030f95660 100644
 --- a/codex-rs/core/src/session/model_invocation_deadline.rs
 +++ b/codex-rs/core/src/session/model_invocation_deadline.rs
 @@ -33,6 +33,7 @@ pub(crate) struct ModelInvocationDeadline {
@@ -1449,7 +1449,7 @@ index 4e794f69..0a81c87d 100644
          }
          if errors.is_empty() {
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 712c80eb..c09bbb14 100644
+index 07a7a270af9488e2b4147029265b7553cf5f26fc..1cb56054d76103096b8ba44fede0e011153de130 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -1,3 +1,4 @@
@@ -1457,7 +1457,7 @@ index 712c80eb..c09bbb14 100644
  use std::borrow::Cow;
  use std::collections::HashMap;
  use std::collections::HashSet;
-@@ -2026,13 +2027,42 @@ async fn run_sampling_request(
+@@ -2054,13 +2055,42 @@ async fn run_sampling_request(
                  Some(stop),
              ),
          );
@@ -1501,7 +1501,7 @@ index 712c80eb..c09bbb14 100644
      let invocation = async {
          loop {
              // Running code-mode cells can request review while this response is in flight.
-@@ -2126,54 +2156,140 @@ async fn run_sampling_request(
+@@ -2154,54 +2184,140 @@ async fn run_sampling_request(
                  )
                  .await?;
              }
@@ -1686,7 +1686,7 @@ index 712c80eb..c09bbb14 100644
                  Ok(output) => {
                      return Ok((output, original_input.unwrap_or(prompt.input)));
                  }
-@@ -2212,6 +2328,185 @@ async fn run_sampling_request(
+@@ -2240,6 +2356,185 @@ async fn run_sampling_request(
  
              let original_input = original_input.get_or_insert(prompt.input);
  
@@ -1872,7 +1872,7 @@ index 712c80eb..c09bbb14 100644
              let retry = handle_response_stream_error(
                  &mut retry_state,
                  max_retries,
-@@ -2239,6 +2534,12 @@ async fn run_sampling_request(
+@@ -2267,6 +2562,12 @@ async fn run_sampling_request(
                  ));
              }
              retry??;
@@ -1885,7 +1885,7 @@ index 712c80eb..c09bbb14 100644
              recovery_attempt += 1;
              turn_context.turn_timing_state.record_sampling_retry();
          }
-@@ -2268,6 +2569,41 @@ async fn run_sampling_request(
+@@ -2296,6 +2597,41 @@ async fn run_sampling_request(
      outcome
  }
  
@@ -1927,7 +1927,7 @@ index 712c80eb..c09bbb14 100644
  pub(crate) struct PreparedToolRecommendations {
      auth: Option<CodexAuth>,
      endpoint_candidates: Option<Vec<DiscoverableTool>>,
-@@ -3153,7 +3489,9 @@ pub(super) enum RealtimeEventText {
+@@ -3181,7 +3517,9 @@ pub(super) enum RealtimeEventText {
  
  pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventText> {
      match msg {
@@ -1938,7 +1938,7 @@ index 712c80eb..c09bbb14 100644
          EventMsg::ElicitationRequest(request)
              if matches!(
                  &request.request,
-@@ -3731,6 +4069,10 @@ async fn try_run_sampling_request(
+@@ -3760,6 +4098,10 @@ async fn try_run_sampling_request(
      }
      // Every request, including a stream retry, depends on accepted durable history.
      sess.ensure_rollout_durable().await?;
@@ -1949,7 +1949,7 @@ index 712c80eb..c09bbb14 100644
      let sample_cancel = cancellation_token.child_token();
      let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
      let tool_cancellation = sample_cancel.child_token();
-@@ -3803,7 +4145,12 @@ async fn try_run_sampling_request(
+@@ -3837,7 +4179,12 @@ async fn try_run_sampling_request(
              .await??;
          // Publish owned handles synchronously before checking raced cancellation.
          deadline.attach_stream_stop(stream.consumer_dropped.clone(), stream.producer_stop.take());
@@ -1963,7 +1963,7 @@ index 712c80eb..c09bbb14 100644
              deadline.attach_tasks([stream.mapper_task.take(), stream.producer_task.take()]);
          }
          if sample_cancel.is_cancelled() {
-@@ -3911,6 +4258,10 @@ async fn try_run_sampling_request(
+@@ -3945,6 +4292,10 @@ async fn try_run_sampling_request(
                      }
                  }
                  ResponseEvent::Created { response_id } => {
@@ -1974,7 +1974,7 @@ index 712c80eb..c09bbb14 100644
                      response_fact_response_id.clone_from(&response_id);
                      if let Some(response_id) = response_id {
                          turn_context
-@@ -3919,6 +4270,13 @@ async fn try_run_sampling_request(
+@@ -3953,6 +4304,13 @@ async fn try_run_sampling_request(
                      }
                  }
                  ResponseEvent::OutputItemDone(mut item) => {
@@ -1988,7 +1988,7 @@ index 712c80eb..c09bbb14 100644
                      assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                      sess.reserve_assistant_message_order(&turn_context, &item)
                          .await;
-@@ -4247,6 +4605,12 @@ async fn try_run_sampling_request(
+@@ -4293,6 +4651,12 @@ async fn try_run_sampling_request(
                      usage_metadata,
                      end_turn,
                  } => {
@@ -2001,7 +2001,7 @@ index 712c80eb..c09bbb14 100644
                      sess.services
                          .analytics_events_client
                          .track_code_mode_tool_call(
-@@ -4270,6 +4634,7 @@ async fn try_run_sampling_request(
+@@ -4316,6 +4680,7 @@ async fn try_run_sampling_request(
                          response_observation_id.take(),
                          token_usage.as_ref(),
                          usage_metadata.as_ref(),
@@ -2009,7 +2009,7 @@ index 712c80eb..c09bbb14 100644
                      )
                      .await;
                      let budget_result = sess
-@@ -4301,6 +4666,11 @@ async fn try_run_sampling_request(
+@@ -4362,6 +4727,11 @@ async fn try_run_sampling_request(
                          if !active_item_is_streaming_to_client {
                              continue;
                          }
@@ -2021,7 +2021,7 @@ index 712c80eb..c09bbb14 100644
                          let item_id = active.id();
                          if matches!(active, TurnItem::AgentMessage(_)) {
                              let parsed =
-@@ -4458,7 +4828,8 @@ async fn try_run_sampling_request(
+@@ -4519,7 +4889,8 @@ async fn try_run_sampling_request(
      };
      // A final success (including preemption) or nonretryable error owns its
      // outcome before cleanup. Only a retryable failure retains the logical clock.
@@ -2031,7 +2031,7 @@ index 712c80eb..c09bbb14 100644
          || outcome
              .as_ref()
              .err()
-@@ -4485,7 +4856,7 @@ async fn try_run_sampling_request(
+@@ -4546,7 +4917,7 @@ async fn try_run_sampling_request(
              }
          }
      }
@@ -2040,7 +2040,7 @@ index 712c80eb..c09bbb14 100644
          deadline_cleanup_errors.extend(deadline.retire_tasks().await);
      }
      let mut tool_cleanup = if !in_flight.is_empty() {
-@@ -4542,7 +4913,17 @@ async fn try_run_sampling_request(
+@@ -4603,7 +4974,17 @@ async fn try_run_sampling_request(
          } else {
              format!("; {}", deadline_cleanup_errors.join("; "))
          };
@@ -2060,10 +2060,10 @@ index 712c80eb..c09bbb14 100644
      if !deadline_cleanup_errors.is_empty() {
          let message = deadline_cleanup_errors.join("; ");
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index 7911f4ee..27b26334 100644
+index 4dd2cd1c63961ca6320a9c6ad0c83f3f9efd46e6..67334bc5fc30fb666a61369aa05bd7b5bc6e0179 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
-@@ -1039,6 +1039,10 @@ impl Session {
+@@ -1250,6 +1250,10 @@ impl Session {
              self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
                  .await;
              EventMsg::TurnAborted(TurnAbortedEvent {
@@ -2074,7 +2074,7 @@ index 7911f4ee..27b26334 100644
                  turn_id: Some(turn_context.sub_id.clone()),
                  reason,
                  error: None,
-@@ -1055,6 +1059,10 @@ impl Session {
+@@ -1266,6 +1270,10 @@ impl Session {
              self.emit_turn_stop_lifecycle(turn_context.extension_data.as_ref())
                  .await;
              EventMsg::TurnComplete(TurnCompleteEvent {
@@ -2085,7 +2085,7 @@ index 7911f4ee..27b26334 100644
                  turn_id: turn_context.sub_id.clone(),
                  last_agent_message,
                  tool_completion: if error.is_none() {
-@@ -1327,17 +1335,25 @@ impl Session {
+@@ -1548,25 +1556,25 @@ impl Session {
          if was_cancelled && error.is_none() {
              if join_realtime_tools {
                  let _ = task.handle.await;
@@ -2101,9 +2101,17 @@ index 7911f4ee..27b26334 100644
                      .abort(Arc::clone(self), Arc::clone(&task.turn_context))
                      .await;
 -            } else if let Some(owner) = &request_owner {
--                let errors = self.join_deadline_request_tasks(task.handle, &task.turn_context, join_local_commands, owner).await;
+-                let errors = self
+-                    .join_deadline_request_tasks(
+-                        task.handle,
+-                        &task.turn_context,
+-                        join_local_commands,
+-                        owner,
+-                    )
+-                    .await;
 -                if let Some(error) = owner.abort_error(error.take(), errors) {
--                    self.send_event(&task.turn_context, EventMsg::Error(error)).await;
+-                    self.send_event(&task.turn_context, EventMsg::Error(error))
+-                        .await;
 +            } else {
 +                if let Some(event) = self.join_deadline_request_tasks(
 +                    task.handle, &task.turn_context, join_local_commands,
@@ -2118,7 +2126,7 @@ index 7911f4ee..27b26334 100644
              }
              if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
                  warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
-@@ -1372,6 +1388,14 @@ impl Session {
+@@ -1601,6 +1609,14 @@ impl Session {
  
          if join_realtime_tools {
              let _ = task.handle.await;
@@ -2133,12 +2141,19 @@ index 7911f4ee..27b26334 100644
          } else {
              select! {
                  _ = task.done.notified() => {
-@@ -1381,15 +1405,11 @@ impl Session {
+@@ -1610,22 +1626,11 @@ impl Session {
                  }
              }
  
 -            if let Some(owner) = &request_owner {
--                let errors = self.join_deadline_request_tasks(task.handle, &task.turn_context, join_local_commands, owner).await;
+-                let errors = self
+-                    .join_deadline_request_tasks(
+-                        task.handle,
+-                        &task.turn_context,
+-                        join_local_commands,
+-                        owner,
+-                    )
+-                    .await;
 -                error = owner.abort_error(error.take(), errors);
 -            } else if join_local_commands {
 -                self.join_interrupted_local_commands(task.handle, &task.turn_context)
@@ -2154,7 +2169,7 @@ index 7911f4ee..27b26334 100644
          }
  
          if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
-@@ -1444,6 +1464,11 @@ impl Session {
+@@ -1680,6 +1685,11 @@ impl Session {
          self.emit_turn_abort_lifecycle(reason.clone(), task.turn_context.extension_data.as_ref())
              .await;
          let event = EventMsg::TurnAborted(TurnAbortedEvent {
@@ -2166,7 +2181,7 @@ index 7911f4ee..27b26334 100644
              turn_id: Some(task.turn_context.sub_id.clone()),
              reason,
              error,
-@@ -1462,19 +1487,28 @@ impl Session {
+@@ -1698,15 +1708,14 @@ impl Session {
          }
      }
  
@@ -2174,10 +2189,14 @@ index 7911f4ee..27b26334 100644
 +    // Sampler shutdown must precede the final lookup: a first/new attempt may
 +    // publish its physical owner after abort's initial snapshot.
      async fn join_deadline_request_tasks(
-         &self, mut task: AbortOnDropHandle<()>, turn: &TurnContext, join_local_commands: bool,
+-        &self,
+-        mut task: AbortOnDropHandle<()>,
+-        turn: &TurnContext,
+-        join_local_commands: bool,
 -        owner: &crate::session::model_invocation_deadline::ModelInvocationDeadline,
 -    ) -> Vec<String> {
 -        owner.cancel_for_retirement();
++        &self, mut task: AbortOnDropHandle<()>, turn: &TurnContext, join_local_commands: bool,
 +        initial: Option<&crate::session::model_invocation_deadline::ModelInvocationDeadline>,
 +        primary: Option<ErrorEvent>, cleanup_errors: Option<&mut Vec<String>>,
 +    ) -> Option<ErrorEvent> {
@@ -2185,10 +2204,19 @@ index 7911f4ee..27b26334 100644
          task.abort();
          let mut errors = Vec::new();
          if let Err(error) = (&mut task).await {
-             if !error.is_cancelled() { errors.push(format!("sampler retirement failed: {error}")); }
+@@ -1714,47 +1723,50 @@ impl Session {
+                 errors.push(format!("sampler retirement failed: {error}"));
+             }
          }
 -        // Actual sampler retirement prevents a late factory/task registration.
 -        errors.extend(owner.retire_tasks().await);
+-        if join_local_commands
+-            && !self
+-                .services
+-                .unified_exec_manager
+-                .join_unreturned_local_commands(&turn.extension_data)
+-                .await
+-        {
 +        let latest = turn.extension_data
 +            .get::<Arc<crate::session::model_invocation_deadline::ModelInvocationDeadline>>();
 +        let latest_owner = latest.as_ref().map(|owner| owner.as_ref().as_ref());
@@ -2198,10 +2226,10 @@ index 7911f4ee..27b26334 100644
 +            errors.extend(owner.retire_tasks().await);
 +        }
 +        if let Some(owner) = latest_owner { errors.extend(owner.retire_tasks().await); }
-         if join_local_commands && !self.services.unified_exec_manager
-             .join_unreturned_local_commands(&turn.extension_data).await {
++        if join_local_commands && !self.services.unified_exec_manager
++            .join_unreturned_local_commands(&turn.extension_data).await {
              let failure = ManagedLocalExecCancelFailure(turn.sub_id.clone());
-@@ -1482,33 +1516,34 @@ impl Session {
+             turn.extension_data.insert(failure.clone());
              self.services.thread_extension_data.insert(failure);
              errors.push("Native local command cleanup could not confirm exit".to_owned());
          }
@@ -2259,10 +2287,10 @@ index 7911f4ee..27b26334 100644
  
  #[cfg(test)]
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 33154fb4..fa05c8b2 100644
+index 20576c96e9b579c6e0c76d2e3cd3361438d99aa4..8d21a8eeac6bb124a6eb6c7e11fa54615159d728 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -2752,6 +2752,7 @@ fn append_interrupted_boundary(
+@@ -2823,6 +2823,7 @@ fn append_interrupted_boundary(
      interrupted_marker: InterruptedTurnHistoryMarker,
  ) -> InitialHistory {
      let aborted_event = RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
@@ -2271,10 +2299,10 @@ index 33154fb4..fa05c8b2 100644
          reason: TurnAbortReason::Interrupted,
          error: None,
 diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
-index f69668a1..6a0122da 100644
+index 71d9e51221df4bd38ad65ee689e5d4d85ff4d622..d706cdb82a668bec7e7deaaf4356accb28da01fb 100644
 --- a/codex-rs/core/src/tools/parallel.rs
 +++ b/codex-rs/core/src/tools/parallel.rs
-@@ -385,6 +385,9 @@ impl ToolCallRuntime {
+@@ -393,6 +393,9 @@ impl ToolCallRuntime {
                      let _ = execution_started_at.set(Instant::now());
                  }
  
@@ -2285,10 +2313,10 @@ index f69668a1..6a0122da 100644
                      .dispatch_tool_call_with_state(
                          session,
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 36d736d1..ec3eb521 100644
+index 61ddcbcb8bb8e71dd7931fff99ba6bb3e7e9d185..5a4c2b2072ceb8101c07263dc943ee8ef895222e 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -158,6 +158,9 @@ pub use model_request::ResponseEvent;
+@@ -159,6 +159,9 @@ pub use model_request::ResponseEvent;
  pub use model_request::ToolsOnlyCallInput;
  pub use model_request::ToolsOnlyWorkCancellation;
  pub use model_request::TurnSamplingStop;
@@ -2299,7 +2327,7 @@ index 36d736d1..ec3eb521 100644
  mod model_request_observation;
  pub use model_request::PreparedRequestAdmission;
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index dedec722..4fc7b9d0 100644
+index dedec722862e27bceeee1c2982113690ee9e64f7..4fc7b9d004b83331bfe33665fcdb9087139ffd2d 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
 @@ -15,38 +15,98 @@ use std::sync::atomic::Ordering;
@@ -2583,7 +2611,7 @@ index dedec722..4fc7b9d0 100644
 +    }
 +}
 diff --git a/codex-rs/ext/guardian-reviewer/src/retry.rs b/codex-rs/ext/guardian-reviewer/src/retry.rs
-index f2133a2f..593381d1 100644
+index f2133a2f0bd18c12a9b28cd9309a175d00adb1f6..593381d108d7ab9c85e0e9403db0a88d28941c36 100644
 --- a/codex-rs/ext/guardian-reviewer/src/retry.rs
 +++ b/codex-rs/ext/guardian-reviewer/src/retry.rs
 @@ -124,6 +124,7 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
@@ -2595,7 +2623,7 @@ index f2133a2f..593381d1 100644
          },
          GuardianReviewOutcome::Completed(_)
 diff --git a/codex-rs/protocol/src/codex_error_info.rs b/codex-rs/protocol/src/codex_error_info.rs
-index cfd24f99..33b9bd41 100644
+index cfd24f99b30b4f15053096ba490728d13f09eed6..33b9bd413dc9722d4c802d4de6b7b6b19345df45 100644
 --- a/codex-rs/protocol/src/codex_error_info.rs
 +++ b/codex-rs/protocol/src/codex_error_info.rs
 @@ -20,6 +20,7 @@ enum CodexErrorInfoWire {
@@ -2607,7 +2635,7 @@ index cfd24f99..33b9bd41 100644
      RateLimitExceeded,
      FlexUnavailable,
 diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
-index be42aa14..2ab2b897 100644
+index be42aa143e8f322eec948d3890a144997356ab0c..2ab2b897f3da20a423c52d343e1632f81a130fbc 100644
 --- a/codex-rs/protocol/src/error.rs
 +++ b/codex-rs/protocol/src/error.rs
 @@ -105,6 +105,8 @@ pub enum CodexErrorDetails {
@@ -2646,7 +2674,7 @@ index be42aa14..2ab2b897 100644
              CodexErrorDetails::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
              CodexErrorDetails::RateLimitExceeded(_) => CodexErrorInfo::RateLimitExceeded,
 diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
-index b6ec4b44..4b9c7f15 100644
+index b6ec4b443947189354f05e41aa3d73d65f8cff76..4b9c7f1538691710ea18d87e7cd57fe2be07b2f1 100644
 --- a/codex-rs/protocol/src/lib.rs
 +++ b/codex-rs/protocol/src/lib.rs
 @@ -37,6 +37,7 @@ pub mod memory_citation;
@@ -2658,7 +2686,7 @@ index b6ec4b44..4b9c7f15 100644
  pub mod network_policy;
  pub mod num_format;
 diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
-index 992878f8..6418acce 100644
+index 992878f81131899e9a70e2f7f6c08daef43399d5..6418acce413d84fbd2bddbf2ccace0354a29a6ed 100644
 --- a/codex-rs/protocol/src/model_request_controls.rs
 +++ b/codex-rs/protocol/src/model_request_controls.rs
 @@ -60,6 +60,24 @@ pub struct HostedPromptControls {
@@ -2714,7 +2742,7 @@ index 992878f8..6418acce 100644
          }
 diff --git a/codex-rs/protocol/src/model_retry.rs b/codex-rs/protocol/src/model_retry.rs
 new file mode 100644
-index 00000000..a4d07713
+index 0000000000000000000000000000000000000000..a4d0771339f39e4fb5feb0932af595ccfcc1712b
 --- /dev/null
 +++ b/codex-rs/protocol/src/model_retry.rs
 @@ -0,0 +1,263 @@
@@ -2982,7 +3010,7 @@ index 00000000..a4d07713
 +    }
 +}
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 53ec0f6c..20e022a5 100644
+index 53ec0f6c310541f3f204861be231e2fb43642046..20e022a5bc016ffad126922c78c0074e0b87ef13 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -2040,6 +2040,10 @@ pub enum EventMsg {
@@ -3089,7 +3117,7 @@ index 53ec0f6c..20e022a5 100644
 +    }
 +}
 diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
-index f6a634c3..3f713d68 100644
+index f6a634c3100a0792ce61ea7ebac7471b8f4ccda3..3f713d682ed507e80b68f20b9304e29600adbbbd 100644
 --- a/codex-rs/rollout-trace/src/protocol_event.rs
 +++ b/codex-rs/rollout-trace/src/protocol_event.rs
 @@ -267,7 +267,9 @@ impl<'a> From<&'a ExecCommandEndEvent> for ExecCommandEndTracePayload<'a> {
@@ -3115,10 +3143,10 @@ index f6a634c3..3f713d68 100644
          EventMsg::TurnStarted(_) => Some("turn_started"),
          EventMsg::TurnComplete(_) => Some("turn_complete"),
 diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
-index 25ad762a..6fdd65bc 100644
+index ba461e5caf342b6ef93ad386602720dd17d3fbe5..7e56194dea2439396656831a6f2fcd54d2e5660d 100644
 --- a/codex-rs/rollout/src/policy.rs
 +++ b/codex-rs/rollout/src/policy.rs
-@@ -143,7 +143,8 @@ pub fn persisted_event_msg(
+@@ -147,7 +147,8 @@ pub fn persisted_event_msg(
  ) -> Option<Cow<'_, EventMsg>> {
      match ev {
          EventMsg::ItemCompleted(event) => persisted_item_completed_event(ev, event, history_mode),
@@ -3129,7 +3157,7 @@ index 25ad762a..6fdd65bc 100644
          | EventMsg::ThreadRolledBack(_)
          | EventMsg::TurnAborted(_)
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
-index a26d18d4..601db2b8 100644
+index a26d18d439f282869e8cf64f7b2f62b2fb83d89a..601db2b86751ac459110104f5c7c6880f61afc1b 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
 @@ -376,6 +376,7 @@ impl LegacyRolloutCanonicalizer {
