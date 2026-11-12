@@ -13,12 +13,14 @@ import pytest
 from agents import (
     Agent,
     Allow,
+    HostedShell,
     NativeProvider,
     ShellCall,
     ShellOutput,
     SignInWithChatGPT,
     SignInWithChatGPTCredentials,
     ToolContext,
+    ToolSearch,
     function_tool,
     shell_tool,
 )
@@ -527,6 +529,14 @@ async def test_sign_in_with_chatgpt_keeps_external_bearer_and_original_http(
         "error_details_tool",
         "application-shell",
         "mixed-application-shell",
+        "history",
+        "items",
+        "hosted-shell",
+        "server-tool-search",
+        "client-tool-search",
+        "mixed-hosted-shell",
+        "mixed-server-tool-search",
+        "mixed-client-tool-search",
     ],
 )
 async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
@@ -573,12 +583,24 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
     monkeypatch.setattr(native, "create_engine", create_engine)
     agent_options: dict[str, Any] = {}
     run_options: dict[str, Any] = {}
-    if profile in ("tool", "ca", "proxy", "raw_usage_tool", "error_details_tool"):
+    if profile in (
+        "tool",
+        "ca",
+        "proxy",
+        "raw_usage_tool",
+        "error_details_tool",
+        "history",
+        "items",
+    ):
         agent_options["tools"] = [optional_tool]
         if profile == "ca":
             monkeypatch.setenv("SSL_CERT_FILE", "")
         elif profile == "proxy":
             monkeypatch.setenv("HTTPS_PROXY", "")
+        elif profile == "history":
+            run_options["return_history"] = True
+        elif profile == "items":
+            run_options["return_items"] = True
     elif profile == "hook":
         agent_options["before_complete"] = lambda *args: None
     elif profile == "state":
@@ -593,6 +615,15 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
             [optional_tool, application_shell]
             if profile == "mixed-application-shell"
             else [application_shell]
+        )
+    elif profile.endswith(("hosted-shell", "tool-search")):
+        excluded_tool: HostedShell | ToolSearch
+        if profile.endswith("hosted-shell"):
+            excluded_tool = HostedShell(environment={"type": "container_auto"})
+        else:
+            excluded_tool = ToolSearch(execution="client" if "client" in profile else "server")
+        agent_options["tools"] = (
+            [optional_tool, excluded_tool] if profile.startswith("mixed-") else [excluded_tool]
         )
     if profile in ("raw_usage", "raw_usage_tool"):
         run_options["return_raw_usage"] = True
@@ -613,9 +644,18 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         assert kwargs["_private_http"] is True and kwargs["_process_private_http"] is True
         assert "codex_home" not in runtime and "cwd" not in runtime
         assert starts == []
+    elif profile == "tool":
+        route, config, kwargs, runtime = openings.pop()
+        assert route == "_open_conversation"
+        assert config["model_providers.native_agent"]["supports_websockets"] is True
+        assert kwargs["_private_http"] is False
+        assert kwargs["_share_model_http"] is False
+        assert kwargs["_process_private_runtime"] is True
+        assert "codex_home" not in runtime and "cwd" not in runtime
+        assert starts == []
     else:
         assert starts == [{"initial_messages_json": None}]
-        assert bool(thread_options[0].get("_sdk_websocket_tls", False)) is (profile == "tool")
+        assert not thread_options[0].get("_sdk_websocket_tls", False)
     assert len(providers) == 1 and providers[0].api_key is None and providers[0]._closed
     assert agent.provider is None
     assert not openings
