@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744b657346d 100644
+index a743ae733ccb4b5dff5504658cf05056e2c65227..0b97bcae99dbfcae13e0899406bb2bdf1fe4f955 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -1,4 +1,6 @@
@@ -47,7 +47,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
      )
      .await;
      let status = compaction_status_from_result(&result);
-@@ -255,60 +262,347 @@ async fn run_compact_task_inner(
+@@ -255,60 +262,358 @@ async fn run_compact_task_inner(
      result.map(|_| ())
  }
  
@@ -93,6 +93,10 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
 +                            encrypted_content: Some(_),
 +                            ..
 +                        }
++                        | ResponseItem::ContextCompaction {
++                            encrypted_content: Some(_),
++                            ..
++                        }
 +                ))
 +    });
 +    for item in items.iter().filter(|item| {
@@ -103,6 +107,10 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
 +                    item,
 +                    ResponseItem::Compaction { .. }
 +                        | ResponseItem::Reasoning {
++                            encrypted_content: Some(_),
++                            ..
++                        }
++                        | ResponseItem::ContextCompaction {
 +                            encrypted_content: Some(_),
 +                            ..
 +                        }
@@ -376,7 +384,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
 +                )?;
 +                // A borrowed client's producer is outside the native catalog owner.
 +                let model_hash = None;
-+                // Record copied controls through the replacement history.
++                // Observe only non-control output from the borrowed replacement.
 +                let output = window
 +                    .items
 +                    .iter()
@@ -392,6 +400,9 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
 +                let items = window
 +                    .items
 +                    .into_iter()
++                    // Current native context owns system/developer instruction placement.
++                    // Other proven window items keep their existing data and metadata.
++                    .filter(|item| !matches!(item, ResponseItem::Message { role, .. } if role == "system" || role == "developer"))
 +                    .map(|item| {
 +                        let mut envelope = item
 +                            .id()
@@ -430,7 +441,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
          }
      }
      Ok(None)
-@@ -327,12 +621,7 @@ async fn publish_compaction_summary(
+@@ -327,12 +632,7 @@ async fn publish_compaction_summary(
      let (compaction_response_id, completed_output) = match compaction_response {
          Some((response, cancellation_token)) => (
              Some(response.response_id),
@@ -444,7 +455,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
          ),
          None => (None, None),
      };
-@@ -350,12 +639,57 @@ async fn publish_compaction_summary(
+@@ -350,12 +650,57 @@ async fn publish_compaction_summary(
          // belongs to this compaction turn.
          summary_item.set_turn_id_if_missing(&turn_context.sub_id);
      }
@@ -503,7 +514,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
      let (initial_context, world_state_baseline) =
          build_compaction_initial_context(sess, replacement_step_context, world_state).await;
      new_history =
-@@ -368,7 +702,7 @@ async fn publish_compaction_summary(
+@@ -368,7 +713,7 @@ async fn publish_compaction_summary(
              input_goal_ids,
              message: summary_text,
              window,
@@ -512,7 +523,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
              compaction_model_hash,
              reviewer_compaction_hash: None,
          },
-@@ -379,6 +713,7 @@ async fn publish_compaction_summary(
+@@ -379,6 +724,7 @@ async fn publish_compaction_summary(
      Ok(())
  }
  
@@ -520,7 +531,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
  async fn run_compact_task_inner_impl(
      sess: Arc<Session>,
      source_step_context: Arc<StepContext>,
-@@ -387,17 +722,29 @@ async fn run_compact_task_inner_impl(
+@@ -387,17 +733,29 @@ async fn run_compact_task_inner_impl(
      world_state: Arc<WorldState>,
      compaction_metadata: CompactionTurnMetadata,
      cancellation_token: &CancellationToken,
@@ -551,7 +562,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
      )
      .await?
      {
-@@ -405,9 +752,14 @@ async fn run_compact_task_inner_impl(
+@@ -405,9 +763,14 @@ async fn run_compact_task_inner_impl(
              .await;
          return Ok(summary);
      }
@@ -567,7 +578,7 @@ index a743ae733ccb4b5dff5504658cf05056e2c65227..6f550b60b91a4a4fde7ed36fe1ca5744
      let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
      history.record_items(
          &[initial_input_for_turn.into()],
-@@ -1064,3 +1416,125 @@ async fn drain_to_completed(
+@@ -1064,3 +1427,125 @@ async fn drain_to_completed(
  #[cfg(test)]
  #[path = "compact_tests.rs"]
  mod tests;

@@ -806,7 +806,7 @@
     },
     {
       "path": "sdk-borrowed-responses-compaction.patch",
-      "sha256": "9a85ae1c3c3508667e1fb4267fe5027e0d8f24bd486d4f3f4042fc76dcf29b9f"
+      "sha256": "2bd50e43bafefb05a078af67760366c2e26fe2989140f647fcf55dded09e3583"
     },
     {
       "path": "sdk-managed-receipt-original-identity.patch",
@@ -817,5 +817,5 @@
       "sha256": "cbf049d3d03e9071d9100217c969138574df3735def89c74abe2037da3978513"
     }
   ],
-  "result_tree": "82a1c0f392af243d5667bea4ab0b6f9b91e09db1"
+  "result_tree": "58427bdc8cfc63b2e5eed079fa6aba6ceae74581"
 }

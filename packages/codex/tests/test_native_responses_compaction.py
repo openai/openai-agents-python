@@ -421,7 +421,11 @@ async def test_compaction_transform_keeps_original_instruction_provenance(respon
             saved = await session.save_state()
             compacted = next(row["payload"] for row in saved.history if row["type"] == "compacted")
             accepted = compacted["replacement_history"]
-            assert len(captured) == 2 and all(item in accepted for item in captured)
+            assert len(captured) == 2
+            assert f"{original} current" in json.dumps(accepted)
+            for item in accepted:
+                if item.get("role") in ("system", "developer") and original in json.dumps(item):
+                    assert f"{original} current" in json.dumps(item)
             assert redacted not in json.dumps(accepted)
         current_agent = Agent(
             instructions=f"{original} current",
@@ -481,7 +485,7 @@ async def test_compaction_retains_only_captured_reference_occurrences(responses,
 
 
 @pytest.mark.parametrize("captured", [False, True])
-@pytest.mark.parametrize("kind", ["compaction", "reasoning"])
+@pytest.mark.parametrize("kind", ["compaction", "reasoning", "context_compaction"])
 async def test_unverified_compactor_cannot_introduce_opaque_context(responses, captured, kind):
     opaque = {"type": kind, "encrypted_content": "FOREIGN_OPAQUE_CONTEXT"}
     if kind == "reasoning":
@@ -575,3 +579,96 @@ async def test_unverified_compactor_can_return_plain_reasoning(responses):
         await session.compact()
         assert "VISIBLE_SUMMARY" in (await session.save_state()).to_json()
         await (await session.submit("continue")).get_result()
+
+
+@pytest.mark.parametrize("keep_user", [False, True])
+async def test_compaction_cannot_replay_superseded_control_after_user_boundary(
+    responses, keep_user
+):
+    revoked = "REVOKED_CAPABILITY_OLD"
+    current = "CURRENT_RESTRICTION_NEW"
+
+    async def compact(**body):
+        old = next(
+            item
+            for item in body["input"]
+            if item.get("role") == "developer" and revoked in json.dumps(item)
+        )
+        tail = (
+            [next(item for item in reversed(body["input"]) if item.get("role") == "user")]
+            if keep_user
+            else [assistant_output("VISIBLE_COMPACTED_SUMMARY")["item"]]
+        )
+        return {"output": [*tail, old]}
+
+    factory = ResponsesCompaction(
+        client=client_for(compact), model="compact", mode="input", should_compact=lambda _: False
+    )
+    connection = provider(responses)
+    responses.respond(assistant_output("original answer"))
+    responses.respond(assistant_output("continued"))
+    responses.respond(assistant_output("cold continued"))
+    async with Agent(
+        instructions=revoked, provider=connection, compaction=factory
+    ).session() as session:
+        await (await session.submit("retained user boundary")).get_result()
+        await session.update(instructions=current)
+        await session.compact()
+        await (await session.submit("live followup")).get_result()
+        live = json.dumps(responses.requests[-1]["input"])
+        assert current in live and revoked not in live
+        saved = await session.save_state()
+        replacement = next(
+            row["payload"]["replacement_history"]
+            for row in reversed(saved.history)
+            if row["type"] == "compacted"
+        )
+        assert revoked not in json.dumps(replacement)
+        assert current in json.dumps(replacement)
+    async with Agent(instructions=current, provider=connection, compaction=factory).session(
+        state=SessionState.from_json(saved.to_json())
+    ) as restored:
+        await (await restored.submit("continue")).get_result()
+    body = json.dumps(responses.requests[-1]["input"])
+    assert current in body and revoked not in body
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"type": "additional_tools", "role": "developer", "tools": []},
+        {
+            "type": "agent_message",
+            "author": "/source",
+            "recipient": "/",
+            "content": [{"type": "input_text", "text": "CAPTURED_PEER_DATA"}],
+        },
+    ],
+)
+async def test_compaction_preserves_captured_noninstruction_window_data(responses, item):
+    echoed = []
+
+    async def compact(**body):
+        selected = [entry for entry in body["input"] if entry["type"] == item["type"]]
+        assert len(selected) == 1
+        echoed.extend(selected)
+        return {"output": [*selected, assistant_output("VISIBLE_SUMMARY")["item"]]}
+
+    factory = ResponsesCompaction(
+        client=client_for(compact), model="compact", mode="input", should_compact=lambda _: False
+    )
+    responses.respond(assistant_output("original"))
+    async with Agent(
+        instructions="Current instructions.", provider=provider(responses), compaction=factory
+    ).session() as session:
+        snapshot = await session.history_snapshot()
+        await session.transact_history(expected_revision=snapshot.revision, keep=0, items=[item])
+        await (await session.submit("original request")).get_result()
+        await session.compact()
+        saved = await session.save_state()
+        replacement = next(
+            row["payload"]["replacement_history"]
+            for row in reversed(saved.history)
+            if row["type"] == "compacted"
+        )
+        assert echoed and all(entry in replacement for entry in echoed)
