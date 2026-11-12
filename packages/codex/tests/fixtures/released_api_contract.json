@@ -327,6 +327,30 @@
         ],
         "references": {}
       },
+      "agents.conversations": {
+        "declarations": [
+          "OutputT = TypeVar('OutputT')",
+          "class ConversationsWriteError(RuntimeError):\n\n    def __init__(self, conversation_id: str, items: tuple[dict[str, Any], ...], acknowledged: int) -> None:\n        pass",
+          "class ConversationsHistory:\n\n    def __init__(self, client: AsyncOpenAI, *, conversation_id: str | None=None) -> None:\n        pass\n\n    @property\n    def conversation_id(self) -> str | None:\n        pass\n\n    async def get_conversation_id(self) -> str:\n        pass\n\n    async def get_items(self, limit: int | None=None) -> list[dict[str, Any]]:\n        pass\n\n    async def add_items(self, items: Sequence[Mapping[str, Any]]) -> None:\n        pass\n\n    async def pop_item(self) -> dict[str, Any] | None:\n        pass\n\n    async def clear(self) -> None:\n        pass\n\n    async def run(self, agent: Agent[Any, OutputT], input: UserInput, **session_options: Any) -> Completed[OutputT]:\n        pass"
+        ],
+        "exports": {
+          "ConversationsHistory": "_agents_codex.conversations.ConversationsHistory",
+          "ConversationsWriteError": "_agents_codex.conversations.ConversationsWriteError"
+        },
+        "imports": [
+          "from collections.abc import Mapping, Sequence",
+          "from typing import Any, TypeVar",
+          "from openai import AsyncOpenAI",
+          "from .agent import Agent",
+          "from .input import UserInput",
+          "from .session import Completed"
+        ],
+        "references": {
+          "Agent": "agents.agent.Agent",
+          "Completed": "agents.session.Completed",
+          "UserInput": "agents.input.UserInput"
+        }
+      },
       "agents.decisions": {
         "declarations": [
           "DecisionInput = str | Sequence[dict[str, Any]]",
@@ -2049,6 +2073,8 @@
       "ComputerProvider": "agents.computer.ComputerProvider",
       "ComputerSafetyError": "agents.computer.ComputerSafetyError",
       "ContinueTurn": "agents.completion.ContinueTurn",
+      "ConversationsHistory": "agents.conversations.ConversationsHistory",
+      "ConversationsWriteError": "agents.conversations.ConversationsWriteError",
       "CustomStorage": "agents.canonical_storage.CustomStorage",
       "DaprSessionStore": "agents.canonical_storage.DaprSessionStore",
       "DecisionError": "agents.decisions.DecisionError",
@@ -4898,6 +4924,8 @@
       "ComputerProvider",
       "ComputerSafetyError",
       "ContinueTurn",
+      "ConversationsHistory",
+      "ConversationsWriteError",
       "CustomStorage",
       "DaprSessionStore",
       "DecisionError",
@@ -5071,6 +5099,7 @@
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn, FinishToolBatch as FinishToolBatch, ToolBatchCompletionContext as ToolBatchCompletionContext, ToolBatchResult as ToolBatchResult",
       "from .computer import Computer as Computer, ComputerProvider as ComputerProvider, ComputerSafetyError as ComputerSafetyError, computer_tool as computer_tool",
+      "from .conversations import ConversationsHistory as ConversationsHistory, ConversationsWriteError as ConversationsWriteError",
       "from .decisions import DecisionError as DecisionError, DecisionInput as DecisionInput, DecisionProvider as DecisionProvider, DecisionRequest as DecisionRequest, DecisionResponse as DecisionResponse, OpenAIDecisions as OpenAIDecisions",
       "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",
       "from .guardrails import GuardrailRecord as GuardrailRecord, GuardrailResult as GuardrailResult, GuardrailTripwire as GuardrailTripwire, InputGuardrail as InputGuardrail, OutputGuardrail as OutputGuardrail",
