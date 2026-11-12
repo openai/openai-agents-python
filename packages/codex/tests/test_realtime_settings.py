@@ -151,3 +151,34 @@ def test_tool_choice_is_sparse_and_detached(choice: Any) -> None:
 def test_invalid_tool_choice_is_rejected_before_native_io(choice: Any) -> None:
     with pytest.raises(ValueError, match="tool_choice"):
         serialize_realtime_settings(cast(NativeRealtimeSettings, {"tool_choice": choice}))
+
+
+@pytest.mark.parametrize("mode", ["server_vad", "semantic_vad"])
+def test_vad_provider_data_is_detached_and_preserves_empty_and_null(mode):
+    data = {"vendor_tuning": {"enabled": False, "delay_ms": 0}}
+    source = {"turn_detection": {"type": mode, "provider_data": data}}
+    result = serialize_realtime_settings(source)
+    data["vendor_tuning"]["delay_ms"] = 9
+    assert result["turn_detection"]["provider_data"]["vendor_tuning"]["delay_ms"] == 0
+    for reset in ({}, None):
+        assert serialize_realtime_session_update(
+            {"turn_detection": {"type": mode, "provider_data": reset}}
+        ) == {"turn_detection": {"type": mode, "provider_data": reset}}
+
+
+@pytest.mark.parametrize(
+    "key", ["type", "threshold", "interrupt_response", "interruptResponse", "provider_data"]
+)
+def test_vad_provider_data_cannot_replace_typed_fields(key):
+    with pytest.raises(ValueError, match="cannot override typed"):
+        serialize_realtime_settings(
+            {"turn_detection": {"type": "server_vad", "provider_data": {key: True}}}
+        )
+
+
+@pytest.mark.parametrize("data", [[], "invalid", {1: "not a string key"}])
+def test_vad_provider_data_requires_a_json_object(data):
+    with pytest.raises(ValueError, match="JSON object"):
+        serialize_realtime_settings(
+            {"turn_detection": {"type": "server_vad", "provider_data": data}}
+        )

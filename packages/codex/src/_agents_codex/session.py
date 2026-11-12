@@ -63,7 +63,9 @@ from ._compat import cancel_once as cancel_once, cancellation_requested
 from ._events import (
     CodeInterpreterCallItem,
     FileSearchCallItem,
+    HostedMcpCallItem,
     ImageGenerationCallItem,
+    McpListToolsItem,
     MessageItem,
     ReasoningItem,
     SessionItem as SessionItem,
@@ -80,6 +82,7 @@ from ._function_tools import (
     _ClientToolSearch,
 )
 from ._history import project_history as project_history
+from ._hosted_prompts import _capture_hosted_prompt_reference, _hosted_prompt_controls
 from ._lifecycle import (
     _close_after_error as _close_after_error,
     _error_contexts as _error_contexts,
@@ -96,7 +99,10 @@ from ._managed_workspace import (
 )
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _audio_json, _check_audio_json
+from ._model_retry import _is_model_abort, _ModelFailure, _normalized_error, _resolve_retry
 from ._native_async import _NativeCompletionError as _NativeCompletionError
+from ._opening import _capture_opening_agent as _capture_opening_agent
+from ._opening_compatibility import _validate_custom_storage_capabilities
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
@@ -263,6 +269,7 @@ from .recovery import (
     _application_shell_recovery,
 )
 from .response_facts import _response_fact_record
+from .retry import _CombinedRetryPolicy
 from .schema import (
     OutputSpec as OutputSpec,
     OutputValidationError as OutputValidationError,
@@ -304,8 +311,13 @@ from .tools import (
     WebSearch as WebSearch,
     _capture_application_data,
     _capture_hosted_tools,
+    _capture_tools as _capture_tools,
+    _capture_web_search_config as _capture_web_search_config,
     _CapturedFunction as _CapturedFunction,
     _hosted_tool_name,
+    _restore_operation_slots as _restore_operation_slots,
+    _restore_python_catalog as _restore_python_catalog,
+    _saved_python_ref as _saved_python_ref,
     _ToolCatalog as _ToolCatalog,
 )
 from .turn import (
@@ -378,6 +390,8 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     result: dict[str, Any] = {}
     controls: dict[str, Any] = {}
     control_fields = {
+        "retry",
+        "attempt_timeout_ms",
         "input_modalities",
         "reset_tool_choice",
         "max_output_tokens",
@@ -403,6 +417,15 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
             else:
                 result["tool_choice"] = value or "auto"
                 controls["named_tool_choice"] = None
+        elif key == "retry":
+            retry = copied.get("retry")
+            if retry is None:
+                controls[key] = None
+            else:
+                controls[key] = retry.to_json_dict()
+                controls[key]["configured"] = True
+                if retry.policy is not None:
+                    controls[key]["has_policy"] = True
         elif key in control_fields:
             controls[key] = (
                 dict(value) if key == "metadata" and isinstance(value, Mapping) else value
@@ -486,12 +509,24 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
             "context_management",
             "extra_body",
         }
-        if not isinstance(controls, dict) or controls.keys() - (ordinary | {"named_tool_choice"}):
+        if not isinstance(controls, dict) or controls.keys() - (
+            ordinary | {"named_tool_choice", "attempt_timeout_ms", "retry", "hosted_prompt"}
+        ):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
         normalized = _native_model_settings(
             None,
             cast(ModelSettings, {key: value for key, value in controls.items() if key in ordinary}),
         ).get("request_controls", {})
+        if "hosted_prompt" in controls:
+            prompt = controls["hosted_prompt"]
+            if prompt is not None and (
+                not isinstance(prompt, dict)
+                or prompt.keys() - {"omit_model", "omit_instructions", "omit_tools"}
+                or any(type(value) is not bool for value in prompt.values())
+            ):
+                raise ValueError("Manual checkpoint has invalid hosted prompt omission controls")
+            # The current Agent supplies the reference for each admitted request.
+            normalized["hosted_prompt"] = prompt
         if "named_tool_choice" in controls:
             target = controls["named_tool_choice"]
             if target is not None:
@@ -506,6 +541,44 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
                 normalized["named_tool_choice"] = {"name": ref.name, "namespace": ref.namespace}
             else:
                 normalized["named_tool_choice"] = None
+        if "attempt_timeout_ms" in controls:
+            attempt_timeout = controls["attempt_timeout_ms"]
+            if attempt_timeout is not None and (
+                type(attempt_timeout) is not int or not 1 <= attempt_timeout <= 4_294_967_295
+            ):
+                raise ValueError("Manual checkpoint has invalid attempt_timeout_ms")
+            normalized["attempt_timeout_ms"] = attempt_timeout
+        if "retry" in controls:
+            retry = controls["retry"]
+            if retry is not None:
+                from .retry import ModelRetrySettings, RetryBackoffSettings
+
+                if not isinstance(retry, dict) or retry.keys() - {
+                    "configured",
+                    "has_policy",
+                    "max_retries",
+                    "backoff",
+                }:
+                    raise ValueError("Manual checkpoint has invalid accepted retry settings")
+                for flag in ("configured", "has_policy"):
+                    if flag in retry and type(retry[flag]) is not bool:
+                        raise ValueError("Manual checkpoint has invalid accepted retry settings")
+                backoff = retry.get("backoff")
+                if backoff is not None and (
+                    not isinstance(backoff, dict)
+                    or backoff.keys() - {"initial_delay_ms", "max_delay_ms", "multiplier", "jitter"}
+                ):
+                    raise ValueError("Manual checkpoint has invalid accepted retry settings")
+                try:
+                    ModelRetrySettings(
+                        max_retries=retry.get("max_retries"),
+                        backoff=(RetryBackoffSettings(**backoff) if backoff is not None else None),
+                    )
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "Manual checkpoint has invalid accepted retry settings"
+                    ) from None
+            normalized["retry"] = deepcopy(retry)
         settings["request_controls"] = normalized
     return model, settings
 
@@ -1112,11 +1185,13 @@ class _NativeCallback:
 class _Submission:
     output: _PreparedOutput
     run_usage: _UsageCollector = field(default_factory=_UsageCollector)
+    model_run_usage: _UsageCollector = field(default_factory=_UsageCollector, repr=False)
     observation_after: int = 0
     accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
     completion: asyncio.Future[Any] = field(default_factory=_future)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
+    model_failure: _ModelFailure | None = field(default=None, repr=False)
     handle: Turn[Any] | None = None
     issued: Turn[Any] | None = None
     task: asyncio.Task[None] | None = None
@@ -1210,6 +1285,7 @@ class _ChildCallbacks:
     handle: ChildInvocation
     root_turn_id: str | None = None
     run_usage: _UsageCollector = field(default_factory=_UsageCollector)
+    model_run_usage: _UsageCollector = field(default_factory=_UsageCollector, repr=False)
     observation_after: int = 0
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
@@ -1233,6 +1309,7 @@ class _ChildCallbacks:
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     observed: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
+    model_failure: _ModelFailure | None = field(default=None, repr=False)
     completion: asyncio.Future[Any] = field(default_factory=_future)
     task: asyncio.Task[None] | None = None
     continuation: asyncio.Future[None] | None = None
@@ -1480,6 +1557,8 @@ def _project_progress(
                 or item["type"]
                 in {
                     "web_search_call",
+                    "mcp_list_tools",
+                    "mcp_call",
                     "file_search_call",
                     "code_interpreter_call",
                     "shell_call",
@@ -1500,6 +1579,8 @@ def _project_progress(
                             MessageItem
                             | ReasoningItem
                             | WebSearchCallItem
+                            | McpListToolsItem
+                            | HostedMcpCallItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
                             | ShellCallItem
@@ -1739,6 +1820,9 @@ class _OpeningOwner:
         # Successful native-only runs retain at most 256 events / 256 KiB.
         # Project measured completions once; do not retain temporary event trees.
         measured = _UsageCollector()
+        native_attempt = info.get("model_attempt")
+        if native_attempt is not None:
+            measured.replace_model_attempt(native_attempt, final=True)
         for event in json.loads(archive.json()):
             if (
                 event is not None
@@ -1746,7 +1830,9 @@ class _OpeningOwner:
                 and event.get("id") == info["receipt"]["turn_id"]
                 and event.get("msg", {}).get("type") == "raw_response_completed"
             ):
-                measured.observe(event["msg"].get("token_usage"))
+                measured.observe(
+                    event["msg"].get("token_usage"), event["msg"].get("model_attempt_id")
+                )
         result = _CompletedTurnOwner(
             run_usage=measured.snapshot(),
             opening_agent=agent,
@@ -2019,7 +2105,6 @@ def _fixed_tool_refs(
     project_guidance: bool = False,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
-    from .native_agents import _COLLABORATION_TOOLS
 
     fixed: set[ToolRef] = set()
     for tool in tools:
@@ -2046,7 +2131,9 @@ def _fixed_tool_refs(
     if project_guidance:
         fixed.update(ToolRef(name, "functions") for name in _PROJECT_GUIDANCE_TOOL_NAMES)
     if native_agents is not None:
-        fixed.update(ToolRef(name, "collaboration") for name in _COLLABORATION_TOOLS)
+        fixed.update(
+            ToolRef(name, "collaboration") for name in native_agents._collaboration_tool_names
+        )
     return fixed
 
 
@@ -2073,7 +2160,7 @@ def _handoff_default_names(
     selected = {
         tool.name
         for tool in selection
-        if isinstance(tool, ToolRef) and tool.namespace in (None, "functions")
+        if isinstance(tool, (ToolRef, FunctionTool)) and tool.namespace in (None, "functions")
     }
     return [name for name in handoffs or () if name in selected]
 
@@ -2108,6 +2195,14 @@ def _split_tools(
 ) -> tuple[
     tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents[Any] | None
 ]:
+    from .hosted_mcp import HostedMCP
+
+    def bindings(values: Any) -> Any:
+        return tuple(item._binding if isinstance(item, HostedMCP) else item for item in values)
+
+    tools = bindings(tools)
+    available = bindings(available) if available is not None else None
+    ceiling = bindings(ceiling) if ceiling is not None else None
     opening = ceiling if ceiling is not None else tools if available is None else available
     admitted: dict[ToolRef, FunctionTool[Any, Any, Any] | HttpMCP[Any] | StdioMCP[Any]] = {}
     mcp_raw_names: dict[ToolRef, str] = {}
@@ -2207,7 +2302,7 @@ def _split_tools(
                     and identity[1] in item.tools
                 )
                 tool = declaration.tool(identity[1])
-            if tool in fixed:
+            if tool in fixed and tool not in admitted:
                 if tool in retained:
                     raise CapabilityError("Operation tools must select distinct fixed capabilities")
                 retained.add(tool)
@@ -2599,6 +2694,8 @@ def _capture_profile_runtimes(
     context: Any,
     output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     input_guardrails: Sequence[InputGuardrail[Any]] = (),
+    *,
+    run_error_formatter: bool = False,
 ) -> tuple[dict[str, _ProfileRuntime], list[dict[str, Any]]]:
     captured: dict[str, _ProfileRuntime] = {}
     roster: list[dict[str, Any]] = []
@@ -2625,9 +2722,30 @@ def _capture_profile_runtimes(
             native_agents=roles,
         )
         output = _prepare_spec(declaration.output_type)
-        instructions = root_instructions if index == 0 else declaration.instructions
+        instructions = root_instructions if index == 0 else (declaration.instructions or "")
         captured[profile.id] = _ProfileRuntime(profile, catalog, output, instructions)
         settings = _native_model_settings(declaration.model, declaration.model_settings)
+        if any(profile.declaration.hosted_prompt is not None for profile in profiles):
+            settings.setdefault("request_controls", {})["hosted_prompt"] = _hosted_prompt_controls(
+                declaration.hosted_prompt,
+                model=declaration.model,
+                instructions=instructions
+                if getattr(declaration, "_hosted_instructions_provided", True)
+                else None,
+                tools_provided=getattr(declaration, "_hosted_tools_provided", True)
+                or bool(declaration.tools)
+                or bool(declaration.handoffs),
+                extra_body=declaration.model_settings.get("extra_body"),
+            )
+        # A new Agent source owns its own callable; numeric settings may inherit.
+        controls = settings.setdefault("request_controls", {})
+        if "retry" not in declaration.model_settings:
+            controls["retry"] = {"has_policy": False}
+        elif controls.get("retry") is not None:
+            captured_retry = declaration.model_settings["retry"]
+            controls["retry"]["has_policy"] = (
+                captured_retry is not None and captured_retry.policy is not None
+            )
         roster.append(
             {
                 "id": profile.id,
@@ -2645,6 +2763,17 @@ def _capture_profile_runtimes(
                 "tools": json.loads(catalog.native_specs()),
                 "manual_slots": catalog.manual_slots(),
                 "terminal_slots": catalog.finish_slots(),
+                "input_error_slots": catalog.input_error_slots(),
+                **(
+                    {
+                        "run_input_error_slots": sorted(
+                            set(catalog.input_error_slots(run_formatter=True))
+                            - set(catalog.input_error_slots())
+                        )
+                    }
+                    if run_error_formatter
+                    else {}
+                ),
                 "step_defaults": list(range(len(catalog.tools))),
                 "handoffs": dict(profile.handoffs),
                 **(
@@ -2652,7 +2781,8 @@ def _capture_profile_runtimes(
                     if profile.handoff_callbacks
                     else {}
                 ),
-                "transform_context": declaration.transform_context is not None,
+                "transform_context": declaration.transform_context is not None
+                or declaration.hosted_prompt is not None,
                 "before_compact": declaration.before_compact is not None,
                 "before_complete": _needs_before_complete(
                     declaration, input_guardrails, output_guardrails
@@ -2741,68 +2871,6 @@ def _install_profile_options(
     )
 
 
-def _capture_tools(
-    generation: int,
-    tools: tuple[FunctionTool[Any, Any, Any], ...],
-    context: ContextT | None,
-) -> _ToolCatalog:
-    return _ToolCatalog(
-        generation,
-        tuple(tool._capture(context) for tool in tools),
-    )
-
-
-def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
-    kind = spec.get("type")
-    if kind == "applyPatch":
-        return ToolRef("apply_patch")
-    if kind in ("computer", "shell"):
-        return ToolRef(kind)
-    if kind == "toolSearch":
-        return ToolRef("tool_search")
-    if kind == "namespace":
-        tools = spec.get("tools")
-        if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
-            return None
-        namespace = spec.get("name")
-        name = tools[0].get("name")
-        if isinstance(namespace, str) and isinstance(name, str):
-            return ToolRef(name, namespace)
-    else:
-        name = spec.get("name")
-        if isinstance(name, str):
-            return ToolRef(name)
-    return None
-
-
-def _restore_python_catalog(
-    catalog: _ToolCatalog, specs: Sequence[Mapping[str, Any]]
-) -> _ToolCatalog:
-    # Use saved order with current bindings. Native rejects unknown or duplicate
-    # specs when comparing the complete catalogs.
-    by_ref = {tool._ref: tool for tool in catalog.tools}
-    refs = dict.fromkeys(map(_saved_python_ref, specs))
-    return _ToolCatalog(
-        catalog.generation, tuple(by_ref[ref] for ref in refs if ref is not None and ref in by_ref)
-    )
-
-
-def _restore_operation_slots(
-    catalog: _ToolCatalog,
-    selected: Sequence[FunctionTool[Any, Any, Any]],
-    pending_names: Sequence[str],
-) -> tuple[int, ...]:
-    available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
-    if any(tool.ref not in available for tool in selected):
-        raise ValueError("Saved operation names tools outside its native generation")
-    manual_names = {
-        tool.name for tool in selected if tool._bind is None or tool.needs_approval is not False
-    }
-    if any(name not in manual_names for name in pending_names):
-        raise ValueError("Saved operation does not admit its pending manual tools")
-    return tuple(available[tool.ref] for tool in selected)
-
-
 def _restore_operation_tools(
     saved: SessionState,
     catalog: _ToolCatalog,
@@ -2818,9 +2886,11 @@ def _restore_operation_tools(
     tuple[int, ...],
     tuple[ToolRef, ...],
     tuple[_MCP[Any], ...],
-    tuple[FunctionTool[Any, Any, Any] | _MCP[Any], ...],
+    tuple[Tool[Any], ...],
 ]:
     """Reconstruct one saved ceiling from its fresh, proven source declaration."""
+    from .hosted_mcp import HostedMCP
+
     assert saved.operation_tools is not None and saved.native_continuation is not None
     selected, mcp, _ = _split_tools(
         saved.operation_tools,
@@ -2847,19 +2917,23 @@ def _restore_operation_tools(
         for tool in available
         if isinstance(tool, FunctionTool)
         and any(tool is selected_tool for selected_tool in selected)
+        or isinstance(tool, HostedMCP)
+        and any(tool._binding is selected_tool for selected_tool in selected)
         or isinstance(tool, _MCP)
         and any(tool.name == server.name for server in mcp)
     )
     current_selected = selected
     selected_mcp = mcp
     if current_available is not None:
+        current_functions, current_mcp, _ = _split_tools(
+            current_available, programmatic_tool_calling
+        )
         current_refs = {tool._ref for tool in catalog.tools}
         current_selected = tuple(
             tool
             for tool in selected
-            if tool.ref in current_refs and any(tool is current for current in current_available)
+            if tool.ref in current_refs and any(tool is current for current in current_functions)
         )
-        _, current_mcp, _ = _split_tools(current_available, programmatic_tool_calling)
         selected_mcp = tuple(
             replace(server, tools=tuple(raw for raw in server.tools if server.tool(raw) in refs))
             for server in current_mcp
@@ -3270,34 +3344,6 @@ def _validate_storage_opening(
     return reconciliation
 
 
-def _validate_custom_storage_capabilities(
-    storage: LocalStorage | CustomStorage | None,
-    *,
-    native_agents: NativeAgents[Any] | None,
-    goals: bool,
-    programmatic_tool_calling: bool,
-    checklist: bool,
-    mcp_tools: Sequence[_MCP[Any]],
-    has_environment: bool,
-    available: Sequence[Tool[Any]],
-    tools: Sequence[FunctionTool[Any, Any, Any]],
-) -> None:
-    if isinstance(storage, CustomStorage) and (
-        native_agents is not None
-        or goals
-        or programmatic_tool_calling
-        or checklist
-        or mcp_tools
-        or has_environment
-        or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
-        or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
-    ):
-        raise ValueError(
-            "CustomStorage preview does not support children, goals, checklist, "
-            "code mode, manual tools, standalone native tools or environments"
-        )
-
-
 def _capture_project_guidance(
     enabled: bool,
 ) -> tuple[dict[str, bool], dict[str, bool], list[dict[str, str]]]:
@@ -3398,35 +3444,6 @@ def _configure_storage_runtime(
             runtime["_sdk_resume_thread_id"] = resume
         if goals:
             runtime["native_goal_store"] = str(storage.path)
-
-
-def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
-    config: dict[str, Any] = {}
-    if search is not None:
-        if search.search_context_size is not None:
-            config["tools.web_search.context_size"] = search.search_context_size
-        if search.allowed_domains is not None:
-            config["tools.web_search.allowed_domains"] = list(search.allowed_domains)
-        if search.blocked_domains is not None:
-            config["tools.web_search.blocked_domains"] = list(search.blocked_domains)
-        if search.location is not None:
-            config["tools.web_search.location"] = dict(search.location)
-        if search.search_content_types is not None:
-            config["tools.web_search.search_content_types"] = list(search.search_content_types)
-        if search.image_settings is not None:
-            image_settings = search.image_settings.copy()
-            # Native configuration uses signed 64-bit TOML integers.
-            max_results = image_settings.get("max_results")
-            if max_results is not None and (
-                isinstance(max_results, bool)
-                or not isinstance(max_results, int)
-                or not 0 <= max_results < 2**63
-            ):
-                raise ValueError(
-                    "WebSearch image max_results must be a non-negative integer below 2**63"
-                )
-            config["tools.web_search.image_settings"] = dict(image_settings)
-    return config
 
 
 def _validate_siwc_opening_tools(
@@ -3543,38 +3560,6 @@ def _configure_child_roles(
         }
 
 
-def _capture_opening_agent(
-    agent: Agent[ContextT, OutputT],
-    *,
-    provider: NativeProvider | None,
-    model: str | None,
-    model_settings: ModelSettings | None,
-    tool_selection: Sequence[Tool[ContextT]] | None,
-) -> Agent[ContextT, OutputT]:
-    """Detach declaration defaults before native opening can suspend."""
-    return Agent[ContextT, OutputT](
-        instructions=agent.instructions,
-        realtime=agent.realtime,
-        name=agent.name,
-        tools=agent.tools if tool_selection is None else tool_selection,
-        handoffs=agent.handoffs,
-        model=agent.model if model is None else model,
-        model_settings=cast(
-            ModelSettings, {**agent.model_settings, **_copy_model_settings(model_settings)}
-        ),
-        provider=agent.provider if provider is None else provider,
-        decisions=agent.decisions,
-        output_type=cast(OutputSpec[OutputT], agent.output_type),
-        programmatic_tool_calling=agent.programmatic_tool_calling,
-        transform_context=agent.transform_context,
-        before_compact=agent.before_compact,
-        before_complete=agent.before_complete,
-        tool_batch_completion=agent.tool_batch_completion,
-        input_guardrails=agent.input_guardrails,
-        output_guardrails=agent.output_guardrails,
-    )
-
-
 def _private_default_opening_candidates(
     agent: Agent[Any, Any],
     *,
@@ -3627,11 +3612,34 @@ def _supports_atomic_first_turn(
     output_mode: str,
     programmatic_tool_calling: bool,
     tools: Sequence[Tool[Any]],
+    initial_messages_json: str | None,
+    selected: object | None,
+    profiles: tuple[_AgentProfile, ...],
+    state: SessionState | None,
+    storage: LocalStorage | CustomStorage | None,
+    resume: str | None,
+    environment: object | None,
+    input_guardrails: Sequence[InputGuardrail[Any]],
+    output_guardrails: Sequence[OutputGuardrail[Any]],
+    instruction_files: Sequence[Path],
+    auth: object | None,
 ) -> bool:
     return (
-        output_mode == "plain"
+        initial_messages_json is None
+        and selected is None
+        and not profiles
+        and state is None
+        and storage is None
+        and resume is None
+        and environment is None
+        and not input_guardrails
+        and not output_guardrails
+        and not instruction_files
+        and auth is None
+        and output_mode == "plain"
         and not programmatic_tool_calling
         and agent.transform_context is None
+        and agent.hosted_prompt is None
         and agent.before_compact is None
         and agent.before_complete is None
         and agent.tool_batch_completion is None
@@ -3645,6 +3653,32 @@ def _supports_atomic_first_turn(
             for tool in tools
         )
     )
+
+
+class _OriginalToolArgumentsError(ValueError):
+    """A parse failure carried by the native invocation's existing receipt."""
+
+
+def _capture_opening_hosted_tools(
+    available: Sequence[Tool[Any]],
+    profiles: Sequence[_AgentProfile],
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+    codex_login: CodexLogin | None,
+) -> list[dict[str, Any]]:
+    from .hosted_mcp import HostedMCP
+
+    profile_mcp = (
+        tool
+        for profile in profiles
+        for tool in profile.declaration.tools
+        if isinstance(tool, HostedMCP)
+    )
+    hosted_tools = _capture_hosted_tools([*available, *profile_mcp])
+    if codex_login is not None and (
+        hosted_tools or any(isinstance(tool, _ClientToolSearch) for tool in tools)
+    ):
+        raise ValueError("Hosted tools require an API-key Responses provider, not Codex login")
+    return hosted_tools
 
 
 def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
@@ -3669,6 +3703,64 @@ def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
         and error.args == ("api_key must not be empty",)
     ):
         error.args = ("Provide api_key or set OPENAI_API_KEY",)
+
+
+def _current_attempt_controls(
+    root: Mapping[str, Any], profile: Mapping[str, Any]
+) -> dict[str, Any]:
+    retry = root.get("retry")
+    if "retry" in profile:
+        profile_retry = profile["retry"]
+        retry = {**(retry or {}), **profile_retry} if profile_retry is not None else None
+    return {
+        "retry": retry,
+        "attempt_timeout_ms": profile.get("attempt_timeout_ms", root.get("attempt_timeout_ms")),
+    }
+
+
+def _prepare_opening_model_settings(
+    agent: Agent[Any, Any],
+    model: str | None,
+    instructions: str,
+    codex_login: CodexLogin | None,
+    restored_model_settings: tuple[str, dict[str, Any]] | None,
+    restored_profile: _ProfileRuntime | None,
+    profile_roster: list[dict[str, Any]],
+) -> tuple[str | None, dict[str, Any]]:
+    settings = _native_model_settings(model, agent.model_settings)
+    prompt_controls = _hosted_prompt_controls(
+        agent.hosted_prompt,
+        model=agent.model,
+        instructions=instructions
+        if getattr(agent, "_hosted_instructions_provided", True)
+        else None,
+        tools_provided=getattr(agent, "_hosted_tools_provided", True)
+        or bool(agent.tools)
+        or bool(agent.handoffs),
+        extra_body=agent.model_settings.get("extra_body"),
+    )
+    if prompt_controls is not None:
+        settings.setdefault("request_controls", {})["hosted_prompt"] = prompt_controls
+    if codex_login is not None and settings.get("request_controls", {}).get("store") is True:
+        raise ValueError("store=True requires API-key Responses authentication")
+    if restored_model_settings is not None:
+        current_controls = settings.get("request_controls", {})
+        profile_model = (
+            next(row["model"] for row in profile_roster if row["id"] == restored_profile.profile.id)
+            if restored_profile is not None
+            else None
+        )
+        profile_controls = profile_model["request_controls"] if profile_model is not None else {}
+        attempt_controls = _current_attempt_controls(current_controls, profile_controls)
+        invocation_timeout = (
+            profile_model.get("invocation_timeout_ms")
+            if profile_model is not None
+            else settings.get("invocation_timeout_ms")
+        )
+        model, settings = restored_model_settings
+        settings.setdefault("request_controls", {}).update(attempt_controls)
+        settings["invocation_timeout_ms"] = invocation_timeout
+    return model, settings
 
 
 class Session(Generic[ContextT, OutputT]):
@@ -3726,6 +3818,8 @@ class Session(Generic[ContextT, OutputT]):
             include_request_attempts=include_request_attempts,
             resume_budget=resume_budget,
         )
+        if state is not None:
+            state._check_prompt_references()
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -3814,8 +3908,14 @@ class Session(Generic[ContextT, OutputT]):
             uses_siwc = isinstance(auth, SignInWithChatGPT)
             programmatic_tool_calling = agent.programmatic_tool_calling
             instructions, instruction_receipts = _load_instruction_files(
-                agent.instructions, instruction_files
+                agent.instructions or "", instruction_files
             )
+            if instruction_receipts:
+                object.__setattr__(agent, "_hosted_instructions_provided", True)
+                if profiles:
+                    object.__setattr__(
+                        profiles[0].declaration, "_hosted_instructions_provided", True
+                    )
             if not isinstance(programmatic_tool_calling, bool):
                 raise TypeError("programmatic_tool_calling must be a bool")
             checkpoint = None
@@ -3883,13 +3983,7 @@ class Session(Generic[ContextT, OutputT]):
             )
             if goals and storage is None:
                 raise ValueError("NativeGoals requires an explicit LocalStorage profile")
-            hosted_tools = _capture_hosted_tools(available)
-            if codex_login is not None and (
-                hosted_tools or any(isinstance(tool, _ClientToolSearch) for tool in tools)
-            ):
-                raise ValueError(
-                    "Hosted tools require an API-key Responses provider, not Codex login"
-                )
+            hosted_tools = _capture_opening_hosted_tools(available, profiles, tools, codex_login)
             web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
             # Capture the controls before opening can await. Later selections only select the grant.
             web_search_config = _capture_web_search_config(web_search)
@@ -3946,6 +4040,7 @@ class Session(Generic[ContextT, OutputT]):
                 context,
                 output_guardrails,
                 (*input_guardrails, *agent.input_guardrails),
+                run_error_formatter=tool_error_formatter is not None,
             )
             restored_profile, operation_profile, operation_source = _restore_profile_sources(
                 native,
@@ -3986,14 +4081,15 @@ class Session(Generic[ContextT, OutputT]):
                 if restored_profile is not None
                 else output
             )
-            settings = _native_model_settings(model, agent.model_settings)
-            if (
-                codex_login is not None
-                and settings.get("request_controls", {}).get("store") is True
-            ):
-                raise ValueError("store=True requires API-key Responses authentication")
-            if restored_model_settings is not None:
-                model, settings = restored_model_settings
+            model, settings = _prepare_opening_model_settings(
+                agent,
+                model,
+                instructions,
+                codex_login,
+                restored_model_settings,
+                restored_profile,
+                profile_roster,
+            )
             native_specs = catalog.native_specs()
             manual_slots = catalog.manual_slots()
             if state is not None:
@@ -4017,27 +4113,25 @@ class Session(Generic[ContextT, OutputT]):
                 _check_restored_tool_context(
                     restored_tools, restored_mcp, saved.operation_tools, context
                 )
+
             # Capture the supported ceiling before acquiring a provider lease.
             # Excluded openings keep their durable zero-turn publication path.
-            _atomic_first_turn = (
-                _atomic_first_turn
-                and initial_messages_json is None
-                and selected is None
-                and not profiles
-                and state is None
-                and storage is None
-                and resume is None
-                and opening.environment is None
-                and not input_guardrails
-                and not output_guardrails
-                and not instruction_files
-                and auth is None
-                and _supports_atomic_first_turn(
-                    agent,
-                    output_mode=output.mode,
-                    programmatic_tool_calling=programmatic_tool_calling,
-                    tools=available,
-                )
+            _atomic_first_turn = _atomic_first_turn and _supports_atomic_first_turn(
+                agent,
+                output_mode=output.mode,
+                programmatic_tool_calling=programmatic_tool_calling,
+                tools=available,
+                initial_messages_json=initial_messages_json,
+                selected=selected,
+                profiles=profiles,
+                state=state,
+                storage=storage,
+                resume=resume,
+                environment=opening.environment,
+                input_guardrails=input_guardrails,
+                output_guardrails=output_guardrails,
+                instruction_files=instruction_files,
+                auth=auth,
             )
             # Capture owned eligibility before narrowing explicit-provider atomic admission.
             _private_wss_candidate, _private_default_opening = _private_default_opening_candidates(
@@ -4312,7 +4406,8 @@ class Session(Generic[ContextT, OutputT]):
                         else {}
                     ),
                     "_buffered_responses": provider.response_mode == "buffered",
-                    "_transform_context": agent.transform_context is not None,
+                    "_transform_context": agent.transform_context is not None
+                    or agent.hosted_prompt is not None,
                     "_before_compact": agent.before_compact is not None,
                     "_before_complete": _needs_before_complete(
                         agent, input_guardrails, output_guardrails
@@ -4361,12 +4456,29 @@ class Session(Generic[ContextT, OutputT]):
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
                     "_terminal_tool_slots": restored_catalog.finish_slots(),
+                    "_input_error_tool_slots": restored_catalog.input_error_slots(
+                        run_formatter=tool_error_formatter is not None
+                    ),
                     **(
                         {
                             "_native_agent_roles": [
                                 role.name for role in native_agents.additional_roles
                             ],
                             "_native_agent_max_depth": native_agents.max_depth,
+                            **(
+                                {
+                                    "_native_agent_tools": [
+                                        {
+                                            "name": tool.name,
+                                            "role": tool.role,
+                                            "description": tool.description,
+                                        }
+                                        for tool in native_agents.managed_tools
+                                    ],
+                                }
+                                if native_agents.managed_tools
+                                else {}
+                            ),
                         }
                         if native_agents is not None
                         else {}
@@ -4388,6 +4500,7 @@ class Session(Generic[ContextT, OutputT]):
                         + [
                             {"name": tool["type"], "namespace": "functions"}
                             for tool in hosted_tools
+                            if tool["type"] != "mcp"
                         ]
                         + (
                             [{"name": "run", "namespace": "web"}]
@@ -4415,7 +4528,7 @@ class Session(Generic[ContextT, OutputT]):
                         + (
                             [
                                 {"name": name, "namespace": "collaboration"}
-                                for name in _COLLABORATION_TOOLS
+                                for name in native_agents._collaboration_tool_names
                             ]
                             if native_agents is not None
                             else []
@@ -4723,6 +4836,8 @@ class Session(Generic[ContextT, OutputT]):
                 await session._publish_opening_configuration(
                     settings=settings,
                     fresh=checkpoint is None and not _atomic_first_turn,
+                    restored=checkpoint is not None or resume is not None,
+                    manual_restore=manual_restore,
                     validate_provider_model=(
                         uses_siwc or (web_search is not None and web_search.route == "hosted")
                     ),
@@ -5293,6 +5408,8 @@ class Session(Generic[ContextT, OutputT]):
         *,
         settings: dict[str, Any],
         fresh: bool,
+        restored: bool = False,
+        manual_restore: bool = False,
         validate_provider_model: bool,
         instructions: str,
         instruction_receipts: Sequence[Mapping[str, Any]],
@@ -5305,8 +5422,37 @@ class Session(Generic[ContextT, OutputT]):
         default_handoffs: list[str] | None = None,
     ) -> None:
         thread = self._native
+
+        async def publish_attempt_controls(controls: Mapping[str, Any]) -> None:
+            # Idle restores retain their accepted deadline; manual work uses current authority.
+            reset: dict[str, Any] = {
+                "request_controls": {
+                    "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
+                    "retry": None,
+                },
+            }
+            if manual_restore:
+                reset["invocation_timeout_ms"] = settings.get("invocation_timeout_ms")
+            if (
+                await self._publish_startup(thread._update_model_settings(json.dumps(reset)))
+                is not True
+            ):
+                raise NativeError("Native model update acknowledgement did not match")
+            retry = controls.get("retry")
+            if retry is not None:
+                current_retry = {"request_controls": {"retry": retry}}
+                if (
+                    await self._publish_startup(
+                        thread._update_model_settings(json.dumps(current_retry))
+                    )
+                    is not True
+                ):
+                    raise NativeError("Native model update acknowledgement did not match")
+
         if validate_provider_model and (not fresh or "model" not in settings):
             await self._publish_startup(thread._validate_provider_model())
+        if restored and (not profile_roster or manual_restore):
+            await publish_attempt_controls(settings.get("request_controls", {}))
         if fresh and settings:
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(settings)))
@@ -5316,9 +5462,11 @@ class Session(Generic[ContextT, OutputT]):
         if fresh and not profile_roster:
             if (
                 await self._publish_startup(
-                    thread._update_instructions(instructions, json.dumps(instruction_receipts))
-                    if instruction_receipts
-                    else thread._update_instructions(instructions)
+                    thread._update_instructions(
+                        instructions,
+                        json.dumps(instruction_receipts) if instruction_receipts else None,
+                        explicit=False,
+                    )
                 )
                 is not True
             ):
@@ -5329,7 +5477,7 @@ class Session(Generic[ContextT, OutputT]):
             )
             _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, generation)
         if profile_roster:
-            receipt = await self._publish_startup(
+            encoded = await self._publish_startup(
                 thread._configure_agent_profiles(
                     json.dumps(profile_roster),
                     profile_roster[0]["id"],
@@ -5337,7 +5485,18 @@ class Session(Generic[ContextT, OutputT]):
                     default_handoffs,
                 )
             )
-            self._accept_profile_catalogs(json.loads(receipt))
+            receipt = json.loads(encoded)
+            self._accept_profile_catalogs(receipt)
+            if restored and not manual_restore:
+                # Pending continuations already have their current controls before
+                # the graph binds their sealed profile receipt.
+                active = receipt["active"]["profile_id"]
+                model = next(row["model"] for row in profile_roster if row["id"] == active)
+                controls = _current_attempt_controls(
+                    settings.get("request_controls", {}), model["request_controls"]
+                )
+                await publish_attempt_controls(controls)
+                await self._refresh_profile_bindings(preserve_current=True)
 
     async def _prepare_realtime_mcp(self) -> None:
         """Acquire idle defaults before voice captures a lazy native source."""
@@ -5698,6 +5857,8 @@ class Session(Generic[ContextT, OutputT]):
     ) -> set[ToolRef] | None:
         if not self._profiles or state.operation_refs is None:
             return None
+        from .hosted_mcp import HostedMCP
+
         declared = state.operation_declarations or ()
         allowed = _fixed_tool_refs(
             source.tools,
@@ -5711,7 +5872,7 @@ class Session(Generic[ContextT, OutputT]):
         for tool in bindings:
             if not any(tool is grant for grant in declared):
                 continue
-            if isinstance(tool, FunctionTool):
+            if isinstance(tool, (FunctionTool, HostedMCP)):
                 allowed.add(tool.ref)
             elif isinstance(tool, _MCP):
                 allowed.update(tool.tool(raw) for raw in tool.tools)
@@ -7128,10 +7289,16 @@ class Session(Generic[ContextT, OutputT]):
                             "manual input validation", "validation", request._tracing_context
                         ),
                     ):
+                        if isinstance(message.get("_sdk_argument_error"), str):
+                            raise _OriginalToolArgumentsError(message["_sdk_argument_error"])
                         arguments = entry.input_adapter.validate_python(
                             deepcopy(message["arguments"])
                         )
-                except ValidationError as error:
+                except (
+                    ValidationError,
+                    json.JSONDecodeError,
+                    _OriginalToolArgumentsError,
+                ) as error:
                     if (
                         (
                             entry.function.input_error_function is None
@@ -8178,6 +8345,9 @@ class Session(Generic[ContextT, OutputT]):
             options["_application_instructions"] = self._instructions
             options["_manual_tool_slots"] = self._catalog.manual_slots()
             options["_terminal_tool_slots"] = self._catalog.finish_slots()
+            options["_input_error_tool_slots"] = self._catalog.input_error_slots(
+                run_formatter=self._tool_error_formatter is not None
+            )
             current_options = json.loads(change.options())
             options["_sdk_instruction_files"] = current_options["instruction_files"]
             applied_roots = current_options["executor_writable_roots"]
@@ -8201,8 +8371,8 @@ class Session(Generic[ContextT, OutputT]):
                     else {}
                 ),
             )
-            thread = await engine.restore_checkpoint(
-                checkpoint,
+            thread = await change.restore_candidate(
+                engine,
                 json.dumps(options),
                 self._catalog.native_specs(),
             )
@@ -8585,6 +8755,14 @@ class Session(Generic[ContextT, OutputT]):
                             "Native interaction needs on_interaction or Agent.session()"
                         )
 
+                    from ._hosted_mcp_binding import _HostedMCPBinding
+
+                    if isinstance(event._declaration, _HostedMCPBinding):
+                        raise InteractionRequired(
+                            "Hosted MCP approvals require live replies; "
+                            "pass on_interaction or use Agent.session()"
+                        )
+
                     def check_pending() -> None:
                         # Check the whole settled sample, not only the first
                         # request this cursor happened to observe.
@@ -8777,12 +8955,14 @@ class Session(Generic[ContextT, OutputT]):
                         project_guidance=self._project_guidance,
                     )
                 if tools is not None:
+                    from .hosted_mcp import HostedMCP
+
                     chosen = {tool.ref for tool in python}
                     server_names = {server.name for server in mcp}
                     operation_declarations = tuple(
                         tool
                         for tool in self._bindings
-                        if isinstance(tool, FunctionTool)
+                        if isinstance(tool, (FunctionTool, HostedMCP))
                         and tool.ref in chosen
                         or isinstance(tool, _MCP)
                         and tool.name in server_names
@@ -9004,7 +9184,11 @@ class Session(Generic[ContextT, OutputT]):
         Cancellation joins publication; accepted changes stay applied.
         """
         self._check_idle_update()
-        settings = _native_model_settings(model, model_settings)
+        captured_update_settings = _copy_model_settings(model_settings)
+        requested_retry = (
+            captured_update_settings.get("retry") if captured_update_settings else None
+        )
+        settings = _native_model_settings(model, captured_update_settings)
         captured_tools = tuple(tools) if tools is not None else None
         target = None
         if agent is not None:
@@ -9022,6 +9206,12 @@ class Session(Generic[ContextT, OutputT]):
 
         async def publish_update() -> None:
             await self._refresh_profile_bindings()
+            if requested_retry is not None and requested_retry.policy is not None:
+                captured_retry = self._effective_agent().model_settings.get("retry")
+                if captured_retry is None or requested_retry.policy is not captured_retry.policy:
+                    raise ValueError(
+                        "Session.update cannot install a different retry policy callable"
+                    )
             if target is not None:
                 expected = json.loads(await self._native._active_agent_profile())
                 self._agent_for_profile(expected)
@@ -9087,6 +9277,19 @@ class Session(Generic[ContextT, OutputT]):
                 native_agents=self._native_agents,
                 project_guidance=self._project_guidance,
             )
+            if self._profile_current is not None:
+                profile = self._profiles[self._profile_current[0]].profile
+                callbacks = {
+                    tool.ref: tool
+                    for tool in profile.declaration.tools
+                    if isinstance(tool, FunctionTool)
+                    and tool.namespace in (None, "functions")
+                    and tool.name in profile.handoff_callbacks
+                }
+                for tool in python:
+                    expected = callbacks.get(tool.ref)
+                    if expected is not None and tool is not expected:
+                        raise ValueError("A captured handoff callback cannot be replaced")
             for tool in python:
                 tool._check_context(self._context)
             for server in mcp:
@@ -9115,15 +9318,19 @@ class Session(Generic[ContextT, OutputT]):
             )
             # Explicit idle declarations replace bindings; refs only select.
             # Preserve every omitted opening slot and alias for later operations.
+            from .hosted_mcp import HostedMCP
+
             supplied_python = {
-                tool.ref: tool for tool in selection if isinstance(tool, FunctionTool)
+                tool.ref: tool._binding if isinstance(tool, HostedMCP) else tool
+                for tool in selection
+                if isinstance(tool, (FunctionTool, HostedMCP))
             }
             supplied_mcp = tuple(
                 tool for tool in selection if isinstance(tool, (HttpMCP, StdioMCP))
             )
             bindings: list[Tool[ContextT]] = []
             for bound in self._bindings:
-                if isinstance(bound, FunctionTool):
+                if isinstance(bound, (FunctionTool, HostedMCP)):
                     bindings.append(supplied_python.get(bound.ref, bound))
                 elif isinstance(bound, (HttpMCP, StdioMCP)):
                     if not any(server.name == bound.name for server in supplied_mcp):
@@ -9139,6 +9346,20 @@ class Session(Generic[ContextT, OutputT]):
                 else bound
                 for bound in self._bound_tools
             )
+            from ._hosted_mcp_binding import (
+                _CapturedHostedMCPApproval,
+                _CapturedHostedMCPManual,
+            )
+
+            hosted_bindings = (_CapturedHostedMCPApproval, _CapturedHostedMCPManual)
+            for previous, replacement in zip(self._bound_tools, selected, strict=True):
+                if isinstance(previous, hosted_bindings) and (
+                    not isinstance(replacement, hosted_bindings)
+                    or previous.config != replacement.config
+                ):
+                    raise CapabilityError(
+                        "Hosted MCP provider configuration is fixed when the Session opens"
+                    )
             bound_tools = selected
             if self._native_agents is not None:
                 refs = {tool.ref for tool in python}
@@ -9365,6 +9586,9 @@ class Session(Generic[ContextT, OutputT]):
                             }
                         ),
                         terminal_slots=candidate.finish_slots(),
+                        input_error_slots=candidate.input_error_slots(
+                            run_formatter=self._tool_error_formatter is not None
+                        ),
                     )
                     if self._profiles
                     else self._native._replace_tools(
@@ -9373,6 +9597,9 @@ class Session(Generic[ContextT, OutputT]):
                         manual_slots,
                         default_slots,
                         terminal_slots=candidate.finish_slots(),
+                        input_error_slots=candidate.input_error_slots(
+                            run_formatter=self._tool_error_formatter is not None
+                        ),
                     )
                     if default_slots is not None
                     else self._native._replace_tools(
@@ -9380,10 +9607,18 @@ class Session(Generic[ContextT, OutputT]):
                         specs,
                         manual_slots,
                         terminal_slots=candidate.finish_slots(),
+                        input_error_slots=candidate.input_error_slots(
+                            run_formatter=self._tool_error_formatter is not None
+                        ),
                     )
                     if manual_slots
                     else self._native._replace_tools(
-                        candidate.generation, specs, terminal_slots=candidate.finish_slots()
+                        candidate.generation,
+                        specs,
+                        terminal_slots=candidate.finish_slots(),
+                        input_error_slots=candidate.input_error_slots(
+                            run_formatter=self._tool_error_formatter is not None
+                        ),
                     )
                 )
             except BaseException as error:
@@ -11540,7 +11775,10 @@ class Session(Generic[ContextT, OutputT]):
                     submission_id=state.handle.submission_id,
                 )
             return
-        if kind in {"task_started", "turn_started"} and state.root_turn_id is None:
+        if (
+            kind in {"task_started", "turn_started", "_sdk_model_attempt"}
+            and state.root_turn_id is None
+        ):
             origin = message.get("root_turn_id")
             if isinstance(origin, str) and origin:
                 state.root_turn_id = origin
@@ -11550,8 +11788,14 @@ class Session(Generic[ContextT, OutputT]):
                     parent = self._usage_roots.get(origin)
                     if parent is not None and parent is not state.run_usage:
                         parent.attach(state.run_usage)
+        if kind == "_sdk_model_attempt":
+            if message["data"]["phase"] == "started":
+                state.model_failure = None
+            state.run_usage.attach(state.model_run_usage)
+            state.model_run_usage.replace_model_attempt(message["data"])
+            return
         if kind == "raw_response_completed" and event["id"] == state.handle.turn_id:
-            state.run_usage.observe(message.get("token_usage"))
+            state.run_usage.observe(message.get("token_usage"), message.get("model_attempt_id"))
         state.native_instance = event["subagent_instance_id"]
         if not state.observed.done():
             state.observed.set_result(None)
@@ -11560,6 +11804,7 @@ class Session(Generic[ContextT, OutputT]):
         self._observe_mcp(event, state)
         self._observe_progress(event, state.handle, event["subagent_id"])
         if kind in {"task_complete", "turn_complete", "turn_aborted"}:
+            self._capture_model_terminal(state, message)
             policy_failure = message.get("_sdk_policy_failure")
             if policy_failure is not None and not state.failure.done():
                 state.policy_stop = "expired"
@@ -11620,21 +11865,107 @@ class Session(Generic[ContextT, OutputT]):
         ):
             state.failure.set_result(InteractionRequired("Native child requires interaction"))
 
+    def _capture_model_terminal(self, state: _CallbackState, message: Mapping[str, Any]) -> None:
+        snapshot = message.get("model_attempt")
+        if snapshot is not None:
+            state.run_usage.attach(state.model_run_usage)
+            state.model_run_usage.replace_model_attempt(snapshot, final=True)
+        failure = state.model_failure
+        selected = state.model_run_usage.model_terminal_attempt_id
+        if selected is not None and not state.failure.done():
+            if failure is None:
+                raise NativeError("Native terminal has no retained provider error")
+            error = failure.selected_error(selected)
+            if not state.stopping:
+                state.failure.set_result(error)
+        state.model_failure = None
+
+    async def _decide_model_retry(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        invocation = _invocation.get()
+        native = (
+            invocation.native_callback[1].native
+            if invocation is not None and invocation.native_callback is not None
+            else self._native
+        )
+        failed = True
+        reply = None
+
+        def active() -> bool:
+            return (
+                not state.stopping
+                and not state.failure.done()
+                and not _native_callback_cancelled(state)
+            )
+
+        try:
+            if not active():
+                return
+            declaration = self._agent_for_message(message)
+            retry = declaration.model_settings.get("retry")
+            policy = retry.policy if retry is not None else None
+
+            async def invoke(callback: Callable[..., Any], argument: Any) -> Any:
+                if not active():
+                    raise asyncio.CancelledError
+                if isinstance(callback, _CombinedRetryPolicy):
+                    return await _call_callback(callback.evaluate, active, argument, invoke)
+                return await _call_callback(callback, active, argument)
+
+            result = await _resolve_retry(message["data"], state.model_failure, policy, invoke)
+            reply = json.dumps(result, allow_nan=False)
+            if len(reply.encode("utf-8")) > 65_536:
+                raise ValueError("Model retry reply exceeds capacity")
+            failed = False
+        except BaseException as error:
+            if (
+                not state.stopping
+                and not state.failure.done()
+                and not _native_callback_cancelled(state)
+            ):
+                state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
+        finally:
+            if failed:
+                state.model_failure = None
+            try:
+                native._reply_model_retry(
+                    message["request_id"],
+                    reply,
+                    error=failed,
+                    thread=message["thread"],
+                    instance=message.get("instance"),
+                )
+            except RuntimeError:
+                if (
+                    not state.stopping
+                    and not state.failure.done()
+                    and not _native_callback_cancelled(state)
+                ):
+                    state.failure.set_result(NativeError("Model retry callback expired"))
+            finally:
+                del message, reply, invocation, native
+
     async def _produce_model_stream(
         self,
+        native: Any,
         stream: Callable[..., Any],
         request: Any,
         request_id: int,
         active: Callable[[], bool],
     ) -> bool:
-        produced = await _call_callback(stream, active, request)
-        if produced is None and not active():
-            return False
-        iterator = aiter(produced)
+        produced: Any = None
+        iterator: Any = None
         event: Any = None
         data: str | None = None
+        close: Any = None
+        closed: Any = None
         try:
-            if not active() or not self._native._start_model_producer_stream(request_id):
+            produced = await _call_callback(stream, active, request)
+            if produced is None and not active():
+                return False
+            iterator = aiter(produced)
+            if not active() or not native._start_model_producer_stream(request_id):
                 return False
             while active():
                 try:
@@ -11646,7 +11977,7 @@ class Session(Generic[ContextT, OutputT]):
                 if not isinstance(event, Mapping):
                     raise TypeError("NativeModel.stream must yield Responses event mappings")
                 data = json.dumps(dict(event), allow_nan=False)
-                if not await self._native._push_model_producer_event(request_id, data):
+                if not await native._push_model_producer_event(request_id, data):
                     return False
             return False
         finally:
@@ -11657,13 +11988,26 @@ class Session(Generic[ContextT, OutputT]):
                     if inspect.isawaitable(closed):
                         await closed
             finally:
-                del event, data, produced, iterator, request, stream
+                del event, data, produced, iterator, request, stream, native, active, close, closed
 
     async def _produce_model_response(self, state: _Submission, message: dict[str, Any]) -> None:
         request: Any = None
         produced: Any = None
+        backend: Any = None
+        complete: Any = None
+        stream: Any = None
+        attempt_id = message.get("attempt_id")
         request_id = message["request_id"]
-        guard = _Invocation(self)
+        issuing = _invocation.get()
+        callback_owner = (
+            issuing.native_callback[1]
+            if issuing is not None and issuing.native_callback is not None
+            else None
+        )
+        native = callback_owner.native if callback_owner is not None else self._native
+        guard = _Invocation(
+            self, native_callback=issuing.native_callback if issuing is not None else None
+        )
         token = _invocation.set(guard)
         reply: str | None = None
         failed = True
@@ -11676,7 +12020,7 @@ class Session(Generic[ContextT, OutputT]):
             except NativeError:
                 return False
             try:
-                return bool(self._native._check_model_producer(request_id))
+                return bool(native._check_model_producer(request_id))
             except RuntimeError:
                 return False
 
@@ -11687,31 +12031,68 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native model producer has no current application backend")
             from .models import ModelRequest, ModelResponse
 
+            measurement_owner = (
+                json.dumps({"attempt_id": attempt_id, "callback": callback_owner.receipt})
+                if isinstance(attempt_id, str) and callback_owner is not None
+                else None
+            )
+
+            def report_usage(usage: dict[str, int]) -> bool:
+                if measurement_owner is None:
+                    return False
+                try:
+                    return bool(
+                        native._report_model_attempt_usage(
+                            measurement_owner, json.dumps(usage, allow_nan=False)
+                        )
+                    )
+                except RuntimeError:
+                    return False
+
             request = ModelRequest(
-                deepcopy(message["data"]), self._context, self.id, message["turn_id"]
+                deepcopy(message["data"]),
+                self._context,
+                self.id,
+                message["turn_id"],
+                attempt_id=attempt_id,
+                attempt=message.get("attempt"),
+                retry_configured=message.get("retry_configured") is True,
+                disable_provider_retries=message.get("disable_provider_retries") is True,
+                _report_usage=report_usage,
             )
             if self._include_raw_provider_events:
                 object.__setattr__(request, "_observe_raw_provider_events", True)
             backend = self._model_backend
-            if not callable(getattr(backend, "complete", None)):
-                backend = await _call_callback(backend.get_model, active, request.body["model"])
+            complete = getattr(backend, "complete", None)
+            if not callable(complete) and not callable(getattr(backend, "stream", None)):
+                routing_model = message.get("model", request.body.get("model"))
+                if not isinstance(routing_model, str):
+                    raise TypeError("Native model producer must capture a routing model")
+                backend = await _call_callback(backend.get_model, active, routing_model)
                 if not active():
                     return
+                complete = getattr(backend, "complete", None)
             stream = getattr(backend, "stream", None)
             if callable(stream):
-                failed = not await self._produce_model_stream(stream, request, request_id, active)
+                failed = not await self._produce_model_stream(
+                    native, stream, request, request_id, active
+                )
                 return
+            if not callable(complete):
+                raise TypeError("Native model provider must resolve a complete or stream method")
 
             def invoke(request: ModelRequest) -> Any:
                 value: Any = None
                 try:
-                    value = backend.complete(request)
+                    value = complete(request)
                     if inspect.isawaitable(value):
                         # Keep the original coroutine visible to callback admission
                         # so cancellation can close it before application entry.
                         return value
                     if not isinstance(value, ModelResponse):
                         raise TypeError("NativeModel.complete must return ModelResponse")
+                    if value.usage is not None:
+                        request.report_usage(value.usage)
                     return value._capture(
                         capture_raw_usage=message.get("capture_raw_usage") is True,
                         capture_raw_provider_events=self._include_raw_provider_events,
@@ -11723,6 +12104,8 @@ class Session(Generic[ContextT, OutputT]):
             # Awaited producers settle on this loop. Capture immediately, before
             # another await or handing the retained value back to the application.
             if isinstance(produced, ModelResponse):
+                if produced.usage is not None:
+                    request.report_usage(produced.usage)
                 reply = produced._capture(
                     capture_raw_usage=message.get("capture_raw_usage") is True,
                     capture_raw_provider_events=self._include_raw_provider_events,
@@ -11735,7 +12118,26 @@ class Session(Generic[ContextT, OutputT]):
                 return
             failed = False
         except BaseException as error:
-            if not state.stopping and not state.failure.done():
+            if _native_callback_cancelled(state):
+                if not _is_model_abort(error):
+                    state.retain_cleanup_error(error)
+                elif isinstance(attempt_id, str) and request is not None:
+                    # Advice retains the failed request; native timeout disposition
+                    # independently keeps the cancellation artifact out of policy.error.
+                    state.model_failure = _ModelFailure(attempt_id, request, backend, error)
+            elif isinstance(attempt_id, str) and request is not None:
+                state.model_failure = _ModelFailure(attempt_id, request, backend, error)
+                reply = json.dumps(
+                    {
+                        "failed": True,
+                        "failure": {
+                            "attempt_id": attempt_id,
+                            "normalized": asdict(_normalized_error(error)),
+                        },
+                    },
+                    allow_nan=False,
+                )
+            elif not state.stopping and not state.failure.done():
                 state.failure.set_result(error)
             elif not isinstance(error, asyncio.CancelledError):
                 state.retain_cleanup_error(error)
@@ -11744,19 +12146,33 @@ class Session(Generic[ContextT, OutputT]):
                 guard.active = False
                 _invocation.reset(token)
                 try:
-                    accepted = self._native._reply_model_producer(request_id, reply, error=failed)
-                    if not accepted and not state.stopping and not state.failure.done():
+                    accepted = native._reply_model_producer(request_id, reply, error=failed)
+                    if (
+                        not accepted
+                        and attempt_id is None
+                        and not state.stopping
+                        and not state.failure.done()
+                    ):
                         state.failure.set_result(NativeError("Prepared request expired"))
                 except RuntimeError:
-                    if not state.stopping and not state.failure.done():
+                    if attempt_id is None and not state.stopping and not state.failure.done():
                         state.failure.set_result(NativeError("Prepared request expired"))
             finally:
                 # Native reply admission has finished; retained failures need no payloads.
                 message = {}
-                del request, produced, reply
+                complete = None
+                stream = None
+                del request, produced, reply, backend, callback_owner, issuing
 
     async def _prepare_sampling_request(self, state: _Submission, message: dict[str, Any]) -> None:
         request_id = message["request_id"]
+        issuing = _invocation.get()
+        callback_owner = (
+            issuing.native_callback[1]
+            if issuing is not None and issuing.native_callback is not None
+            else None
+        )
+        native = callback_owner.native if callback_owner is not None else self._native
         guard = _Invocation(self)
         token = _invocation.set(guard)
         reply: str | None = None
@@ -11770,7 +12186,7 @@ class Session(Generic[ContextT, OutputT]):
             except NativeError:
                 return False
             try:
-                return bool(self._native._check_prepared_request(request_id))
+                return bool(native._check_prepared_request(request_id))
             except RuntimeError:
                 return False
 
@@ -11807,7 +12223,10 @@ class Session(Generic[ContextT, OutputT]):
                 return
             failed = False
         except BaseException as error:
-            if not state.stopping and not state.failure.done():
+            if _native_callback_cancelled(state):
+                if not _is_model_abort(error):
+                    state.retain_cleanup_error(error)
+            elif not state.stopping and not state.failure.done():
                 state.failure.set_result(error)
             elif not isinstance(error, asyncio.CancelledError):
                 state.retain_cleanup_error(error)
@@ -11815,11 +12234,20 @@ class Session(Generic[ContextT, OutputT]):
             guard.active = False
             _invocation.reset(token)
             try:
-                accepted = self._native._reply_prepared_request(request_id, reply, error=failed)
-                if not accepted and not state.stopping and not state.failure.done():
+                accepted = native._reply_prepared_request(request_id, reply, error=failed)
+                if (
+                    not accepted
+                    and not _native_callback_cancelled(state)
+                    and not state.stopping
+                    and not state.failure.done()
+                ):
                     state.failure.set_result(NativeError("Prepared request expired"))
             except RuntimeError:
-                if not state.stopping and not state.failure.done():
+                if (
+                    not _native_callback_cancelled(state)
+                    and not state.stopping
+                    and not state.failure.done()
+                ):
                     state.failure.set_result(NativeError("Prepared request expired"))
 
     async def _call_decision_callback(
@@ -11937,9 +12365,36 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _transform_context_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
         def prepare() -> tuple[Callable[..., Any], ModelRequestContext[ContextT]]:
-            callback = self._agent_for_message(message).transform_context
-            if callback is None:
+            declaration = self._agent_for_message(message)
+            callback = declaration.transform_context
+            source = declaration.hosted_prompt
+            enabled = message.get("hosted_prompt") is True
+            if source is not None and not enabled and message.get("purpose") == "compaction":
+                # Native local compaction deliberately omits server-prompt controls.
+                # Keep its admitted transform path without resolving a prompt factory.
+                source = None
+                callback = callback if callback is not None else (lambda _request: None)
+            if (source is not None) != enabled:
+                raise NativeError("Hosted prompt ownership differs from the restored request")
+            if source is None and callback is None:
                 raise NativeError("Model context callback has no application owner")
+            controls = _hosted_prompt_controls(
+                source,
+                model=declaration.model,
+                instructions=(declaration.instructions or "")
+                if getattr(declaration, "_hosted_instructions_provided", True)
+                else None,
+                tools_provided=getattr(declaration, "_hosted_tools_provided", True)
+                or bool(declaration.tools)
+                or bool(declaration.handoffs),
+            )
+            if controls is not None:
+                retained = message.get("hosted_prompt_omissions", {})
+                for key in ("omit_model", "omit_instructions", "omit_tools"):
+                    if controls[key] is False and retained.get(key) is True:
+                        raise NativeError(
+                            "Explicit hosted prompt settings differ from the restored request"
+                        )
             request = ModelRequestContext(
                 context=cast(ContextT, self._context),
                 items=tuple(message["items"]),
@@ -11954,17 +12409,76 @@ class Session(Generic[ContextT, OutputT]):
                     else self._context_transform_purpose
                 ),
             )
-            return callback, request
+            if source is None:
+                assert callback is not None
+                return callback, request
+
+            async def projected(value: ModelRequestContext[ContextT]) -> Any:
+                result = reference = replacement = None
+                try:
+                    captured = False
+
+                    def admitted() -> bool:
+                        if (
+                            state.stopping
+                            or _native_callback_cancelled(state)
+                            or state.failure.done()
+                        ):
+                            return False
+                        self._native._check_step(
+                            message["step_id"], message["thread"], message["instance"]
+                        )
+                        return True
+
+                    def resolve(request: ModelRequestContext[ContextT]) -> Any:
+                        nonlocal captured
+                        raw = None
+                        try:
+                            raw = source(request) if callable(source) else source
+                            if inspect.isawaitable(raw):
+                                return raw
+                            resolved = _capture_hosted_prompt_reference(raw)
+                            captured = True
+                            return resolved
+                        finally:
+                            del request, raw
+
+                    result = await _call_callback(resolve, admitted, value)
+                    if state.stopping or _native_callback_cancelled(state) or state.failure.done():
+                        raise asyncio.CancelledError()
+                    reference = result if captured else _capture_hosted_prompt_reference(result)
+                    if not admitted():
+                        raise asyncio.CancelledError()
+                    replacement = (
+                        await _call_callback(callback, admitted, value)
+                        if callback is not None
+                        else None
+                    )
+                    return reference, replacement
+                finally:
+                    del value, result, reference, replacement
+
+            return projected, request
 
         def reply(replacement: Any) -> None:
+            reference = None
+            if message.get("hosted_prompt") is True:
+                reference, replacement = replacement
             if replacement is not None and (
                 not isinstance(replacement, Sequence)
                 or isinstance(replacement, (str, bytes, bytearray))
             ):
                 raise TypeError("transform_context must return input items or None")
-            items_json = json.dumps(
-                list(replacement) if replacement is not None else None, allow_nan=False
-            )
+            data: Any = list(replacement) if replacement is not None else None
+            if reference is not None:
+                data = {
+                    "hosted_prompt": reference,
+                    "explicit_tools": getattr(state, "before_step", None) is not None
+                    or getattr(state, "operation_refs", None) is not None
+                    or getattr(state, "operation_slots", None) is not None,
+                    **({"items": data} if data is not None else {}),
+                }
+            items_json = json.dumps(data, allow_nan=False)
             self._native._reply_context(
                 message["step_id"], items_json, message["thread"], message["instance"]
             )
@@ -12925,7 +13439,12 @@ class Session(Generic[ContextT, OutputT]):
             # Task completion also joins synchronous callback workers.
             try:
                 callback.close()
-                owner.native._release_python_callback(json.dumps(owner.receipt))
+                if state.cleanup_error is None:
+                    owner.native._release_python_callback(json.dumps(owner.receipt))
+                else:
+                    owner.native._release_python_callback(
+                        json.dumps(owner.receipt), cleanup_failed=True
+                    )
                 if (
                     isinstance(state, _Submission)
                     and state.restored_pending
@@ -13105,6 +13624,18 @@ class Session(Generic[ContextT, OutputT]):
                             )
                             child.failure.set_result(_model_failure_error(message))
                     continue
+                if message.get("type") == "_sdk_model_retry" and message["thread"] != self.id:
+                    child = self._child_callback_state(
+                        message["thread"], message["instance"], message["turn_id"]
+                    )
+                    self._start_native_callback(
+                        child,
+                        self._decide_model_retry(child, message),
+                        pending_callback,
+                        native=event_native,
+                    )
+                    pending_callback = None
+                    continue
                 preparation_callback = preparation_callbacks.get(message.get("type"))
                 if preparation_callback is not None and message["thread"] != self.id:
                     try:
@@ -13280,13 +13811,21 @@ class Session(Generic[ContextT, OutputT]):
                 if turn_id and turn_id != handle.turn_id:
                     continue
                 if kind == "raw_response_completed" and event["id"] == handle.turn_id:
-                    state.run_usage.observe(message.get("token_usage"))
+                    state.run_usage.observe(
+                        message.get("token_usage"), message.get("model_attempt_id")
+                    )
                 if (
                     kind == "raw_response_completed"
                     and event["id"] == handle.turn_id
                     and state.budget is not None
                 ):
                     state.budget.observe(message["token_usage"])
+                if kind == "_sdk_model_attempt":
+                    if message["data"]["phase"] == "started":
+                        state.model_failure = None
+                    state.run_usage.attach(state.model_run_usage)
+                    state.model_run_usage.replace_model_attempt(message["data"])
+                    continue
                 if kind == "agent_profile_changed":
                     if not projected:
                         self._observe_profile_change(message, handle)
@@ -13294,6 +13833,7 @@ class Session(Generic[ContextT, OutputT]):
                 # Observe delivered MCP ends before settled-policy failure bookkeeping.
                 self._observe_mcp(event, state)
                 if kind in {"task_complete", "turn_complete", "turn_aborted"}:
+                    self._capture_model_terminal(state, message)
                     policy_failure = message.get("_sdk_policy_failure")
                     if policy_failure is not None and not state.failure.done():
                         state.policy_stop = "expired"
@@ -13343,12 +13883,30 @@ class Session(Generic[ContextT, OutputT]):
                             "expired" if message.get("policy_stop") is True else None
                         )
                         state.failure.set_result(_model_failure_error(message))
+                elif kind == "_sdk_model_retry":
+                    self._start_native_callback(
+                        state,
+                        self._decide_model_retry(state, message),
+                        pending_callback,
+                        native=event_native,
+                    )
+                    pending_callback = None
                 elif kind == "_sdk_model_produce":
-                    task = asyncio.create_task(self._produce_model_response(state, message))
-                    state.add_callback(task)
+                    self._start_native_callback(
+                        state,
+                        self._produce_model_response(state, message),
+                        pending_callback,
+                        native=event_native,
+                    )
+                    pending_callback = None
                 elif kind == "_sdk_prepare_request":
-                    task = asyncio.create_task(self._prepare_sampling_request(state, message))
-                    state.add_callback(task)
+                    self._start_native_callback(
+                        state,
+                        self._prepare_sampling_request(state, message),
+                        pending_callback,
+                        native=event_native,
+                    )
+                    pending_callback = None
                 elif preparation_callback is not None:
                     self._start_native_callback(
                         state,
@@ -13765,10 +14323,7 @@ class Session(Generic[ContextT, OutputT]):
                     if type(approved) is not bool:
                         raise TypeError("Environment approval must return a bool")
                     if not approved:
-                        if not self._native._resolve_native_interception(
-                            nonce, '{"action":"deny"}'
-                        ):
-                            raise NativeError("Executor policy decision expired")
+                        self._native._resolve_native_interception(nonce, '{"action":"deny"}')
                         return
                 if callback is not None:
                     # Approval owns its own waiting. Only the transform gets
@@ -13832,8 +14387,8 @@ class Session(Generic[ContextT, OutputT]):
                         decision = {"action": "replace", "value": value}
             if admitted():
                 reply = json.dumps(decision, allow_nan=False)
-                if not self._native._resolve_native_interception(nonce, reply):
-                    raise NativeError("Executor policy decision expired")
+                # Core can retire this nonce between admission and the reply.
+                self._native._resolve_native_interception(nonce, reply)
         except BaseException as error:
             if admitted():
                 fail_original(
@@ -14199,10 +14754,16 @@ class Session(Generic[ContextT, OutputT]):
                     raise NativeError("Managed approval arguments are no longer available")
             if approved is None:
                 try:
+                    if isinstance(message.get("_sdk_argument_error"), str):
+                        raise _OriginalToolArgumentsError(message["_sdk_argument_error"])
                     parsed = entry._parse_arguments(
                         message.get("_sdk_effective_arguments", message["arguments"])
                     )
-                except (ValidationError, json.JSONDecodeError) as error:
+                except (
+                    ValidationError,
+                    json.JSONDecodeError,
+                    _OriginalToolArgumentsError,
+                ) as error:
                     if "_sdk_effective_arguments" in message:
                         raise
                     call = ToolCallInfo(
@@ -14425,7 +14986,19 @@ class Session(Generic[ContextT, OutputT]):
                 )
 
             try:
-                if isinstance(entry, _CapturedComputer):
+                from ._hosted_mcp_binding import _CapturedHostedMCPApproval
+
+                if isinstance(entry, _CapturedHostedMCPApproval):
+                    assert context is not None
+                    value = await self._call_decision_callback(
+                        state,
+                        message,
+                        entry.invoke,
+                        lambda: self._admit_tool(state, request),
+                        context,
+                        parsed,
+                    )
+                elif isinstance(entry, _CapturedComputer):
                     assert context is not None and isinstance(parsed, _ComputerCall)
                     value = await self._call_decision_callback(
                         state,
@@ -15227,10 +15800,19 @@ class Session(Generic[ContextT, OutputT]):
         assert active is not None
         # Waiting precedes checkpoint ownership: cancellation or close can
         # still stop a callback that has not reached a safe sealing boundary.
-        if self._child_admissions or any(
-            not child.completion.done() for child in self._child_callbacks.values()
-        ):
+        if self._child_admissions:
             raise RuntimeError("Cannot save while native child work or callbacks remain active")
+        children = tuple(
+            child.completion
+            for child in self._child_callbacks.values()
+            if not child.completion.done()
+        )
+        if children:
+            # Native settlement can precede delivery of the host terminal
+            # receipt. Join those owners before taking the checkpoint.
+            if not await self._native._manual_children_settled():
+                raise RuntimeError("Cannot save while native child work or callbacks remain active")
+            await asyncio.gather(*(asyncio.shield(child) for child in children))
         if not await self._wait_manual_boundary(active, require_request=True):
             raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
         self._check_open()
@@ -15268,8 +15850,10 @@ class Session(Generic[ContextT, OutputT]):
                 "portable restore cannot recover its callback"
             )
 
+        from ._hosted_mcp_binding import _CapturedHostedMCPManual
+
         if any(
-            isinstance(tool, (_CapturedFunction, _CapturedApproval))
+            isinstance(tool, (_CapturedFunction, _CapturedApproval, _CapturedHostedMCPManual))
             and tool._requires_live_manual_session
             for tool in self._catalog.tools
         ):
@@ -15385,6 +15969,7 @@ class Session(Generic[ContextT, OutputT]):
             self._sealing = True
         native_sealed = False
         pre_seal_refused = False
+        model_attempt: dict[str, Any] | None = None
         try:
             if active is None:
                 idle_mcp = self._mcp_tools
@@ -15474,12 +16059,19 @@ class Session(Generic[ContextT, OutputT]):
                 seal_options = {"drain_events": True} if drain_budget_usage else {}
                 if active.output.mode == "native":
                     encoded = await self._native._seal_manual(
-                        json.dumps(active.output.schema), **seal_options
+                        json.dumps(active.output.schema), include_model_attempt=True, **seal_options
                     )
                 else:
-                    encoded = await self._native._seal_manual(**seal_options)
-                payload = json.loads(encoded)
-            native_sealed = active is not None
+                    encoded = await self._native._seal_manual(
+                        include_model_attempt=True, **seal_options
+                    )
+                native_sealed = True
+                sealed = json.loads(encoded)
+                if sealed is None:
+                    pre_seal_refused = True
+                    raise RuntimeError("The active submission is not a settled manual boundary")
+                payload = sealed["checkpoint"]
+                model_attempt = sealed["model_attempt"]
             if active is not None:
                 if payload is None:
                     pre_seal_refused = True
@@ -15491,6 +16083,9 @@ class Session(Generic[ContextT, OutputT]):
                         raise NativeError("Native manual checkpoint did not drain its final events")
                 active.stopping = True
                 self._model_api_key = None
+                if model_attempt is not None:
+                    active.run_usage.attach(active.model_run_usage)
+                    active.model_run_usage.replace_model_attempt(model_attempt, final=True)
             # Current launch options are authority. Saved options may hold MCP
             # endpoints or literal credentials.
             payload["agent_options"] = {}

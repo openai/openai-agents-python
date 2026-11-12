@@ -18,6 +18,7 @@ from _agents_codex.native_agents import (
     MappingProxyType as MappingProxyType,
     NativeAgents as NativeAgents,
     NativeRole as NativeRole,
+    NativeRoleTool as NativeRoleTool,
     NativeToolCall as NativeToolCall,
     Protocol as Protocol,
     Sequence as Sequence,

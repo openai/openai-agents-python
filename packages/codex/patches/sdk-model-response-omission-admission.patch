@@ -1,0 +1,56 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 73dfa15e..4f79369d 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2176,6 +2176,7 @@ impl ModelClientSession {
+                 &self.client.request_contributors,
+                 &self.client.state.thread_id.to_string(),
+                 &model_info.slug,
++                request.model.is_none(),
+                 codex_extension_api::ModelRequestKind::Generation,
+                 &mut request.client_metadata,
+                 prompt.tool_admission.clone(),
+@@ -2536,6 +2537,7 @@ impl ModelClientSession {
+                 &self.client.request_contributors,
+                 &self.client.state.thread_id.to_string(),
+                 &model_info.slug,
++                ws_payload.model.is_none(),
+                 if warmup {
+                     codex_extension_api::ModelRequestKind::Warmup
+                 } else {
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index c5381f07..fa144767 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -51,6 +51,7 @@ pub(crate) fn prepare(
+     contributors: &[Arc<dyn ModelRequestContributor>],
+     thread_id: &str,
+     model: &str,
++    model_omitted: bool,
+     kind: ModelRequestKind,
+     metadata: &mut Option<HashMap<String, String>>,
+     tool_admission: Option<Arc<dyn ModelToolAdmission>>,
+@@ -64,6 +65,7 @@ pub(crate) fn prepare(
+                 thread_id,
+                 client_metadata: &mut additions,
+                 model,
++                model_omitted,
+             });
+             if let Some(additions) = additions {
+                 for (key, value) in crate::responses_metadata::filter_extra_metadata(additions) {
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 18754dfa..dedec722 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -70,8 +70,10 @@ pub struct ModelRequestInput<'a> {
+     pub thread_id: &'a str,
+     /// Additional provider metadata for request tracking; existing and reserved keys cannot be replaced.
+     pub client_metadata: &'a mut Option<HashMap<String, String>>,
+-    /// Requested model identifier.
++    /// Native model/routing hint, including when the provider payload omits model.
+     pub model: &'a str,
++    /// True only when the final typed provider request omits its model field.
++    pub model_omitted: bool,
+ }
+ 
+ /// A detached input projection for one model request, before transport retries.

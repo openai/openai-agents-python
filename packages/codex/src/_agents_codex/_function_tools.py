@@ -47,6 +47,7 @@ from _agents_shared.strict_schema import (
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
+from .hosted_mcp import HostedMCP
 from .manual import (
     ActionRequested as ActionRequested,
     InputT as InputT,
@@ -699,6 +700,7 @@ Tool: TypeAlias = (
     | CodeInterpreter
     | HostedShell
     | ImageGeneration
+    | HostedMCP[ToolContextT]
     | ToolSearch
     | NativeAgents[ToolContextT]
 )
@@ -1065,12 +1067,13 @@ def function_tool(
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
-    Optional input_error_function: initial host argument-validation recovery,
-    with ToolInputErrorContext, the validation error, and detached original JSON.
+    Optional input_error_function: initial JSON syntax or argument-validation recovery,
+    with ToolInputErrorContext, the original error, and detached original input.
+    Native JSON syntax errors: ValueError with the exact original raw string.
     No validated arguments on this context. A string failure result, before
-    approval, before/execute/after, and output validation; default turn failure
-    without this formatter. Replacement/restored input and callback exceptions
-    outside recovery. Core malformed-JSON recovery without custom formatting.
+    approval, before/execute/after, and output validation; default validation turn
+    failure without this formatter. Replacement/restored input and callback exceptions
+    outside recovery. Default native failed result for malformed JSON.
 
     Model arguments must have type annotations and accept keyword arguments.
     Use names supported by Pydantic model fields, with Field(alias=...) when

@@ -616,6 +616,79 @@ async def test_request_budget_survives_portable_same_turn_restart(
         assert len(responses.requests) == max_requests
 
 
+async def test_restore_detaches_caller_input_before_native_acquisition(responses, monkeypatch):
+    from agents import RunDiagnosticError, _native
+
+    lookup = lookup_tool()
+    limits = RunBudget(max_requests=1, max_tokens=14)
+    agent = Agent(instructions="Look up and answer.", provider=provider(responses), tools=[lookup])
+    responses.respond(function_call("lookup", {"key": "A"}, "pending"))
+    original_input = {"role": "user", "content": [{"type": "input_text", "text": "Look up A"}]}
+    acquired, release = asyncio.Event(), asyncio.Event()
+    create = _native.create_checkpoint_engine
+    acquisitions = []
+
+    async def held_acquisition(*args, **kwargs):
+        engine = await create(*args, **kwargs)
+        acquisitions.append(engine)
+        acquired.set()
+        await release.wait()
+        return engine
+
+    async with timeout(20):
+        with pytest.raises(RunDiagnosticError) as pending:
+            await agent.run(original_input, budget=limits, capture_error_details=True)
+        assert isinstance(pending.value.__cause__, InteractionRequired)
+        saved = pending.value.__cause__.state
+        monkeypatch.setattr(_native, "create_checkpoint_engine", held_acquisition)
+        for invalid in (
+            None,
+            RunBudget(max_requests=2, max_tokens=14),
+            RunBudget(max_requests=1, max_tokens=14, missing_usage="continue"),
+        ):
+            with pytest.raises(CapabilityError):
+                async with agent.session(state=saved, resume_budget=invalid):
+                    pytest.fail("Invalid current limits acquired restore resources")
+        assert acquisitions == [] and len(responses.requests) == 1
+
+        scope = agent.session(state=saved, resume_budget=limits)
+        assert acquisitions == []
+        saved.original_input["content"][0]["text"] = "Captured on context entry"
+        expected_input = {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Captured on context entry"}],
+        }
+
+        async def restore():
+            async with scope as restored:
+                request = await next_request(restored.interactions(), lookup)
+                assert request.call_id == "pending"
+                return await restored.suspend()
+
+        opening = asyncio.create_task(restore())
+        try:
+            await acquired.wait()
+            assert saved.original_input == expected_input
+            saved.original_input["content"][0]["text"] = "Changed after acquisition"
+        finally:
+            release.set()
+            detached = await opening
+        assert detached.original_input == expected_input
+        assert detached.run_budget == saved.run_budget
+        assert detached.run_budget.admitted_requests == 1
+        assert detached.run_budget.consumed_tokens == 14
+        assert detached.run_budget.usage_missing is False
+        assert detached.run_usage.total_tokens == 14
+        async with agent.session(state=detached, resume_budget=limits) as resumed:
+            request = await next_request(resumed.interactions(), lookup)
+            await request.respond("A result")
+            with pytest.raises(NativeError) as stopped:
+                await resumed.restored_turn.get_result()
+            assert stopped.value.code == "run_budget_exceeded"
+        assert len(acquisitions) == 2 and len(responses.requests) == 1
+    await agent.provider.aclose()
+
+
 @pytest.mark.parametrize("version", [True, 1.0, 2])
 def test_request_budget_checkpoint_requires_an_exact_version(version):
     from _agents_codex.state import _RequestRunBudgetCheckpoint

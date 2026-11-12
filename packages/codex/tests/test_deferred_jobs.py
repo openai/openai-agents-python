@@ -892,8 +892,8 @@ async def test_prepare_interruption_at_native_seal(responses, monkeypatch, entry
                     await release.wait()
                 return await native._manual_ready()
 
-            async def _seal_manual(self):
-                state = await native._seal_manual()
+            async def _seal_manual(self, *args, **kwargs):
+                state = await native._seal_manual(*args, **kwargs)
                 if phase == "seal":
                     entered.set()
                     await release.wait()
@@ -998,8 +998,8 @@ async def test_unconfirmed_prepare_recovers_sealed_turn_without_retry(
             def __getattr__(self, name):
                 return getattr(native, name)
 
-            async def _seal_manual(self):
-                state = await native._seal_manual()
+            async def _seal_manual(self, *args, **kwargs):
+                state = await native._seal_manual(*args, **kwargs)
                 driver.cancel(reason)
                 return state
 

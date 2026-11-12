@@ -199,6 +199,7 @@ fn passive(event: &Value) -> bool {
                 | "mcp_startup_complete"
                 | "thread_settings_applied"
                 | "_sdk_request_metadata"
+                | "_sdk_model_attempt"
                 | "warning"
                 | "deprecation_notice"
                 | "raw_response_created"
@@ -301,6 +302,14 @@ async fn execute(inputs: Inputs, cancelled: CancellationToken) -> PyResult<RunOu
             }
         };
         let message = &event["msg"];
+        if event["id"].as_str() == Some(turn_id.as_str()) {
+            if message["type"] == "_sdk_model_attempt" {
+                output.info["model_attempt"] = message["data"].clone();
+            } else if !message["model_attempt"].is_null() {
+                // Terminal DTO is authoritative after stream/callback retirement.
+                output.info["model_attempt"] = message["model_attempt"].clone();
+            }
+        }
         let terminal = matches!(
             message["type"].as_str(),
             Some("task_complete" | "turn_complete")

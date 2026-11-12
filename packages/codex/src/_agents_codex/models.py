@@ -8,10 +8,11 @@ import json
 import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
-from typing import Any, Protocol, TypeAlias, cast
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
 
+from pydantic import ValidationError
 from typing_extensions import TypedDict
 
 from agents.config import JsonValue
@@ -37,6 +38,69 @@ class ModelRequest:
     context: Any = field(repr=False)
     session_id: str
     turn_id: str
+    attempt_id: str | None = field(default=None, kw_only=True)
+    attempt: int | None = field(default=None, kw_only=True)
+    retry_configured: bool = field(default=False, kw_only=True)
+    disable_provider_retries: bool = field(default=False, kw_only=True)
+    _report_usage: Callable[[dict[str, int]], bool] | None = field(
+        default=None, repr=False, compare=False, kw_only=True
+    )
+
+    def report_usage(self, usage: Mapping[str, int]) -> bool:
+        """Report measured cumulative tokens for this exact native attempt.
+
+        Reporting replaces this attempt's measurement; it never increments request
+        counts. Cleanup can report until the admitted callback physically exits.
+        False means this request has no live native measurement owner.
+        """
+        captured = None
+        try:
+            captured = _capture_model_usage(usage)
+            assert captured is not None
+            return self._report_usage(captured) if self._report_usage is not None else False
+        finally:
+            del self, usage, captured
+
+
+def _capture_model_usage(usage: Mapping[str, int] | None) -> dict[str, int] | None:
+    if usage is None:
+        return None
+    fields = (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+    try:
+        if (
+            not isinstance(usage, Mapping)
+            or usage.keys() - set(fields)
+            or any(
+                type(value) is not int or not 0 <= value <= 2**63 - 1 for value in usage.values()
+            )
+        ):
+            raise ValueError("ModelResponse usage requires nonnegative native token counters")
+        captured = {key: usage.get(key, 0) for key in fields}
+        if "total_tokens" not in usage:
+            captured["total_tokens"] = captured["input_tokens"] + captured["output_tokens"]
+            if captured["total_tokens"] > 2**63 - 1:
+                raise ValueError("ModelResponse total token count exceeds native capacity")
+        return captured
+    finally:
+        del usage
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRetryAdviceRequest:
+    """One failed producer request, with logical policy and physical request indexes."""
+
+    request: ModelRequest = field(repr=False)
+    error: BaseException = field(repr=False)
+    attempt_id: str
+    attempt: int
+    request_attempt: int
 
 
 class ModelRequestOptions(TypedDict, total=False):
@@ -124,12 +188,7 @@ async def _request_options_for(
         if callable(source):
             from .session import _call_callback
 
-            observed = ModelRequest(
-                body=deepcopy(request.body),
-                context=request.context,
-                session_id=request.session_id,
-                turn_id=request.turn_id,
-            )
+            observed = replace(request, body=deepcopy(request.body))
             value = await _call_callback(source, admit, observed)
         if task is not None and cancellation_requested(task):
             raise asyncio.CancelledError
@@ -180,24 +239,7 @@ class ModelResponse:
             if not isinstance(self.response_id, str) or not self.response_id.strip():
                 raise ValueError("ModelResponse needs a nonempty response_id")
             usage = None
-            if self.usage is not None:
-                fields = (
-                    "input_tokens",
-                    "cached_input_tokens",
-                    "cache_write_input_tokens",
-                    "output_tokens",
-                    "reasoning_output_tokens",
-                    "total_tokens",
-                )
-                if self.usage.keys() - set(fields) or any(
-                    type(value) is not int or value < 0 for value in self.usage.values()
-                ):
-                    raise ValueError(
-                        "ModelResponse usage requires nonnegative native token counters"
-                    )
-                usage = {key: self.usage.get(key, 0) for key in fields}
-                if "total_tokens" not in self.usage:
-                    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+            usage = _capture_model_usage(self.usage)
             if capture_raw_provider_events:
                 raw = getattr(self, "_raw_chat_completion", None)
             try:
@@ -284,6 +326,51 @@ class ModelProvider(Protocol):
     def get_model(self, model_name: str) -> NativeModel: ...
 
 
+def _is_workspace_patch_path(path: str) -> bool:
+    return (
+        bool(path)
+        and path == path.rstrip()
+        and not any(character in path for character in ("\r", "\n", "\0"))
+    )
+
+
+def _workspace_operation_patch(value: Any) -> str:
+    from .apply_patch import _EditorPatchArguments
+
+    try:
+        operation = _EditorPatchArguments.model_validate({"operation": value}).operation
+    except ValidationError:
+        return ""
+    if not _is_workspace_patch_path(operation.path):
+        return ""
+
+    lines = ["*** Begin Patch"]
+    if operation.type == "delete_file":
+        lines.append(f"*** Delete File: {operation.path}")
+    else:
+        diff = operation.diff.replace("\r\n", "\n").removesuffix("\n")
+        changes = diff.split("\n") if diff else []
+        if operation.type == "create_file":
+            if not all(line.startswith("+") for line in changes):
+                return ""
+            lines.append(f"*** Add File: {operation.path}")
+        else:
+            lines.append(f"*** Update File: {operation.path}")
+            if operation.move_to is not None:
+                if not _is_workspace_patch_path(operation.move_to):
+                    return ""
+                lines.append(f"*** Move to: {operation.move_to}")
+            # Keep raw hunk and environment directives out of this single operation.
+            if not all(
+                line in ("", "@@", "*** End of File") or line.startswith((" ", "+", "-", "@@ "))
+                for line in changes
+            ):
+                return ""
+        lines.extend(changes)
+    lines.append("*** End Patch")
+    return "\n".join(lines)
+
+
 def _chat_apply_patch_input(arguments: Any) -> str:
     if not isinstance(arguments, str):
         return ""
@@ -293,8 +380,69 @@ def _chat_apply_patch_input(arguments: Any) -> str:
         return arguments
     if isinstance(envelope, str):
         return envelope
-    patch = envelope.get("patch") if isinstance(envelope, dict) else None
-    return patch if isinstance(patch, str) else ""
+    if not isinstance(envelope, dict):
+        return ""
+    patch = envelope.get("patch")
+    return (
+        patch if isinstance(patch, str) else _workspace_operation_patch(envelope.get("operation"))
+    )
+
+
+_PatchWire: TypeAlias = Literal["workspace", "editor"]
+
+
+def _chat_editor_patch_function() -> dict[str, Any]:
+    from .apply_patch import _EditorPatchArguments
+
+    return {
+        "name": "apply_patch",
+        "description": "Apply an operation with the application's workspace editor.",
+        "parameters": _EditorPatchArguments.model_json_schema(),
+        "strict": False,
+    }
+
+
+def _chat_workspace_patch_function() -> dict[str, Any]:
+    function = _chat_editor_patch_function()
+    function["description"] = "Apply a freeform patch or one structured operation in the workspace."
+    parameters = function["parameters"]
+    parameters["properties"]["patch"] = {
+        "type": "string",
+        "description": "An apply_patch patch beginning with *** Begin Patch.",
+    }
+    parameters["required"] = []
+    parameters["oneOf"] = [{"required": ["patch"]}, {"required": ["operation"]}]
+    parameters["additionalProperties"] = False
+    return function
+
+
+def _chat_editor_patch_call(call: Mapping[str, Any]) -> dict[str, Any]:
+    from .apply_patch import _EditorPatchArguments
+
+    arguments = None
+    try:
+        try:
+            arguments = _EditorPatchArguments.model_validate_json(call["function"]["arguments"])
+        except (ValidationError, KeyError, RecursionError, TypeError):
+            pass
+        if arguments is None:
+            raise ValueError("apply_patch requires a valid editor operation")
+        return {
+            "type": "apply_patch_call",
+            "call_id": call["id"],
+            "status": "completed",
+            "operation": arguments.operation.model_dump(exclude_none=True),
+        }
+    finally:
+        del call, arguments
+
+
+def _chat_patch_replay_arguments(kind: str, item: Mapping[str, Any]) -> Any:
+    if kind == "apply_patch_call":
+        return json.dumps({"operation": item["operation"]})
+    if kind == "custom_tool_call":
+        return json.dumps({"patch": item["input"]})
+    return item["arguments"]
 
 
 @dataclass(frozen=True)
@@ -331,8 +479,8 @@ class ChatCompletionsModel:
         object.__setattr__(self, "_request_options_source", source)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        apply_patch_calls: set[str] = set()
-        apply_patch_offered = False
+        apply_patch_calls: dict[str, _PatchWire] = {}
+        apply_patch_wire: _PatchWire | None = None
         audio_data: Any = None
         audio_format: Any = None
         audio_header: Any = None
@@ -428,7 +576,7 @@ class ChatCompletionsModel:
                         messages[-1]["content"] = [*(messages[-1].get("content") or []), *content]
                     else:
                         messages.append({"role": item["role"], "content": content})
-                elif kind == "function_call" or (
+                elif kind in ("function_call", "apply_patch_call") or (
                     kind == "custom_tool_call" and item.get("name") == "apply_patch"
                 ):
                     if item.get("namespace") not in (None, "functions"):
@@ -438,25 +586,38 @@ class ChatCompletionsModel:
                     if not messages or messages[-1].get("role") != "assistant":
                         messages.append({"role": "assistant", "tool_calls": []})
                     if kind == "custom_tool_call":
-                        apply_patch_calls.add(item["call_id"])
+                        apply_patch_calls[item["call_id"]] = "workspace"
+                    elif kind == "apply_patch_call":
+                        apply_patch_calls[item["call_id"]] = "editor"
                     messages[-1].setdefault("tool_calls", []).append(
                         {
                             "id": item["call_id"],
                             "type": "function",
                             "function": {
-                                "name": item["name"],
-                                "arguments": (
-                                    json.dumps({"patch": item["input"]})
-                                    if kind == "custom_tool_call"
-                                    else item["arguments"]
-                                ),
+                                "name": "apply_patch"
+                                if kind == "apply_patch_call"
+                                else item["name"],
+                                "arguments": _chat_patch_replay_arguments(kind, item),
                             },
                         }
                     )
-                elif kind == "function_call_output" or (
-                    kind == "custom_tool_call_output" and item["call_id"] in apply_patch_calls
+                elif (
+                    kind == "function_call_output"
+                    or (
+                        kind == "custom_tool_call_output"
+                        and apply_patch_calls.get(item["call_id"]) == "workspace"
+                    )
+                    or (
+                        kind == "apply_patch_call_output"
+                        and apply_patch_calls.get(item["call_id"]) == "editor"
+                    )
                 ):
-                    output = item["output"]
+                    if kind == "apply_patch_call_output":
+                        output = json.dumps(
+                            {"status": item.get("status"), "output": item.get("output")}
+                        )
+                    else:
+                        output = item["output"]
                     if not isinstance(output, str):
                         if not isinstance(output, list) or any(
                             not isinstance(part, dict)
@@ -494,34 +655,16 @@ class ChatCompletionsModel:
                 for tool in leaves:
                     if tool.get("namespace") not in (None, "functions"):
                         raise ValueError("Chat adapters support the default function namespace")
-                    if tool.get("type") == "custom" and tool.get("name") == "apply_patch":
-                        apply_patch_offered = True
+                    if tool.get("type") == "apply_patch":
+                        apply_patch_wire = "editor"
                         tools.append(
-                            {
-                                "type": "function",
-                                "function": {
-                                    "name": "apply_patch",
-                                    "description": "Apply a patch to files in the workspace.",
-                                    "parameters": {
-                                        "type": "object",
-                                        "properties": {
-                                            "patch": {
-                                                "type": "string",
-                                                "description": (
-                                                    "A patch between *** Begin Patch and "
-                                                    "*** End Patch. "
-                                                    "Use *** Add File:, *** Update File:, or "
-                                                    "*** Delete File: headers, and *** Move to: "
-                                                    "within an update to rename a file."
-                                                ),
-                                            }
-                                        },
-                                        "required": ["patch"],
-                                        "additionalProperties": False,
-                                    },
-                                    "strict": True,
-                                },
-                            }
+                            {"type": "function", "function": _chat_editor_patch_function()}
+                        )
+                        continue
+                    if tool.get("type") == "custom" and tool.get("name") == "apply_patch":
+                        apply_patch_wire = "workspace"
+                        tools.append(
+                            {"type": "function", "function": _chat_workspace_patch_function()}
                         )
                         continue
                     if tool.get("type") != "function":
@@ -619,7 +762,7 @@ class ChatCompletionsModel:
             if isinstance(options.get("tool_choice"), Mapping):
                 declaration = options["tool_choice"]
                 if declaration.get("type") != "function" and not (
-                    apply_patch_offered
+                    apply_patch_wire == "workspace"
                     and declaration.get("type") == "custom"
                     and declaration.get("name") == "apply_patch"
                 ):
@@ -655,7 +798,43 @@ class ChatCompletionsModel:
                 **options,
             )
             value = response.model_dump() if hasattr(response, "model_dump") else response
-            if not isinstance(value, dict) or len(value.get("choices", [])) != 1:
+            if not isinstance(value, dict):
+                raise ValueError("ChatCompletionsModel requires exactly one response choice")
+            raw_usage = value.get("usage")
+            usage = (
+                None
+                if raw_usage is None
+                else {
+                    "input_tokens": raw_usage.get("prompt_tokens", 0),
+                    "output_tokens": raw_usage.get("completion_tokens", 0),
+                    "total_tokens": raw_usage.get("total_tokens", 0),
+                    "cached_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
+                        "cached_tokens", 0
+                    ),
+                    "cache_write_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
+                        "cache_write_tokens", 0
+                    ),
+                    "reasoning_output_tokens": (
+                        raw_usage.get("completion_tokens_details") or {}
+                    ).get("reasoning_tokens", 0),
+                }
+            )
+            if usage is not None:
+                usage = {
+                    key: 0
+                    if counter is None
+                    and key
+                    in (
+                        "cached_input_tokens",
+                        "cache_write_input_tokens",
+                        "reasoning_output_tokens",
+                    )
+                    else counter
+                    for key, counter in usage.items()
+                }
+            if usage is not None:
+                request.report_usage(usage)
+            if len(value.get("choices", [])) != 1:
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
             choice = value["choices"][0]
             message = choice["message"]
@@ -717,7 +896,10 @@ class ChatCompletionsModel:
             for call in message.get("tool_calls") or []:
                 if call.get("type") != "function":
                     raise ValueError("ChatCompletionsModel received an unsupported tool call")
-                if apply_patch_offered and call["function"]["name"] == "apply_patch":
+                if apply_patch_wire == "editor" and call["function"]["name"] == "apply_patch":
+                    output.append(_chat_editor_patch_call(call))
+                    continue
+                if apply_patch_wire == "workspace" and call["function"]["name"] == "apply_patch":
                     output.append(
                         {
                             "type": "custom_tool_call",
@@ -735,38 +917,6 @@ class ChatCompletionsModel:
                         "arguments": call["function"]["arguments"],
                     }
                 )
-            raw_usage = value.get("usage")
-            usage = (
-                None
-                if raw_usage is None
-                else {
-                    "input_tokens": raw_usage.get("prompt_tokens", 0),
-                    "output_tokens": raw_usage.get("completion_tokens", 0),
-                    "total_tokens": raw_usage.get("total_tokens", 0),
-                    "cached_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
-                        "cached_tokens", 0
-                    ),
-                    "cache_write_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
-                        "cache_write_tokens", 0
-                    ),
-                    "reasoning_output_tokens": (
-                        raw_usage.get("completion_tokens_details") or {}
-                    ).get("reasoning_tokens", 0),
-                }
-            )
-            if usage is not None:
-                usage = {
-                    key: 0
-                    if counter is None
-                    and key
-                    in (
-                        "cached_input_tokens",
-                        "cache_write_input_tokens",
-                        "reasoning_output_tokens",
-                    )
-                    else counter
-                    for key, counter in usage.items()
-                }
             returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
             if getattr(request, "_observe_raw_provider_events", False):
                 object.__setattr__(returned, "_raw_chat_completion", deepcopy(value))
@@ -818,6 +968,8 @@ class ChatCompletionsModel:
         try:
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
+            if request.disable_provider_retries:
+                selected["max_retries"] = 0
             if "max_retries" in selected:
                 if not callable(getattr(client, "with_options", None)):
                     raise TypeError("Per-request retries require client.with_options")
@@ -852,6 +1004,8 @@ class LitellmModel(ChatCompletionsModel):
                     **options.get("extra_body", {}),
                     "prompt_cache_key": options.pop("prompt_cache_key"),
                 }
+            if request.disable_provider_retries:
+                options["num_retries"] = 0
             response = await self.client.acompletion(**options)
             value = response.model_dump()
             return value
@@ -873,6 +1027,8 @@ class AnyLLMModel(ChatCompletionsModel):
 
     async def _create(self, request: ModelRequest, **options: Any) -> Any:
         try:
+            if request.disable_provider_retries:
+                raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
             if self._request_options_source is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")
             if "max_completion_tokens" in options:
@@ -936,6 +1092,8 @@ class ResponsesModel:
         try:
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
+            if request.disable_provider_retries:
+                selected["max_retries"] = 0
             if "max_retries" in selected:
                 if not callable(getattr(client, "with_options", None)):
                     raise TypeError("Per-request retries require client.with_options")
@@ -944,7 +1102,8 @@ class ResponsesModel:
             if not inspect.iscoroutinefunction(inspect.unwrap(create)):
                 raise TypeError("ResponsesModel requires an asynchronous client")
             body = dict(request.body)
-            body["model"] = self.model or body["model"]
+            if self.model:
+                body["model"] = self.model
             if self.prompt_cache_key is not None:
                 body["prompt_cache_key"] = self.prompt_cache_key
             body.pop("stream", None)
@@ -952,19 +1111,6 @@ class ResponsesModel:
                 stream=False, extra_body=body, **_client_request_options(selected)
             )
             value = response.model_dump() if hasattr(response, "model_dump") else response
-            output = value.get("output") or []
-            refusal = False
-            for item in output:
-                if item.get("type") != "message":
-                    continue
-                for part in item.get("content", []):
-                    if part.get("type") == "refusal":
-                        refusal = True
-                        break
-                if refusal:
-                    break
-            if value.get("status") != "completed" and not refusal:
-                raise ValueError("ResponsesModel requires a completed response")
             raw_usage = value.get("usage")
             usage = (
                 None
@@ -994,6 +1140,21 @@ class ResponsesModel:
                     else counter
                     for key, counter in usage.items()
                 }
+            if usage is not None:
+                request.report_usage(usage)
+            output = value.get("output") or []
+            refusal = False
+            for item in output:
+                if item.get("type") != "message":
+                    continue
+                for part in item.get("content", []):
+                    if part.get("type") == "refusal":
+                        refusal = True
+                        break
+                if refusal:
+                    break
+            if value.get("status") != "completed" and not refusal:
+                raise ValueError("ResponsesModel requires a completed response")
             returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
             if (
                 value.get("status") == "completed"

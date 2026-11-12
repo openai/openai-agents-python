@@ -155,12 +155,12 @@ class RealtimePeer:
         if response_done:
             await self.socket.send_json({"type": "response.done", "response": {"id": response_id}})
 
-    async def function(self, name: str, arguments: dict[str, Any], call_id: str) -> None:
+    async def function(self, name: str, arguments: dict[str, Any] | str, call_id: str) -> None:
         await self.functions([(name, arguments, call_id)], response_id=f"response-{call_id}")
 
     async def functions(
         self,
-        calls: list[tuple[str, dict[str, Any], str]],
+        calls: list[tuple[str, dict[str, Any] | str, str]],
         *,
         response_id: str,
         response_done: bool = True,
@@ -173,7 +173,7 @@ class RealtimePeer:
                 "type": "function_call",
                 "name": name,
                 "call_id": call_id,
-                "arguments": json.dumps(arguments),
+                "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments),
             }
             for name, arguments, call_id in calls
         ]

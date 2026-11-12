@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
 from threading import Thread
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -24,7 +25,11 @@ from tests._asyncio import capture_cancellation
 
 @contextmanager
 def collector(
-    statuses: list[int] | None = None, *, delay: float = 0
+    statuses: list[int] | None = None,
+    *,
+    delay: float = 0,
+    response_headers: dict[str, str] | None = None,
+    request_times: list[float] | None = None,
 ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     received = []
     replies = list(statuses or [])
@@ -39,6 +44,8 @@ def collector(
             pass
 
         def do_POST(self):
+            if request_times is not None:
+                request_times.append(monotonic())
             received.append(
                 {
                     "headers": dict(self.headers),
@@ -51,6 +58,8 @@ def collector(
                 time.sleep(delay)
             self.send_response(replies.pop(0) if replies else 200)
             self.send_header("Content-Length", "0")
+            for name, value in (response_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
 
     server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
@@ -121,7 +130,7 @@ async def test_exporter_retries_bounded_http_failure_and_preserves_wire_identity
     assert span["error"]["data"]["outcome"] == "error"
 
 
-@pytest.mark.parametrize("status", [302, 403, 429])
+@pytest.mark.parametrize("status", [302, 403])
 async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_diagnostics(status):
     with collector([status]) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(
@@ -132,6 +141,124 @@ async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_di
         assert str(failure.value) == "Native OpenAI trace export failed"
         assert_sanitized_failure(failure.value, "synthetic-private-key")
         assert len(received) == 1
+
+
+@pytest.mark.parametrize("status", [408, 409, 429, 503])
+async def test_exporter_honors_transient_status_and_server_retry_delay(status):
+    times: list[float] = []
+    response_headers = (
+        {"retry-after-ms": "NaN", "retry-after": "0.035"}
+        if status == 409
+        else {"retry-after": "Thu, 01 Jan 2099 00:00:00 GMT"}
+        if status == 503
+        else {"retry-after-ms": "35"}
+    )
+    with collector(
+        [status, 200],
+        response_headers=response_headers,
+        request_times=times,
+    ) as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-key",
+            endpoint=endpoint,
+            max_retries=5,
+            timeout_ms=1500,
+            retry_delay_ms=5,
+            max_retry_delay_ms=50,
+        )
+        await exporter.on_trace_event(completed_event())
+    assert len(received) == 2
+    assert times[1] - times[0] >= 0.03
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_exporter_honors_server_retry_veto(status):
+    with collector([status], response_headers={"x-should-retry": " false "}) as (
+        endpoint,
+        received,
+    ):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-key", endpoint=endpoint, max_retries=5
+        )
+        with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
+            await exporter.on_trace_event(completed_event())
+    assert len(received) == 1
+
+
+@pytest.mark.parametrize("status", [200, 403, 429, 503])
+async def test_exporter_preserves_response_retry_decision_after_close_failure(status, monkeypatch):
+    import httpx2
+
+    attempts: list[float] = []
+
+    class FailedBody(httpx2.AsyncByteStream):
+        async def __aiter__(self):
+            yield b""
+
+        async def aclose(self):
+            raise httpx2.ReadError("Synthetic response close failure")
+
+    def respond(request):
+        attempts.append(monotonic())
+        if len(attempts) > 1:
+            return httpx2.Response(200, request=request)
+        return httpx2.Response(
+            status,
+            headers={
+                "x-should-retry": "false" if status == 429 else "true",
+                "retry-after-ms": "15",
+            },
+            stream=FailedBody(),
+            request=request,
+        )
+
+    original_client = httpx2.AsyncClient
+
+    def client(**options):
+        return original_client(**options, transport=httpx2.MockTransport(respond))
+
+    monkeypatch.setattr(httpx2, "AsyncClient", client)
+    exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", max_retries=2)
+    if status == 503:
+        await exporter.on_trace_event(completed_event())
+        assert len(attempts) == 2
+        assert attempts[1] - attempts[0] >= 0.01
+    else:
+        with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
+            await exporter.on_trace_event(completed_event())
+        assert len(attempts) == 1
+
+
+async def test_exporter_caps_exponential_backoff_within_the_delivery_budget():
+    times: list[float] = []
+    with collector([503] * 10 + [200], request_times=times) as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-key",
+            endpoint=endpoint,
+            max_retries=10,
+            retry_delay_ms=5,
+            max_retry_delay_ms=5,
+        )
+        await exporter.on_trace_event(completed_event())
+    assert len(received) == 11
+    assert times[-1] - times[0] >= 0.045
+
+
+async def test_exporter_backoff_cannot_extend_the_delivery_deadline():
+    with collector([503, 200]) as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-key",
+            endpoint=endpoint,
+            max_retries=5,
+            timeout_ms=100,
+            retry_delay_ms=1000,
+            max_retry_delay_ms=1000,
+        )
+        started = monotonic()
+        with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
+            await exporter.on_trace_event(completed_event())
+        assert monotonic() - started < 1
+    assert len(received) == 1
 
 
 def native_trace_child_env() -> dict[str, str]:
@@ -150,6 +277,8 @@ def native_trace_child_env() -> dict[str, str]:
         "native_deadline_reset_case",
         "native_outcome_privacy_case",
         "native_auth_case",
+        "native_auth_destination_case",
+        "native_auth_replacement_case",
         pytest.param("native_batch_case", marks=pytest.mark.serial),
     ],
 )
@@ -317,8 +446,16 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     peer_closed = asyncio.Event()
     handler_done = asyncio.Event()
     request_started = asyncio.Event()
+    handlers = set()
+
+    async def bounded(awaitable, phase):
+        try:
+            return await asyncio.wait_for(awaitable, 3)
+        except asyncio.TimeoutError:
+            raise AssertionError(f"Trace exporter fixture stalled during {phase}") from None
 
     async def trickle(reader, writer):
+        handlers.add(asyncio.current_task())
         eof = None
         try:
             header = await reader.readuntil(b"\r\n\r\n")
@@ -351,10 +488,16 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             if eof is not None:
                 if not eof.done():
                     eof.cancel()
-                await asyncio.gather(eof, return_exceptions=True)
+                await bounded(asyncio.gather(eof, return_exceptions=True), "reader cleanup")
             writer.close()
             try:
-                await writer.wait_closed()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), 1)
+                except asyncio.TimeoutError:
+                    writer.transport.abort()
+                    raise AssertionError(
+                        "Trace exporter fixture stalled during writer close"
+                    ) from None
             except (BrokenPipeError, ConnectionResetError):
                 if not peer_closed.is_set():
                     raise
@@ -365,7 +508,7 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             warmup = telemetry.OpenAITraceExporter(
                 api_key="synthetic-key", endpoint=warmup_endpoint
             )
-            await warmup.on_trace_event(completed_event())
+            await bounded(warmup.on_trace_event(completed_event()), "warmup delivery")
             assert len(requests) == 1
 
     server = await asyncio.start_server(trickle, "127.0.0.1", 0)
@@ -388,7 +531,7 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             started = time.monotonic()
             delivery.cancel("synthetic caller cancellation")
             with pytest.raises(asyncio.CancelledError) as failure:
-                await delivery
+                await bounded(delivery, "trickling delivery")
             assert delivery.cancelled()
             assert [error.args for error in cancellations] == [("synthetic caller cancellation",)]
             assert_sanitized_failure(cancellations[0], secret)
@@ -400,7 +543,7 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             )
         else:
             with pytest.raises(RuntimeError, match="Native OpenAI trace export failed") as failure:
-                await delivery
+                await bounded(delivery, "trickling delivery")
             assert_sanitized_failure(failure.value, secret)
         # The old per-read timeout could succeed after roughly 600 ms of headers.
         assert time.monotonic() - started < 0.4
@@ -412,15 +555,16 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             recovered = telemetry.OpenAITraceExporter(
                 api_key="synthetic-key", endpoint=healthy_endpoint
             )
-            await recovered.on_trace_event(completed_event())
+            await bounded(recovered.on_trace_event(completed_event()), "recovery delivery")
             assert len(requests) == 1
     finally:
         if not delivery.done():
             delivery.cancel()
-            await asyncio.gather(delivery, return_exceptions=True)
+            await bounded(asyncio.gather(delivery, return_exceptions=True), "delivery cleanup")
         server.close()
-        await server.wait_closed()
-        await asyncio.wait_for(handler_done.wait(), 1)
+        await bounded(server.wait_closed(), "server close")
+        if handlers:
+            await bounded(asyncio.gather(*handlers), "handler cleanup")
 
 
 async def native_deadline_case():
@@ -888,10 +1032,18 @@ async def test_original_snapshot_auth_groups_and_retired_forwarding():
             {**completed_event(), "credential_required": True, "sequence": 3, "span_id": "c" * 16}
         )
         routes = {
-            "2": {"identity": "native-A", "headers": {"authorization": "Bearer scope-A"}},
-            "3": {"identity": "native-B", "headers": {"authorization": "Bearer scope-B"}},
+            "2": {
+                "identity": "native-A",
+                "headers": {"authorization": "Bearer scope-A"},
+                "processor_ids": ["host"],
+            },
+            "3": {
+                "identity": "native-B",
+                "headers": {"authorization": "Bearer scope-B"},
+                "processor_ids": ["host"],
+            },
         }
-        owner = _TraceDeliveryOwner((a, b), routes, Event())
+        owner = _TraceDeliveryOwner((a, b), routes, Event(), "host")
         with _trace_delivery_context(owner, (a, b)):
             with pytest.raises(RuntimeError):
                 await exporter.on_trace_event({**a, "name": "copied foreign root"})
@@ -899,7 +1051,7 @@ async def test_original_snapshot_auth_groups_and_retired_forwarding():
         owner.retire()
         with pytest.raises(RuntimeError):
             await exporter.on_trace_event(a)
-        owner = _TraceDeliveryOwner((a,), routes, Event())
+        owner = _TraceDeliveryOwner((a,), routes, Event(), "host")
         with _trace_delivery_context(owner, (a,)):
             await exporter.on_trace_event(a)
         owner.retire()
@@ -931,6 +1083,39 @@ async def test_original_snapshot_auth_groups_and_retired_forwarding():
                 "native-B",
             )
         )
+
+
+async def test_unselected_processor_fallback_requires_original_active_snapshot():
+    from threading import Event
+    from types import MappingProxyType
+
+    from _agents_codex._trace_delivery import _trace_delivery_context, _TraceDeliveryOwner
+
+    event = MappingProxyType({**completed_event(), "credential_required": True, "sequence": 2})
+    routes = {
+        "2": {
+            "identity": "original-scope",
+            "headers": {"authorization": "Bearer original-secret"},
+            "processor_ids": ["original"],
+        }
+    }
+    owner = _TraceDeliveryOwner((event,), routes, Event(), "later")
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="later-fallback", endpoint=endpoint)
+        with _trace_delivery_context(owner, (event,)):
+            with pytest.raises(RuntimeError):
+                await exporter.on_trace_event(dict(event))
+            await exporter.on_trace_event(event)
+        with pytest.raises(RuntimeError):
+            await exporter.on_trace_event(event)
+        owner.retire()
+        with _trace_delivery_context(owner, (event,)), pytest.raises(RuntimeError):
+            await exporter.on_trace_event(event)
+        assert len(received) == 1
+        assert {key.lower(): value for key, value in received[0]["headers"].items()}[
+            "authorization"
+        ] == "Bearer later-fallback"
+        assert "original-secret" not in json.dumps(received)
 
 
 async def native_auth_case():
@@ -1032,3 +1217,67 @@ async def native_auth_case():
             await exporter.on_trace_event(scoped)
         assert len(received) == count
         await telemetry.shutdown()
+
+
+async def native_auth_destination_case():
+    with collector() as (otlp_endpoint, otlp_received), collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="host-fallback", endpoint=endpoint)
+        await telemetry.configure(
+            traces=telemetry.OtlpHttp(endpoint=otlp_endpoint, protocol="json"),
+            processors=[exporter],
+        )
+        try:
+            credentials = telemetry.TraceExportCredentials(
+                headers={"Authorization": "Bearer selected-otlp"}
+            )
+            with telemetry.trace(
+                "selected-destination", options={"export_credentials": credentials}
+            ):
+                pass
+            assert (await telemetry.force_flush()).status == "success"
+            assert any(
+                {key.lower(): value for key, value in item["headers"].items()}.get("authorization")
+                == "Bearer selected-otlp"
+                for item in otlp_received
+            )
+            assert received
+            assert {
+                {key.lower(): value for key, value in item["headers"].items()}["authorization"]
+                for item in received
+            } == {"Bearer host-fallback"}
+        finally:
+            await telemetry.shutdown()
+
+
+async def native_auth_replacement_case():
+    with collector() as (old_endpoint, old_received), collector() as (endpoint, received):
+        original = telemetry.OpenAITraceExporter(api_key="original-fallback", endpoint=old_endpoint)
+        replacement = telemetry.OpenAITraceExporter(
+            api_key="replacement-fallback", endpoint=endpoint
+        )
+        await telemetry.configure(processors=[original])
+        try:
+            credentials = telemetry.TraceExportCredentials(
+                headers={"Authorization": "Bearer original-scope"}
+            )
+            with telemetry.trace(
+                "original-owner", options={"export_credentials": credentials}
+            ) as root:
+                pass
+            assert (await telemetry.force_flush()).status == "success"
+            telemetry.set_trace_processors([replacement])
+            with telemetry.span("inherited-after-replacement", options={"parent": root.context}):
+                pass
+            assert (await telemetry.force_flush()).status == "success"
+            assert old_received
+            assert {
+                {key.lower(): value for key, value in item["headers"].items()}["authorization"]
+                for item in old_received
+            } == {"Bearer original-scope"}
+            assert received
+            assert {
+                {key.lower(): value for key, value in item["headers"].items()}["authorization"]
+                for item in received
+            } == {"Bearer replacement-fallback"}
+        finally:
+            await telemetry.shutdown()

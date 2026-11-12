@@ -136,7 +136,8 @@ async def test_realtime_close_expires_pending_managed_decision(realtime_peer: Re
 
 
 @pytest.mark.parametrize("managed", [False, True])
-async def test_realtime_original_input_recovery_continues_once(realtime_peer, managed):
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_realtime_original_input_recovery_continues_once(realtime_peer, managed, malformed):
     peer = realtime_peer
     effects, policies, predicates, formatted = [], [], [], []
 
@@ -153,7 +154,10 @@ async def test_realtime_original_input_recovery_continues_once(realtime_peer, ma
         return True
 
     def recover(context, error, original):
-        assert original == {"key": 7}
+        assert original == (' {"key": ' if malformed else {"key": 7})
+        if malformed:
+            assert isinstance(error, ValueError)
+            assert "EOF" in str(error)
         formatted.append(True)
         return "Invalid risky input"
 
@@ -180,7 +184,9 @@ async def test_realtime_original_input_recovery_continues_once(realtime_peer, ma
             config=RealtimeConfig(model="fixture-realtime", tools=(risky,))
         ) as voice:
             start = len(peer.frames)
-            await peer.function("risky", {"key": 7}, "invalid-original")
+            await peer.function(
+                "risky", ' {"key": ' if malformed else {"key": 7}, "invalid-original"
+            )
             output = await peer.frame(
                 lambda frame: (
                     frame["type"] == "conversation.item.create"
