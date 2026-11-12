@@ -81,13 +81,10 @@ class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
     _schema_json: str = field(repr=False)
     _selected_context: ContextT = field(repr=False)
 
-    def __init__(
-        self, *, _schema_json: str, _selected_context: ContextT, **declaration: Any
-    ) -> None:
+    def __init__(self, *, _schema_json: str, _selected_context: ContextT, **options: Any) -> None:
         object.__setattr__(self, "_schema_json", _schema_json)
         object.__setattr__(self, "_selected_context", _selected_context)
-        # Use FunctionTool's formatter defaults for selection and dataclass copies.
-        super().__init__(**declaration)
+        super().__init__(**options)
 
     @property
     def _requires_live_manual_session(self) -> bool:

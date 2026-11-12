@@ -128,8 +128,11 @@ from ._stored_history import (
     StoredSessionPage,
     StoredTurnPage,
     _item_page as _stored_item_page,
-    _options as _stored_options,
+    _items_request as _stored_items_request,
+    _search_request as _stored_search_request,
+    _sessions_request as _stored_sessions_request,
     _turn_page as _stored_turn_page,
+    _turns_request as _stored_turns_request,
 )
 from ._submission import _future as _future, _Submission as _Submission
 from ._tool_errors import ToolErrorContext, ToolErrorFormatter
@@ -313,6 +316,7 @@ from .state import (
     NativeGoal as NativeGoal,
     SessionState as SessionState,
     _GuardrailCheckpointRecord,
+    _ManualContinuation,
     _RememberedApproval,
     _RequestRunBudgetCheckpoint,
     _TokenRunBudgetCheckpoint,
@@ -3420,6 +3424,7 @@ async def _opening_provider_config(
     base_url = provider.base_url or "https://api.openai.com/v1"
     routing: dict[str, Any] = provider._routing_config()
     for name in (
+        "websocket_base_url",
         "request_max_retries",
         "stream_max_retries",
         "stream_idle_timeout_ms",
@@ -3505,6 +3510,7 @@ def _default_private_tls_profile(
     return (
         provider_config["model_provider"] == "native_agent"
         and provider.supports_websockets is None
+        and provider.websocket_base_url is None
         and websockets_enabled
         and not provider._routing_config()
         and sys.platform == "linux"
@@ -4763,6 +4769,8 @@ class Session(Generic[ContextT, OutputT]):
                     session._manual_source_digest = hashlib.sha256(
                         saved.to_json().encode()
                     ).hexdigest()
+                    if continuation.pending_input:
+                        session._staged_restore_checkpoint = saved
                     active = _Submission(
                         restored_output,
                         model_override=continuation.model_override,
@@ -4802,6 +4810,7 @@ class Session(Generic[ContextT, OutputT]):
                     session._active = active
                     thread._select_steps(
                         bool(session._profiles)
+                        or bool(continuation.pending_input)
                         or active.budget is not None
                         or bool(session._mcp_tools)
                         or restored_operation_refs is not None
@@ -4842,6 +4851,9 @@ class Session(Generic[ContextT, OutputT]):
                     )
                     session._start_output_acceptance(handle)
                     active.task = _create_task(session._execute(active, [], admitted=True))
+                    if continuation.staged_retry:
+                        driver = _create_task(session._continue_restored_turn(active))
+                        active.add_callback(driver)
                 if handoff is not None:
                     await session._finish_run_opening(
                         opening,
@@ -5153,6 +5165,7 @@ class Session(Generic[ContextT, OutputT]):
         self._repair_items: list[SessionItem] = []
         self._application_tool_outputs: list[ApplicationToolOutput] = []
         self._restored_turn: Turn[OutputT] | None = None
+        self._staged_restore_checkpoint: SessionState | None = None
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
         self._child_admissions: set[asyncio.Task[Turn[str]]] = set()
         self._graph_interrupts: set[asyncio.Task[None]] = set()
@@ -5398,16 +5411,17 @@ class Session(Generic[ContextT, OutputT]):
     ) -> None:
         thread = self._native
 
-        async def publish_attempt_controls(controls: Mapping[str, Any]) -> None:
-            # Idle restores retain their accepted deadline; manual work uses current authority.
+        async def publish_attempt_controls(
+            controls: Mapping[str, Any], *, invocation_settings: Mapping[str, Any] | None = None
+        ) -> None:
             reset: dict[str, Any] = {
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
                     "retry": None,
                 },
             }
-            if manual_restore:
-                reset["invocation_timeout_ms"] = settings.get("invocation_timeout_ms")
+            if invocation_settings is not None:
+                reset["invocation_timeout_ms"] = invocation_settings.get("invocation_timeout_ms")
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(reset)))
                 is not True
@@ -5427,7 +5441,10 @@ class Session(Generic[ContextT, OutputT]):
         if validate_provider_model and (not fresh or "model" not in settings):
             await self._publish_startup(thread._validate_provider_model())
         if restored and (not profile_roster or manual_restore):
-            await publish_attempt_controls(settings.get("request_controls", {}))
+            await publish_attempt_controls(
+                settings.get("request_controls", {}),
+                invocation_settings=settings if manual_restore else None,
+            )
         if fresh and settings:
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(settings)))
@@ -5470,7 +5487,7 @@ class Session(Generic[ContextT, OutputT]):
                 controls = _current_attempt_controls(
                     settings.get("request_controls", {}), model["request_controls"]
                 )
-                await publish_attempt_controls(controls)
+                await publish_attempt_controls(controls, invocation_settings=model)
                 await self._refresh_profile_bindings(preserve_current=True)
 
     async def _prepare_realtime_mcp(self) -> None:
@@ -13697,6 +13714,41 @@ class Session(Generic[ContextT, OutputT]):
             source_agent = self._agent_for_message(message)
             checks = (*self._input_guardrails, *source_agent.input_guardrails)
             guardrail_agent = self._original_agent_for_message(message)
+            staged = message.get("staged_input") if isinstance(state, _Submission) else None
+            if (
+                isinstance(state, _Submission)
+                and staged is not None
+                and not state.input_guardrails_started
+            ):
+                if (
+                    not isinstance(staged, list)
+                    or not staged
+                    or not all(isinstance(item, dict) for item in staged)
+                ):
+                    raise NativeError("Invalid staged input from the native recovery boundary")
+                content: list[dict[str, Any]] = []
+                for item in staged:
+                    parts = item.get("content")
+                    if (
+                        item.get("type") != "message"
+                        or item.get("role") != "user"
+                        or not isinstance(parts, list)
+                        or not all(
+                            isinstance(part, dict)
+                            and part.get("type")
+                            in {"input_text", "input_image", "input_file", "input_audio"}
+                            for part in parts
+                        )
+                    ):
+                        state.guardrail_input = json.dumps(
+                            staged, ensure_ascii=False, allow_nan=False
+                        )
+                        break
+                    content.extend(parts)
+                else:
+                    state.guardrail_input = cast(
+                        UserInput, {"type": "message", "role": "user", "content": deepcopy(content)}
+                    )
             if isinstance(state, _ChildCallbacks):
                 checks = tuple(check for check in checks if check.child_callback is not None)
                 if checks and not state.input_guardrails_started:
@@ -13719,7 +13771,11 @@ class Session(Generic[ContextT, OutputT]):
                     step_index=guardrail_step_index,
                 )
                 parallel = tuple(check for check in checks if check.run_in_parallel)
-                if parallel:
+                if staged is not None:
+                    await self._run_input_guardrails(
+                        state, message, guardrail_agent, parallel, step_index=guardrail_step_index
+                    )
+                elif parallel:
 
                     async def run_parallel() -> None:
                         scope = _Invocation(self)
@@ -14071,7 +14127,13 @@ class Session(Generic[ContextT, OutputT]):
                     self._native._reply_step(
                         message["step_id"], selected_json, message["thread"], message["instance"]
                     )
-                    if budget is not None and selected_json is not None:
+                    # Recovered tool settlement prepares a context before
+                    # the staged input's sampling selection.
+                    if (
+                        budget is not None
+                        and selected_json is not None
+                        and message.get("staged_input_preparation") is not True
+                    ):
                         budget.requests += 1
             except RuntimeError:
                 # Cancellation can retire this exact native nonce first.
@@ -16211,12 +16273,8 @@ class Session(Generic[ContextT, OutputT]):
                     break
         """
         self._check_open()
-        options = _stored_options(limit, cursor)
-        options.pop("descending")
-        if type(archived) is not bool:
-            raise TypeError("archived must be a bool")
         value = await self._native._stored_history(
-            json.dumps({"kind": "sessions", **options, "archived": archived})
+            _stored_sessions_request(limit, cursor, archived)
         )
         return cast(StoredSessionPage, json.loads(value))
 
@@ -16235,11 +16293,8 @@ class Session(Generic[ContextT, OutputT]):
         Full projected item detail through stored_items; explicit unsupported-store errors.
         """
         self._check_open()
-        options = _stored_options(limit, cursor, direction)
-        if type(include_summary) is not bool:
-            raise TypeError("include_summary must be a bool")
         value = await self._native._stored_history(
-            json.dumps({"kind": "turns", **options, "include_items": include_summary})
+            _stored_turns_request(limit, cursor, direction, include_summary)
         )
         return _stored_turn_page(json.loads(value))
 
@@ -16257,11 +16312,8 @@ class Session(Generic[ContextT, OutputT]):
         No hidden full-journal fallback for stores without an index.
         """
         self._check_open()
-        options = _stored_options(limit, cursor, direction)
-        if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
-            raise ValueError("turn_id must be a nonempty string or None")
         value = await self._native._stored_history(
-            json.dumps({"kind": "items", **options, "turn_id": turn_id})
+            _stored_items_request(limit, cursor, direction, turn_id)
         )
         return _stored_item_page(json.loads(value))
 
@@ -16274,13 +16326,7 @@ class Session(Generic[ContextT, OutputT]):
         Inclusive turn_cursor for stored_turns at the matching turn.
         """
         self._check_open()
-        options = _stored_options(limit, cursor)
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Stored history search requires nonempty text")
-        options.pop("descending")
-        value = await self._native._stored_history(
-            json.dumps({"kind": "search", **options, "text": text})
-        )
+        value = await self._native._stored_history(_stored_search_request(limit, cursor, text))
         return cast(StoredMatchPage, json.loads(value))
 
     async def items(self, *, subagent_id: str | None = None) -> AsyncIterator[SessionItem]:
@@ -16781,6 +16827,28 @@ class Session(Generic[ContextT, OutputT]):
                         raise
                     raise NativeError("Native checkpoint readiness could not be verified") from None
                 payload = json.loads(encoded)
+                if (retry := payload.pop("_staged_manual_retry", None)) is not None:
+                    if fork:
+                        raise RuntimeError("fork requires settled staged input")
+                    saved = self._staged_restore_checkpoint
+                    if saved is None or saved.native_continuation is None:
+                        raise NativeError("Staged retry has no original checkpoint owner")
+                    continuation = _ManualContinuation.model_validate_json(json.dumps(retry))
+                    if (
+                        not continuation.staged_retry
+                        or continuation.turn_id != saved.native_continuation.turn_id
+                    ):
+                        raise NativeError("Staged retry does not match its original checkpoint")
+                    return saved.model_copy(
+                        update={
+                            "native_continuation": continuation,
+                            "remembered_approvals": self._current_remembered_approvals(),
+                            "application_tool_outputs": [
+                                record.model_copy(deep=True)
+                                for record in self._application_tool_outputs
+                            ],
+                        }
+                    ).to_json()
                 if fork:
                     if payload["descendants"]:
                         raise RuntimeError("fork cannot copy conversations with native descendants")

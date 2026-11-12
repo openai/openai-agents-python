@@ -891,7 +891,15 @@
     {
       "path": "sdk-native-custom-string-tools.patch",
       "sha256": "cb1835cce8e8926674ac438a8b6713ec71053c73db1270dd88ee27d763c3322f"
+    },
+    {
+      "path": "sdk-independent-websocket-base.patch",
+      "sha256": "b29ef217c5eb88d94fc48bb6d6ef2b06c458e6ab6df5ca5cdbfd9e94bb52385a"
+    },
+    {
+      "path": "sdk-staged-manual-continuation-input.patch",
+      "sha256": "9954e733d95ce8fac27fb8fbac4286067149eec4191363c09428ffaa00be64d4"
     }
   ],
-  "result_tree": "c4f7bda5e22fa172767cca2219b79505a1823d8e"
+  "result_tree": "952284e1f4e38f0d7ffd071a53b685ab438aa818"
 }
