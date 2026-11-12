@@ -107,9 +107,6 @@ jobs:
         if: env.OPENAI_AGENTS_NATIVE_BUILD_IMAGE != ''
         run: |
           test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
-          python_bin=/opt/python/cp312-cp312/bin
-          "$python_bin/python" --version
-          printf '%s\n' "$python_bin" >> "$GITHUB_PATH"
           {
             printf '%s\n' 'OPENAI_AGENTS_NATIVE_MANYLINUX=manylinux_2_28' 'OPENSSL_STATIC=1'
             printf 'OPENAI_AGENTS_NATIVE_RECEIPT_DIR=%s/dist\n' "$GITHUB_WORKSPACE"
@@ -189,6 +186,16 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           enable-cache: false
+      - name: Install a shared-library Python for the manylinux build
+        if: env.OPENAI_AGENTS_NATIVE_BUILD_IMAGE != ''
+        run: |
+          export UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/agents-build-python"
+          uv python install --no-bin 3.12
+          python="$(uv python find --managed-python 3.12)"
+          libdir="$("$python" -I -S -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+          test -f "$libdir/libpython3.12.so"
+          printf '%s\n' "$(dirname -- "$python")" >> "$GITHUB_PATH"
+          printf 'UV_PYTHON=%s\nPYO3_PYTHON=%s\n' "$python" "$python" >> "$GITHUB_ENV"
       - name: Install native build tools
         if: inputs.native_source_run == ''
         uses: ./.github/actions/setup-native
@@ -280,6 +287,7 @@ jobs:
           import shutil
           import subprocess
           import sys
+          import sysconfig
           from pathlib import Path
           root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
           fixture = Path("tests/fixtures/exec_server.rs")
@@ -290,6 +298,11 @@ jobs:
           environment = build_environment(root)
           options, build_target = cargo_build_options(root, environment)
           environment["PYO3_PYTHON"] = sys.executable
+          if os.environ.get("OPENAI_AGENTS_NATIVE_BUILD_IMAGE"):
+              libdir = sysconfig.get_config_var("LIBDIR")
+              environment["LD_LIBRARY_PATH"] = os.pathsep.join(
+                  part for part in (libdir, environment.get("LD_LIBRARY_PATH")) if part
+              )
           environment.setdefault("RUST_MIN_STACK", str(16 * 1024 * 1024))
           subprocess.run(
               ["cargo", "test", "--release", "--locked", *options, "--lib",
