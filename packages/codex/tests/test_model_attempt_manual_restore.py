@@ -195,6 +195,7 @@ async def capture(
         _default_tools=None,
         _repair_turns=[],
         _repair_items=[],
+        _application_tool_outputs=[],
         _native=SimpleNamespace(_seal_manual=seal),
         _manual_ready=ready,
         _executor_policy_digest=executor_digest,
@@ -202,7 +203,6 @@ async def capture(
         _instructions="",
         _sealing=False,
         _observations=SimpleNamespace(notify=lambda: None),
-        _application_tool_outputs=[],
         _model_api_key="private",
     )
     raw = await implementation.Session._capture_checkpoint(owner, active, None, False)
