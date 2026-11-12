@@ -81,6 +81,7 @@ class _Call(BaseModel):
 
 
 def _editor_result(value: Any) -> tuple[Literal["completed", "failed"], str | None]:
+    status: Literal["completed", "failed"] | None = None
     try:
         if value is None or isinstance(value, str):
             return "completed", value
@@ -93,7 +94,7 @@ def _editor_result(value: Any) -> tuple[Literal["completed", "failed"], str | No
             raise TypeError("Invalid Apply Patch result")
         return status, value.output
     finally:
-        value = None
+        del value, status
 
 
 def _output(value: Any) -> ToolOutput:
@@ -219,27 +220,30 @@ def apply_patch_batch_tool(
         task = asyncio.current_task()
         assert task is not None
 
-        def admit() -> bool:
+        def admit(task: asyncio.Task[Any] = task) -> bool:
             return not cancellation_requested(task)
 
         results = []
-        for operation in operations:
-            if not admit():
-                raise asyncio.CancelledError
-            value = await _call_callback(dispatch, admit, context, operation)
-            status, text = _editor_result(value)
-            results.append({"status": status, "output": text})
-        output = ToolOutput.text(json.dumps({"results": results}, allow_nan=False))
-        output.success = all(result["status"] == "completed" for result in results)
-        return output
+        operation = value = status = text = output = None
+        try:
+            for operation in operations:
+                if not admit():
+                    raise asyncio.CancelledError
+                value = await _call_callback(dispatch, admit, context, operation)
+                status, text = _editor_result(value)
+                results.append({"status": status, "output": text})
+            output = ToolOutput.text(json.dumps({"results": results}, allow_nan=False))
+            output.success = all(result["status"] == "completed" for result in results)
+            return output
+        finally:
+            del context, operations, operation, value, results, status, text, output, task, admit
 
     return function_tool(
-        apply,
         name="apply_patch_batch",
         description="Apply an ordered batch of patches with the application's editor",
         needs_approval=needs_approval,
         error_function=None,
-    )
+    )(apply)
 
 
 _preserve_module_identity(globals(), "agents.apply_patch")

@@ -363,16 +363,22 @@ def _chat_workspace_patch_function() -> dict[str, Any]:
 def _chat_editor_patch_call(call: Mapping[str, Any]) -> dict[str, Any]:
     from .apply_patch import _EditorPatchArguments
 
+    arguments = None
     try:
-        arguments = _EditorPatchArguments.model_validate_json(call["function"]["arguments"])
-    except (ValidationError, KeyError, RecursionError, TypeError):
-        raise ValueError("apply_patch requires a valid editor operation") from None
-    return {
-        "type": "apply_patch_call",
-        "call_id": call["id"],
-        "status": "completed",
-        "operation": arguments.operation.model_dump(exclude_none=True),
-    }
+        try:
+            arguments = _EditorPatchArguments.model_validate_json(call["function"]["arguments"])
+        except (ValidationError, KeyError, RecursionError, TypeError):
+            pass
+        if arguments is None:
+            raise ValueError("apply_patch requires a valid editor operation")
+        return {
+            "type": "apply_patch_call",
+            "call_id": call["id"],
+            "status": "completed",
+            "operation": arguments.operation.model_dump(exclude_none=True),
+        }
+    finally:
+        del call, arguments
 
 
 def _chat_patch_replay_arguments(kind: str, item: Mapping[str, Any]) -> Any:

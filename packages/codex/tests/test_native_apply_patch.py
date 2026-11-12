@@ -12,6 +12,7 @@ from agents import (
     ApplyPatchOperation,
     ApplyPatchResult,
     ChatCompletionsModel,
+    ModelRequest,
     NativeError,
     NativeProvider,
     SessionState,
@@ -19,6 +20,7 @@ from agents import (
     apply_patch_batch_tool,
     apply_patch_tool,
 )
+from agents.session import _call_callback
 from tests.native_fixtures import assistant_output, responses as responses
 
 
@@ -405,6 +407,192 @@ async def test_local_interrupted_edit_keeps_durable_owner_and_refuses_silent_reo
     ]
     assert len(owned) == 1
     assert owned[0]["metadata"]["sdk_application_tool"] == "apply_patch"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"operation":{"path":"synthetic-private-output","diff":',
+        json.dumps({"operation": {"type": "invalid", "path": "synthetic-private-output"}}),
+    ],
+    ids=["malformed-json", "invalid-operation"],
+)
+@pytest.mark.parametrize("boundary", ["adapter", "native"])
+async def test_chat_editor_failure_releases_validator_context_and_payload_frames(
+    arguments, boundary
+):
+    async def create(**body):
+        return {
+            "id": "chat_invalid_editor",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_invalid_editor",
+                                "type": "function",
+                                "function": {"name": "apply_patch", "arguments": arguments},
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+    def assert_released(error):
+        pending, seen = [error], set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            assert type(current).__name__ != "ValidationError"
+            trace = current.__traceback__
+            while trace is not None:
+                frame = trace.tb_frame
+                if frame.f_code.co_filename == ChatCompletionsModel.complete.__code__.co_filename:
+                    assert not {"call", "arguments", "response", "value"}.intersection(
+                        frame.f_locals
+                    )
+                trace = trace.tb_next
+            pending.extend(
+                item for item in (current.__cause__, current.__context__) if item is not None
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    backend = ChatCompletionsModel(client)
+    if boundary == "adapter":
+        with pytest.raises(ValueError, match="requires a valid editor operation") as direct:
+            await backend.complete(
+                ModelRequest(
+                    {
+                        "model": "fixture",
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": "edit"}],
+                            }
+                        ],
+                        "tools": [{"type": "apply_patch"}],
+                    },
+                    None,
+                    "session",
+                    "turn",
+                )
+            )
+        assert_released(direct.value)
+        return
+    editor = Editor()
+    async with NativeProvider(
+        base_url="https://example.invalid/v1", api_key="synthetic", model_backend=backend
+    ) as provider:
+        agent = Agent(
+            instructions="Use the editor.",
+            model="gpt-5",
+            provider=provider,
+            tools=[apply_patch_tool(editor)],
+        )
+        with pytest.raises(ValueError, match="requires a valid editor operation") as native:
+            await agent.run("edit")
+    assert_released(native.value)
+    assert editor.operations == []
+
+
+@pytest.mark.parametrize("fail_at", [0, 1])
+@pytest.mark.parametrize("invalid_result", [False, True])
+async def test_editor_batch_failure_releases_unexecuted_payloads(fail_at, invalid_result):
+    failure = RuntimeError("synthetic editor failure")
+    entered = []
+
+    async def edit(operation):
+        entered.append(operation.path)
+        if len(entered) - 1 == fail_at:
+            if invalid_result:
+                return ApplyPatchResult("synthetic-private-status", "synthetic-private-output")
+            raise failure
+        return "synthetic-private-prior-output"
+
+    editor = SimpleNamespace(create_file=edit, update_file=edit, delete_file=edit)
+    tool = apply_patch_batch_tool(editor)
+    operations = [
+        {"type": "create_file", "path": f"synthetic-{i}", "diff": "synthetic-private-later-diff"}
+        for i in range(3)
+    ]
+
+    async def create(**body):
+        return {
+            "id": "chat_batch_failure",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "batch_failure",
+                                "type": "function",
+                                "function": {
+                                    "name": "apply_patch_batch",
+                                    "arguments": json.dumps({"operations": operations}),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    async with NativeProvider(
+        base_url="https://example.invalid/v1",
+        api_key="synthetic",
+        model_backend=ChatCompletionsModel(client),
+    ) as provider:
+        agent = Agent(
+            instructions="Use editor.",
+            model="gpt-5",
+            provider=provider,
+            tools=[tool],
+        )
+        with pytest.raises(TypeError if invalid_result else RuntimeError) as caught:
+            await agent.run("edit")
+    if not invalid_result:
+        assert caught.value is failure
+    assert len(entered) == fail_at + 1
+    trace = caught.value.__traceback__
+    inspected = False
+    while trace is not None:
+        frame = trace.tb_frame
+        if frame.f_code.co_filename.endswith("/_agents_codex/apply_patch.py"):
+            if frame.f_code.co_name == "apply":
+                inspected = True
+                assert not {
+                    "context",
+                    "operations",
+                    "operation",
+                    "results",
+                    "value",
+                    "text",
+                    "status",
+                    "output",
+                    "task",
+                    "admit",
+                }.intersection(frame.f_locals)
+            if frame.f_code.co_name == "_editor_result":
+                assert frame.f_locals.get("value") is None
+                assert frame.f_locals.get("status") is None
+        trace = trace.tb_next
+    assert inspected
+    entry = tool._capture(object())
+    parsed = entry._parse_arguments({"operations": [operations[0]]})
+    reused = await _call_callback(
+        entry.callback, lambda: True, object(), **entry._arguments(parsed)
+    )
+    assert reused.success
+    assert len(entered) == fail_at + 2
 
 
 if __name__ == "__main__":
