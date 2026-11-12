@@ -304,7 +304,9 @@ pub(crate) fn validate_for_opening(
         return Ok(frame);
     };
     let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
-    let pending = state["native_continuation"]["pending_manual"]
+    let continuation = &state["native_continuation"];
+    let staged_retry = continuation["staged_retry"].as_bool() == Some(true);
+    let pending = continuation["pending_manual"]
         .as_array()
         .context("Missing pending manual calls")?;
     let ids = pending
@@ -316,7 +318,7 @@ pub(crate) fn validate_for_opening(
         })
         .collect::<Result<HashSet<_>>>()?;
     ensure!(
-        !ids.is_empty() && ids.len() == pending.len(),
+        (!ids.is_empty() || staged_retry) && ids.len() == pending.len(),
         "Invalid pending call identities"
     );
     let mut current = None;
@@ -400,11 +402,15 @@ pub(crate) fn validate_for_opening(
         found.len() == ids.len(),
         "Pending source does not cover every call"
     );
-    let source = source.context("Missing pending Agent source")?;
+    let (active, graph) = current.as_ref().context("Missing pending Agent source")?;
+    let source = if staged_retry && ids.is_empty() {
+        // A settled retry has no pending calls. The captured active profile owns it.
+        active.clone()
+    } else {
+        source.context("Missing pending Agent source")?
+    };
     ensure!(
-        current
-            .as_ref()
-            .is_some_and(|(receipt, _)| receipt == &source),
+        active == &source && *graph == opening.fingerprint,
         "Pending calls differ from the active Agent source"
     );
     opening.validate_pending_source(&source)?;

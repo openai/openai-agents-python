@@ -301,6 +301,64 @@ async def test_staged_checkpoint_cannot_grant_hosted_mcp_approval(
     assert len(responses.requests) == 1
 
 
+@_POSIX_CAPTURE
+@pytest.mark.parametrize("clear_pending", [False, True])
+async def test_staged_retry_restores_handoff_agent(
+    responses: ResponsesFixture, clear_pending: bool
+):
+    staged_text = "queued after the manual decision"
+    reject = True
+    effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def record(value: str) -> str:
+        effects.append(value)
+        return "recorded"
+
+    async def check_staged(_turn: object, _context: object, _agent: object, value: object):
+        return GuardrailResult(tripwire_triggered=reject and staged_text in json.dumps(value))
+
+    responses.respond(function_call("transfer_to_worker", {}, "handoff"))
+    responses.respond(function_call("record", {"value": "once"}, "worker-call"))
+    async with timeout(20), provider(responses) as current:
+        worker = Agent(
+            name="Worker",
+            instructions="Record the decision after approval.",
+            model="gpt-5.5",
+            provider=current,
+            tools=[record],
+            input_guardrails=[InputGuardrail("worker-staged-input", check_staged)],
+        )
+        root = Agent(
+            instructions="Hand off to Worker.",
+            model="gpt-5.5",
+            provider=current,
+            handoffs=[worker],
+        )
+        async with root.session() as source:
+            await source.submit("Ask Worker to record once.")
+            await next_request(source.interactions(), record)
+            saved = (await source.suspend()).with_pending_input(staged_text)
+        async with root.session(state=saved) as restored:
+            approval = await next_request(restored.interactions(), record)
+            await approval.approve()
+            assert restored.restored_turn is not None
+            with pytest.raises(GuardrailTripwire):
+                await restored.restored_turn.get_result()
+            retry = await restored.save_state()
+        assert retry.pending_input == saved.pending_input
+        assert len(responses.requests) == 2
+        reject = False
+        responses.respond(assistant_output("done"))
+        retry_state = retry.without_pending_input() if clear_pending else retry
+        async with root.session(state=retry_state) as resumed:
+            assert resumed.restored_turn is not None
+            assert (await resumed.restored_turn.get_result()).final_output == "done"
+    assert effects == ["once"]
+    assert len(responses.requests) == 3
+    assert (staged_text in json.dumps(responses.requests[-1]["input"])) == (not clear_pending)
+
+
 class LookupArgs(BaseModel):
     key: str
 
