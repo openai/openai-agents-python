@@ -502,6 +502,53 @@ async def test_chat_editor_failure_releases_validator_context_and_payload_frames
     assert editor.operations == []
 
 
+@pytest.mark.parametrize("needs_approval", [False, True])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        {"type": "synthetic-private-kind", "path": "synthetic-private-path"},
+        {
+            "type": "update_file",
+            "path": {"private": "synthetic-private-path"},
+            "diff": "synthetic-private-diff",
+        },
+    ],
+)
+async def test_batch_invalid_input_is_bounded_before_editor_or_approval(
+    responses, needs_approval, operation
+):
+    editor = Editor()
+    responses.respond(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "fc_invalid_batch",
+                "call_id": "invalid-batch",
+                "name": "apply_patch_batch",
+                "arguments": json.dumps({"operations": [operation]}),
+            },
+        }
+    )
+    responses.respond(assistant_output("refused invalid batch"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic") as provider:
+        agent = Agent(
+            instructions="Use editor.",
+            model="gpt-5",
+            provider=provider,
+            tools=[apply_patch_batch_tool(editor, needs_approval=needs_approval)],
+        )
+        await agent.run("edit", tool_error_formatter=lambda _: "bounded run error")
+    assert editor.operations == []
+    assert len(responses.requests) == 2
+    replies = [
+        item for item in responses.requests[1]["input"] if item["type"] == "function_call_output"
+    ]
+    assert len(replies) == 1
+    assert "Invalid Apply Patch batch arguments." in json.dumps(replies[0])
+    assert "synthetic-private" not in json.dumps(replies[0])
+
+
 @pytest.mark.parametrize("fail_at", [0, 1])
 @pytest.mark.parametrize("invalid_result", [False, True])
 async def test_editor_batch_failure_releases_unexecuted_payloads(fail_at, invalid_result):
@@ -559,7 +606,7 @@ async def test_editor_batch_failure_releases_unexecuted_payloads(fail_at, invali
             tools=[tool],
         )
         with pytest.raises(TypeError if invalid_result else RuntimeError) as caught:
-            await agent.run("edit")
+            await agent.run("edit", tool_error_formatter=lambda _: "must not recover editor body")
     if not invalid_result:
         assert caught.value is failure
     assert len(entered) == fail_at + 1

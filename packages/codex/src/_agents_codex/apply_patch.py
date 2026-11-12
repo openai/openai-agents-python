@@ -242,6 +242,9 @@ def apply_patch_batch_tool(
         name="apply_patch_batch",
         description="Apply an ordered batch of patches with the application's editor",
         needs_approval=needs_approval,
+        input_error_function=lambda _context, _error, _arguments: (
+            "Invalid Apply Patch batch arguments."
+        ),
         error_function=None,
     )(apply)
 
