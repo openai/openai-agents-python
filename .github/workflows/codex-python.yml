@@ -452,9 +452,12 @@ jobs:
               raise SystemExit(f"Missing Linux native components: {sorted(missing)}")
           verify_elf(Path("dist/exec-server-fixture"), "exec-server-fixture")
           PYTHON
-          uv run --isolated --no-project --no-build --python /opt/python/cp310-cp310/bin/python \
-            --with "$GITHUB_WORKSPACE"/dist/openai_agents-*.whl \
-            python -I packages/codex/scripts/verify_installed.py --output "$RUNNER_TEMP/manylinux-installed.json"
+          smoke_env="$RUNNER_TEMP/manylinux-smoke"
+          uv venv --python /opt/python/cp310-cp310/bin/python "$smoke_env"
+          uv pip install --no-build --link-mode copy --python "$smoke_env/bin/python" \
+            "$GITHUB_WORKSPACE"/dist/openai_agents-*.whl
+          "$smoke_env/bin/python" -I packages/codex/scripts/verify_installed.py \
+            --output "$RUNNER_TEMP/manylinux-installed.json"
       - name: Publish the native snapshot
         id: snapshot
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
