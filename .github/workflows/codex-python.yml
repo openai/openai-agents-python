@@ -95,6 +95,9 @@ jobs:
               exit 1
             fi
           done
+          if [[ -n "${OPENAI_AGENTS_NATIVE_BUILD_IMAGE:-}" ]]; then
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          fi
           native_bytecode=$(git ls-files -- ':(glob,icase)**/__pycache__' ':(glob,icase)**/__pycache__/**' ':(glob,icase)**/*.py[co]') || exit 1
           if [[ -n "$native_bytecode" ]]; then
             echo "Native CI rejects tracked Python bytecode and cache paths." >&2
@@ -107,7 +110,10 @@ jobs:
           python_bin=/opt/python/cp312-cp312/bin
           "$python_bin/python" --version
           printf '%s\n' "$python_bin" >> "$GITHUB_PATH"
-          printf '%s\n' 'OPENAI_AGENTS_NATIVE_MANYLINUX=manylinux_2_28' 'OPENSSL_STATIC=1' >> "$GITHUB_ENV"
+          {
+            printf '%s\n' 'OPENAI_AGENTS_NATIVE_MANYLINUX=manylinux_2_28' 'OPENSSL_STATIC=1'
+            printf 'OPENAI_AGENTS_NATIVE_RECEIPT_DIR=%s/dist\n' "$GITHUB_WORKSPACE"
+          } >> "$GITHUB_ENV"
       - name: Check the Linux ARM64 build host
         if: inputs.runner == 'ubuntu-24.04-arm'
         run: |
