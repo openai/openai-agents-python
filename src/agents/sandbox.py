@@ -46,8 +46,22 @@ from _agents_codex.sandbox import (
     truncate_text as truncate_text,
     truncate_with_token_budget as truncate_with_token_budget,
 )
+from _agents_codex.sandbox_skills import (
+    LazySkillSource as LazySkillSource,
+    LocalDirLazySkillSource as LocalDirLazySkillSource,
+    SandboxEnvironmentSource as SandboxEnvironmentSource,
+    Skill as Skill,
+    SkillMetadata as SkillMetadata,
+    Skills as Skills,
+)
 
 __all__ = [
+    "Skill",
+    "Skills",
+    "SkillMetadata",
+    "LazySkillSource",
+    "LocalDirLazySkillSource",
+    "SandboxEnvironmentSource",
     "ManagedWorkspaceCheckpoint",
     "cleanup_stale_default_local_snapshots",
     "default_local_snapshot_base_dir",

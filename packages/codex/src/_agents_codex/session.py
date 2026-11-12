@@ -3140,6 +3140,7 @@ class _EnvironmentLease:
         loop = asyncio.get_running_loop()
         self._ready: asyncio.Future[Environment[Any]] = loop.create_future()
         self._retired: asyncio.Future[None] = loop.create_future()
+        self.source = source
         self._borrower = asyncio.current_task()
         self._sync_run: _SyncRun | None = None
         self._woke_borrower = False
@@ -7099,6 +7100,12 @@ class Session(Generic[ContextT, OutputT]):
                 realtime_usage=self.realtime_usage,
             )
 
+            object.__setattr__(context, "_environment", self._executor)
+            object.__setattr__(
+                context,
+                "_sandbox_source",
+                self._environment_lease.source if self._environment_lease else None,
+            )
             object.__setattr__(context, "_usage_reporter", self._tool_usage_reporter(state, admit))
 
             if not admit():
@@ -14176,6 +14183,12 @@ class Session(Generic[ContextT, OutputT]):
                     trace_context=_native_trace_context(message.get("_sdk_trace")),
                     realtime_usage=self.realtime_usage,
                     call=call,
+                )
+                object.__setattr__(tool_context, "_environment", self._executor)
+                object.__setattr__(
+                    tool_context,
+                    "_sandbox_source",
+                    self._environment_lease.source if self._environment_lease else None,
                 )
                 object.__setattr__(
                     tool_context,

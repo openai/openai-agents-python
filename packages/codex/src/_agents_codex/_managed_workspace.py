@@ -140,6 +140,10 @@ class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
     def _sdk_workspace_instructions(self) -> str | None:
         return cast(str | None, getattr(self._source, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, None))
 
+    @property
+    def skill_tools(self) -> Any:
+        return getattr(self._source, "skill_tools", ())
+
     def validate_resume(self, checkpoint: ManagedWorkspaceCheckpoint) -> ManagedWorkspaceCheckpoint:
         # Association validation precedes resource acquisition and native restore.
         provenance = checkpoint._capture_provenance
