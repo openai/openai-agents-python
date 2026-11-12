@@ -221,10 +221,10 @@ async def native_case(case):
                         )
                 assert "synthetic-private-annotation" not in str(malformed.value)
                 assert invalid._outcome is None
-                with pytest.raises(RuntimeError, match="4096 UTF-8 bytes"):
+                with pytest.raises(RuntimeError, match="64 KiB"):
                     with telemetry.trace(
                         "metadata-still-bounded",
-                        options=telemetry.TraceOptions(metadata={"value": "é" * 3000}),
+                        options=telemetry.TraceOptions(metadata={"value": "é" * 32769}),
                     ):
                         pass
             elif case == "restrictions":
