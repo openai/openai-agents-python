@@ -531,6 +531,8 @@ async def test_native_jsonl_budget_retains_physical_append_until_resource_cleanu
     tmp_path: Path,
 ):
     release = threading.Event()
+    written = asyncio.Event()
+    loop = asyncio.get_running_loop()
     appended = []
 
     class BlockedOutbox(JsonlOutboxSink):
@@ -538,6 +540,7 @@ async def test_native_jsonl_budget_retains_physical_append_until_resource_cleanu
             appended.append(line)
             release.wait(timeout=10)
             super()._append_line(line)
+            loop.call_soon_threadsafe(written.set)
 
     path = tmp_path / "events.jsonl"
     instrumentation = Instrumentation(
@@ -575,4 +578,6 @@ async def test_native_jsonl_budget_retains_physical_append_until_resource_cleanu
         release.set()
         await manager.__aexit__(None, None, None)
         await instrumentation.flush()
+    async with timeout(5):
+        await written.wait()
     assert len(path.read_text().splitlines()) == 1

@@ -4829,10 +4829,7 @@ class Session(Generic[ContextT, OutputT]):
                         json.dumps(saved.history)
                     )
                     session._mcp_tools = mcp_tools
-                session._bind_sandbox_events(lease, thread)
-                session._model_backend = provider.model_backend
-                if provider.model_backend is not None:
-                    session._native._enable_model_producer(True)
+                session._bind_native_producers(lease, thread, provider)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
                 options.pop("_sdk_websocket_tls", None)
@@ -5287,10 +5284,15 @@ class Session(Generic[ContextT, OutputT]):
         if _start_readers:
             self._start_readers()
 
-    def _bind_sandbox_events(self, lease: _EnvironmentLease | None, thread: Any) -> None:
+    def _bind_native_producers(
+        self, lease: _EnvironmentLease | None, thread: Any, provider: NativeProvider
+    ) -> None:
         if lease is not None and lease._sandbox_events is not None:
             self._sandbox_events = lease._sandbox_events
             thread._enable_sandbox_operations()
+        self._model_backend = provider.model_backend
+        if provider.model_backend is not None:
+            self._native._enable_model_producer(True)
 
     def _start_readers(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         self._start_interception(pending)
