@@ -1,0 +1,77 @@
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1756,6 +1756,12 @@
+ }
+
+ impl ModelClientSession {
++    pub(crate) fn uses_chatgpt_plan(&self) -> bool {
++        self.client
++            .auth_manager()
++            .is_some_and(|manager| manager.uses_app_managed_model_oauth())
++    }
++
+     pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
+         let source = &self.client.state.session_source;
+         // ThreadSpawn children expose the same attention API as root turns.
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2034,7 +2034,7 @@
+         Arc::clone(&turn_diff_tracker),
+     );
+     let max_retries = turn_context.provider.info().stream_max_retries();
+-    let stop_at_rate_limit = client_session.saved_login_limits_need_attention();
++    let stop_at_saved_login_limit = client_session.saved_login_limits_need_attention();
+     let mut retry_state = ResponsesStreamRetryState::default();
+     let mut recovery_attempt = 0;
+     let mut initial_input = Some(input);
+@@ -2324,17 +2324,6 @@
+                     if let Some(snapshot) = err.api_rate_limits().cloned() {
+                         sess.emit_api_rate_limits(&turn_context, snapshot).await;
+                     }
+-                    let rate_limited = match err.details() {
+-                        CodexErrorDetails::RateLimitExceeded(_) => true,
+-                        CodexErrorDetails::RetryLimit(error) => {
+-                            error.status == http::StatusCode::TOO_MANY_REQUESTS
+-                        }
+-                        _ => false,
+-                    };
+-                    if rate_limited && stop_at_rate_limit {
+-                        // SDK callers decide when to resubmit after saved-login throttling.
+-                        return Err(err);
+-                    }
+                     match err.details() {
+                         CodexErrorDetails::ContextWindowExceeded => {
+                             sess.set_total_tokens_full(&turn_context, &step_context.settings)
+@@ -2410,7 +2399,21 @@
+                 || failure.is_some()
+                 || attempt_deadline.expired()
+                 || context.normalized.error_code.as_deref() == Some("conversation_locked");
+-            let hard_veto = permanently_stopped
++            // Registered plan inference allows one physical attempt per model step.
++            // SDK callers decide when to resubmit after saved-login quota or throttling.
++            let saved_login_limit = stop_at_saved_login_limit
++                && match err.details() {
++                    CodexErrorDetails::RateLimitExceeded(_) | CodexErrorDetails::QuotaExceeded => {
++                        true
++                    }
++                    CodexErrorDetails::RetryLimit(error) => {
++                        error.status == http::StatusCode::TOO_MANY_REQUESTS
++                    }
++                    _ => false,
++                };
++            let stop_at_plan_error = client_session.uses_chatgpt_plan() || saved_login_limit;
++            let hard_veto = stop_at_plan_error
++                || permanently_stopped
+                 || retirement_failed
+                 || attempt
+                     .provider_effects
+@@ -2438,7 +2441,8 @@
+                 && retry_settings.and_then(|settings| settings.max_retries) != Some(0)
+                 && locked_retries < 3;
+             let mut resolution = None;
+-            if !permanently_stopped
++            if !stop_at_plan_error
++                && !permanently_stopped
+                 && !retirement_failed
+                 && !compatibility_retry
+                 && (retry_configured || failure.is_some() || attempt_timeout.is_some())
