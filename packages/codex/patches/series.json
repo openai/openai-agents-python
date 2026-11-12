@@ -741,6 +741,10 @@
       "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
     },
     {
+      "path": "sdk-realtime-vad-provider-data.patch",
+      "sha256": "bb38997bdffe09280acb438f7e31ae6e7b0a609f85c2ac072340b8a8dc7cb729"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
       "sha256": "487a2e788517874133ef1d0aef8366cbcbd885fdb57783c1d569d374aed14220"
     },
@@ -793,5 +797,5 @@
       "sha256": "d89d2ed9176b3a4a163a890d2d9cf2be51cf6029d13d25aa895f876eb2770609"
     }
   ],
-  "result_tree": "bd562c8e9a302c673e18f9cd980c746a7972afed"
+  "result_tree": "d509c5df014892325f9412b3857aa63786eaa2d7"
 }
