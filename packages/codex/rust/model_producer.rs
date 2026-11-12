@@ -284,7 +284,6 @@ impl PythonTools {
                         events,
                         projection,
                         observe_raw_chat,
-                        chat_stream,
                         ..
                     },
                 ..
@@ -312,19 +311,7 @@ impl PythonTools {
                 )
             } else {
                 let had_usage = projection.completed_usage().is_some();
-                let (mut projected, continue_stream) = projection.push(data);
-                if *chat_stream {
-                    for event in &mut projected {
-                        if let ResponseEvent::Completed {
-                            usage_metadata: Some(metadata),
-                            ..
-                        } = event
-                        {
-                            // Chat usage has been normalized into this synthetic completion.
-                            metadata.metadata = None;
-                        }
-                    }
-                }
+                let (projected, continue_stream) = projection.push(data);
                 // Retirement can discard the reply before the iterator settles.
                 if !had_usage
                     && let (Some(attempt), Some(usage)) = (attempt, projection.completed_usage())
@@ -388,10 +375,22 @@ impl PythonTools {
         let reply = match delivery {
             Delivery::Waiting(reply) => reply,
             Delivery::Streaming {
-                projection, finish, ..
+                projection,
+                finish,
+                chat_stream,
+                ..
             } => {
                 let usage = projection.completed_usage().cloned();
-                let result = projection.finish(error.then_some(FAILURE));
+                let mut result = projection.finish(error.then_some(FAILURE));
+                if chat_stream
+                    && let Ok(events) = &mut result
+                    && let Some(ResponseEvent::Completed {
+                        usage_metadata: Some(metadata),
+                        ..
+                    }) = events.last_mut()
+                {
+                    metadata.metadata = None;
+                }
                 if let (Some(attempt), Some(usage)) = (&attempt, usage)
                     && attempt.report_usage(usage).is_err()
                     && result.is_ok()
