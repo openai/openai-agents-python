@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         ToolTimeoutBehavior,
         ToolTimeoutError,
     )
+    from .agent import ContextT
     from .manual import ActionRequested
     from .native_interception import Allow, Deny, ReplaceArguments
 
@@ -678,6 +679,20 @@ class _ToolCatalog:
 
     def native_specs(self) -> str:
         return json.dumps([json.loads(tool.spec_json) for tool in self.tools])
+
+
+def _capture_tools(
+    generation: int,
+    tools: tuple[FunctionTool[Any, Any, Any], ...],
+    context: ContextT | None,
+) -> _ToolCatalog:
+    return _ToolCatalog(
+        generation,
+        tuple(tool._capture(context) for tool in tools),
+    )
+
+
+_capture_tools.__module__ = "agents.session"
 
 
 def _function_parameters(
