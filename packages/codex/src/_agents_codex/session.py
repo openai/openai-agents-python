@@ -2828,8 +2828,6 @@ def _check_restored_hosted_mcp(
 ) -> None:
     from .hosted_mcp import HostedMCP
 
-    if any(not isinstance(tool, HostedMCP) for tool in authorized):
-        raise TypeError("restored_hosted_mcp requires current HostedMCP declarations")
     selected = None if saved.operation_tools is None else frozenset(saved.operation_tools)
     for tool in available:
         if (
