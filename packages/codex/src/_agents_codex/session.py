@@ -3094,6 +3094,7 @@ def _prepare_native_checkpoint(
         restored_override = True
         payload["agent_options"].pop("_sdk_output_override")
     payload.pop("original_input", None)
+    payload.pop("continuation_trace_id", None)
     payload.pop("codex_login_binding", None)
     payload.pop("executor_read_only", None)
     if saved.format_version in (8, 9):
@@ -3743,6 +3744,7 @@ class Session(Generic[ContextT, OutputT]):
         _captured_siwc_provider: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
+        _tracing_context_policy_only: bool = False,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
@@ -4823,7 +4825,13 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     )
                     # The native reader can receive restored requests during preparation.
-                    active.tracing = _capture(fallback=_tracing_context)
+                    active.tracing = _capture(
+                        fallback=_tracing_context,
+                        fallback_policy_only=_tracing_context_policy_only,
+                        continuation_trace_id=(
+                            saved.continuation_trace_id if parent_trace is None else None
+                        ),
+                    )
                     await thread._prepare_manual_restore()
                     session._validate_pending_manual(active)
                     session._observations.append(
@@ -6764,7 +6772,7 @@ class Session(Generic[ContextT, OutputT]):
             }
             if expected_turn_id is not None:
                 request["exact_steering"] = True
-            captured = _CapturedTrace(None, None)
+            captured = _CapturedTrace(None, None, policy_only=False)
             if state.tracing is not None and state.tracing.context is not None:
                 # Steering belongs to the admitted root, even if the caller's
                 # ambient workflow changed. Retain it through native acceptance.
@@ -16703,6 +16711,7 @@ class Session(Generic[ContextT, OutputT]):
         )
         executor_policy_digest = None
         guardrail_records: list[dict[str, Any]] = []
+        continuation_trace_id = None
         if (
             active_uses_executor
             or self._strict_executor_writes
@@ -16717,6 +16726,8 @@ class Session(Generic[ContextT, OutputT]):
             if drain_budget_usage and self._reader.done():
                 raise NativeError("Native event reader ended before manual capture")
             guardrail_records = self._checkpoint_guardrail_records(active)
+            if active.tracing is not None:
+                continuation_trace_id = active.tracing.correlation_id()
             # Block replies and suppress expected ShutdownComplete/EOF while
             # Core decides whether it can stop the original writer. Readers
             # must keep dispatching until native capture confirms suspension.
@@ -16932,6 +16943,8 @@ class Session(Generic[ContextT, OutputT]):
             if active is not None:
                 if active.original_input is not None:
                     payload["original_input"] = active.original_input
+                if continuation_trace_id is not None:
+                    payload["continuation_trace_id"] = continuation_trace_id
                 usage = active.run_usage.snapshot()
                 payload["guardrail_results"] = guardrail_records
                 payload["run_usage"] = {
