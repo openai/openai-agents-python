@@ -1277,10 +1277,15 @@ def test_sandbox_state_equality_ignores_memory_lock_identity() -> None:
     assert reconstructed == original
     assert restored == original
     assert reconstructed._native_memory_flush_lock is not original._native_memory_flush_lock
+    assert reconstructed._native_skill_copy_budget is not original._native_skill_copy_budget
+    assert restored._native_skill_copy_budget is not original._native_skill_copy_budget
+    assert not reconstructed._native_skill_copy_budget.trusted
+    assert not restored._native_skill_copy_budget.trusted
     for deep in (False, True):
         copied = original.model_copy(deep=deep)
         assert copied == original
         assert copied._native_memory_flush_lock is original._native_memory_flush_lock
+        assert copied._native_skill_copy_budget is original._native_skill_copy_budget
     assert original.model_copy(update={"workspace_root_ready": True}) != original
     for name, value in (
         ("_path_grants_require_rebind", ("data",)),

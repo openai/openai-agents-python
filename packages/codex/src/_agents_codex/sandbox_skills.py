@@ -10,7 +10,9 @@ from typing import Any, Protocol, TypeVar
 from urllib.parse import unquote, urlsplit
 
 from _agents_shared.sandbox_skills import (
+    Dir,
     LazySkillSource as LazySkillSource,
+    LocalDir,
     LocalDirLazySkillSource as LocalDirLazySkillSource,
     Manifest,
     SandboxSession,
@@ -18,12 +20,11 @@ from _agents_shared.sandbox_skills import (
     Skill as Skill,
     SkillMetadata as SkillMetadata,
     SkillSet,
+    _LocalDirBudget,
     _MetadataBudget,
     coerce_posix_path,
     posix_path_as_path,
 )
-from agents.classic.sandbox.entries import Dir, LocalDir
-from agents.classic.sandbox.entries.artifacts import _LocalDirBudget
 
 from ._function_tools import Allow, FunctionTool, ToolContext, function_tool
 from .executor import Environment, _path_uri

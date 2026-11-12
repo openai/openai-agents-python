@@ -13,7 +13,14 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
-from agents.classic.sandbox.entries import BaseEntry, Dir, File, LocalDir, LocalFile
+from agents.classic.sandbox.entries import (
+    BaseEntry,
+    Dir as Dir,
+    File,
+    LocalDir as LocalDir,
+    LocalFile,
+)
+from agents.classic.sandbox.entries.artifacts import _LocalDirBudget as _LocalDirBudget
 from agents.classic.sandbox.errors import (
     LocalDirReadError,
     SkillsConfigError,

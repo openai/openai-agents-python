@@ -26,6 +26,14 @@ class _SkillCopyBudget:
         self.snapshot_pending = False
         self.restore_candidate: tuple[int, int, str] | None = None
 
+    def __eq__(self, other: object) -> bool:
+        """Copy-accounting value equality without lock identity."""
+        if type(self) is not type(other):
+            return False
+        return {key: value for key, value in vars(self).items() if key != "lock"} == {
+            key: value for key, value in vars(other).items() if key != "lock"
+        }
+
     def _accept_snapshot(self, charge: tuple[int, int, str]) -> None:
         self.members = max(self.members, charge[0])
         self.bytes = max(self.bytes, charge[1])
