@@ -838,8 +838,8 @@
     },
     {
       "path": "sdk-tracing-annotation-shapes.patch",
-      "sha256": "f5d36afa2db92661f006b96a36a561ef798dbf20ba3f04cedd135473b44bdb28"
+      "sha256": "621eeab50d86c245d1002f6ad9b9c69e5c08beba5d71b2e206c595bf6c9d2d7e"
     }
   ],
-  "result_tree": "1c57699a9fbe935d7f20485db2214a703be7e8e9"
+  "result_tree": "6aa2f0f4b127da80d45914052469a5d28590e0bc"
 }

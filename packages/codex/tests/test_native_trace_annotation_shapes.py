@@ -154,7 +154,7 @@ async def native_boundaries():
         await telemetry.shutdown()
 
 
-@pytest.mark.parametrize("route", ["otlp", "generic"])
+@pytest.mark.parametrize("route", ["otlp", "generic", "wide", "wide-queue"])
 def test_native_annotation_delivery_and_generic_limits(route):
     result = subprocess.run(
         [
@@ -194,6 +194,42 @@ async def native_delivery(route):
             assert delivered["generic.000-long"] == "x" * 4096
             assert len(delivered) <= 128
             assert ended[0]["dropped_attributes_count"] > 0
+        finally:
+            await telemetry.shutdown()
+        return
+
+    if route in {"wide", "wide-queue"}:
+        events = []
+
+        class Recorder:
+            def on_trace_event(self, event):
+                events.append(event)
+
+        await telemetry.configure(
+            processors=[Recorder()],
+            trace_delivery={"max_queue_bytes": 60000} if route == "wide-queue" else None,
+        )
+        try:
+            metadata = {f"f{i}": 0 for i in range(3000)}
+            with telemetry.trace("bounds.wide.root", options={"metadata": metadata}) as root:
+                parent = root.context
+            with telemetry.use_context(parent):
+                with telemetry.span("bounds.wide.late-child"):
+                    pass
+            flushed = await telemetry.force_flush(timeout_ms=5000)
+            if route == "wide-queue":
+                assert flushed.status == "partial"
+                assert not events
+            else:
+                assert flushed.status == "success"
+                ended = {event["name"]: event for event in events if event["lifecycle"] == "end"}
+                assert ended.keys() == {"bounds.wide.root", "bounds.wide.late-child"}
+                delivered = {
+                    key.removeprefix("sdk.metadata."): json.loads(value)
+                    for key, value in ended["bounds.wide.root"]["attributes"].items()
+                    if key.startswith("sdk.metadata.")
+                }
+                assert delivered == metadata
         finally:
             await telemetry.shutdown()
         return
