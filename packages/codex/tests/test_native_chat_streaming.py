@@ -377,3 +377,43 @@ async def test_native_chat_cancellation_joins_cleanup_and_discards_late_tools():
             await pending
             assert cleaned.is_set()
             assert effects == []
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_native_chat_usage_stays_out_of_responses_originals(streaming):
+    usage = {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+
+    async def frames():
+        yield chunk({"content": "done"}, "stop")
+        yield chunk(usage=usage)
+
+    async def create(**body):
+        if body.get("stream"):
+            return frames()
+        return {
+            "id": "chat-completed",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": usage,
+        }
+
+    async with (
+        timeout(15),
+        NativeProvider(
+            model_backend=ChatCompletionsModel(client(create), stream=streaming)
+        ) as provider,
+    ):
+        result = await Agent(instructions="Reply.", model="fixture", provider=provider).run(
+            "Reply.", return_raw_usage=True
+        )
+    assert result.raw_usage == ()
+    assert result.run_usage.requests == 1
+    assert result.run_usage.input_tokens == 2
+    assert result.run_usage.output_tokens == 1
+    assert result.run_usage.total_tokens == 3

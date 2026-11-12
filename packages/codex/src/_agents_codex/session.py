@@ -11865,7 +11865,7 @@ class Session(Generic[ContextT, OutputT]):
             observing_chat = chat_stream and getattr(request, "_observe_raw_provider_events", False)
             started = (
                 native._start_model_producer_stream(request_id, chat_stream=True)
-                if observing_chat
+                if chat_stream
                 else native._start_model_producer_stream(request_id)
             )
             if not started:

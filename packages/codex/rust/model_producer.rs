@@ -27,6 +27,7 @@ pub(super) enum Delivery {
         finish: oneshot::Sender<StreamResult>,
         projection: ApplicationModelStream,
         observe_raw_chat: bool,
+        chat_stream: bool,
     },
 }
 impl Delivery {
@@ -247,6 +248,7 @@ impl PythonTools {
                 finish,
                 projection: ApplicationModelStream::new(observe_raw && !chat_stream),
                 observe_raw_chat: observe_raw && chat_stream,
+                chat_stream,
             },
         ) else {
             unreachable!()
@@ -282,6 +284,7 @@ impl PythonTools {
                         events,
                         projection,
                         observe_raw_chat,
+                        chat_stream,
                         ..
                     },
                 ..
@@ -309,7 +312,19 @@ impl PythonTools {
                 )
             } else {
                 let had_usage = projection.completed_usage().is_some();
-                let (projected, continue_stream) = projection.push(data);
+                let (mut projected, continue_stream) = projection.push(data);
+                if *chat_stream {
+                    for event in &mut projected {
+                        if let ResponseEvent::Completed {
+                            usage_metadata: Some(metadata),
+                            ..
+                        } = event
+                        {
+                            // Chat usage has been normalized into this synthetic completion.
+                            metadata.metadata = None;
+                        }
+                    }
+                }
                 // Retirement can discard the reply before the iterator settles.
                 if !had_usage
                     && let (Some(attempt), Some(usage)) = (attempt, projection.completed_usage())
