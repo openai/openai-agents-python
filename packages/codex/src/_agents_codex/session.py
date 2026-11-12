@@ -4823,9 +4823,7 @@ class Session(Generic[ContextT, OutputT]):
                         json.dumps(saved.history)
                     )
                     session._mcp_tools = mcp_tools
-                if lease is not None and lease._sandbox_events is not None:
-                    session._sandbox_events = lease._sandbox_events
-                    thread._enable_sandbox_operations()
+                session._bind_sandbox_events(lease, thread)
                 session._model_backend = provider.model_backend
                 if provider.model_backend is not None:
                     session._native._enable_model_producer(True)
@@ -5281,6 +5279,11 @@ class Session(Generic[ContextT, OutputT]):
         self._mcp_reader: asyncio.Task[None] | None = None
         if _start_readers:
             self._start_readers()
+
+    def _bind_sandbox_events(self, lease: _EnvironmentLease | None, thread: Any) -> None:
+        if lease is not None and lease._sandbox_events is not None:
+            self._sandbox_events = lease._sandbox_events
+            thread._enable_sandbox_operations()
 
     def _start_readers(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         self._start_interception(pending)
