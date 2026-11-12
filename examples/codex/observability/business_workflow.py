@@ -6,16 +6,27 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Lock
+from time import perf_counter_ns
 from typing import Any
 from urllib.request import Request, urlopen
 
-from agents import Agent, ToolContext, function_tool, telemetry
-from agents.testing import ScriptedResponses, text, tool_call
+from agents import (
+    Agent,
+    NativeError,
+    RunBudget,
+    ToolContext,
+    TurnNeedsAttention,
+    TurnStoppedError,
+    function_tool,
+    telemetry,
+)
+from agents.testing import ScriptedResponse, ScriptedResponses, text, tool_call
 
 from .trace_walkthrough import Collector
 
@@ -32,6 +43,23 @@ def plain(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return [plain(item) for item in value]
     return value
+
+
+@contextmanager
+def business_stage(name: str, receipts: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    receipt: dict[str, Any] = {"stage": name, "outcome": "completed"}
+    started = perf_counter_ns()
+    with telemetry.span("business." + name, options={"metadata": {"business.stage": name}}) as span:
+        try:
+            yield receipt
+        except Exception:
+            receipt["outcome"] = "failed"
+            raise
+        finally:
+            if "error_code" in receipt:
+                span.set_outcome(status="error", category=receipt["error_code"])
+            receipt["duration_ns"] = perf_counter_ns() - started
+            receipts.append(receipt)
 
 
 class ReceiptProcessor:
@@ -147,10 +175,84 @@ def post(url: str, headers: dict[str, str]) -> dict[str, Any]:
     return receipt
 
 
+async def supervisory_stages(receipts: ReceiptProcessor) -> list[dict[str, Any]]:
+    stages: list[dict[str, Any]] = []
+    entered, cleaned = asyncio.Event(), asyncio.Event()
+    with telemetry.trace("business.supervisory-stops"):
+        for scenario in ("cancelled", "run_budget_exceeded"):
+            entered.clear()
+            cleaned.clear()
+
+            @function_tool
+            async def hold() -> str:
+                """The synthetic stage has been waiting for cancellation."""
+                entered.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    cleaned.set()
+                return "unreachable"
+
+            scripts = (
+                [[tool_call("hold", {}, call_id="supervisory-hold")]]
+                if scenario == "cancelled"
+                else []
+            )
+            async with ScriptedResponses(*scripts) as peer:
+                agent = Agent(
+                    instructions="Run the synthetic stage.", provider=peer.provider, tools=[hold]
+                )
+                async with agent.session() as session:
+                    with business_stage("supervisory_" + scenario, stages) as stage:
+                        turn = await session.submit(
+                            "Run the stage.",
+                            budget=RunBudget(max_requests=0)
+                            if scenario == "run_budget_exceeded"
+                            else None,
+                        )
+                        if scenario == "cancelled":
+                            await asyncio.wait_for(entered.wait(), 10)
+                            await turn.cancel()
+                            assert cleaned.is_set()
+                        outcome = await turn.wait_for_attention()
+                        assert isinstance(outcome, TurnNeedsAttention)
+                        assert outcome.reason == (
+                            "interrupted" if scenario == "cancelled" else "budget_exceeded"
+                        )
+                        if scenario == "cancelled":
+                            assert isinstance(outcome.error, TurnStoppedError)
+                        else:
+                            assert isinstance(outcome.error, NativeError)
+                            assert outcome.error.code == "run_budget_exceeded"
+                            assert not cleaned.is_set()
+                        try:
+                            await turn.get_result()
+                        except (TurnStoppedError, NativeError) as error:
+                            assert error is outcome.error
+                        else:
+                            raise AssertionError("The stopped stage must not return a result")
+                        stage.update(outcome="failed", error_code=scenario)
+                        assert len(peer.requests) == (1 if scenario == "cancelled" else 0)
+    await telemetry.force_flush()
+    for stage in stages:
+        assert stage["outcome"] == "failed"
+        assert stage["duration_ns"] >= 0
+        assert any(
+            event["lifecycle"] == "end"
+            and event["name"] == "business." + stage["stage"]
+            and event["attributes"].get("sdk.outcome.category") == stage["error_code"]
+            for event in receipts.snapshot()
+        )
+    return stages
+
+
 async def workflow(collector_url: str, worker_url: str, scenario: str) -> dict[str, Any]:
     receipts = await configure(collector_url, "checkout")
     remote: dict[str, Any] = {}
     carrier: dict[str, str] = {}
+    stages: list[dict[str, Any]] = []
+    delivered: list[dict[str, str]] = []
+    supervisory = await supervisory_stages(receipts)
     if scenario == "failure":
         telemetry.add_trace_processor(FailingProcessor())
     try:
@@ -161,33 +263,58 @@ async def workflow(collector_url: str, worker_url: str, scenario: str) -> dict[s
                 metadata={"business.stage": "checkout", "business.route": "standard"},
             ),
         ) as root:
-            with telemetry.span(
-                "validate order", options={"metadata": {"business.stage": "validation"}}
-            ):
-                # Business metadata comes from constants or allowlisted enums.
-                # The synthetic private order stays in provider/tool payloads.
-                pass
+            with business_stage("authorized_routing", stages) as route:
+                registry = {"fulfillment": worker_url}
+                selected_worker = registry["fulfillment"]
+                route["specialist"] = "fulfillment"
 
             @function_tool
             async def dispatch(ctx: ToolContext[None]) -> str:
                 """Call the separate synthetic fulfillment service."""
                 assert ctx.trace_context is not None
                 carrier.update(ctx.trace_context.to_headers())
-                remote.update(await asyncio.to_thread(post, worker_url, carrier))
-                outcome = remote.get("outcome")
-                if not isinstance(outcome, str) or outcome not in ("completed", "stopped"):
-                    raise ValueError("Unexpected synthetic worker outcome")
+                with business_stage("specialist_tool", stages) as stage:
+                    remote.update(await asyncio.to_thread(post, selected_worker, carrier))
+                    outcome = remote.get("outcome")
+                    if not isinstance(outcome, str) or outcome not in ("completed", "stopped"):
+                        raise ValueError("Unexpected synthetic worker outcome")
+                    if outcome == "stopped":
+                        stage.update(outcome="failed", error_code="fulfillment_stopped")
                 return outcome
 
             async with ScriptedResponses(
-                [tool_call("dispatch", {}, call_id="dispatch-1")], [text(SENTINEL)]
+                [tool_call("dispatch", {}, call_id="dispatch-1")],
+                ScriptedResponse(
+                    [text(SENTINEL)],
+                    usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+                ),
             ) as peer:
-                await Agent(
+                completed = await Agent(
                     instructions="Dispatch the synthetic order.",
                     tools=[dispatch],
                     provider=peer.provider,
                 ).run(SENTINEL)
             outcome = remote["outcome"]
+            with business_stage("validation", stages) as validation:
+                accepted = outcome == "completed" and completed.final_output == SENTINEL
+                validation["outcome"] = "completed" if accepted else "rejected"
+            with business_stage("in_memory_delivery", stages) as delivery:
+                if accepted:
+                    delivered.append({"outcome": "completed"})
+                else:
+                    delivery["outcome"] = "suppressed"
+            usage = completed.run_usage
+            accounting = {
+                "reported_totals": {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "total_tokens": usage.total_tokens,
+                },
+                "observed_completions": usage.requests,
+                "missing_usage_requests": usage.missing_usage_requests,
+                "fixture_estimate": {"tokens": 8, "basis": "synthetic fixture estimate"},
+                "worker_tokens": {"status": "unavailable"},
+            }
             with telemetry.span(
                 "record business outcome",
                 options={
@@ -221,6 +348,10 @@ async def workflow(collector_url: str, worker_url: str, scenario: str) -> dict[s
         "outcome": outcome,
         "trace_id": root_id,
         "carrier": carrier,
+        "stages": stages,
+        "supervisory": supervisory,
+        "delivered": delivered,
+        "usage": accounting,
         "flush": asdict(flush),
         "events": receipts.snapshot(),
         "worker": remote,
@@ -232,6 +363,36 @@ async def workflow(collector_url: str, worker_url: str, scenario: str) -> dict[s
 def verify(artifact: dict[str, Any]) -> None:
     local, remote = artifact["events"], artifact["worker"]["events"]
     assert local and remote, "Missing processor receipts"
+    assert [row["stage"] for row in artifact["stages"]] == [
+        "authorized_routing",
+        "specialist_tool",
+        "validation",
+        "in_memory_delivery",
+    ]
+    assert all(row["duration_ns"] >= 0 for row in artifact["stages"])
+    assert artifact["delivered"] == (
+        [{"outcome": "completed"}] if artifact["outcome"] == "completed" else []
+    )
+    assert artifact["stages"][-1]["outcome"] == (
+        "completed" if artifact["outcome"] == "completed" else "suppressed"
+    )
+    failed_stage = artifact["stages"][1]
+    assert failed_stage.get("error_code") == (
+        "fulfillment_stopped" if artifact["scenario"] == "failure" else None
+    )
+    assert any(
+        event["name"] == "business.specialist_tool"
+        and event["attributes"].get("sdk.outcome.category") == "fulfillment_stopped"
+        for event in local
+    ) == (artifact["scenario"] == "failure")
+    assert artifact["usage"]["fixture_estimate"]["basis"] == "synthetic fixture estimate"
+    assert artifact["usage"]["reported_totals"] == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }
+    assert artifact["usage"]["observed_completions"] == 2
+    assert artifact["usage"]["missing_usage_requests"] == 1
     assert SENTINEL not in json.dumps(artifact), "Private payload reached an artifact"
     tool_id = artifact["carrier"]["traceparent"][36:52]
     tool = next(event for event in local if event["span_id"] == tool_id)

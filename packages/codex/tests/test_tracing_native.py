@@ -1039,6 +1039,25 @@ async def _processors_flush(
         )
         assert not any(row["name"] == "replacement route" for row in _spans(peer))
 
+        queued, next_route = Recorder(), Recorder()
+        telemetry.set_trace_processors([queued])
+        with telemetry.trace("queued before replacement"):
+            pass
+        assert not queued.events
+        telemetry.set_trace_processors([next_route])
+        with telemetry.trace("created after replacement"):
+            pass
+        result = await telemetry.force_flush(timeout_ms=5000)
+        assert result.status == "success", result
+        assert [(event["name"], event["lifecycle"]) for event in queued.events] == [
+            ("queued before replacement", "start"),
+            ("queued before replacement", "end"),
+        ]
+        assert [(event["name"], event["lifecycle"]) for event in next_route.events] == [
+            ("created after replacement", "start"),
+            ("created after replacement", "end"),
+        ]
+
 
 async def _processor_failures(fixture: ResponsesFixture, provider: NativeProvider) -> None:
     release = threading.Event()
