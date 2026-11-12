@@ -1,0 +1,74 @@
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json.rs b/codex-rs/codex-api/src/endpoint/responses_json.rs
+index decbfeb6..7c002cc7 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_json.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_json.rs
+@@ -83,6 +83,7 @@ pub(super) fn response_stream(
+         drop(body);
+         if observe_raw_provider_events && response.is_object() {
+             yield ResponseEvent::RawProvider(SdkRawProviderEvent {
++                source: codex_protocol::protocol::SdkRawProviderSource::Responses,
+                 transport: ResponsesEventTransport::Json,
+                 payload: response.clone(),
+             });
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index a944a900..1a745a91 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -773,6 +773,7 @@ async fn run_websocket_response_stream(
+                     && payload.is_object()
+                     && tx_event
+                         .send(Ok(ResponseEvent::RawProvider(SdkRawProviderEvent {
++                            source: codex_protocol::protocol::SdkRawProviderSource::Responses,
+                             transport: ResponsesEventTransport::Websocket,
+                             payload: payload.clone(),
+                         })))
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index 1045a688..f1af9528 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -778,6 +778,7 @@ async fn process_sse_with_treatment(
+             && payload.is_object()
+             && tx_event
+                 .send(Ok(ResponseEvent::RawProvider(SdkRawProviderEvent {
++                    source: codex_protocol::protocol::SdkRawProviderSource::Responses,
+                     transport: ResponsesEventTransport::Sse,
+                     payload: payload.clone(),
+                 })))
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 53ec0f6c..48191c8b 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1925,7 +1925,7 @@ impl Event {
+                 "id": &self.id,
+                 "msg": {
+                     "type": "sdk_raw_provider_event",
+-                    "source": "responses",
++                    "source": event.source,
+                     "transport": event.transport,
+                     "payload": &event.payload,
+                 },
+@@ -1943,8 +1943,16 @@ pub enum ResponsesEventTransport {
+     Json,
+ }
+ 
++#[derive(Debug, Clone, Copy, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum SdkRawProviderSource {
++    Responses,
++    ChatCompletions,
++}
++
+ #[derive(Clone)]
+ pub struct SdkRawProviderEvent {
++    pub source: SdkRawProviderSource,
+     pub transport: ResponsesEventTransport,
+     pub payload: serde_json::Value,
+ }
+@@ -1952,6 +1960,7 @@ pub struct SdkRawProviderEvent {
+ impl std::fmt::Debug for SdkRawProviderEvent {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         f.debug_struct("SdkRawProviderEvent")
++            .field("source", &self.source)
+             .field("transport", &self.transport)
+             .finish_non_exhaustive()
+     }
