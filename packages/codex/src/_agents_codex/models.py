@@ -445,7 +445,11 @@ def _chat_patch_replay_arguments(kind: str, item: Mapping[str, Any]) -> Any:
 _MAX_CHAT_STREAM_BYTES = 8 * 1024 * 1024
 
 
-class _RawChatChunk(dict[str, Any]):
+class _ChatStreamEvent(dict[str, Any]):
+    """Process-local Chat provenance, preserved by delegating stream adapters."""
+
+
+class _RawChatChunk(_ChatStreamEvent):
     """A process-local source tag; never part of provider JSON."""
 
 
@@ -1078,7 +1082,9 @@ class ChatCompletionsModel:
                             raise ValueError("Raw Chat chunk exceeds the stream frame limit")
                         yield _RawChatChunk(deepcopy(raw))
                     if opening:
-                        yield {"type": "response.created", "response": {"id": response_id}}
+                        yield _ChatStreamEvent(
+                            {"type": "response.created", "response": {"id": response_id}}
+                        )
                     choices = raw.get("choices")
                     if choices == []:
                         continue
@@ -1110,29 +1116,33 @@ class ChatCompletionsModel:
                         raise ValueError("Chat adapters do not support provider reasoning replay")
                     if delta.get("content") is not None:
                         if text is None:
-                            yield {
-                                "type": "response.output_item.added",
-                                "output_index": 0,
-                                "item": {
-                                    "id": message_id,
-                                    "type": "message",
-                                    "role": "assistant",
-                                    "content": [],
-                                },
-                            }
+                            yield _ChatStreamEvent(
+                                {
+                                    "type": "response.output_item.added",
+                                    "output_index": 0,
+                                    "item": {
+                                        "id": message_id,
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [],
+                                    },
+                                }
+                            )
                         text = (text or "") + delta["content"]
-                        yield {
-                            "type": "response.output_text.delta",
-                            "item_id": message_id,
-                            "output_index": 0,
-                            "content_index": 0,
-                            "delta": delta["content"],
-                            **(
-                                {"logprobs": deepcopy(probabilities)}
-                                if probabilities is not None
-                                else {}
-                            ),
-                        }
+                        yield _ChatStreamEvent(
+                            {
+                                "type": "response.output_text.delta",
+                                "item_id": message_id,
+                                "output_index": 0,
+                                "content_index": 0,
+                                "delta": delta["content"],
+                                **(
+                                    {"logprobs": deepcopy(probabilities)}
+                                    if probabilities is not None
+                                    else {}
+                                ),
+                            }
+                        )
                     if delta.get("refusal") is not None:
                         refusal = (refusal or "") + delta["refusal"]
                     if probabilities is not None:
@@ -1218,36 +1228,42 @@ class ChatCompletionsModel:
                 for item in result.output
             ]
             for index, item in enumerate(output):
-                yield {"type": "response.output_item.done", "output_index": index, "item": item}
+                yield _ChatStreamEvent(
+                    {"type": "response.output_item.done", "output_index": index, "item": item}
+                )
             measured = result.usage
-            yield {
-                "type": "response.completed",
-                "response": {
-                    "id": response_id,
-                    "status": "completed",
-                    "output": output,
-                    **(
-                        {
-                            "usage": {
-                                "input_tokens": measured["input_tokens"],
-                                "output_tokens": measured["output_tokens"],
-                                "total_tokens": measured["total_tokens"],
-                                "input_tokens_details": {
-                                    "cached_tokens": measured.get("cached_input_tokens", 0),
-                                    "cache_write_tokens": measured.get(
-                                        "cache_write_input_tokens", 0
-                                    ),
-                                },
-                                "output_tokens_details": {
-                                    "reasoning_tokens": measured.get("reasoning_output_tokens", 0)
-                                },
+            yield _ChatStreamEvent(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": response_id,
+                        "status": "completed",
+                        "output": output,
+                        **(
+                            {
+                                "usage": {
+                                    "input_tokens": measured["input_tokens"],
+                                    "output_tokens": measured["output_tokens"],
+                                    "total_tokens": measured["total_tokens"],
+                                    "input_tokens_details": {
+                                        "cached_tokens": measured.get("cached_input_tokens", 0),
+                                        "cache_write_tokens": measured.get(
+                                            "cache_write_input_tokens", 0
+                                        ),
+                                    },
+                                    "output_tokens_details": {
+                                        "reasoning_tokens": measured.get(
+                                            "reasoning_output_tokens", 0
+                                        )
+                                    },
+                                }
                             }
-                        }
-                        if measured is not None
-                        else {}
-                    ),
-                },
-            }
+                            if measured is not None
+                            else {}
+                        ),
+                    },
+                }
+            )
         finally:
             # Release provider payloads before exposing callback failures.
             del request, parameters, apply_patch_wire, chunks, iterator, chunk, raw, choice, delta

@@ -12049,9 +12049,11 @@ class Session(Generic[ContextT, OutputT]):
         request: Any,
         request_id: int,
         active: Callable[[], bool],
-        *,
-        chat_stream: bool = False,
     ) -> bool:
+        from .models import _ChatStreamEvent, _RawChatChunk
+
+        started = False
+        observing_chat = False
         produced: Any = None
         iterator: Any = None
         event: Any = None
@@ -12065,25 +12067,30 @@ class Session(Generic[ContextT, OutputT]):
             iterator = aiter(produced)
             if not active():
                 return False
-            observing_chat = chat_stream and getattr(request, "_observe_raw_provider_events", False)
-            started = (
-                native._start_model_producer_stream(request_id, chat_stream=True)
-                if chat_stream
-                else native._start_model_producer_stream(request_id)
-            )
-            if not started:
-                return False
             while active():
                 try:
                     event = await anext(iterator)
                 except StopAsyncIteration:
+                    if not started:
+                        return bool(active() and native._start_model_producer_stream(request_id))
                     return active()
                 if not active():
                     return False
                 if not isinstance(event, Mapping):
                     raise TypeError("NativeModel.stream must yield Responses event mappings")
+                if not started:
+                    chat_stream = isinstance(event, _ChatStreamEvent)
+                    observing_chat = chat_stream and getattr(
+                        request, "_observe_raw_provider_events", False
+                    )
+                    started = (
+                        native._start_model_producer_stream(request_id, chat_stream=True)
+                        if chat_stream
+                        else native._start_model_producer_stream(request_id)
+                    )
+                    if not started:
+                        return False
                 data = json.dumps(dict(event), allow_nan=False)
-                from .models import _RawChatChunk
 
                 accepted = (
                     await native._push_model_producer_event(request_id, data, raw_chat_chunk=True)
@@ -12142,7 +12149,7 @@ class Session(Generic[ContextT, OutputT]):
                 return
             if self._model_backend is None:
                 raise NativeError("Native model producer has no current application backend")
-            from .models import ChatCompletionsModel, ModelRequest, ModelResponse
+            from .models import ModelRequest, ModelResponse
 
             measurement_owner = (
                 json.dumps({"attempt_id": attempt_id, "callback": callback_owner.receipt})
@@ -12193,8 +12200,6 @@ class Session(Generic[ContextT, OutputT]):
                     request,
                     request_id,
                     active,
-                    chat_stream=getattr(stream, "__func__", None)
-                    is ChatCompletionsModel._stream_response,
                 )
                 return
             if not callable(complete):

@@ -461,3 +461,72 @@ async def test_native_chat_retains_measured_cache_write_usage(streaming):
     assert result.run_usage.cached_input_tokens == 2
     assert result.run_usage.input_tokens == 11
     assert result.run_usage.total_tokens == 14
+
+
+class _ReYieldChat:
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def complete(self, request):
+        return await self.inner.complete(request)
+
+    async def stream(self, request):
+        async for event in self.inner.stream(request):
+            yield event
+
+
+def delegated_chat_backend():
+    originals = [
+        chunk({"content": "done"}, "stop"),
+        chunk(
+            usage={
+                "prompt_tokens": 11,
+                "completion_tokens": 3,
+                "total_tokens": 14,
+                "prompt_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 5},
+            }
+        ),
+    ]
+
+    async def frames():
+        for event in originals:
+            yield event
+
+    async def create(**body):
+        return frames()
+
+    return _ReYieldChat(ChatCompletionsModel(client(create), stream=True)), originals
+
+
+@pytest.mark.parametrize("capture", [False, True])
+async def test_delegated_native_chat_originals(capture):
+    wrapped, originals = delegated_chat_backend()
+    async with NativeProvider(model_backend=wrapped) as native:
+        async with Agent(instructions="Reply.", model="fixture", provider=native).session(
+            include_raw_provider_events=capture, observation_retention="all"
+        ) as session:
+            turn = await session.submit("Reply.")
+            result = await turn.get_result()
+            assert result.final_output == "done"
+            assert result.run_usage.input_tokens == 11
+            assert result.run_usage.output_tokens == 3
+            assert result.run_usage.total_tokens == 14
+            assert result.run_usage.cached_input_tokens == 2
+            assert result.run_usage.cache_write_input_tokens == 5
+            observed = [
+                event
+                async for event in turn.events(include_execution_details=True)
+                if isinstance(event, RawProviderEvent)
+            ]
+            assert [event.payload for event in observed] == (originals if capture else [])
+            assert all(event.source == "chat_completions" for event in observed)
+
+
+async def test_delegated_native_chat_responses_raw_usage():
+    wrapped, _ = delegated_chat_backend()
+    async with NativeProvider(model_backend=wrapped) as native:
+        result = await Agent(instructions="Reply.", model="fixture", provider=native).run(
+            "Reply.", return_raw_usage=True
+        )
+    assert result.raw_usage == ()
+    assert result.run_usage.total_tokens == 14
