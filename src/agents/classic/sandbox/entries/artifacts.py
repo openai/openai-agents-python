@@ -27,7 +27,7 @@ from ..errors import (
     _InvalidGitHostError,
     _redact_git_host_error_data,
 )
-from ..materialization import MaterializedFile, gather_in_order
+from ..materialization import MaterializedFile, _SkillCopyBudget, gather_in_order
 from ..types import ExecResult, User
 from ..workspace_paths import SandboxPathGrant, sandbox_path_grant_host_path, sandbox_path_str
 from .base import BaseEntry
@@ -246,6 +246,13 @@ class _LocalDirBudget:
         self.members = 0
         self.scanned_bytes = 0
         self.copied_bytes = 0
+        self.sandbox: _SkillCopyBudget | None = None
+        self.reserved_bytes = 0
+
+    def admit(self, sandbox: _SkillCopyBudget) -> None:
+        sandbox.reserve(members=self.members + 1, bytes=self.scanned_bytes)
+        self.sandbox = sandbox
+        self.reserved_bytes = self.scanned_bytes
 
     def observe(self, path: Path, info: os.stat_result) -> None:
         self.members += 1
@@ -263,7 +270,11 @@ class _LocalDirBudget:
         content = handle.read(remaining + 1)
         if len(content) > remaining:
             raise ValueError("Skill materialization exceeds the byte limit")
-        self.copied_bytes += len(content)
+        copied_bytes = self.copied_bytes + len(content)
+        if self.sandbox is not None and copied_bytes > self.reserved_bytes:
+            self.sandbox.reserve(bytes=copied_bytes - self.reserved_bytes)
+            self.reserved_bytes = copied_bytes
+        self.copied_bytes = copied_bytes
         return io.BytesIO(content)
 
 
@@ -294,7 +305,9 @@ class LocalDir(BaseEntry):
         *,
         user: str | User | None = None,
     ) -> list[MaterializedFile]:
-        return await self._apply(session, dest, base_dir, user=user, budget=_LocalDirBudget())
+        sandbox = session._skill_copy_budget()
+        async with sandbox.lock:
+            return await self._apply(session, dest, base_dir, user=user, budget=_LocalDirBudget())
 
     async def _apply(
         self,
@@ -324,6 +337,7 @@ class LocalDir(BaseEntry):
                     budget=budget,
                 )
                 if budget is not None:
+                    budget.admit(session._skill_copy_budget())
                     await session.mkdir(dest, parents=True, user=user)
 
                 def _make_copy_task(child: Path) -> Callable[[], Awaitable[MaterializedFile]]:

@@ -944,3 +944,89 @@ async def test_native_lazy_index_rejects_swapped_source(
         ).session(environment=source) as session:
             await (await session.submit("Read the index.")).get_result()
     assert responses.requests == []
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="UnixLocal resource")
+@pytest.mark.parametrize("limit", ["bytes", "members"])
+@pytest.mark.parametrize("state_mode", ["shared", "resumed"])
+async def test_native_skill_budget_survives_environment_lease_retirement(
+    tmp_path, monkeypatch, responses, limit, state_mode
+):
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    for name in ("alpha", "beta"):
+        selected = tmp_path / name / name
+        selected.mkdir(parents=True)
+        (selected / "SKILL.md").write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
+        if limit == "bytes":
+            with (selected / "large.bin").open("wb") as handle:
+                handle.truncate(40 * 1024 * 1024)
+        else:
+            for index in range(2050):
+                (selected / str(index)).touch()
+
+    client = UnixLocalSandboxClient()
+    options = UnixLocalSandboxClientOptions()
+    borrowed = await client.create(manifest=Manifest(), options=options)
+    await borrowed.start()
+    root = Path(borrowed.state.manifest.root)
+    saved = borrowed.state.model_copy(deep=True)
+    alias = None
+    current = borrowed
+    try:
+        async with ExecutorPeer(tmp_path / "executor").serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+
+            @asynccontextmanager
+            async def connect(selected):
+                assert selected is current
+                yield Environment(
+                    url=peer.url,
+                    headers={"Authorization": "Bearer " + peer.token},
+                    cwd=str(root),
+                    tools=(),
+                    capability_directories=[str(root / ".agents")],
+                )
+
+            for name in ("alpha", "beta"):
+                if name == "beta" and state_mode == "resumed":
+                    alias = await client.resume(saved)
+                    await alias.start()
+                    current = alias
+                source = sandbox_environment(
+                    client,
+                    manifest=current.state.manifest,
+                    options=options,
+                    session=current,
+                    connect=connect,
+                    skills=Skills(
+                        lazy_from=LocalDirLazySkillSource(source=LocalDir(src=Path(name)))
+                    ),
+                )
+                responses.respond(function_call("load_skill", {"skill_name": name}, name))
+                responses.respond(assistant_output("done"))
+                async with Agent(
+                    instructions="Load the current skill.",
+                    model="gpt-5.5",
+                    provider=provider(responses),
+                    tools=source.skill_tools,
+                ).session(environment=source) as session:
+                    if name == "alpha":
+                        assert (
+                            await (await session.submit("Load alpha.")).get_result()
+                        ).final_output == "done"
+                    else:
+                        error = "byte" if limit == "bytes" else "member"
+                        with pytest.raises(ValueError, match=f"sandbox {error} limit"):
+                            await (await session.submit("Load beta.")).get_result()
+            assert (root / ".agents/alpha/SKILL.md").exists()
+            assert not (root / ".agents/beta").exists()
+    finally:
+        if alias is not None:
+            await alias.aclose()
+        await borrowed.aclose()
+        await client.delete(borrowed)

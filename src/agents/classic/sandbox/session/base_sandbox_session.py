@@ -32,7 +32,7 @@ from ..errors import (
 )
 from ..files import FileEntry
 from ..manifest import Manifest
-from ..materialization import MaterializationResult, MaterializedFile
+from ..materialization import MaterializationResult, MaterializedFile, _SkillCopyBudget
 from ..types import ExecResult, ExposedPortEndpoint, User
 from ..util.parse_utils import parse_ls_la
 from ..workspace_paths import (
@@ -224,6 +224,9 @@ class BaseSandboxSession(abc.ABC):
     _max_manifest_entry_concurrency: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
     _max_local_dir_file_concurrency: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY
     _archive_limits: SandboxArchiveLimits | None = None
+
+    def _skill_copy_budget(self) -> _SkillCopyBudget:
+        return self.state._native_skill_copy_budget
 
     def _runtime_has_protected_mount_authority(self) -> bool:
         """Return whether SDK-owned runtime state contains live mount authority."""

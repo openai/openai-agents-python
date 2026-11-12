@@ -16,6 +16,26 @@ class MaterializationResult:
     files: list[MaterializedFile]
 
 
+class _SkillCopyBudget:
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.members = 0
+        self.bytes = 0
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "_SkillCopyBudget":
+        # Trusted state aliases have been sharing one physical resource's quota.
+        memo[id(self)] = self
+        return self
+
+    def reserve(self, *, members: int = 0, bytes: int = 0) -> None:
+        if self.members + members > 4096:
+            raise ValueError("Skill materialization exceeds the sandbox member limit")
+        if self.bytes + bytes > 64 * 1024 * 1024:
+            raise ValueError("Skill materialization exceeds the sandbox byte limit")
+        self.members += members
+        self.bytes += bytes
+
+
 _TaskResultT = TypeVar("_TaskResultT")
 _MISSING = object()
 

@@ -21,6 +21,7 @@ from agents.classic.sandbox._mount_security import (
     redact_mount_error_data_sync,
 )
 from agents.classic.sandbox.manifest import Manifest
+from agents.classic.sandbox.materialization import _SkillCopyBudget
 from agents.classic.sandbox.snapshot import SnapshotBase
 
 from ._identity import _preserve_legacy_module
@@ -40,6 +41,7 @@ class SandboxSessionState(BaseModel):
     snapshot_fingerprint_version: str | None = None
     workspace_root_ready: bool = False
 
+    _native_skill_copy_budget: _SkillCopyBudget = PrivateAttr(default_factory=_SkillCopyBudget)
     _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}
     _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())
     _mount_authority_redacted: bool = PrivateAttr(default=False)
