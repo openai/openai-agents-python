@@ -213,6 +213,7 @@ from .mcp import (
     _tool_names as _tool_names,
 )
 from .model_context import ModelContextSnapshot, ModelRequestContext
+from .models import ProviderHistory, _capture_provider_history
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     ChildInvocation as ChildInvocation,
@@ -3605,6 +3606,7 @@ def _prepare_opening_model_settings(
     restored_model_settings: tuple[str, dict[str, Any]] | None,
     restored_profile: _ProfileRuntime | None,
     profile_roster: list[dict[str, Any]],
+    provider_history: ProviderHistory | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
     settings = _native_model_settings(model, agent.model_settings)
     prompt_controls = _hosted_prompt_controls(
@@ -3630,6 +3632,9 @@ def _prepare_opening_model_settings(
             else None
         )
         profile_controls = profile_model["request_controls"] if profile_model is not None else {}
+        current_store = (profile_controls if profile_model is not None else current_controls).get(
+            "store"
+        )
         attempt_controls = _current_attempt_controls(current_controls, profile_controls)
         invocation_timeout = (
             profile_model.get("invocation_timeout_ms")
@@ -3639,6 +3644,16 @@ def _prepare_opening_model_settings(
         model, settings = restored_model_settings
         settings.setdefault("request_controls", {}).update(attempt_controls)
         settings["invocation_timeout_ms"] = invocation_timeout
+    else:
+        current_store = settings.get("request_controls", {}).get("store")
+    if provider_history is not None:
+        if provider_history["type"] == "previous_response" and current_store is not True:
+            raise ValueError("Previous-response HTTP history requires current store=True")
+        controls = settings.setdefault("request_controls", {})
+        if current_store is None:
+            controls.pop("store", None)
+        else:
+            controls["store"] = current_store
     return model, settings
 
 
@@ -3667,6 +3682,7 @@ class Session(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
@@ -3690,6 +3706,7 @@ class Session(Generic[ContextT, OutputT]):
         _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
+        provider_history = _capture_provider_history(provider_history)
         state, managed_source = _prepare_open_state(
             state,
             environment,
@@ -3972,6 +3989,7 @@ class Session(Generic[ContextT, OutputT]):
                 restored_model_settings,
                 restored_profile,
                 profile_roster,
+                provider_history,
             )
             native_specs = catalog.native_specs()
             manual_slots = catalog.manual_slots()
@@ -4281,6 +4299,11 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **(
+                        {"_provider_history": provider_history}
+                        if provider_history is not None
+                        else {}
+                    ),
                     **({"_sdk_websocket_tls": True} if private_wss_tls else {}),
                     **guidance_options,
                     **(

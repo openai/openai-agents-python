@@ -12,5 +12,8 @@ from _agents_codex.models import (
     ModelRetryAdviceRequest as ModelRetryAdviceRequest,
     NativeModel as NativeModel,
     NativeStreamingModel as NativeStreamingModel,
+    ProviderConversation as ProviderConversation,
+    ProviderHistory as ProviderHistory,
+    ProviderResponseChain as ProviderResponseChain,
     ResponsesModel as ResponsesModel,
 )

@@ -161,6 +161,9 @@ if TYPE_CHECKING:
         ModelRetryAdviceRequest as ModelRetryAdviceRequest,
         NativeModel as NativeModel,
         NativeStreamingModel as NativeStreamingModel,
+        ProviderConversation as ProviderConversation,
+        ProviderHistory as ProviderHistory,
+        ProviderResponseChain as ProviderResponseChain,
         ResponsesModel as ResponsesModel,
     )
     from .native_agents import (
@@ -297,6 +300,9 @@ _MODULES = {
     "LitellmModel": ".models",
     "AnyLLMModel": ".models",
     "ModelProvider": ".models",
+    "ProviderConversation": ".models",
+    "ProviderHistory": ".models",
+    "ProviderResponseChain": ".models",
     "ModelRequest": ".models",
     "ModelRetryAdviceRequest": ".models",
     "ModelRequestOptions": ".models",

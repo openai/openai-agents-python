@@ -13,12 +13,42 @@ from typing import Any, Literal, Protocol, TypeAlias, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from agents.config import JsonValue
 
 from ._compat import cancellation_requested
 from ._public import preserve_module_identity as _preserve_module_identity
+
+
+class ProviderConversation(TypedDict):
+    type: Literal["conversation"]
+    id: str
+
+
+class ProviderResponseChain(TypedDict):
+    type: Literal["previous_response"]
+    id: NotRequired[str]
+
+
+ProviderHistory: TypeAlias = ProviderConversation | ProviderResponseChain
+
+
+def _capture_provider_history(value: ProviderHistory | None) -> ProviderHistory | None:
+    if value is None:
+        return None
+    kind = value["type"]
+    if kind not in ("conversation", "previous_response"):
+        raise ValueError("provider_history must select conversation or previous_response")
+    identity = value.get("id")
+    if kind == "conversation" and identity is None:
+        raise ValueError("conversation history requires an id")
+    if identity is not None and not identity.strip():
+        raise ValueError("provider history id must be nonempty")
+    return cast(
+        ProviderHistory,
+        {"type": kind, **({"id": identity} if identity is not None else {})},
+    )
 
 
 @dataclass(frozen=True)

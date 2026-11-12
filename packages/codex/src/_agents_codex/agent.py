@@ -73,7 +73,7 @@ from .guardrails import InputGuardrail, OutputGuardrail
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
 from .model_context import HostedPromptSource, _ContextTransform
-from .models import ModelProvider, NativeModel
+from .models import ModelProvider, NativeModel, ProviderHistory, _capture_provider_history
 from .retry import ModelRetrySettings as ModelRetrySettings
 from .tools import ToolRef
 from .usage import RunBudget
@@ -1309,6 +1309,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[Tool[None]] | None = None,
         instruction_files: Sequence[Path] = (),
@@ -1344,6 +1345,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[Tool[object]] | None = None,
         instruction_files: Sequence[Path] = (),
@@ -1379,6 +1381,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
@@ -1414,6 +1417,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
@@ -1573,6 +1577,7 @@ class Agent(Generic[ContextT, OutputT]):
         Pass it again to discover files when restoring or resuming. Previously
         supplied instructions can still appear in the conversation history.
         """
+        provider_history = _capture_provider_history(provider_history)
         try:
             initial_messages = _capture_initial_messages(
                 initial_messages, state=state, resume=resume
@@ -1589,6 +1594,7 @@ class Agent(Generic[ContextT, OutputT]):
                 provider=provider,
                 model=model,
                 model_settings=model_settings,
+                provider_history=provider_history,
                 environment=environment,
                 tools=tools,
                 instruction_files=instruction_files,
@@ -1631,6 +1637,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
@@ -1653,6 +1660,7 @@ class Agent(Generic[ContextT, OutputT]):
         _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT] | Completed[OutputT]]:
+        provider_history = _capture_provider_history(provider_history)
         if tool_error_formatter is not None and not callable(tool_error_formatter):
             raise TypeError("tool_error_formatter must be callable or None")
         if on_interaction is not None and not callable(on_interaction):
@@ -1681,6 +1689,7 @@ class Agent(Generic[ContextT, OutputT]):
                 provider=provider,
                 model=model,
                 model_settings=model_settings,
+                provider_history=provider_history,
                 tool_selection=tools,
                 instruction_files=instruction_files,
                 project_guidance=project_guidance,
@@ -1748,6 +1757,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
         | None = None,
@@ -1781,6 +1791,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
         | None = None,
@@ -1814,6 +1825,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
@@ -1846,6 +1858,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
             ToolRef
@@ -1931,6 +1944,7 @@ class Agent(Generic[ContextT, OutputT]):
         Restores without that origin have been reporting input=None and incomplete=True.
         Read the snapshot from RunDiagnosticError.details. The original error is its cause.
         """
+        provider_history = _capture_provider_history(provider_history)
         capture_error_details = capture_error_details is True
         error_input = deepcopy(input) if capture_error_details else None
         if error_input is not None:
@@ -2094,6 +2108,8 @@ class Agent(Generic[ContextT, OutputT]):
                 options["model"] = model
             if model_settings is not None:
                 options["model_settings"] = model_settings
+            if provider_history is not None:
+                options["provider_history"] = provider_history
             if input_guardrails:
                 options["input_guardrails"] = input_guardrails
             if output_guardrails:
@@ -2108,6 +2124,7 @@ class Agent(Generic[ContextT, OutputT]):
                 isinstance(session_factory, MethodType)
                 and session_factory.__self__ is self
                 and session_factory.__func__ is _BUILTIN_SESSION_FACTORY
+                and provider_history is None
                 and state is None
                 and initial_messages is None
                 and input is not None
@@ -2357,6 +2374,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
         | None = None,
@@ -2390,6 +2408,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
         | None = None,
@@ -2423,6 +2442,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
@@ -2455,6 +2475,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
+        provider_history: ProviderHistory | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
             ToolRef
@@ -2493,6 +2514,7 @@ class Agent(Generic[ContextT, OutputT]):
         retry cleanup. Explicit providers remain the caller's responsibility and
         are not attached to the error.
         """
+        provider_history = _capture_provider_history(provider_history)
         initial_messages = _capture_initial_messages(initial_messages, state=state)
         if budget is not None and not isinstance(budget, RunBudget):
             raise TypeError("budget must be a RunBudget or None")
@@ -2531,6 +2553,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model"] = model
                 if model_settings is not None:
                     options["model_settings"] = model_settings
+                if provider_history is not None:
+                    options["provider_history"] = provider_history
                 if input_guardrails:
                     options["input_guardrails"] = input_guardrails
                 if output_guardrails:
