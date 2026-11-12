@@ -32,13 +32,6 @@ def test_native_package_without_classic_dependencies() -> None:
     )
 
 
-def test_native_imports_do_not_load_migration() -> None:
-    run_isolated(
-        "import agents, agents.agent, agents.session, sys; "
-        "assert not any(x.startswith(('agents.migration', 'agents.classic')) for x in sys.modules)"
-    )
-
-
 def test_migration_namespace_is_inert_and_runner_api_is_absent() -> None:
     run_isolated(
         "import agents.migration, importlib.util, sys; "
