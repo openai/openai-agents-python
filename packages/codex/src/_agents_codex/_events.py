@@ -633,6 +633,17 @@ class ShellCallItem(_HostedCallItem):
     action: dict[str, JsonValue]
 
 
+class LocalShellCallItem(TypedDict):
+    """A historical LocalShell call retained in native history."""
+
+    type: Literal["local_shell_call"]
+    id: str
+    turn_id: str
+    call_id: str | None
+    action: dict[str, JsonValue]
+    status: str
+
+
 class ShellCallOutputItem(_HostedCallItem):
     type: Literal["shell_call_output"]
     call_id: str
@@ -796,6 +807,7 @@ OutputItem = _PublicTypeAliasType(
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ShellCallItem
+        | LocalShellCallItem
         | ShellCallOutputItem
         | ImageGenerationCallItem
     ),

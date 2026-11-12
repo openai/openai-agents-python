@@ -53,6 +53,7 @@ from _agents_codex._events import (
     JsonValue as JsonValue,
     LegacyPermissionProfile as LegacyPermissionProfile,
     Literal as Literal,
+    LocalShellCallItem as LocalShellCallItem,
     McpApproval as McpApproval,
     McpCallItem as McpCallItem,
     McpElicitationRequiredAction as McpElicitationRequiredAction,
