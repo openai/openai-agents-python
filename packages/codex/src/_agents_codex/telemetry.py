@@ -230,6 +230,7 @@ async def configure(
     processors: Sequence[TraceProcessor] = (),
     diagnostics: ConsoleDiagnostics | None = None,
     trace_delivery: TraceDeliveryConfig | Mapping[str, Any] | None = None,
+    restart_after_shutdown: bool = False,
 ) -> None:
     """Configure once, before opening the first Session.
 
@@ -241,6 +242,10 @@ async def configure(
     processors enables native trace delivery without an OTLP destination. Up
     to 16 active Python processors are supported. Configure before any Session;
     later add/set calls change routes without replacing the native provider.
+
+    Set restart_after_shutdown after closing all clients and completing
+    shutdown in this SDK instance. Configure console diagnostics with the
+    initial subscriber.
     """
     options: dict[str, Any] = {}
     try:
@@ -248,6 +253,8 @@ async def configure(
             TraceDeliveryConfig() if trace_delivery is None else trace_delivery
         )
         batch_size = delivery_options["max_batch_size"]
+        if restart_after_shutdown:
+            options["sdk.trace_restart"] = True
         processors = tuple(processors)
         _validate_processors(processors)
         # Native gates response records on either OTLP kind, not its destination.
@@ -294,6 +301,7 @@ async def configure(
     async def initialize() -> None:
         global _engine_options, _processor_closing, _processor_starting
         global _processor_batch_size, _processor_callback_timeout
+        global _processor_dropped_records, _processor_recovery_epoch, _processor_retired
         reserved: asyncio.Task[None] | None = None
         ready: asyncio.Future[None] | None = None
         owns_startup = False
@@ -302,6 +310,10 @@ async def configure(
             with _processor_lock:
                 if _processor_starting:
                     raise RuntimeError("Trace processor startup is in progress")
+                if restart_after_shutdown and (_processor_shutdowns or not _processor_retired):
+                    raise RuntimeError(
+                        "Telemetry restart requires successful shutdown in this SDK instance"
+                    )
                 _processor_starting = True
                 owns_startup = True
                 _check_processor_capacity(len(processors), replace=False)
@@ -326,6 +338,12 @@ async def configure(
                     "Invalid trace delivery options",
                     "Codex telemetry can only be configured once per process",
                     "Configure telemetry before creating any Codex clients",
+                    "Console diagnostics are configured with the initial telemetry subscriber",
+                    "Telemetry restart requires successful shutdown",
+                    "Telemetry restart requires all Codex clients to close",
+                    "Telemetry restart requires all recording spans to end",
+                    "Telemetry restart requires retired trace delivery",
+                    "Telemetry shutdown is in progress",
                     "A Rust tracing subscriber is already installed; "
                     "Codex telemetry cannot replace it",
                 ):
@@ -341,6 +359,11 @@ async def configure(
                 _processor_closing = False
                 _processor_batch_size = batch_size
                 _processor_callback_timeout = callback_timeout
+                if restart_after_shutdown:
+                    _processor_dropped_records = 0
+                    _processor_loss_cutoffs.clear()
+                    _processor_recovery_epoch = 0
+                _processor_retired = False
                 if processors:
                     _set_processors(processors, replace=False, _startup=(reserved, ready))
                 _engine_options = snapshot
@@ -369,7 +392,7 @@ async def configure(
 
 
 async def shutdown(*, timeout_ms: int | None = None) -> None:
-    """Flush native telemetry after all Sessions close; retire it for this process.
+    """Flush native telemetry after all Sessions close and retire its provider.
 
     Requires a successful configure. It does not close Sessions or any
     application-owned Python OpenTelemetry exporters.
@@ -401,25 +424,33 @@ async def shutdown(*, timeout_ms: int | None = None) -> None:
                     _retired_routes.clear()
 
     async def retire() -> None:
-        global _processor_closing
+        global _processor_closing, _processor_retired, _processor_shutdowns
         with _processor_lock:
             if _processor_starting:
                 raise RuntimeError("Trace processor startup is in progress")
+            _processor_shutdowns += 1
+        retired = False
         try:
-            with _processor_lock:
-                try:
-                    _ensure_processor_pump()
-                finally:
-                    _processor_closing = True
-            if budget is None:
-                await native.shutdown_telemetry()
+            try:
+                with _processor_lock:
+                    try:
+                        _ensure_processor_pump()
+                    finally:
+                        _processor_closing = True
+                if budget is None:
+                    await native.shutdown_telemetry()
+                else:
+                    await native.shutdown_telemetry(budget)
+            except BaseException as error:
+                await _close_after_error(error, cleanup)
+                raise
             else:
-                await native.shutdown_telemetry(budget)
-        except BaseException as error:
-            await _close_after_error(error, cleanup)
-            raise
-        else:
-            await cleanup()
+                await cleanup()
+                retired = True
+        finally:
+            with _processor_lock:
+                _processor_shutdowns -= 1
+                _processor_retired |= retired
 
     await _join(_create_task(retire()))
 
@@ -1123,6 +1154,8 @@ _processor_task: asyncio.Task[None] | None = None
 _processor_lock = RLock()
 _processor_starting = False
 _processor_closing = False
+_processor_retired = False
+_processor_shutdowns = 0
 _processor_serial = 0
 _active_processor_ids: set[str] = set()
 _retired_routes: dict[str, int] = {}

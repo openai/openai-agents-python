@@ -2,7 +2,7 @@ use anyhow::ensure;
 use codex_protocol::protocol::AgentStatus;
 use serde_json::{Value, json};
 
-use crate::engine::ThreadState;
+use crate::engine::{EngineState, ThreadState};
 
 pub async fn read(state: &ThreadState) -> anyhow::Result<Value> {
     let _mutation = state.mutations.lock().await;
@@ -130,6 +130,31 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
 }
 
 impl Change {
+    pub(crate) fn validate_mcp_provider(&self, candidate: &EngineState) -> anyhow::Result<()> {
+        let source = &self.state.engine;
+        let source_auth = source.manager.auth_manager().auth_cached();
+        let candidate_auth = candidate.manager.auth_manager().auth_cached();
+        let same_credentials = source_auth
+            .as_ref()
+            .zip(candidate_auth.as_ref())
+            .is_some_and(|(source, candidate)| {
+                source.api_auth_mode() == candidate.api_auth_mode()
+                    && source
+                        .get_token()
+                        .ok()
+                        .zip(candidate.get_token().ok())
+                        .is_some_and(|(source, candidate)| source == candidate)
+            });
+        ensure!(
+            same_credentials
+                && source.service_config.model_provider_id
+                    == candidate.service_config.model_provider_id
+                && source.service_config.model_provider == candidate.service_config.model_provider,
+            "Hosted MCP compaction requires the current provider credentials"
+        );
+        Ok(())
+    }
+
     pub fn options(&self) -> Value {
         let instruction_files = self
             .state
@@ -256,6 +281,9 @@ impl Change {
             "retained indices must be unique, increasing and within the current model context"
         );
         check_pairs(&live, retained_indices)?;
+        for &index in retained_indices {
+            crate::checkpoint::validate_external_response_item(&live[index])?;
+        }
         let history: Vec<RolloutItem> = serde_json::from_value(self.checkpoint["history"].clone())?;
         let mut current = Vec::new();
         let mut review = Vec::new();
@@ -430,14 +458,14 @@ pub(crate) fn check_pairs(
     let mut calls: HashMap<(&str, &str), usize> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
         let (family, id, is_call) = match item {
-            ResponseItem::FunctionCall { call_id, .. } => ("function", Some(call_id), true),
-            ResponseItem::LocalShellCall { call_id, .. } => ("function", call_id.as_ref(), true),
-            ResponseItem::FunctionCallOutput { call_id, .. } => {
-                ("function", call_id.as_ref(), false)
+            ResponseItem::FunctionCall { call_id, .. } => {
+                ("function", Some(call_id.as_str()), true)
             }
-            ResponseItem::ApplyPatchCall { call_id, .. } => ("apply_patch", Some(call_id), true),
+            ResponseItem::ApplyPatchCall { call_id, .. } => {
+                ("apply_patch", Some(call_id.as_str()), true)
+            }
             ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
-                ("apply_patch", Some(call_id), false)
+                ("apply_patch", Some(call_id.as_str()), false)
             }
             ResponseItem::ShellCall {
                 provider_fields, ..
@@ -446,30 +474,44 @@ pub(crate) fn check_pairs(
                 provider_fields, ..
             } => (
                 "shell",
-                provider_fields
-                    .get("call_id")
-                    .and_then(|value| match value {
-                        Value::String(id) => Some(id),
-                        _ => None,
-                    }),
+                provider_fields.get("call_id").and_then(Value::as_str),
                 matches!(item, ResponseItem::ShellCall { .. }),
             ),
-            ResponseItem::ComputerCall { call_id, .. } => ("computer", Some(call_id), true),
-            ResponseItem::ComputerCallOutput { call_id, .. } => ("computer", Some(call_id), false),
-            ResponseItem::CustomToolCall { call_id, .. } => ("custom", Some(call_id), true),
-            ResponseItem::CustomToolCallOutput { call_id, .. } => ("custom", Some(call_id), false),
+            ResponseItem::LocalShellCall { call_id, .. } => ("function", call_id.as_deref(), true),
+            ResponseItem::FunctionCallOutput { call_id, .. } => {
+                ("function", call_id.as_deref(), false)
+            }
+            ResponseItem::ComputerCall { call_id, .. } => {
+                ("computer", Some(call_id.as_str()), true)
+            }
+            ResponseItem::ComputerCallOutput { call_id, .. } => {
+                ("computer", Some(call_id.as_str()), false)
+            }
+            ResponseItem::CustomToolCall { call_id, .. } => {
+                ("custom", Some(call_id.as_str()), true)
+            }
+            ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                ("custom", Some(call_id.as_str()), false)
+            }
+            ResponseItem::McpApprovalRequest { id, .. } => {
+                ("mcp-approval", id.as_ref().map(|id| id.as_str()), true)
+            }
+            ResponseItem::McpApprovalResponse {
+                approval_request_id,
+                ..
+            } => ("mcp-approval", Some(approval_request_id.as_str()), false),
             ResponseItem::ToolSearchCall {
                 call_id, execution, ..
-            } if execution != "server" => ("search", call_id.as_ref(), true),
+            } if execution != "server" => ("search", call_id.as_deref(), true),
             ResponseItem::ToolSearchOutput {
                 call_id, execution, ..
-            } if execution != "server" => ("search", call_id.as_ref(), false),
+            } if execution != "server" => ("search", call_id.as_deref(), false),
             _ => continue,
         };
         let Some(id) = id else {
             anyhow::bail!("application compaction cannot preserve an unidentified tool pair");
         };
-        let key = (family, id.as_str());
+        let key = (family, id);
         if is_call {
             ensure!(
                 calls.insert(key, index).is_none(),

@@ -17,6 +17,19 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::oneshot;
 
 const ORIGIN: &str = "agents-sdk";
+fn model_override(history: &[RolloutItem], turn: &str) -> Option<String> {
+    history
+        .iter()
+        .rev()
+        .find_map(|row| match row {
+            RolloutItem::TurnContext(context) if context.turn_id.as_deref() == Some(turn) => {
+                Some(context.sdk_model_override.clone())
+            }
+            _ => None,
+        })
+        .flatten()
+}
+
 #[derive(Debug)]
 pub(crate) enum UnsupportedManualState {
     CodeState,
@@ -449,7 +462,7 @@ fn validate_frame(
         .as_object()
         .context("Missing native manual continuation")?;
     ensure!(
-        (6..=8).contains(&frame.len())
+        (6..=9).contains(&frame.len())
             && frame.keys().all(|key| matches!(
                 key.as_str(),
                 "turn_id"
@@ -459,6 +472,7 @@ fn validate_frame(
                     | "accepted_replies"
                     | "pending_manual"
                     | "output_schema"
+                    | "model_override"
                     | "tool_outcomes"
             ))
             && frame.get("output_schema").is_none_or(Value::is_object),
@@ -490,6 +504,16 @@ fn validate_frame(
         "Manual continuation has no pending action"
     );
     let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
+    let restored_override: Option<String> =
+        serde_json::from_value(frame.get("model_override").cloned().unwrap_or(Value::Null))?;
+    ensure!(
+        restored_override
+            .as_ref()
+            .is_none_or(|name| !name.trim().is_empty())
+            && restored_override == model_override(&history, &turn),
+        "Manual continuation changed its admitted model override"
+    );
+
     ensure!(
         portable_manual_actions(&history),
         "Manual continuation contains nonportable native work"
@@ -1052,8 +1076,11 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
             catalog.tool_batch_completion
         });
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
-    let model = crate::checkpoint::managed_settings(&history, source_id)
-        .map(|settings| settings.model.as_str());
+    let admitted_override = model_override(&history, &frame.turn);
+    let model = admitted_override.as_deref().or_else(|| {
+        crate::checkpoint::managed_settings(&history, source_id)
+            .map(|settings| settings.model.as_str())
+    });
     for (name, handoff) in &frame.handoffs {
         crate::agent_profiles::restore_handoff(
             thread,
@@ -1203,6 +1230,8 @@ pub(crate) async fn continue_if_ready(
         Some(schema) => serde_json::json!({"output_schema":schema}),
         None => serde_json::json!({}),
     };
+    recovery_options["model_override"] =
+        frame.state["native_continuation"]["model_override"].clone();
     recovery_options["trace"] = serde_json::json!(trace);
     recovery_options["observation_submission_id"] = serde_json::json!(observation_submission_id);
     if let Some(source) = operation_declaration_source {
@@ -1626,11 +1655,15 @@ pub(crate) async fn capture(
             Some(item)
         })
         .collect();
+    let admitted_override = model_override(&history, &turn);
     snapshot["history"] = serde_json::to_value(history)?;
     snapshot["native_continuation"] = serde_json::json!({
         "turn_id":turn,"seen_call_ids":calls.iter().map(|(id,_)|id).collect::<Vec<_>>(),
         "turn_usage":usage,"reply_order":order,"accepted_replies":encode_accepted_replies(&accepted)?,"pending_manual":pending_manual
     });
+    if let Some(name) = admitted_override {
+        snapshot["native_continuation"]["model_override"] = Value::String(name);
+    }
     if let Some(outcomes) = tool_outcomes {
         snapshot["native_continuation"]["tool_outcomes"] = serde_json::to_value(outcomes)?;
     }

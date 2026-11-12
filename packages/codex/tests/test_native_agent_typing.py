@@ -599,6 +599,14 @@ async def run() -> None:
     assert_type(choice.final_output, Choice)
     assert_type(choice.final_output.root, int | str)
     assert_type(await agent.run("input", context=Application("tenant")), Completed[Answer])
+    assert_type(
+        await agent.run("input", context=Application("tenant"), model_override="selected-model"),
+        Completed[Answer],
+    )
+    assert_type(
+        agent.run_sync("input", context=Application("tenant"), model_override="selected-model"),
+        Completed[Answer],
+    )
     async with Agent(instructions="Answer.", tools=[plain]).session() as plain_session:
         assert_type(plain_session, Session[object, str])
     async with Agent[Application](instructions="Answer.").session(
@@ -611,6 +619,7 @@ async def run() -> None:
         assert_type(object_session, Session[object, str])
     async with agent.session(context=Application("tenant")) as session:
         assert_type(session, Session[Application, Answer])
+        assert_type(await session.submit("read", model_override="selected-model"), Turn[Answer])
         assert_type(await session.submit("read", tools=[plain, lookup]), Turn[Answer])
         assert_type(await session.submit("read", tools=[lookup.ref]), Turn[Answer])
         assert_type(await session.compact(), None)

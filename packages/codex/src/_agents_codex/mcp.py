@@ -13,8 +13,6 @@ from collections.abc import (
     Sequence as Sequence,
 )
 from dataclasses import dataclass as dataclass, field as field
-from functools import wraps as _wraps
-from traceback import clear_frames as _clear_frames
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
@@ -28,7 +26,7 @@ from urllib.parse import unquote as unquote, urlsplit as urlsplit
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict, TypeVar as TypeVar
 
-from ._mcp_errors import _protect_mcp_methods
+from ._mcp_errors import _protect_mcp_initializer, _protect_mcp_methods
 from ._mcp_names import (
     _project_name as _project_name,
     _project_tool_names as _project_tool_names,
@@ -74,28 +72,6 @@ class _McpValues(dict[str, str]):
 
     def __reduce__(self) -> tuple[Any, tuple[dict[str, str]]]:
         return type(self), (dict(self),)
-
-
-def _protect_mcp_initializer(declaration: type[Any]) -> None:
-    """Keep rejected credentials out of generated initializer traceback frames."""
-    initialize = declaration.__init__
-
-    @_wraps(initialize)
-    def protected(self: Any, *args: Any, **kwargs: Any) -> None:
-        try:
-            initialize(self, *args, **kwargs)
-        except BaseException as error:
-            _clear_frames(error.__traceback__)
-            object.__setattr__(error, "__context__", None)
-            object.__setattr__(error, "__cause__", None)
-            for name in ("env", "headers", "bearer_token", "access_token"):
-                if name in self.__dict__:
-                    object.__setattr__(self, name, None)
-            raise
-        finally:
-            del self, args, kwargs
-
-    declaration.__init__ = protected
 
 
 class MCPResource(TypedDict):
