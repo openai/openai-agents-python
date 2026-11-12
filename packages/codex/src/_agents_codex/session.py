@@ -5401,16 +5401,17 @@ class Session(Generic[ContextT, OutputT]):
     ) -> None:
         thread = self._native
 
-        async def publish_attempt_controls(controls: Mapping[str, Any]) -> None:
-            # Idle restores retain their accepted deadline; manual work uses current authority.
+        async def publish_attempt_controls(
+            controls: Mapping[str, Any], *, invocation_settings: Mapping[str, Any] | None = None
+        ) -> None:
             reset: dict[str, Any] = {
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
                     "retry": None,
                 },
             }
-            if manual_restore:
-                reset["invocation_timeout_ms"] = settings.get("invocation_timeout_ms")
+            if invocation_settings is not None:
+                reset["invocation_timeout_ms"] = invocation_settings.get("invocation_timeout_ms")
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(reset)))
                 is not True
@@ -5430,7 +5431,10 @@ class Session(Generic[ContextT, OutputT]):
         if validate_provider_model and (not fresh or "model" not in settings):
             await self._publish_startup(thread._validate_provider_model())
         if restored and (not profile_roster or manual_restore):
-            await publish_attempt_controls(settings.get("request_controls", {}))
+            await publish_attempt_controls(
+                settings.get("request_controls", {}),
+                invocation_settings=settings if manual_restore else None,
+            )
         if fresh and settings:
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(settings)))
@@ -5473,7 +5477,7 @@ class Session(Generic[ContextT, OutputT]):
                 controls = _current_attempt_controls(
                     settings.get("request_controls", {}), model["request_controls"]
                 )
-                await publish_attempt_controls(controls)
+                await publish_attempt_controls(controls, invocation_settings=model)
                 await self._refresh_profile_bindings(preserve_current=True)
 
     async def _prepare_realtime_mcp(self) -> None:
