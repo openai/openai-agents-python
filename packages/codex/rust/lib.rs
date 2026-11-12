@@ -1,4 +1,4 @@
-#![cfg_attr(test, recursion_limit = "256")]
+#![recursion_limit = "256"]
 
 //! Python ownership and asyncio boundaries for the unchanged Codex runtime.
 
@@ -3283,6 +3283,7 @@ impl NativeThread {
                     request,
                     response,
                     start_response,
+                    handoff_target_profile_id,
                 } => {
                     if request.reply.thread != inner.id.to_string() {
                         let Some(child_tools) = tools.owner(&inner.id.to_string(), &request) else {
@@ -3345,6 +3346,7 @@ impl NativeThread {
                                     .send(python_tools::ToolReply {
                                         response,
                                         start_response,
+                                        handoff_target_profile_id,
                                         acceptance,
                                     })
                                     .is_ok())
@@ -3355,6 +3357,7 @@ impl NativeThread {
                             .send(python_tools::ToolReply {
                                 response,
                                 start_response,
+                                handoff_target_profile_id,
                                 acceptance,
                             })
                             .is_ok());
@@ -3428,6 +3431,7 @@ impl NativeThread {
                                 .send(python_tools::ToolReply {
                                     response,
                                     start_response,
+                                    handoff_target_profile_id,
                                     acceptance,
                                 })
                                 .is_ok())
@@ -3454,6 +3458,7 @@ impl NativeThread {
                                 .send(python_tools::ToolReply {
                                     response,
                                     start_response,
+                                    handoff_target_profile_id,
                                     acceptance,
                                 })
                                 .is_ok())
@@ -3465,6 +3470,7 @@ impl NativeThread {
                         .send(python_tools::ToolReply {
                             response,
                             start_response,
+                            handoff_target_profile_id,
                             acceptance,
                         })
                         .is_ok();

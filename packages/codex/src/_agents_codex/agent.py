@@ -48,7 +48,7 @@ from typing import (
 )
 from urllib.parse import urlsplit as urlsplit
 
-from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar
+from typing_extensions import Required as _Required, TypedDict as TypedDict, TypeVar as TypeVar
 
 from ._hosted_prompts import _capture_hosted_prompt_source, _hosted_prompt_controls
 from ._lifecycle import (
@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from ._function_tools import Tool
     from ._managed_workspace import ManagedWorkspaceCheckpoint
     from .canonical_storage import CustomStorage
+    from .decision_handoff import DecisionHandoff
     from .executor import Environment, EnvironmentSource
     from .handoffs import Handoff
     from .input import UserInput
@@ -117,6 +118,27 @@ TypedAgentT = TypeVar("TypedAgentT", bound="Agent[Any, Any]")
 
 _MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()
 _OBSERVATION_RETENTION_UNSET: Any = object()
+
+
+class HostedToolChoice(TypedDict, total=False, closed=True):
+    """Explicit provider selector within the current admitted catalog."""
+
+    type: _Required[
+        Literal[
+            "web_search",
+            "file_search",
+            "code_interpreter",
+            "image_generation",
+            "computer",
+            "computer_use_preview",
+            "shell",
+            "apply_patch",
+            "tool_search",
+            "mcp",
+        ]
+    ]
+    server_label: str
+    name: str
 
 
 class ModelSettings(TypedDict, total=False, closed=True):
@@ -162,7 +184,7 @@ class ModelSettings(TypedDict, total=False, closed=True):
     reasoning_effort: str
     reasoning_summary: str
     service_tier: str | None
-    tool_choice: Literal["auto", "none", "required"] | ToolRef | None
+    tool_choice: Literal["auto", "none", "required"] | ToolRef | HostedToolChoice | None
     input_modalities: Sequence[Literal["text", "image", "audio"]] | None
     max_output_tokens: int | None
     temperature: float | None
@@ -851,6 +873,7 @@ class Agent(Generic[ContextT, OutputT]):
         Agent[ContextT, OutputT]
         | Handoff[ContextT, OutputT]
         | RealtimeHandoff
+        | DecisionHandoff
         | _Callable[[], Agent[ContextT, OutputT]],
         ...,
     ]
@@ -893,6 +916,7 @@ class Agent(Generic[ContextT, OutputT]):
                 Agent[ContextT, str]
                 | Handoff[ContextT, str]
                 | RealtimeHandoff
+                | DecisionHandoff
                 | _Callable[[], Agent[ContextT, str]]
             ]
             | None = None,
@@ -916,6 +940,7 @@ class Agent(Generic[ContextT, OutputT]):
                 Agent[ContextT, OutputT]
                 | Handoff[ContextT, OutputT]
                 | RealtimeHandoff
+                | DecisionHandoff
                 | _Callable[[], Agent[ContextT, OutputT]]
             ]
             | None = None,
@@ -948,6 +973,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, str]
             | Handoff[ContextT, str]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, str]]
         ]
         | None = None,
@@ -982,6 +1008,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, str]
             | Handoff[ContextT, str]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, str]]
         ]
         | None = None,
@@ -1013,6 +1040,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, OutputT]
             | Handoff[ContextT, OutputT]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, OutputT]]
         ]
         | None = None,
@@ -1045,6 +1073,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, OutputT]
             | Handoff[ContextT, OutputT]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, OutputT]]
         ]
         | None = None,
@@ -1073,6 +1102,7 @@ class Agent(Generic[ContextT, OutputT]):
             Agent[ContextT, Any]
             | Handoff[ContextT, Any]
             | RealtimeHandoff
+            | DecisionHandoff
             | _Callable[[], Agent[ContextT, Any]]
         ]
         | None = None,
@@ -1124,12 +1154,14 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
             raise TypeError("provider must be a NativeProvider or None")
+        from .decision_handoff import DecisionHandoff
         from .handoffs import Handoff
         from .realtime_agents import RealtimeAgentConfig, RealtimeHandoff
 
         captured_handoffs = tuple(handoffs or ())
         if any(
-            not isinstance(target, (Agent, Handoff, RealtimeHandoff)) and not callable(target)
+            not isinstance(target, (Agent, Handoff, RealtimeHandoff, DecisionHandoff))
+            and not callable(target)
             for target in captured_handoffs
         ):
             raise TypeError("handoffs must contain native Agents or synchronous target resolvers")
@@ -1466,9 +1498,11 @@ class Agent(Generic[ContextT, OutputT]):
         provider reasoning summaries in the Session's observation stream.
         include_request_attempts=True has been retaining content-free native send
         counts on Turn.request_attempts after settlement of each new explicit
-        native submission. Restored-only handles and private correction or child
-        turns have not been acquiring their own capture. Borrowed client sends
-        have been remaining unavailable. These counts have not been enforcing a cap.
+        native submission. Turn.submission_request_attempts has been additionally
+        counting owned private corrections and steering continuations after logical
+        settlement. Restored-only handles and child turns have been remaining
+        outside this root capture. Borrowed client sends have been remaining
+        unavailable. These native-model counts have not been enforcing a cap.
         include_raw_provider_events=True captures Responses and completed Chat client JSON. Use
         include_execution_details=True on the observation reader to receive it.
         Capture uses the Session's in-memory observation retention policy.

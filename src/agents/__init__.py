@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         Agent as Agent,
         CodexAccount as CodexAccount,
         CodexLogin as CodexLogin,
+        HostedToolChoice as HostedToolChoice,
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
         ProviderCompactionPolicy as ProviderCompactionPolicy,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
         ConversationsHistory as ConversationsHistory,
         ConversationsWriteError as ConversationsWriteError,
     )
+    from .decision_handoff import DecisionHandoff as DecisionHandoff
     from .decisions import (
         DecisionError as DecisionError,
         DecisionInput as DecisionInput,
@@ -129,6 +131,7 @@ if TYPE_CHECKING:
         HttpMCP as HttpMCP,
         MCPBlobResourceContents as MCPBlobResourceContents,
         MCPCallContext as MCPCallContext,
+        MCPDiscoveryContext as MCPDiscoveryContext,
         MCPGetPromptResult as MCPGetPromptResult,
         MCPListResourcesResult as MCPListResourcesResult,
         MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
@@ -147,6 +150,7 @@ if TYPE_CHECKING:
         MCPResourceTemplate as MCPResourceTemplate,
         MCPResultContext as MCPResultContext,
         MCPTextResourceContents as MCPTextResourceContents,
+        MCPToolDefinition as MCPToolDefinition,
         StdioMCP as StdioMCP,
     )
     from .model_context import (
@@ -280,6 +284,7 @@ if TYPE_CHECKING:
         WebSearch as WebSearch,
     )
     from .turn import (
+        AcceptedTextChunk as AcceptedTextChunk,
         ChildTurn as ChildTurn,
         PendingRequests as PendingRequests,
         RequestAttemptCount as RequestAttemptCount,
@@ -393,6 +398,7 @@ _MODULES = {
     "CodexAccount": ".agent",
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",
+    "HostedToolChoice": ".agent",
     "ModelRetrySettings": ".retry",
     "NormalizedError": ".retry",
     "RetryAdvice": ".retry",
@@ -500,6 +506,8 @@ _MODULES = {
     "ToolTimeoutError": "._function_tools",
     "ToolCallInfo": ".tools",
     "MCPCallContext": ".mcp",
+    "MCPDiscoveryContext": ".mcp",
+    "MCPToolDefinition": ".mcp",
     "MCPMetadataContext": ".mcp",
     "function_tool": "._function_tools",
     "Completed": ".session",
@@ -524,7 +532,9 @@ _MODULES = {
     "ChildTurn": ".turn",
     "PendingRequests": ".turn",
     "RequestAttemptCount": ".turn",
+    "DecisionHandoff": ".decision_handoff",
     "RequestAttempts": ".turn",
+    "AcceptedTextChunk": ".turn",
     "SteeringReceipt": ".turn",
     "TurnNeedsAttention": ".turn",
     "ExecutorNetworkReceipt": ".turn_receipt",

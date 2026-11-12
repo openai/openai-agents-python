@@ -211,6 +211,7 @@ from .mcp import (
     ChatGPTAppsMCP as ChatGPTAppsMCP,
     HostedVerificationMCP as HostedVerificationMCP,
     HttpMCP as HttpMCP,
+    MCPDiscoveryContext as MCPDiscoveryContext,
     MCPGetPromptResult as MCPGetPromptResult,
     MCPListResourcesResult as MCPListResourcesResult,
     MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
@@ -218,6 +219,7 @@ from .mcp import (
     MCPPrompt as MCPPrompt,
     MCPReadResourceResult as MCPReadResourceResult,
     MCPResultContext as MCPResultContext,
+    MCPToolDefinition as MCPToolDefinition,
     StdioMCP as StdioMCP,
     _ready as _ready,
     _result_policies as _result_policies,
@@ -354,6 +356,7 @@ from .turn import (
     TurnT as TurnT,
     _child_turn as _child_turn,
     _root_turn as _root_turn,
+    _SubmissionRequestAttempts,
 )
 from .turn_receipt import (
     _load_instruction_files as _load_instruction_files,
@@ -444,6 +447,10 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
             if isinstance(value, ToolRef):
                 result["tool_choice"] = "required"
                 controls["named_tool_choice"] = {"name": value.name, "namespace": value.namespace}
+            elif isinstance(value, Mapping):
+                result["tool_choice"] = "required"
+                controls["named_tool_choice"] = None
+                controls["hosted_tool_choice"] = dict(value)
             else:
                 result["tool_choice"] = value or "auto"
                 controls["named_tool_choice"] = None
@@ -546,7 +553,14 @@ def _manual_restore_model_settings(
             "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (
-            ordinary | {"named_tool_choice", "attempt_timeout_ms", "retry", "hosted_prompt"}
+            ordinary
+            | {
+                "named_tool_choice",
+                "hosted_tool_choice",
+                "attempt_timeout_ms",
+                "retry",
+                "hosted_prompt",
+            }
         ):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
         normalized = _native_model_settings(
@@ -563,6 +577,15 @@ def _manual_restore_model_settings(
                 raise ValueError("Manual checkpoint has invalid hosted prompt omission controls")
             # The current Agent supplies the reference for each admitted request.
             normalized["hosted_prompt"] = prompt
+        if "hosted_tool_choice" in controls:
+            target = controls["hosted_tool_choice"]
+            if target is None:
+                normalized["hosted_tool_choice"] = None
+            else:
+                captured_choice = _copy_model_settings({"tool_choice": target}).get("tool_choice")
+                if not isinstance(captured_choice, Mapping):
+                    raise ValueError("Manual checkpoint has invalid hosted tool choice")
+                normalized["hosted_tool_choice"] = dict(captured_choice)
         if "named_tool_choice" in controls:
             target = controls["named_tool_choice"]
             if target is not None:
@@ -2552,7 +2575,7 @@ def _capture_profile_runtimes(
         mcp = opening_tools.mcp
         catalog = (
             root_catalog
-            if index == 0 and not profile.handoff_callbacks
+            if index == 0 and not profile.handoff_callbacks and not profile.decision_handoffs
             else opening_tools.bind(
                 context, generation=root_catalog.generation if index == 0 else 0
             )
@@ -2562,8 +2585,9 @@ def _capture_profile_runtimes(
                 tool._ref
                 for slot, tool in enumerate(catalog.tools)
                 if slot not in profile.handoff_callbacks.values()
+                and slot not in {entry["slot"] for entry in profile.decision_handoffs.values()}
             ),
-            profile.handoffs,
+            {**profile.handoffs, **dict.fromkeys(profile.decision_handoffs, "")},
         )
         opening_tools.validate_collisions()
         output = _prepare_spec(declaration.output_type)
@@ -2626,6 +2650,11 @@ def _capture_profile_runtimes(
                     if profile.handoff_callbacks
                     else {}
                 ),
+                **(
+                    {"decision_handoffs": dict(profile.decision_handoffs)}
+                    if profile.decision_handoffs
+                    else {}
+                ),
                 "transform_context": declaration.transform_context is not None
                 or declaration.hosted_prompt is not None,
                 "before_compact": declaration.before_compact is not None
@@ -2642,13 +2671,23 @@ def _capture_profile_runtimes(
                 "selecting_steps": any(
                     check.child_callback is not None
                     for check in (*declaration.input_guardrails, *input_guardrails)
-                ),
+                )
+                or any(server.tool_filter is not None for server in mcp),
                 "output_fingerprint": output.fingerprint,
                 # Fingerprinting uses admitted MCP identities, not credentials.
                 # Connection configs are completed only after environment entry.
                 "mcp_servers": {server.name: {} for server in mcp},
                 "mcp_result_tools": json.loads(_result_policies(mcp, 0))["servers"],
                 "mcp_metadata_tools": json.loads(_result_policies(mcp, 0))["metadata_servers"],
+                **(
+                    {
+                        "mcp_discovery_tools": json.loads(_result_policies(mcp, 0))[
+                            "discovery_servers"
+                        ]
+                    }
+                    if any(server.tool_filter is not None for server in mcp)
+                    else {}
+                ),
                 "mcp_tools": _mcp_profile_declarations(mcp),
             }
         )
@@ -4775,6 +4814,7 @@ class Session(Generic[ContextT, OutputT]):
                         and (
                             native_agents.before_step is not None
                             or session._has_child_input_guardrails()
+                            or session._has_mcp_discovery_filters()
                             or any(
                                 isinstance(tool, FunctionTool) and tool.is_enabled is not True
                                 for tool in session._bindings
@@ -5212,6 +5252,8 @@ class Session(Generic[ContextT, OutputT]):
         return None if self._realtime is None else self._realtime.usage
 
     def _check_realtime_provider(self) -> None:
+        if any(profile.profile.decision_handoffs for profile in self._profiles.values()):
+            raise CapabilityError("DecisionHandoff does not support Realtime")
         if self._uses_siwc:
             raise CapabilityError("Sign in with ChatGPT Sessions do not support Realtime")
 
@@ -8089,11 +8131,12 @@ class Session(Generic[ContextT, OutputT]):
         self._memory_restored = state is not None or resume is not None
 
     async def flush_memory(self) -> None:
-        """Generate memory for the acquired sandbox from a successful settled text turn.
+        """Memory generation for a successful settled source turn.
 
-        Configure memory on sandbox_environment. Concurrent callers share the same
-        flush, and the same history revision generates once. Restored Sessions and
-        non-text histories are outside this generation path.
+        Configuration: sandbox_environment(memory=...). Shared concurrent flushes;
+        one generation per history revision. Input: admitted text messages and
+        retained tool records. Restored Sessions and non-text message content:
+        unsupported.
         """
         self._check_callback_operation("flush sandbox memory on its source Session")
         lease = self._environment_lease
@@ -9055,6 +9098,11 @@ class Session(Generic[ContextT, OutputT]):
                     slots = tuple(indices)
             state = _Submission(
                 output,
+                submission_request_attempts=(
+                    _SubmissionRequestAttempts()
+                    if self._include_request_attempts and realtime_tool is None
+                    else None
+                ),
                 guardrail_input=guardrail_input,
                 run_usage=run_usage or _UsageCollector(),
                 observation_after=self._observations.sequence,
@@ -9081,7 +9129,13 @@ class Session(Generic[ContextT, OutputT]):
             if input is not None:
                 # A queued root has no observation window until its own dispatch.
                 issued = _root_turn(
-                    self, None, uuid4().hex, state.completion, -1, state.guardrail_results
+                    self,
+                    None,
+                    uuid4().hex,
+                    state.completion,
+                    -1,
+                    state.guardrail_results,
+                    submission_request_attempts=state.submission_request_attempts,
                 )
                 state.issued = issued
                 self._queued_roots.register(state, input)
@@ -9340,7 +9394,10 @@ class Session(Generic[ContextT, OutputT]):
                     for tool in profile.declaration.tools
                     if isinstance(tool, FunctionTool)
                     and tool.namespace in (None, "functions")
-                    and tool.name in profile.handoff_callbacks
+                    and (
+                        tool.name in profile.handoff_callbacks
+                        or tool.name in profile.decision_handoffs
+                    )
                 }
                 for tool in python:
                     expected = callbacks.get(tool.ref)
@@ -10528,6 +10585,9 @@ class Session(Generic[ContextT, OutputT]):
         object.__setattr__(handle, "_run_usage", state.run_usage)
         object.__setattr__(handle, "_original_input", state.original_input)
         state.handle = handle
+        object.__setattr__(
+            handle, "_submission_request_attempts", state.submission_request_attempts
+        )
         object.__setattr__(handle, "_guardrail_results", state.guardrail_results)
         assert handle.turn_id is not None
         self._observations.append(
@@ -10680,6 +10740,7 @@ class Session(Generic[ContextT, OutputT]):
                         and (
                             self._native_agents.before_step is not None
                             or self._has_child_input_guardrails()
+                            or self._has_mcp_discovery_filters()
                             or any(
                                 isinstance(tool, FunctionTool) and tool.is_enabled is not True
                                 for tool in self._bindings
@@ -10727,7 +10788,12 @@ class Session(Generic[ContextT, OutputT]):
                             request["trace"] = state.parent_trace.to_headers()
                         if state.issued is None:
                             state.issued = _root_turn(
-                                self, None, uuid4().hex, state.completion, state.observation_after
+                                self,
+                                None,
+                                uuid4().hex,
+                                state.completion,
+                                state.observation_after,
+                                submission_request_attempts=state.submission_request_attempts,
                             )
                         route_id = self._register_request_observation(state, state.issued)
                         request["observation_submission_id"] = route_id
@@ -10758,9 +10824,11 @@ class Session(Generic[ContextT, OutputT]):
                                 confirmed_rejection = True
                                 raise
                             encoded = json.dumps(request)
-                            if self._include_request_attempts and state.continued_from is None:
+                            if self._include_request_attempts:
                                 native = importlib.import_module("agents._native")
                                 capture = native.NativeModelAttemptCapture()
+                                if state.submission_request_attempts is None:
+                                    state.submission_request_attempts = _SubmissionRequestAttempts()
                                 object.__setattr__(state.issued, "_request_attempts", capture)
                                 submitted = await self._native._submit(
                                     encoded, model_attempts=capture
@@ -11005,6 +11073,16 @@ class Session(Generic[ContextT, OutputT]):
         outcome: Completed[Any] | None,
     ) -> None:
         self._drain_terminal_observations(state)
+        if state.submission_request_attempts is not None and state.issued is not None:
+            # This producer has been owning this native capture exactly once.
+            if state.issued._request_attempts is not None:
+                snapshot = state.issued.request_attempts
+                if (
+                    snapshot is not None
+                    or state.handle is not None
+                    or getattr(error, "_effects", None) != "not_started"
+                ):
+                    state.submission_request_attempts.add(snapshot)
         continuation: _Submission | None = None
         if state.cleanup_error is not None:
             if error is None:
@@ -11035,6 +11113,7 @@ class Session(Generic[ContextT, OutputT]):
                     budget=state.budget,
                     model_override=state.model_override,
                     run_usage=state.run_usage,
+                    submission_request_attempts=state.submission_request_attempts,
                     original_input=state.original_input,
                     guardrail_results=state.guardrail_results,
                     operation_slots=state.operation_slots,
@@ -11265,6 +11344,7 @@ class Session(Generic[ContextT, OutputT]):
             parent_trace=state.parent_trace,
             include_model_output_items=self._observations.include_model_output_items,
             include_raw_provider_events=self._include_raw_provider_events,
+            include_request_attempts=state.submission_request_attempts is not None,
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
@@ -11272,6 +11352,7 @@ class Session(Generic[ContextT, OutputT]):
         repair._context_transform_purpose = "output_repair"
         repair._observations.repair_parent = (self._observations, handle.submission_id)
         repair._rate_limit_parent = self
+        attempt: Turn[Any] | None = None
         try:
             if active is not None and not active():
                 raise asyncio.CancelledError()
@@ -11339,6 +11420,10 @@ class Session(Generic[ContextT, OutputT]):
         else:
             await repair.aclose()
         finally:
+            if state.submission_request_attempts is not None:
+                captured_attempt = attempt or repair._last_turn
+                if captured_attempt is not None:
+                    state.submission_request_attempts.add(captured_attempt.request_attempts)
             if repair._closed and repair._environment_lease is None:
                 self._repair_session = None
         return cast(str, result.final_output)
@@ -13121,6 +13206,12 @@ class Session(Generic[ContextT, OutputT]):
         if tripped is not None:
             raise GuardrailTripwire(tripped, tuple(state.guardrail_results))
 
+    def _has_mcp_discovery_filters(self) -> bool:
+        tools = [*self._bindings]
+        for runtime in self._profiles.values():
+            tools.extend(runtime.profile.declaration.tools)
+        return any(isinstance(tool, _MCP) and tool.tool_filter is not None for tool in tools)
+
     def _has_child_input_guardrails(self) -> bool:
         checks = [*self._input_guardrails, *self._effective_agent().input_guardrails]
         if self._profiles:
@@ -13862,6 +13953,51 @@ class Session(Generic[ContextT, OutputT]):
                     raise TypeError("FunctionTool is_enabled must return a bool")
                 if not enabled:
                     refs.discard(ref)
+            filters = {
+                server.name: server
+                for server in source_bindings
+                if isinstance(server, _MCP) and server.tool_filter is not None
+            }
+            for row in message.get("mcp_names", ()):
+                server = filters.get(row["server"])
+                discovery_ref = mcp_names.get((row["server"], row["tool"]))
+                if server is None or discovery_ref is None or discovery_ref not in refs:
+                    continue
+                if row["tool"] not in server.tools:
+                    raise CapabilityError("MCP discovery is outside its captured declaration")
+                definition = row.get("definition")
+                if (
+                    not isinstance(definition, dict)
+                    or definition.get("name") != row["tool"]
+                    or not isinstance(definition.get("inputSchema"), dict)
+                ):
+                    raise CapabilityError("MCP discovery lacks its captured raw definition")
+                discovery = MCPDiscoveryContext(
+                    context=self._context,
+                    submission=state.handle,
+                    agent=guardrail_agent,
+                    server_name=server.name,
+                    step_index=index,
+                )
+                discovery_filter = server.tool_filter
+                assert discovery_filter is not None
+                captured_definition = cast(MCPToolDefinition, deepcopy(definition))
+                filter_tool = partial(discovery_filter, discovery, captured_definition)
+                keep = await self._call_decision_callback(
+                    state,
+                    message,
+                    lambda _step, filter_tool=filter_tool: filter_tool(),
+                    active,
+                    ChildStepContext(context=self._context, child=state.handle, step_index=index)
+                    if isinstance(state, _ChildCallbacks)
+                    else self.active_turn or state.handle,
+                )
+                if not active():
+                    return
+                if type(keep) is not bool:
+                    raise TypeError("MCP tool_filter must return a bool")
+                if not keep:
+                    refs.discard(discovery_ref)
             candidates = {
                 ToolRef(item["name"], item["namespace"] or "functions")
                 for item in message["candidates"]
@@ -15749,6 +15885,14 @@ class Session(Generic[ContextT, OutputT]):
                 failure_output = ToolOutput.error(text)
             if not self._admit_tool(state, request):
                 return
+            from .decision_handoff import _CapturedDecisionHandoff, _DecisionHandoffSelection
+
+            handoff_target_profile_id = None
+            if failure_output is None and isinstance(entry, _CapturedDecisionHandoff):
+                if not isinstance(value, _DecisionHandoffSelection):
+                    raise ValueError("Decision handoff selection failed")
+                handoff_target_profile_id = value.target_profile_id
+                value = None
             output: ToolOutput | None = failure_output
             background = False
             if failure_output is None:
@@ -15817,6 +15961,8 @@ class Session(Generic[ContextT, OutputT]):
             response: dict[str, Any] = {"request": message, "response": response_output}
             if background:
                 response["start_response"] = False
+            if handoff_target_profile_id is not None:
+                response["handoff_target_profile_id"] = handoff_target_profile_id
             reply = json.dumps(response)
             del response
             if not self._admit_tool(state, request):
