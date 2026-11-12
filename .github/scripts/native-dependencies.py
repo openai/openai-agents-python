@@ -101,6 +101,9 @@ def identity():
         environment.update(
             OPENAI_AGENTS_NATIVE_BUILD_IMAGE=image,
             OPENAI_AGENTS_NATIVE_MANYLINUX=os.environ.get("OPENAI_AGENTS_NATIVE_MANYLINUX"),
+            OPENAI_AGENTS_NATIVE_OPENSSL_SHA256=os.environ.get(
+                "OPENAI_AGENTS_NATIVE_OPENSSL_SHA256"
+            ),
             OPENSSL_STATIC=os.environ.get("OPENSSL_STATIC"),
         )
     return {

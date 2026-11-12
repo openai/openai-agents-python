@@ -2,8 +2,34 @@
 set -euo pipefail
 
 script_dir=$(dirname -- "${BASH_SOURCE[0]}")
+install_manylinux_openssl() (
+  openssl_version=3.6.3
+  openssl_checksum=243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1
+  openssl_source=$(mktemp -d "$RUNNER_TEMP/openssl-source-XXXXXX")
+  trap 'rm -rf -- "$openssl_source"' EXIT
+  openssl_archive="$openssl_source/source.tar.gz"
+  openssl_prefix="$RUNNER_TEMP/agents-openssl"
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 2 \
+    --connect-timeout 8 --max-time 60 --output "$openssl_archive" \
+    "https://github.com/openssl/openssl/releases/download/openssl-$openssl_version/openssl-$openssl_version.tar.gz"
+  printf '%s  %s\n' "$openssl_checksum" "$openssl_archive" | sha256sum --check --strict
+  tar -xzf "$openssl_archive" -C "$openssl_source" --strip-components=1
+  cd -- "$openssl_source"
+  ./Configure "linux-$(uname -m)" no-shared no-tests \
+    --prefix="$openssl_prefix" --libdir=lib --openssldir=/etc/ssl -fPIC
+  make -j"${CARGO_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)}" install_dev
+  test -f "$openssl_prefix/lib/libssl.a"
+  test -f "$openssl_prefix/lib/libcrypto.a"
+  cp -- LICENSE.txt "$openssl_prefix/LICENSE.txt"
+  {
+    printf 'OPENSSL_DIR=%s\n' "$openssl_prefix"
+    printf 'OPENAI_AGENTS_NATIVE_OPENSSL_SHA256=%s\n' "$openssl_checksum"
+  } >> "$GITHUB_ENV"
+)
+
 if [[ -n "${OPENAI_AGENTS_NATIVE_BUILD_IMAGE:-}" ]]; then
-  dnf install --assumeyes clang cmake pkgconf-pkg-config openssl-static
+  dnf install --assumeyes clang cmake pkgconf-pkg-config
+  install_manylinux_openssl
 elif ! command -v clang >/dev/null ||
   ! command -v cmake >/dev/null ||
   ! command -v pkg-config >/dev/null ||

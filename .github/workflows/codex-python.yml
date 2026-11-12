@@ -422,6 +422,8 @@ jobs:
           expected.update(f"agents/bin/{name}" for name in native_helpers("linux"))
           found = set()
           with tempfile.TemporaryDirectory() as directory, ZipFile(wheel) as archive:
+              if "agents/licenses/OPENSSL_LICENSE" not in archive.namelist():
+                  raise SystemExit("Wheel is missing the bundled OpenSSL license")
               for index, member in enumerate(archive.infolist()):
                   with archive.open(member) as source:
                       magic = source.read(4)
