@@ -150,6 +150,7 @@ async fn validate_model(
 
 pub struct Policy {
     pub roles: Vec<String>,
+    pub managed_tools: Vec<String>,
     pub max_depth: usize,
     pub(crate) instruction_files: Vec<crate::application_instructions::InstructionFile>,
     // Current startup policy is host authority. Core reads its own copy before
@@ -162,6 +163,13 @@ impl Policy {
         self.allowed
             .get()
             .is_some_and(|policy| policy.allowed_tools.is_some() && policy.allows(name))
+    }
+
+    fn managed_tool_admission(&self, depth: usize, name: &str) -> Option<bool> {
+        self.managed_tools
+            .iter()
+            .any(|tool| tool == name)
+            .then_some(depth < self.max_depth)
     }
 
     pub fn admits(&self, depth: usize, item: &codex_protocol::models::ResponseItem) -> bool {
@@ -182,6 +190,9 @@ impl Policy {
                     // The Code Mode wrapper requires an explicit current
                     // ToolPolicy grant, just like each nested dispatch.
                     return true;
+                }
+                if let Some(admitted) = self.managed_tool_admission(depth, name) {
+                    return admitted;
                 }
                 if (depth != 0 && self.max_depth == 1)
                     || (name == "spawn_agent" && depth >= self.max_depth)
@@ -242,6 +253,9 @@ impl Policy {
             codex_code_mode::CodeModeToolKind::Function => {
                 if name.namespace.as_deref() != Some("collaboration") {
                     return true;
+                }
+                if let Some(admitted) = self.managed_tool_admission(depth, &name.name) {
+                    return admitted;
                 }
                 if (depth != 0 && self.max_depth == 1)
                     || (name.name == "spawn_agent" && depth >= self.max_depth)

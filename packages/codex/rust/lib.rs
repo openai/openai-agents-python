@@ -2893,6 +2893,16 @@ impl NativeThread {
         })
     }
 
+    fn _manual_children_settled<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            checkpoint::manual_descendants_settled(&inner)
+                .await
+                .map_err(py_error)
+        })
+    }
+
     fn _manual_progress(&self) -> PyResult<u64> {
         let inner = self.current()?;
         let tools = inner
