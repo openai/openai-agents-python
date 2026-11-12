@@ -873,9 +873,13 @@
       "sha256": "c4a96bdf440d6796107f96fd57b48d5b9648751ad287740c846dfced2a60341e"
     },
     {
+      "path": "sdk-tracing-annotation-shapes.patch",
+      "sha256": "51239eae4e28c4b7de5a4615e1ef0a54e972d6ccbb9bbf57bc3e4ef452cf1d0c"
+    },
+    {
       "path": "sdk-provider-history-lineage.patch",
       "sha256": "5c102fce66821d55d869d657908f1aa71bb8ce6ddc2afc45c7b1772986bdad0e"
     }
   ],
-  "result_tree": "4b54368bfef4a2d0667db85d225dabfeb0f1bf7a"
+  "result_tree": "6d72931ebff5296dd18117324bc8cea61fef8f5b"
 }

@@ -33,7 +33,7 @@ FILES = {
     "CHANGELOG.md",
 }
 NATIVE_RELEASE_ARTIFACTS = {
-    "native-Linux-X64": ("native-linux / Native package (ubuntu-24.04)", "manylinux_2_39_x86_64"),
+    "native-Linux-X64": ("native-linux / Native package (ubuntu-24.04)", "manylinux_2_28_x86_64"),
     "native-Windows-X64": ("native-windows / Native package (windows-latest)", "win_amd64"),
     "native-macOS-ARM64": ("native-macos / Native package (macos-latest)", "macosx_11_0_arm64"),
 }
@@ -43,7 +43,7 @@ RELEASE_ARTIFACTS = {
         **NATIVE_RELEASE_ARTIFACTS,
         "native-Linux-ARM64": (
             "native-linux-arm64 / Native package (ubuntu-24.04-arm)",
-            "manylinux_2_39_aarch64",
+            "manylinux_2_28_aarch64",
         ),
     },
 }
@@ -297,6 +297,10 @@ def collect_distributions(qualified: dict[str, Any], destination: Path) -> None:
                 wheels = [name for name in archive.namelist() if name.endswith(".whl")]
                 if len(wheels) != 1:
                     raise ValueError("Each release artifact must contain exactly one wheel")
+                if platform.startswith("manylinux_2_28_"):
+                    legacy_platform = platform.replace("manylinux_2_28_", "manylinux_2_39_", 1)
+                    if wheels[0].endswith(f"-{legacy_platform}.whl"):
+                        platform = legacy_platform
                 names = [(wheels[0], platform)]
                 if artifact["name"] == "native-Linux-X64":
                     sources = [name for name in archive.namelist() if name.endswith(".tar.gz")]
