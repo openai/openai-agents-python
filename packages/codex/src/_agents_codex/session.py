@@ -8072,11 +8072,12 @@ class Session(Generic[ContextT, OutputT]):
         self._memory_restored = state is not None or resume is not None
 
     async def flush_memory(self) -> None:
-        """Generate memory for the acquired sandbox from a successful settled text turn.
+        """Memory generation for a successful settled source turn.
 
-        Configure memory on sandbox_environment. Concurrent callers share the same
-        flush, and the same history revision generates once. Restored Sessions and
-        non-text histories are outside this generation path.
+        Configuration: sandbox_environment(memory=...). Shared concurrent flushes;
+        one generation per history revision. Input: admitted text messages and
+        retained tool records. Restored Sessions and non-text message content:
+        unsupported.
         """
         self._check_callback_operation("flush sandbox memory on its source Session")
         lease = self._environment_lease

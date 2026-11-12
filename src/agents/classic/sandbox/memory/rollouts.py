@@ -9,44 +9,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from _agents_shared.sandbox_memory_artifacts import (
+    _should_include_memory_item as _should_include_memory_item,
+)
+
 from ...items import ItemHelpers, RunItem, ToolApprovalItem, TResponseInputItem
 from ...result import RunResultBase, RunResultStreaming
 from ...run_internal.items import run_items_to_input_items
 from ...util._json import _to_dump_compatible
 from ..errors import WorkspaceReadNotFoundError
 from ..session.base_sandbox_session import BaseSandboxSession
-
-_EXCLUDED_MEMORY_ITEM_TYPES = frozenset(
-    {
-        "compaction",
-        "image_generation_call",
-        "reasoning",
-    }
-)
-_INCLUDED_MEMORY_ITEM_TYPES = frozenset(
-    {
-        "apply_patch_call",
-        "apply_patch_call_output",
-        "computer_call",
-        "computer_call_output",
-        "custom_tool_call",
-        "custom_tool_call_output",
-        "function_call",
-        "function_call_output",
-        "local_shell_call",
-        "local_shell_call_output",
-        "mcp_approval_request",
-        "mcp_approval_response",
-        "mcp_call",
-        "program",
-        "program_output",
-        "shell_call",
-        "shell_call_output",
-        "tool_search_call",
-        "tool_search_output",
-        "web_search_call",
-    }
-)
 
 
 def _validate_relative_path(*, name: str, path: Path) -> None:
@@ -83,19 +55,6 @@ def _normalize_jsonl_line(*, rollout_contents: str) -> bytes:
         raise ValueError("rollout_contents must be valid JSON text") from exc
     line = json.dumps(obj, separators=(",", ":"))
     return (line + "\n").encode("utf-8")
-
-
-def _should_include_memory_item(item: TResponseInputItem) -> bool:
-    role = item.get("role")
-    if role in {"developer", "system"}:
-        return False
-    if role in {"assistant", "tool", "user"}:
-        return True
-
-    item_type = item.get("type")
-    if item_type in _EXCLUDED_MEMORY_ITEM_TYPES:
-        return False
-    return item_type in _INCLUDED_MEMORY_ITEM_TYPES
 
 
 def _sanitize_memory_items(items: list[TResponseInputItem]) -> list[TResponseInputItem]:

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from _agents_shared.sandbox_memory_artifacts import (
     MemoryLayoutConfig as MemoryLayoutConfig,
     RolloutExtractionArtifacts,
+    _should_include_memory_item,
     format_raw_memory,
     format_rollout_summary,
     validate_rollout_artifacts,
@@ -91,10 +92,10 @@ def _memory_transcript(
     messages: list[dict[str, Any]] = []
     for item in snapshot.items:
         kind = item.get("type")
-        if kind == "reasoning":
-            continue
         if kind != "message":
-            raise ValueError("Native sandbox memory requires text message history")
+            if _should_include_memory_item(item):
+                messages.append(dict(item))
+            continue
         role = item.get("role")
         if role not in ("user", "assistant"):
             continue
