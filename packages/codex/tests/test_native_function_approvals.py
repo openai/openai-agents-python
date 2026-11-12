@@ -22,6 +22,7 @@ from agents import (
     FunctionTool,
     InteractionExpiredError,
     ReplaceArguments,
+    RunBudget,
     ToolContext,
     ToolOutput,
     TurnStoppedError,
@@ -586,6 +587,7 @@ async def test_preapproval_denial_skips_predicate_body_and_after(responses):
     assert calls == ["before"]
 
 
+@pytest.mark.parametrize("budgeted", [False, True])
 @pytest.mark.parametrize("approve", [True, False])
 @pytest.mark.parametrize("guarded", [True, False])
 async def test_fresh_process_restore_keeps_required_decision_and_accepted_sibling(
@@ -593,6 +595,7 @@ async def test_fresh_process_restore_keeps_required_decision_and_accepted_siblin
     tmp_path,
     approve,
     guarded,
+    budgeted,
 ):
     effects_path = tmp_path / "effects.txt"
     effects_path.write_text("")
@@ -627,7 +630,9 @@ async def test_fresh_process_restore_keeps_required_decision_and_accepted_siblin
     )
     async with timeout(40):
         async with agent.session() as source:
-            turn = await source.submit("begin")
+            turn = await source.submit(
+                "begin", budget=RunBudget(max_requests=2) if budgeted else None
+            )
             old = await next_request(source.interactions(), risky)
             saved = await source.suspend()
             assert effects_path.read_text().splitlines() == ["accepted"]
@@ -653,6 +658,7 @@ async def test_fresh_process_restore_keeps_required_decision_and_accepted_siblin
             "approve" if approve else "reject",
             turn_id,
             "guarded" if guarded else "plain",
+            *(["2"] if budgeted else []),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=root,

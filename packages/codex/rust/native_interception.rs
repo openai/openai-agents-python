@@ -686,6 +686,7 @@ pub struct Control {
 // One bounded callback owner per explicit root. Native ThreadSpawn ancestry
 // may share it, but never the parent's turn or thread-stop lifetime.
 struct Channel {
+    model_attempts: Mutex<Weak<crate::model_attempts::Capture>>,
     raw_usage: Mutex<Option<codex_core::SdkRawUsageLink>>,
     observe_raw_provider_events: AtomicBool,
     state: Mutex<State>,
@@ -702,6 +703,18 @@ struct PendingCodeImport {
 }
 
 impl Control {
+    pub(crate) fn seal_model_attempts(&self, turn_id: &str) {
+        let capture = self
+            .channel
+            .model_attempts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .upgrade();
+        if let Some(capture) = capture {
+            capture.seal_for_turn(turn_id);
+        }
+    }
+
     pub(crate) fn bind_mcp_results(
         &self,
         results: &Arc<crate::mcp_result_control::McpResultControl>,
@@ -795,6 +808,7 @@ impl Control {
             strict_executor_writes: OnceLock::new(),
             collaboration_namespace: std::sync::OnceLock::new(),
             channel: Arc::new(Channel {
+                model_attempts: Mutex::default(),
                 raw_usage: Mutex::default(),
                 observe_raw_provider_events: AtomicBool::new(false),
                 state: Mutex::new(State {
@@ -2419,6 +2433,12 @@ impl TurnLifecycleContributor for Boundary {
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if let Some(control) = input.thread_store.get::<Control>() {
+                crate::model_attempts::on_turn_start(
+                    input.turn_store,
+                    input.turn_id,
+                    control.native_ancestor.is_some(),
+                    &control.channel.model_attempts,
+                );
                 if control.native_ancestor.is_some()
                     && !control.stopped.is_cancelled()
                     && let Some(capture) = control
@@ -2462,6 +2482,7 @@ impl TurnLifecycleContributor for Boundary {
     }
     fn on_turn_stop<'a>(&'a self, input: TurnStopInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            crate::model_attempts::on_turn_end(input.turn_store);
             if let Some(control) = input.thread_store.get::<Control>() {
                 control.end_direct_turn(input.turn_store);
                 if let Some(owner) = input.turn_store.get::<DirectTurn>() {
@@ -2479,6 +2500,7 @@ impl TurnLifecycleContributor for Boundary {
     }
     fn on_turn_abort<'a>(&'a self, input: TurnAbortInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            crate::model_attempts::on_turn_end(input.turn_store);
             if let Some(control) = input.thread_store.get::<Control>() {
                 control.end_direct_turn(input.turn_store);
                 if let Some(owner) = input.turn_store.get::<DirectTurn>() {
