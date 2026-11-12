@@ -5,7 +5,7 @@ import json
 import sqlite3
 import traceback
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import anyio
 import pytest
@@ -21,7 +21,7 @@ from starlette.responses import JSONResponse, Response
 from _agents_codex.a2a import _provider
 from _agents_codex.a2a._client import _BoundedTransport
 from agents import FunctionTool
-from agents.a2a import A2AInputReply, A2AJobProvider, A2ALimits
+from agents.a2a import A2AInputReply, A2AJobProvider, A2ALimits, connect_a2a
 from agents.experimental.deferred import DeferredTools, JobBinding, JobClaim, JobUpdate
 from tests.a2a_http import card, rpc_service, serve, service
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -284,6 +284,130 @@ async def test_lost_creation_acknowledgment_stays_unknown_after_restart(
         assert again.status == "unknown" and again.receipt is None
         with executor.store.db() as db:
             assert db.execute("SELECT count(*) FROM private").fetchone()[0] == 1
+
+
+async def test_host_reconciles_lost_create_from_authorized_application_receipt(
+    tmp_path, monkeypatch
+):
+    ledger = tmp_path / "business.sqlite3"
+    with sqlite3.connect(ledger) as db:
+        db.execute("CREATE TABLE effects (order_id TEXT PRIMARY KEY, receipt TEXT)")
+    methods = []
+    task = {
+        "id": "business-task",
+        "contextId": "business-context",
+        "status": {"state": "TASK_STATE_COMPLETED"},
+    }
+    expected = {}
+
+    def app(url):
+        async def rpc(request):
+            assert request.headers["authorization"] == "Bearer alice-token"
+            body = await request.json()
+            methods.append(body["method"])
+            if body["method"] == "SendMessage":
+                assert body["params"]["message"]["parts"] == [{"text": "synthetic-order"}]
+                receipt = {**expected, "task_id": task["id"], "context_id": task["contextId"]}
+                with sqlite3.connect(ledger) as db:
+                    db.execute(
+                        "INSERT INTO effects VALUES (?, ?)",
+                        ("synthetic-order", json.dumps(receipt)),
+                    )
+                result = {"task": task}
+            else:
+                assert body["method"] == "GetTask"
+                assert body["params"]["id"] == task["id"]
+                result = task
+            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+        return rpc_service(url, rpc)
+
+    original = _BoundedTransport.handle_async_request
+    dropped = False
+
+    async def lose_ack(transport, request):
+        nonlocal dropped
+        response = await original(transport, request)
+        if request.method == "POST" and not dropped:
+            dropped = True
+            await response.aclose()
+            raise OSError("Synthetic accepted-create acknowledgment loss")
+        return response
+
+    monkeypatch.setattr(_BoundedTransport, "handle_async_request", lose_ack)
+    async with serve(app) as url:
+        target = endpoint(url)
+        provider = make_provider(target, tmp_path / "reservations.db")
+        current = claim(provider)
+        expected.update(
+            principal="alice",
+            endpoint=target.rpc_url,
+            order_id="synthetic-order",
+            binding=asdict(current.binding),
+            key=current.key,
+            generation=current.generation,
+        )
+        unknown = await provider.start(current, Query(text="synthetic-order"))
+        assert unknown == JobUpdate("unknown")
+        # A new host has been reading its authoritative ledger independently of peer metadata.
+        with sqlite3.connect(ledger) as db:
+            saved = json.loads(db.execute("SELECT receipt FROM effects").fetchone()[0])
+        allowed = True
+        revoke_during_credentials = False
+
+        async def credentials():
+            nonlocal allowed
+            if revoke_during_credentials:
+                allowed = False
+            return await token()
+
+        async def reconcile(receipt, *, source="application-ledger"):
+            if not allowed or source != "application-ledger" or receipt is None:
+                return None
+            if any(receipt.get(key) != value for key, value in expected.items()):
+                return None
+            if not all(
+                isinstance(receipt.get(key), str) and receipt[key]
+                for key in ("task_id", "context_id")
+            ):
+                return None
+            async with connect_a2a(target, authorization=credentials) as client:
+                if not allowed:
+                    return None
+                observed = await client.get_task(p.GetTaskRequest(id=receipt["task_id"]))
+            if (observed.id, observed.context_id) != (receipt["task_id"], receipt["context_id"]):
+                return None
+            return observed.status.state
+
+        assert await reconcile(None) is None
+        assert await reconcile(saved, source="peer-metadata") is None
+        for key, value in {
+            "principal": "bob",
+            "endpoint": "https://foreign.example/rpc",
+            "order_id": "other-order",
+            "binding": {},
+            "key": "foreign",
+            "generation": current.generation + 1,
+            "task_id": "",
+            "context_id": "",
+        }.items():
+            assert await reconcile({**saved, key: value}) is None
+        allowed = False
+        assert await reconcile(saved) is None
+        assert methods == ["SendMessage"]
+        allowed = True
+        revoke_during_credentials = True
+        assert await reconcile(saved) is None
+        assert methods == ["SendMessage"]
+        allowed = True
+        revoke_during_credentials = False
+        assert await reconcile(saved) == p.TASK_STATE_COMPLETED
+        assert methods == ["SendMessage", "GetTask"]
+        assert unknown == JobUpdate("unknown")
+        with sqlite3.connect(ledger) as db:
+            assert db.execute("SELECT count(*) FROM effects").fetchone()[0] == 1
+        with sqlite3.connect(tmp_path / "reservations.db") as db:
+            assert db.execute("SELECT count(*) FROM reservations").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize(

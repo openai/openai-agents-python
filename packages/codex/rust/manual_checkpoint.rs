@@ -1462,6 +1462,14 @@ pub(crate) async fn capture(
     .await;
     let suspended_turn = match &outcome {
         Ok(codex_protocol::turn_input::SuspendTurnOutcome::Suspended { turn_id }) => {
+            // Manual suspension joins the turn without publishing its terminal event.
+            if let Some(control) = thread
+                .thread
+                .thread_extension_data()
+                .get::<crate::native_interception::Control>()
+            {
+                control.seal_model_attempts(turn_id);
+            }
             Some(turn_id.as_str())
         }
         _ => None,

@@ -274,7 +274,7 @@ index 55af6be3..d3477c62 100644
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 468f4ee1..7d2bc9e5 100644
+index e472317d..5323d4c9 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -620,6 +620,7 @@ pub(crate) struct SessionSettingsUpdate {
@@ -800,7 +800,7 @@ index 7c661a2e..cb03bda1 100644
              thread_settings: Default::default(),
              trace: None,
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 61ddcbcb..af113c2e 100644
+index c88a52fe..95263c05 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
 @@ -146,6 +146,7 @@ pub use codex_api::ModelInvocationDeadlineState;
