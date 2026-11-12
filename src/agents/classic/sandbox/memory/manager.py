@@ -4,9 +4,14 @@ import asyncio
 import json
 import logging
 import posixpath
-import re
 import weakref
 from typing import Any
+
+from _agents_shared.sandbox_memory_artifacts import (
+    format_raw_memory as _format_raw_memory,
+    format_rollout_summary as _format_rollout_summary,
+    validate_rollout_id as _validate_rollout_id,
+)
 
 from ...exceptions import UserError
 from ...items import TResponseInputItem
@@ -32,7 +37,6 @@ from .storage import SandboxMemoryStorage
 
 logger = logging.getLogger(__name__)
 
-_ROLLOUT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _STOP = object()
 _MemoryLayoutKey = tuple[str, str]
 _MEMORY_GENERATION_MANAGERS: weakref.WeakKeyDictionary[
@@ -315,51 +319,5 @@ def _memory_layout_key(memory: Memory) -> _MemoryLayoutKey:
     )
 
 
-def _validate_rollout_id(rollout_id: str) -> str:
-    normalized_rollout_id = rollout_id.strip()
-    if not _ROLLOUT_ID_RE.fullmatch(normalized_rollout_id):
-        raise ValueError(
-            "Sandbox memory rollout ID must be a file-safe ID containing only "
-            "letters, numbers, '.', '_', or '-'."
-        )
-    return normalized_rollout_id
-
-
 def _rollout_file_name_for_rollout_id(rollout_id: str) -> str:
     return f"{_validate_rollout_id(rollout_id)}.jsonl"
-
-
-def _format_raw_memory(
-    *,
-    updated_at: str,
-    rollout_id: str,
-    rollout_path: str,
-    rollout_summary_file: str,
-    terminal_state: str,
-    raw_memory: str,
-) -> str:
-    return (
-        f"rollout_id: {rollout_id}\n"
-        f"updated_at: {updated_at}\n"
-        f"rollout_path: {rollout_path}\n"
-        f"rollout_summary_file: {rollout_summary_file}\n"
-        f"terminal_state: {terminal_state}\n\n"
-        f"{raw_memory.rstrip()}\n"
-    )
-
-
-def _format_rollout_summary(
-    *,
-    updated_at: str,
-    rollout_path: str,
-    session_id: str,
-    terminal_state: str,
-    rollout_summary: str,
-) -> str:
-    return (
-        f"session_id: {session_id}\n"
-        f"updated_at: {updated_at}\n"
-        f"rollout_path: {rollout_path}\n"
-        f"terminal_state: {terminal_state}\n\n"
-        f"{rollout_summary.rstrip()}\n"
-    )
