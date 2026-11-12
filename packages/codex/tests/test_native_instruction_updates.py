@@ -324,9 +324,9 @@ async def test_cancelled_initial_publication_joins_then_closes_the_native_thread
     close = _native.NativeThread.close
     close_after_error = session_module._close_after_error
 
-    async def delayed(native, text):
+    async def delayed(native, text, *args, **kwargs):
         owners.append(native)
-        result = await publish(native, text)
+        result = await publish(native, text, *args, **kwargs)
         accepted.set()
         try:
             await release.wait()

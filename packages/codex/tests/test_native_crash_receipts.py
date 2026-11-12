@@ -107,8 +107,11 @@ async def test_process_loss_keeps_effects_distinct_from_native_receipts(
     for name in tuple(environment):
         if name.startswith(("OPENAI_", "AZURE_OPENAI_")):
             environment.pop(name)
-    repository = Path(__file__).resolve().parents[1]
-    environment["PYTHONPATH"] = os.pathsep.join((str(repository / "src"), str(repository)))
+    package = Path(__file__).resolve().parents[1]
+    repository = package.parents[1]
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(repository / "src"), str(package / "src"), str(package))
+    )
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     # SIGKILL cannot run TemporaryDirectory cleanup; keep the child's files in our fixture.
     native_temporary = tmp_path / "native"

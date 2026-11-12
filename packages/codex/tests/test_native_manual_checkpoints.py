@@ -787,7 +787,7 @@ async def test_failed_restored_manual_snapshot_read_keeps_live_reply(
         def __getattr__(self, name: str) -> Any:
             return getattr(self.native, name)
 
-        async def _seal_manual(self) -> str:
+        async def _seal_manual(self, *args: Any, **kwargs: Any) -> str:
             raise RuntimeError("controlled snapshot read failure")
 
     lookup = FunctionTool(
@@ -1195,10 +1195,10 @@ async def test_native_preseal_refusal_keeps_original_manual_reply(
                     await capturing.wait()
             return raw
 
-        async def _seal_manual(self) -> str:
+        async def _seal_manual(self, *args: Any, **kwargs: Any) -> str:
             capturing.set()
             await asyncio.wait_for(entered.wait(), 1)
-            return await self.native._seal_manual()
+            return await self.native._seal_manual(*args, **kwargs)
 
     start_readers = Session._start_readers
 
@@ -1261,7 +1261,7 @@ async def test_preseal_refusal_does_not_revive_an_ended_reader(
             def __getattr__(self, name: str) -> Any:
                 return getattr(native, name)
 
-            async def _seal_manual(self) -> str:
+            async def _seal_manual(self, *args: Any, **kwargs: Any) -> str:
                 session._reader.cancel()
                 await asyncio.gather(session._reader, return_exceptions=True)
                 return "null"

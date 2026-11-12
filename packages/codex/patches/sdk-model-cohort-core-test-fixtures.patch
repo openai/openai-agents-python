@@ -1,0 +1,559 @@
+diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
+index c23baaf0..e7ea531d 100644
+--- a/codex-rs/core/src/agent/control/residency_tests.rs
++++ b/codex-rs/core/src/agent/control/residency_tests.rs
+@@ -196,6 +196,7 @@ async fn mark_thread_completed(thread: &CodexThread) {
+         .send_event(
+             turn.as_ref(),
+             EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: turn.sub_id.clone(),
+                 started_at: None,
+@@ -217,6 +218,7 @@ async fn mark_thread_interrupted(thread: &CodexThread) {
+         .send_event(
+             turn.as_ref(),
+             EventMsg::TurnAborted(TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: Some(turn.sub_id.clone()),
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index bc038c40..f8540466 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -594,6 +594,7 @@ async fn on_event_updates_status_from_task_complete() {
+         ),
+     ] {
+         let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
++            model_attempt: None,
+             tool_completion: None,
+             turn_id: "turn-1".to_string(),
+             started_at: None,
+@@ -623,6 +624,7 @@ async fn on_event_updates_status_from_error() {
+ #[tokio::test]
+ async fn on_event_updates_status_from_turn_aborted() {
+     let status = agent_status_from_event(&EventMsg::TurnAborted(TurnAbortedEvent {
++        model_attempt: None,
+         turn_id: Some("turn-1".to_string()),
+         started_at: None,
+         reason: TurnAbortReason::Interrupted,
+@@ -4321,6 +4323,7 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
+         .send_event(
+             tester_turn.as_ref(),
+             EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: tester_turn.sub_id.clone(),
+                 started_at: None,
+@@ -4404,6 +4407,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
+         .send_event(
+             tester_turn.as_ref(),
+             EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: tester_turn.sub_id.clone(),
+                 started_at: None,
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 2cac85dd..e05b6ad1 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1878,7 +1878,6 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
+                     .to_string(),
+             ),
+         },
+-        None,
+         &mut auth_recovery,
+         &mut provider_auth_recovery_attempted,
+         &test_session_telemetry(),
+@@ -1991,7 +1990,6 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
+         let (event_sender, event_receiver) = async_channel::unbounded();
+         let result = super::handle_unauthorized(
+             unauthorized(),
+-            None,
+             &mut auth_recovery,
+             &mut provider_auth_recovery_attempted,
+             &telemetry,
+@@ -2011,7 +2009,6 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
+             );
+             super::handle_unauthorized(
+                 unauthorized(),
+-                None,
+                 &mut auth_recovery,
+                 &mut provider_auth_recovery_attempted,
+                 &telemetry,
+diff --git a/codex-rs/core/src/codex_delegate_tests.rs b/codex-rs/core/src/codex_delegate_tests.rs
+index 80a91912..56cdd1af 100644
+--- a/codex-rs/core/src/codex_delegate_tests.rs
++++ b/codex-rs/core/src/codex_delegate_tests.rs
+@@ -51,6 +51,7 @@ async fn forward_events_filters_private_events_before_blocked_send_is_cancelled(
+         .send(Event {
+             id: "full".to_string(),
+             msg: EventMsg::TurnAborted(TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: Some("turn-1".to_string()),
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+diff --git a/codex-rs/core/src/guardian/review_session_tests.rs b/codex-rs/core/src/guardian/review_session_tests.rs
+index 3e168e53..2d3edad3 100644
+--- a/codex-rs/core/src/guardian/review_session_tests.rs
++++ b/codex-rs/core/src/guardian/review_session_tests.rs
+@@ -178,6 +178,7 @@ fn turn_complete_event(
+     Event {
+         id: turn_id.to_string(),
+         msg: EventMsg::TurnComplete(TurnCompleteEvent {
++            model_attempt: None,
+             tool_completion: None,
+             turn_id: turn_id.to_string(),
+             started_at: None,
+@@ -194,6 +195,7 @@ fn turn_aborted_event(turn_id: &str) -> Event {
+     Event {
+         id: turn_id.to_string(),
+         msg: EventMsg::TurnAborted(TurnAbortedEvent {
++            model_attempt: None,
+             turn_id: Some(turn_id.to_string()),
+             started_at: None,
+             reason: TurnAbortReason::Interrupted,
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index 0b9a8a67..08dc19c1 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -2974,6 +2974,7 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
+         .send_trunk_event_raw_for_test(Event {
+             id: "stale-turn".to_string(),
+             msg: EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: "stale-turn".to_string(),
+                 started_at: None,
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+index 36865b4a..d725ded5 100644
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -101,6 +101,7 @@ fn contributor_metadata_preserves_core_fields_and_existing_values() {
+             &contributors,
+             "thread",
+             "model",
++            false,
+             ModelRequestKind::Generation,
+             &mut metadata,
+             None
+@@ -249,6 +250,7 @@ async fn prepared_interceptors_keep_the_original_admission_across_overlapping_re
+             &contributors,
+             admission.thread_id(),
+             "model",
++            false,
+             ModelRequestKind::Generation,
+             &mut None,
+             Some(admission.clone()),
+diff --git a/codex-rs/core/src/realtime_history_tests.rs b/codex-rs/core/src/realtime_history_tests.rs
+index 960923ed..0520d567 100644
+--- a/codex-rs/core/src/realtime_history_tests.rs
++++ b/codex-rs/core/src/realtime_history_tests.rs
+@@ -138,6 +138,7 @@ fn interrupted_turn_is_not_associated_with_a_new_voice_session(
+         },
+     ));
+     let aborted = EventMsg::TurnAborted(TurnAbortedEvent {
++        model_attempt: None,
+         turn_id: aborted_turn_id.map(str::to_string),
+         reason: TurnAbortReason::Interrupted,
+         error: None,
+@@ -173,6 +174,7 @@ fn interrupted_turn_is_not_associated_with_a_new_voice_session(
+ fn interrupted_turn_keeps_its_existing_voice_session_for_late_artifacts() {
+     let mut state = started_state();
+     state.observe(&EventMsg::TurnAborted(TurnAbortedEvent {
++        model_attempt: None,
+         turn_id: Some("turn-1".to_string()),
+         reason: TurnAbortReason::Interrupted,
+         error: None,
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index 55af6be3..f374924b 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -285,6 +285,7 @@ fn completed_user_turn_rollout(
+     rollout_items.extend(items);
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
+         codex_protocol::protocol::TurnCompleteEvent {
++            model_attempt: None,
+             tool_completion: None,
+             turn_id,
+             last_agent_message: None,
+@@ -550,6 +551,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
+         RolloutItem::TurnContext(previous_context_item),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id,
+                 last_agent_message: None,
+@@ -699,6 +701,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
+         RolloutItem::ResponseItem(turn_one_assistant.clone().into()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: first_turn_id,
+                 started_at: None,
+@@ -737,6 +740,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
+         RolloutItem::ResponseItem(turn_two_assistant.into()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: rolled_back_turn_id,
+                 started_at: None,
+@@ -823,6 +827,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_inc
+         RolloutItem::ResponseItem(turn_one_assistant.clone().into()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: first_turn_id,
+                 started_at: None,
+@@ -927,6 +932,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
+         RolloutItem::ResponseItem(turn_one_assistant.clone().into()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: first_turn_id,
+                 started_at: None,
+@@ -961,6 +967,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
+         RolloutItem::ResponseItem(turn_two_assistant.into()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: second_turn_id,
+                 started_at: None,
+@@ -990,6 +997,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
+         }),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: standalone_turn_id,
+                 started_at: None,
+@@ -1073,6 +1081,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
+         RolloutItem::ResponseItem(assistant_message("turn 1 assistant").into()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: first_turn_id,
+                 started_at: None,
+@@ -1098,6 +1107,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
+         RolloutItem::ResponseItem(assistant_reply.into()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: assistant_turn_id,
+                 started_at: None,
+@@ -1175,6 +1185,7 @@ async fn reconstruct_history_rollback_clears_history_and_metadata_when_exceeding
+         RolloutItem::ResponseItem(assistant_message("only assistant").into()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: only_turn_id,
+                 started_at: None,
+@@ -1232,6 +1243,7 @@ async fn record_initial_history_resumed_rollback_skips_only_user_turns() {
+         RolloutItem::TurnContext(previous_context_item),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: user_turn_id,
+                 started_at: None,
+@@ -1255,6 +1267,7 @@ async fn record_initial_history_resumed_rollback_skips_only_user_turns() {
+         )),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: standalone_turn_id,
+                 started_at: None,
+@@ -1317,6 +1330,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
+         RolloutItem::TurnContext(previous_context_item.clone()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: previous_turn_id,
+                 started_at: None,
+@@ -1700,6 +1714,7 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
+         });
+         wake_items.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
+             codex_protocol::protocol::TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: Some(format!("wake-{window_number}")),
+                 reason: TurnAbortReason::Interrupted,
+                 error: None,
+@@ -1986,6 +2001,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_clear
+         RolloutItem::TurnContext(current_context_item),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: current_turn_id,
+                 started_at: None,
+@@ -2082,6 +2098,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+         RolloutItem::TurnContext(previous_context_item),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: previous_turn_id,
+                 started_at: None,
+@@ -2210,6 +2227,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
+         RolloutItem::TurnContext(previous_context_item),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: previous_turn_id,
+                 started_at: None,
+@@ -2242,6 +2260,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
+         )),
+         RolloutItem::EventMsg(EventMsg::TurnAborted(
+             codex_protocol::protocol::TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: None,
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+@@ -2353,6 +2372,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
+         RolloutItem::TurnContext(previous_context_item),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: previous_turn_id,
+                 started_at: None,
+@@ -2385,6 +2405,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
+         )),
+         RolloutItem::EventMsg(EventMsg::TurnAborted(
+             codex_protocol::protocol::TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: Some(unmatched_abort_turn_id),
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+@@ -2396,6 +2417,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
+         RolloutItem::TurnContext(current_context_item.clone()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: current_turn_id,
+                 started_at: None,
+@@ -2497,6 +2519,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
+         RolloutItem::TurnContext(previous_context_item),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: previous_turn_id,
+                 started_at: None,
+@@ -2688,6 +2711,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
+         RolloutItem::TurnContext(previous_context_item),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: previous_turn_id,
+                 started_at: None,
+diff --git a/codex-rs/core/src/session/terminal_tool_tests.rs b/codex-rs/core/src/session/terminal_tool_tests.rs
+index 896e6552..835072b5 100644
+--- a/codex-rs/core/src/session/terminal_tool_tests.rs
++++ b/codex-rs/core/src/session/terminal_tool_tests.rs
+@@ -3,6 +3,7 @@ use super::*;
+ use crate::tasks::SessionTask;
+ use codex_protocol::turn_input::NotSubmittedReason;
+ use codex_thread_store::*;
++use pretty_assertions::assert_eq;
+ use std::any::Any;
+ use tokio::sync::{mpsc, oneshot};
+ 
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 4bd8fb0a..4488c505 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -824,6 +824,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
+         .expect("expected turn aborted event")
+         .expect("channel open");
+     let EventMsg::TurnAborted(TurnAbortedEvent {
++        model_attempt: _,
+         turn_id,
+         reason,
+         error: _,
+@@ -4384,6 +4385,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
+         RolloutItem::TurnContext(previous_context_item.clone()),
+         RolloutItem::EventMsg(EventMsg::TurnComplete(
+             codex_protocol::protocol::TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id,
+                 last_agent_message: None,
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index f664c703..a2a20e15 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -205,7 +205,6 @@ async fn terminal_policy_selects_the_first_eligible_call_in_model_order() {
+         &step,
+         &settled_test_calls(),
+         &CancellationToken::new(),
+-        &mut 0,
+     )
+     .await
+     .unwrap()
+@@ -231,7 +230,7 @@ async fn terminal_policy_never_runs_for_failed_siblings() {
+     let mut tools = settled_test_calls();
+     tools.all_succeeded = false;
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
++        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
+             .await
+             .unwrap()
+             .is_none()
+@@ -253,7 +252,6 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+             &step,
+             &settled_test_calls(),
+             &CancellationToken::new(),
+-            &mut 0,
+         )
+         .await
+         .unwrap()
+@@ -272,7 +270,6 @@ async fn terminal_policy_is_default_off_and_validation_errors_fail_the_turn() {
+         &step,
+         &settled_test_calls(),
+         &CancellationToken::new(),
+-        &mut 0,
+     )
+     .await
+     .unwrap_err();
+@@ -286,7 +283,7 @@ async fn terminal_policy_rejects_a_mismatched_accepted_receipt() {
+     let mut tools = settled_test_calls();
+     tools.outputs.swap(0, 1);
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
++        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
+             .await
+             .is_err()
+     );
+@@ -476,7 +473,7 @@ async fn tool_terminal_recovery_saved_success_alone_has_no_completion_authority(
+     let (session, turn) = crate::session::tests::make_session_and_context().await;
+     let step = StepContext::for_test(Arc::new(turn));
+     assert!(
+-        propose_tool_completion(&session, &step, &tools, &CancellationToken::new(), &mut 0)
++        propose_tool_completion(&session, &step, &tools, &CancellationToken::new())
+             .await
+             .unwrap()
+             .is_none()
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index 2ec7c0e9..e6b20cd3 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -2769,6 +2769,7 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
+             RolloutItem::ResponseItem(user_msg("hello").into()),
+             RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
+             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: None,
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+@@ -2793,6 +2794,7 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
+         serde_json::to_value(vec![
+             RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
+             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: None,
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+@@ -2824,6 +2826,7 @@ fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
+         serde_json::to_value(vec![
+             RolloutItem::ResponseItem(user_msg("hello").into()),
+             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: None,
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+@@ -2847,6 +2850,7 @@ fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
+         .expect("serialize disabled interrupted empty fork history"),
+         serde_json::to_value(vec![RolloutItem::EventMsg(EventMsg::TurnAborted(
+             TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: None,
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+@@ -2866,6 +2870,7 @@ fn interrupted_snapshot_is_not_mid_turn() {
+         RolloutItem::ResponseItem(assistant_msg("partial").into()),
+         RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
+         RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
++            model_attempt: None,
+             turn_id: Some("turn-1".to_string()),
+             started_at: None,
+             reason: TurnAbortReason::Interrupted,
+@@ -3047,6 +3052,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
+     .expect("serialize interrupted marker");
+     let interrupted_abort_json = serde_json::to_value(RolloutItem::EventMsg(
+         EventMsg::TurnAborted(TurnAbortedEvent {
++            model_attempt: None,
+             turn_id: expected_turn_id,
+             started_at: None,
+             reason: TurnAbortReason::Interrupted,
+@@ -3170,6 +3176,7 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
+         matches!(
+             item,
+             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
++                model_attempt: _,
+                 turn_id: Some(turn_id),
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,
+diff --git a/codex-rs/core/src/thread_rollout_truncation_tests.rs b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+index 1751c1c2..5cc6e47b 100644
+--- a/codex-rs/core/src/thread_rollout_truncation_tests.rs
++++ b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+@@ -91,6 +91,7 @@ fn turn_started(turn_id: &str) -> RolloutItem {
+ 
+ fn turn_completed(turn_id: &str) -> RolloutItem {
+     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++        model_attempt: None,
+         tool_completion: None,
+         turn_id: turn_id.to_string(),
+         started_at: None,
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 8860cfba..26320b92 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -1540,6 +1540,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
+         .send_event(
+             child_turn.as_ref(),
+             EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: child_turn.sub_id.clone(),
+                 started_at: None,
+@@ -1978,6 +1979,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
+         .send_event(
+             first_turn.as_ref(),
+             EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: first_turn.sub_id.clone(),
+                 started_at: None,
+@@ -2021,6 +2023,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
+         .send_event(
+             second_turn.as_ref(),
+             EventMsg::TurnComplete(TurnCompleteEvent {
++                model_attempt: None,
+                 tool_completion: None,
+                 turn_id: second_turn.sub_id.clone(),
+                 started_at: None,
+@@ -2185,6 +2188,7 @@ async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
+         .send_event(
+             aborted_turn.as_ref(),
+             EventMsg::TurnAborted(TurnAbortedEvent {
++                model_attempt: None,
+                 turn_id: Some(aborted_turn.sub_id.clone()),
+                 started_at: None,
+                 reason: TurnAbortReason::Interrupted,

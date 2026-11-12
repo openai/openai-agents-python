@@ -261,12 +261,14 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             assert root_result.thread_usage is not None
             assert root_result.thread_usage.total_token_usage.total_tokens == 216
             root_snapshot = root_result.run_usage
-            assert (root_snapshot.requests, root_snapshot.total_tokens) in {
-                (2, 216),
-                (3, 226),
-                (3, 238),
-                (4, 248),
-            }
+            # The root can settle while owned child attempts are waiting for usage.
+            measured_requests = {216: 2, 226: 3, 238: 3, 248: 4}
+            assert root_snapshot.total_tokens in measured_requests
+            assert (
+                root_snapshot.requests - root_snapshot.missing_usage_requests
+                == measured_requests[root_snapshot.total_tokens]
+            )
+            assert root_snapshot.requests <= len(peer.requests) == 6
             by_id = {handle.child_id: handle for handle in await handles(session, 2)}
             alpha = by_id[peer.child_metadata["alpha"][0]["thread_id"]]
             beta = by_id[peer.child_metadata["beta"][0]["thread_id"]]
@@ -278,6 +280,7 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             assert first.run_usage.requests == 2 and other.run_usage.requests == 2
             assert first.run_usage.total_tokens == 20 and other.run_usage.total_tokens == 44
             assert root.run_usage.requests == 6 and root.run_usage.total_tokens == 280
+            assert root.run_usage.missing_usage_requests == 0
             assert root_result.run_usage == root_snapshot
             assert first.thread_usage is not None and other.thread_usage is not None
             assert first.thread_usage.total_token_usage.total_tokens == 20
