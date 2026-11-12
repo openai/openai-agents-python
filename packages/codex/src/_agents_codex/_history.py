@@ -7,13 +7,13 @@ from typing import Any as Any, cast as cast
 from pydantic import JsonValue as JsonValue
 
 from ._events import FunctionCallItem as FunctionCallItem, SessionItem as SessionItem
+from ._hosted_projection import project_hosted_response_item as project_hosted_response_item
 from ._projection import (
     EventProjector as EventProjector,
     _execution_item as _execution_item,
     _function_output_fields as _function_output_fields,
     _usage as _usage,
     project_execution_completion as project_execution_completion,
-    project_hosted_response_item,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._web_projection import project_web_search_item as project_web_search_item

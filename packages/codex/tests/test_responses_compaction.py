@@ -233,6 +233,8 @@ async def test_session_compaction_transforms_input_before_client_effects(cancel)
     owner = SimpleNamespace(
         id="session",
         _context=None,
+        _model_api_key=None,
+        _native_options="{}",
         _native=SimpleNamespace(
             _reply_compaction=lambda *args, **kwargs: replies.append((args, kwargs))
         ),
