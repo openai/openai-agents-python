@@ -581,3 +581,60 @@ async def test_native_jsonl_budget_retains_physical_append_until_resource_cleanu
     async with timeout(5):
         await written.wait()
     assert len(path.read_text().splitlines()) == 1
+
+
+@unix
+async def test_native_provider_operations_deliver_paired_headers(tmp_path: Path):
+    from io import BytesIO
+
+    from agents.classic.sandbox.errors import ExposedPortUnavailableError
+
+    seen = []
+    client = UnixLocalSandboxClient(
+        instrumentation=Instrumentation(sinks=[CallbackSink(lambda event, _: seen.append(event))]),
+        inherit_host_environment=False,
+    )
+    observed = []
+
+    @asynccontextmanager
+    async def connect(resource):
+        start = len(seen)
+        path = Path("saved.txt")
+        await resource.write(path, BytesIO(b"workspace content"))
+        assert await resource.read_bounded(path, max_bytes=100) == b"workspace content"
+        assert await resource.running()
+        with pytest.raises(ExposedPortUnavailableError):
+            await resource.resolve_exposed_port(8132)
+        archive = await resource.persist_workspace()
+        try:
+            await resource.rm(path)
+            await resource.hydrate_workspace(archive)
+        finally:
+            archive.close()
+        assert (tmp_path / path).read_bytes() == b"workspace content"
+        observed.extend(seen[start:])
+        yield Environment(url="wss://executor.invalid", cwd=resource.state.manifest.root)
+
+    async with sandbox_environment(
+        client, manifest=Manifest(root=str(tmp_path)), options=None, connect=connect
+    ):
+        pass
+    assert [(event.op, event.phase) for event in observed] == [
+        (operation, phase)
+        for operation in (
+            "write",
+            "read",
+            "running",
+            "resolve_exposed_port",
+            "persist_workspace",
+            "hydrate_workspace",
+        )
+        for phase in ("start", "finish")
+    ]
+    assert all(event.data == {} for event in observed)
+    finishes = [event for event in observed if isinstance(event, SandboxSessionFinishEvent)]
+    assert [(event.op, event.ok) for event in finishes if not event.ok] == [
+        ("resolve_exposed_port", False)
+    ]
+    assert finishes[3].error_type == "SandboxOperationError"
+    assert finishes[3].error_message is None
