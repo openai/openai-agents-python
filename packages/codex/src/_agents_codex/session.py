@@ -966,7 +966,7 @@ class ProducedItem:
 class RunErrorDetails:
     """Evidence retained before a failed one-shot submission closes.
 
-    Raw response payloads use the existing Responses observation capture.
+    Detached client JSON from the existing provider observation capture.
     incomplete records gaps in the available native evidence.
     """
 
@@ -8268,7 +8268,10 @@ class Session(Generic[ContextT, OutputT]):
                                 "response.failed",
                             }:
                                 response = payload.get("response")
-                            elif payload.get("object") == "response":
+                            elif event.source == "chat_completions" or payload.get("object") in (
+                                "response",
+                                "chat.completion",
+                            ):
                                 response = payload
                             else:
                                 continue
@@ -11472,6 +11475,8 @@ class Session(Generic[ContextT, OutputT]):
             request = ModelRequest(
                 deepcopy(message["data"]), self._context, self.id, message["turn_id"]
             )
+            if self._include_raw_provider_events:
+                object.__setattr__(request, "_observe_raw_provider_events", True)
             backend = self._model_backend
             if not callable(getattr(backend, "complete", None)):
                 backend = await _call_callback(backend.get_model, active, request.body["model"])
@@ -11493,7 +11498,8 @@ class Session(Generic[ContextT, OutputT]):
                     if not isinstance(value, ModelResponse):
                         raise TypeError("NativeModel.complete must return ModelResponse")
                     return value._capture(
-                        capture_raw_usage=message.get("capture_raw_usage") is True
+                        capture_raw_usage=message.get("capture_raw_usage") is True,
+                        capture_raw_provider_events=self._include_raw_provider_events,
                     )
                 finally:
                     del request, value
@@ -11503,7 +11509,8 @@ class Session(Generic[ContextT, OutputT]):
             # another await or handing the retained value back to the application.
             if isinstance(produced, ModelResponse):
                 reply = produced._capture(
-                    capture_raw_usage=message.get("capture_raw_usage") is True
+                    capture_raw_usage=message.get("capture_raw_usage") is True,
+                    capture_raw_provider_events=self._include_raw_provider_events,
                 )
             elif produced is not None and not isinstance(produced, str):
                 raise TypeError("NativeModel.complete must return ModelResponse")

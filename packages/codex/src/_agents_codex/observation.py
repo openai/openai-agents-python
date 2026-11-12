@@ -162,9 +162,9 @@ class ResponseFactReceived(_SubmissionEvent):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RawProviderEvent(_SubmissionEvent):
-    """A Responses provider JSON object captured before native event decoding."""
+    """Provider JSON on the exact native turn observation stream."""
 
-    source: Literal["responses"]
+    source: Literal["responses", "chat_completions"]
     transport: Literal["sse", "websocket", "json"]
     payload: dict[str, JsonValue] = field(repr=False)
     type: Literal["raw_provider_event"] = field(default="raw_provider_event", init=False)

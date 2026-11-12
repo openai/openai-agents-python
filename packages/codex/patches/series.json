@@ -729,9 +729,17 @@
       "sha256": "ef7d55fb13765fc4d9d441af6d799c5aa0987eda2296597a84aadd57f9f8d36c"
     },
     {
+      "path": "sdk-chat-completions-raw-response.patch",
+      "sha256": "5adb96468cc0c98a5516ebec5acb2afdbd33129160b7705497cb83601063713c"
+    },
+    {
+      "path": "sdk-application-model-raw-events.patch",
+      "sha256": "fc99d550ba9948829fc1fad79d8eb907da293d2aa78a79152d37a0d166091a7e"
+    },
+    {
       "path": "sdk-hosted-mcp-approvals.patch",
       "sha256": "371cb44ea7cefae92bc273fef58d6ca8a0d47d2c7df49eb8acb2ef1701708378"
     }
   ],
-  "result_tree": "617a8eb20d662d051e9ce73b6685c47067ff2176"
+  "result_tree": "bbdcc7f7095c8b6968d814062feacda4c4b7f566"
 }

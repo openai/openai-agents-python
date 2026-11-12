@@ -2397,15 +2397,16 @@ impl NativeThread {
     }
 
     fn _start_model_producer_stream(&self, request_id: u64) -> PyResult<bool> {
-        Ok(self
-            .live()?
-            .and_then(|inner| {
-                inner
-                    .thread
-                    .thread_extension_data()
-                    .get::<python_tools::PythonTools>()
-            })
-            .is_some_and(|tools| tools.start_model_producer_stream(request_id)))
+        let Some(inner) = self.live()? else {
+            return Ok(false);
+        };
+        let store = inner.thread.thread_extension_data();
+        let observe_raw = store
+            .get::<codex_core::ObserveRawProviderEvents>()
+            .is_some();
+        Ok(store
+            .get::<python_tools::PythonTools>()
+            .is_some_and(|tools| tools.start_model_producer_stream(request_id, observe_raw)))
     }
 
     fn _push_model_producer_event<'py>(

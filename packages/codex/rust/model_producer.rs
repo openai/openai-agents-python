@@ -40,6 +40,8 @@ struct ModelReply {
     usage: Option<codex_protocol::protocol::TokenUsage>,
     #[serde(default)]
     original_usage: Option<OriginalResponsesUsage>,
+    #[serde(default)]
+    raw_chat_completion: Option<serde_json::Map<String, Value>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -156,7 +158,7 @@ impl PythonTools {
         let state = self.model_producer.lock().expect("Model producer poisoned");
         state.accepts(id)
     }
-    pub(crate) fn start_model_producer_stream(&self, id: u64) -> bool {
+    pub(crate) fn start_model_producer_stream(&self, id: u64, observe_raw: bool) -> bool {
         let mut state = self.model_producer.lock().expect("Model producer poisoned");
         if !state.accepts(id) {
             return false;
@@ -172,7 +174,7 @@ impl PythonTools {
             Delivery::Streaming {
                 events,
                 finish,
-                projection: ApplicationModelStream::default(),
+                projection: ApplicationModelStream::new(observe_raw),
             },
         ) else {
             unreachable!("model request has not started streaming")
@@ -358,6 +360,17 @@ impl ModelResponseInterceptor for Producer {
             }
             match reply {
                 Response::Complete(reply) => {
+                    if let Some(id) = reply
+                        .raw_chat_completion
+                        .as_ref()
+                        .and_then(|raw| raw.get("id"))
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                    {
+                        if id != reply.response_id {
+                            return Err(FAILURE.into());
+                        }
+                    }
                     let mut events = codex_extension_api::completed_model_response(
                         reply.response_id,
                         reply.output,
@@ -405,6 +418,18 @@ impl ModelResponseInterceptor for Producer {
                                 )),
                             );
                         }
+                    }
+                    if let Some(raw) = reply.raw_chat_completion {
+                        events.insert(
+                            events.len() - 1,
+                            Ok(codex_api::ResponseEvent::RawProvider(
+                                codex_protocol::protocol::SdkRawProviderEvent {
+                                    source: codex_protocol::protocol::SdkRawProviderSource::ChatCompletions,
+                                    transport: codex_protocol::protocol::ResponsesEventTransport::Json,
+                                    payload: Value::Object(raw),
+                                },
+                            )),
+                        );
                     }
                     Ok(futures_util::stream::iter(events).boxed())
                 }
