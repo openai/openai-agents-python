@@ -726,8 +726,8 @@
     },
     {
       "path": "sdk-trace-provider-restart.patch",
-      "sha256": "ac811ccec994c01fc15acbd55c9d82231c6f3455fd66a7340c0e481c3a1651a9"
+      "sha256": "3c0758c49401590beee08c54c7566a3953a25c2b6bf29a42825215c75d034536"
     }
   ],
-  "result_tree": "edcf9cf723403f9e7fd85646ee07c68b2dde67d2"
+  "result_tree": "24d644e290f861ebaa633bee03daeeee7c4dcdfc"
 }

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/provider.rs b/codex-rs/otel/src/provider.rs
-index 8d066965..29860372 100644
+index 8d066965ba8f55b8c509bb3b9e57b9272e043408..29860372cd6c85933232eb8332743d9dd096bdc3 100644
 --- a/codex-rs/otel/src/provider.rs
 +++ b/codex-rs/otel/src/provider.rs
 @@ -785,12 +785,12 @@ fn build_tracer_provider(
@@ -34,7 +34,7 @@ index 8d066965..29860372 100644
      )
  }
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
-index 8ed47834..129a7b3a 100644
+index 8ed47834302b2aac0d7652b4594ea282228aa180..129a7b3a84484f9352e8bf1fb2556ee40dd8acd7 100644
 --- a/codex-rs/otel/src/sdk_trace.rs
 +++ b/codex-rs/otel/src/sdk_trace.rs
 @@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -157,7 +157,7 @@ index 8ed47834..129a7b3a 100644
      let registration = {
          let span = context.span();
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index 7a3fdab5..a010d59e 100644
+index 7a3fdab5951012a4febbeec07a453805bf5c4755..3b06499b8bee75f364e856e1503206c2b084a855 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
 @@ -7,6 +7,7 @@ use serde::Deserialize;
@@ -219,7 +219,7 @@ index 7a3fdab5..a010d59e 100644
 +    inner: P,
 +    default_enabled: bool,
 +    generation: TraceGeneration,
-+}
+ }
 +
 +impl<P> RoutedSpanProcessor<P> {
 +    pub(crate) fn new(inner: P, default_enabled: bool) -> Self {
@@ -229,7 +229,7 @@ index 7a3fdab5..a010d59e 100644
 +            generation: TraceGeneration::default(),
 +        }
 +    }
- }
++}
 +
  impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
      fn on_start(&self, span: &mut Span, cx: &Context) {
@@ -238,7 +238,7 @@ index 7a3fdab5..a010d59e 100644
          }
          self.inner.on_start(span, cx);
          let mut s = lock();
-+        if !self.generation.is_current() {
++        if s.credentials_closed || !self.generation.is_current() {
 +            return;
 +        }
          if let Some(data) = span.exported_data() {
@@ -248,13 +248,87 @@ index 7a3fdab5..a010d59e 100644
              return;
          }
          let mut s = lock();
-+        if !self.generation.is_current() {
++        if s.credentials_closed || !self.generation.is_current() {
 +            return;
 +        }
          let descriptor = retained_root_descriptor(&span, "end", policy.as_deref(), s.sequence + 1);
          event(
              &mut s,
-@@ -1132,10 +1186,7 @@ mod tests {
+@@ -1059,6 +1113,73 @@ mod tests {
+ 
+     static TEST_LOCK: Mutex<()> = Mutex::new(());
+ 
++    #[test]
++    fn retired_route_ignores_an_in_flight_span_end() {
++        use opentelemetry::trace::Span as _;
++        use std::sync::mpsc;
++
++        #[derive(Debug)]
++        struct HoldEnd {
++            entered: mpsc::Sender<()>,
++            resume: Mutex<mpsc::Receiver<()>>,
++        }
++
++        impl SpanProcessor for HoldEnd {
++            fn on_start(&self, _: &mut Span, _: &Context) {}
++
++            fn on_end(&self, _: SpanData) {
++                self.entered.send(()).unwrap();
++                self.resume
++                    .lock()
++                    .unwrap()
++                    .recv_timeout(Duration::from_secs(5))
++                    .unwrap();
++            }
++
++            fn force_flush(&self) -> OTelSdkResult {
++                Ok(())
++            }
++
++            fn shutdown_with_timeout(&self, _: Duration) -> OTelSdkResult {
++                Ok(())
++            }
++        }
++
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        set_trace_routes(r#"{"processor_ids":["retiring"],"replace":false}"#).unwrap();
++        let (entered_tx, entered_rx) = mpsc::channel();
++        let (resume_tx, resume_rx) = mpsc::channel();
++        let provider = SdkTracerProvider::builder()
++            .with_span_processor(HoldEnd {
++                entered: entered_tx,
++                resume: Mutex::new(resume_rx),
++            })
++            .with_span_processor(RoutedSpanProcessor::new(Recorder::default(), false))
++            .build();
++        let mut span = provider.tracer("route-restart").start("retiring span");
++        {
++            let mut routes = lock();
++            assert_eq!(routes.queue.len(), 1);
++            routes.queue.clear();
++            routes.pending.clear();
++            routes.bytes = 0;
++            routes.acknowledged = routes.sequence;
++        }
++
++        std::thread::scope(|scope| {
++            scope.spawn(move || span.end());
++            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
++            begin_shutdown(Instant::now());
++            let shutdown = provider.shutdown();
++            resume_tx.send(()).unwrap();
++            shutdown.unwrap();
++        });
++
++        restart_host_trace_delivery().unwrap();
++        assert!(lock().queue.is_empty());
++    }
++
+     #[tokio::test]
+     async fn detached_dispatch_wakes_on_acknowledgement_or_shutdown() {
+         use std::future::Future;
+@@ -1132,10 +1253,7 @@ mod tests {
          set_trace_routes(r#"{"processor_ids":["first"],"replace":false}"#).unwrap();
          let recorder = Recorder::default();
          let provider = SdkTracerProvider::builder()
@@ -266,7 +340,7 @@ index 7a3fdab5..a010d59e 100644
              .build();
          let tracer = provider.tracer("route-test");
          let mut old = tracer.start("old");
-@@ -1581,14 +1632,14 @@ mod tests {
+@@ -1581,14 +1699,14 @@ mod tests {
          let release = Arc::new((Mutex::new(false), Condvar::new()));
          let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
          let provider = SdkTracerProvider::builder()
