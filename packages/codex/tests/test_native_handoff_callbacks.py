@@ -93,11 +93,28 @@ def request_instructions(request):
     )
 
 
+async def test_callback_handoff_rejects_code_only_authority_before_sampling(responses):
+    @function_tool(allowed_callers=("code",))
+    def route() -> str:
+        pytest.fail("The callback must not run for a code-only handoff declaration")
+
+    agent = Agent(
+        instructions="Route the request.",
+        provider=provider(responses),
+        handoffs=[Handoff(Agent(instructions="Resolve the request."), route)],
+    )
+    async with timeout(20):
+        with pytest.raises(ValueError, match="Handoff callback must allow direct model calls"):
+            async with agent.session():
+                pass
+    assert responses.requests == []
+
+
 async def test_typed_handoff_keeps_callback_schema_context_and_acknowledgement(responses):
     application = {"account": "captured"}
     effects = []
 
-    @function_tool(name="route_issue", description="Issue routing")
+    @function_tool(name="route_issue", description="Issue routing", allowed_callers=("direct",))
     def route(context: ToolContext[dict[str, str]], ticket: int) -> str:
         assert context.context is application
         effects.append(ticket)

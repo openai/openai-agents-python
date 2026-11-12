@@ -14,8 +14,8 @@ use codex_history::{ResponseItemEnvelope, RolloutItem};
 use codex_protocol::dynamic_tools::{DynamicToolFunctionSpec, DynamicToolSpec};
 use codex_thread_store::PersistContext;
 use codex_tools::{
-    FunctionCallError, ToolCall, ToolExecutor, ToolExecutorFuture, ToolName, ToolOutput, ToolSpec,
-    dynamic_tool_to_responses_api_tool,
+    FunctionCallError, ToolCall, ToolExecutor, ToolExecutorFuture, ToolExposures, ToolName,
+    ToolOutput, ToolSpec, dynamic_tool_to_responses_api_tool,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -346,6 +346,13 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
                     && !profile.manual_slots.contains(slot)
                     && !profile.terminal_slots.contains(slot),
                 "Handoff callback must name its exact automatic catalog slot"
+            );
+            ensure!(
+                profile
+                    .tools
+                    .caller_limits(*slot)
+                    .is_none_or(|callers| callers.contains(ToolExposures::DIRECT)),
+                "Handoff callback must allow direct model calls"
             );
         }
         for (name, declaration) in &profile.decision_handoffs {
@@ -1756,6 +1763,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
     }
     fn spec(&self) -> ToolSpec {
         self.spec.clone()
+    }
+    fn allowed_callers(&self) -> Option<ToolExposures> {
+        self.callback
+            .as_ref()
+            .and_then(|callback| callback.allowed_callers())
+            .map(|callers| callers & ToolExposures::DIRECT)
     }
     fn exposure(&self) -> codex_tools::ToolExposure {
         codex_tools::ToolExposure::DirectModelOnly
