@@ -1,5 +1,5 @@
 {
-  "result_tree": "1da8e2d0039f74a87b40b1bdd1d8e2096acab44c",
+  "result_tree": "e5453c3eb34e3f25ff6533f9474bdd26aaa635ca",
   "patches": [
     {
       "path": "0001-native-schema-recovery.patch",
@@ -711,7 +711,7 @@
     },
     {
       "path": "sdk-trace-credential-destination.patch",
-      "sha256": "2275442fa74e669c5e3d1b0f3f97a90c7284581109e53d2f3e7e636425365bd9"
+      "sha256": "6b4bb517e325c7f9853f6b43cf931529165caef7b787b058243cc282e140d5fa"
     },
     {
       "path": "sdk-native-hosted-prompts-request-ownership.patch",
