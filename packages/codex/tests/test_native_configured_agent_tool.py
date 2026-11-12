@@ -37,7 +37,7 @@ from agents import (
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 
-CATALOG = Path(__file__).parents[1] / ".upstream/codex/codex-rs/models-manager/models.json"
+CATALOG = Path(__file__).parent / "fixtures/request-control-models.json"
 MODEL = next(
     item["slug"]
     for item in json.loads(CATALOG.read_text())["models"]

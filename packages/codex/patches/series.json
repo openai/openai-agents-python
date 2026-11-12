@@ -883,7 +883,11 @@
     {
       "path": "sdk-decision-handoff-admission.patch",
       "sha256": "1a3130959a633e67c297f679c7cf9b275ef4f2105ef375ab19eb9370bf531451"
+    },
+    {
+      "path": "sdk-mcp-discovery-cache.patch",
+      "sha256": "f70e4a2e85f8928eb8f37a1bfe31a62d647ac08a8a2c9ca8d3c2482ba5712c20"
     }
   ],
-  "result_tree": "a7cd2218980f54ae4ce4b571b9b35980b00a4745"
+  "result_tree": "34342524058268a18065a773d4b145dd26893322"
 }
