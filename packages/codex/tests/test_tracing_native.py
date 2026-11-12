@@ -1260,7 +1260,7 @@ asyncio.run(scopes())
 
 async def _child_followup_trace(peer: DecodedCollector, directory: Path) -> None:
     from tests.native_executor_fixtures import ExecutorPeer
-    from tests.native_fixtures import text_response
+    from tests.native_fixtures import text_response, tool_output
     from tests.test_native_child_agents import (
         agent_for,
         child_peer,
@@ -1295,9 +1295,16 @@ async def _child_followup_trace(peer: DecodedCollector, directory: Path) -> None
             "origin_bare_metadata": "4",
             "origin_idle_metadata": "5",
         }[mode] * 32
-        messages = ["follow-up input canary"]
-        if mixed:
-            messages = ["disabled queued input canary", "last input canary"]
+        queued_messages = (
+            [
+                "disabled queued input canary",
+                "metadata queued input canary",
+                "sensitive queued input canary",
+            ]
+            if mixed
+            else []
+        )
+        messages = [*queued_messages, "last input canary" if mixed else "follow-up input canary"]
         marker = f"FOLLOWUP_RESPONSE_CANARY_{mode}"
         completion_held, release_completion = asyncio.Event(), asyncio.Event()
         child_requests: list[dict[str, Any]] = []
@@ -1396,21 +1403,55 @@ async def _child_followup_trace(peer: DecodedCollector, directory: Path) -> None
                             assert initial_result.final_output == "Initial final answer"
 
                         if mixed:
-                            # The enabled dispatch confirms the prior disabled send has
-                            # been queued without waking the child.
-                            model.action = collaboration(
-                                "send_message",
-                                {"target": "/root/alpha", "message": messages[0]},
-                                "queued-call",
-                            )
-                            with telemetry.trace(
-                                "queue-only caller",
-                                options=telemetry.TraceOptions(
-                                    disabled=True, include_sensitive_data=True
-                                ),
+                            # Inspect each queue-only send before the follow-up can wake the child.
+                            assert (await telemetry.force_flush()).status == "success"
+                            batch_start = len(peer.records)
+                            policies = [("d", True, True), ("e", False, False), ("f", False, True)]
+                            for message, (trace_digit, disabled, sensitive) in zip(
+                                queued_messages, policies, strict=True
                             ):
-                                earlier = await session.submit("Queue mail for the child")
-                            assert (await earlier.get_result()).final_output == "root complete"
+                                trace_id = trace_digit * 32
+                                call_id = f"queued-call-{trace_digit}"
+                                model.action = collaboration(
+                                    "send_message",
+                                    {"target": "/root/alpha", "message": message},
+                                    call_id,
+                                )
+                                sender = await session.submit(
+                                    "Queue mail for the child",
+                                    trace_options=telemetry.TraceOptions(
+                                        trace_id=trace_id,
+                                        disabled=disabled,
+                                        include_sensitive_data=sensitive,
+                                    ),
+                                )
+                                assert (await sender.get_result()).final_output == "root complete"
+                                assert tool_output(model.requests[-1], call_id) == ""
+                                assert len(child_requests) == 1
+                                assert (await telemetry.force_flush()).status == "success"
+                                sends = [
+                                    (row, attrs)
+                                    for batch in peer.records[batch_start:]
+                                    if batch["signal"] == "logs"
+                                    for resource in batch["payload"].get("resourceLogs", [])
+                                    for scope in resource.get("scopeLogs", [])
+                                    for row in scope.get("logRecords", [])
+                                    if (attrs := _attrs(row)).get("event.name")
+                                    == "codex.agent_communication"
+                                    and attrs.get("state") == "send"
+                                ]
+                                batch_start = len(peer.records)
+                                if disabled:
+                                    assert not sends, sends
+                                    continue
+                                [(row, attrs)] = sends
+                                assert _hex(row["traceId"]) == trace_id
+                                assert attrs["sender_thread_id"] == session.id
+                                assert attrs["receiver_thread_id"] == original.child_id
+                                if sensitive:
+                                    assert attrs["content"] == message
+                                else:
+                                    assert "content" not in attrs
 
                         model.action = collaboration(
                             "followup_task",
