@@ -561,7 +561,11 @@ pub async fn submit_replaceable_with_attempts(
     let thread = &state.thread;
     let mut p: TurnParams = decode(value)?;
     if let Some(model) = p.start.model_override.as_deref() {
-        state.engine.validate_model(model).await?;
+        if let Err(error) = state.engine.validate_model(model).await {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
     }
     let initial = state
         .initial_turn
@@ -861,7 +865,11 @@ pub async fn recover_prepared(
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
     if let Some(model) = p.model_override.as_deref() {
-        state.engine.validate_model(model).await?;
+        if let Err(error) = state.engine.validate_model(model).await {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
     }
     let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;
