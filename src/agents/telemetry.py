@@ -105,6 +105,7 @@ from _agents_codex.telemetry import (
     shutdown as shutdown,
     span as span,
     trace as trace,
+    use_context as use_context,
 )
 
 __all__ = [
@@ -132,6 +133,7 @@ __all__ += [
     "span",
     "current_context",
     "generate_group_id",
+    "use_context",
     "add_trace_processor",
     "set_trace_processors",
     "set_tracing_disabled",
