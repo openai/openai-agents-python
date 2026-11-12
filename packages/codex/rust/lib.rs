@@ -2827,11 +2827,12 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (output_schema_json=None))]
+    #[pyo3(signature = (output_schema_json=None, *, drain_events=false))]
     fn _seal_manual<'py>(
         &self,
         py: Python<'py>,
         output_schema_json: Option<&str>,
+        drain_events: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let output_schema: Option<serde_json::Value> = output_schema_json
             .map(serde_json::from_str)
@@ -2847,7 +2848,7 @@ impl NativeThread {
         let manual = self.manual.clone();
         async_bridge::future_into_py(py, async move {
             let checkpoint = async_bridge::retain_writer_operation(async move {
-                manual_checkpoint::capture(&inner, &manual, output_schema)
+                manual_checkpoint::capture(&inner, &manual, output_schema, drain_events)
                     .await
                     .map_err(py_error)
             })
@@ -3319,7 +3320,7 @@ impl NativeThread {
                     turn.is_some()
                 };
                 if turn.is_some() {
-                    inner.retire_suspended().await;
+                    inner.retire_suspended(false).await;
                 }
                 outcome.as_ref().map_err(py_error)?;
                 if !preserved {
