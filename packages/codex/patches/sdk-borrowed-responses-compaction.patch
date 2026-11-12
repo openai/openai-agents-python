@@ -1,0 +1,1134 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index a743ae733ccb4b5dff5504658cf05056e2c65227..0b97bcae99dbfcae13e0899406bb2bdf1fe4f955 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -1,4 +1,6 @@
+ use crate::context::UserGoalUpdate;
++use crate::context_manager::ContextManager;
++use std::collections::HashMap;
+ use std::collections::HashSet;
+ use std::sync::Arc;
+ use std::time::Instant;
+@@ -135,6 +137,7 @@ pub(crate) async fn run_inline_auto_compact_task(
+             phase,
+         ),
+         cancellation_token,
++        None,
+     )
+     .await?;
+     Ok(())
+@@ -160,11 +163,13 @@ pub(crate) async fn run_compact_task(
+             CompactionPhase::StandaloneTurn,
+         ),
+         cancellation_token,
++        None,
+     )
+     .await?;
+     Ok(())
+ }
+ 
++#[allow(clippy::too_many_arguments)]
+ async fn run_compact_task_inner(
+     sess: Arc<Session>,
+     source_step_context: Arc<StepContext>,
+@@ -173,6 +178,7 @@ async fn run_compact_task_inner(
+     world_state: Arc<WorldState>,
+     compaction_metadata: CompactionTurnMetadata,
+     cancellation_token: &CancellationToken,
++    captured_history: Option<(&ContextManager, &codex_extension_api::CompactionInput<'_>)>,
+ ) -> CodexResult<()> {
+     let turn_context = Arc::clone(&source_step_context.turn);
+     let trigger = compaction_metadata.trigger();
+@@ -211,6 +217,7 @@ async fn run_compact_task_inner(
+         world_state,
+         compaction_metadata,
+         cancellation_token,
++        captured_history,
+     )
+     .await;
+     let status = compaction_status_from_result(&result);
+@@ -255,60 +262,358 @@ async fn run_compact_task_inner(
+     result.map(|_| ())
+ }
+ 
+-/// Await application work once, before any native summarization attempts.
+-/// Both compaction implementations keep their existing lifecycle and publication.
+-pub(crate) async fn try_custom_compaction(
+-    sess: &Session,
+-    source_step_context: &StepContext,
+-    replacement_step_context: &StepContext,
+-    world_state: &WorldState,
+-    metadata: CompactionTurnMetadata,
+-) -> CodexResult<Option<String>> {
+-    let turn_context = &source_step_context.turn;
++fn is_compaction_control_item(item: &ResponseItem) -> bool {
++    matches!(item, ResponseItem::Message { role, .. } if role == "system" || role == "developer")
++        || matches!(
++            item,
++            ResponseItem::ConfigurationUpdate { .. }
++                | ResponseItem::CompactionTrigger { .. }
++                | ResponseItem::AdditionalTools { .. }
++                | ResponseItem::AgentMessage { .. }
++        )
++        || crate::context_manager::rollback_context_update(item).is_some()
++}
++
++/// Validate a borrowed replacement without changing the captured/live window.
++fn validate_compaction_window(
++    history: &ContextManager,
++    captured_items: &[ResponseItem],
++    items: &[ResponseItem],
++    verified_provider_scope: bool,
++) -> CodexResult<()> {
++    use codex_protocol::openai_models::InputModality;
++
++    let mut captured_controls = captured_items.iter().filter(|item| {
++        is_compaction_control_item(item)
++            || matches!(item, ResponseItem::ItemReference { .. })
++            || (!verified_provider_scope
++                && matches!(
++                    item,
++                    ResponseItem::Compaction { .. }
++                        | ResponseItem::Reasoning {
++                            encrypted_content: Some(_),
++                            ..
++                        }
++                        | ResponseItem::ContextCompaction {
++                            encrypted_content: Some(_),
++                            ..
++                        }
++                ))
++    });
++    for item in items.iter().filter(|item| {
++        is_compaction_control_item(item)
++            || matches!(item, ResponseItem::ItemReference { .. })
++            || (!verified_provider_scope
++                && matches!(
++                    item,
++                    ResponseItem::Compaction { .. }
++                        | ResponseItem::Reasoning {
++                            encrypted_content: Some(_),
++                            ..
++                        }
++                        | ResponseItem::ContextCompaction {
++                            encrypted_content: Some(_),
++                            ..
++                        }
++                ))
++    }) {
++        if !captured_controls.any(|captured| captured == item) {
++            return Err(CodexErr::InvalidRequest(
++                "Compacted window contains a new or modified instruction or control item".into(),
++            ));
++        }
++    }
++
++    let mut candidate = history.clone();
++    candidate.replace_annotated(
++        items
++            .iter()
++            .cloned()
++            .map(ResponseItemEnvelope::new)
++            .collect(),
++    );
++    let projected = candidate.for_prompt(&[
++        InputModality::Text,
++        InputModality::Image,
++        InputModality::Audio,
++    ]);
++    if projected != items {
++        return Err(CodexErr::InvalidRequest(
++            "Compacted window must contain complete tool pairs".into(),
++        ));
++    }
++    Ok(())
++}
++
++/// Only conversation candidates participate in the optional default predicate.
++fn compaction_candidate_indexes(items: &[ResponseItem]) -> Vec<usize> {
++    items
++        .iter()
++        .enumerate()
++        .filter_map(|(index, item)| {
++            (!is_compaction_control_item(item)
++                && !matches!(item, ResponseItem::Message { role, .. } if role == "user")
++                && !matches!(
++                    item,
++                    ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
++                ))
++            .then_some(index)
++        })
++        .collect()
++}
++
++/// Return whether current application policy has replaced native optional scheduling.
++/// The captured window remains stack-owned across policy, hooks, and provider work.
++pub(crate) async fn run_custom_post_turn_compaction(
++    sess: Arc<Session>,
++    step_context: Arc<StepContext>,
++    world_state: Arc<WorldState>,
++    cancellation_token: &CancellationToken,
++) -> CodexResult<bool> {
+     let thread_id = sess.thread_id.to_string();
+     let contributors = sess.services.extensions.model_request_contributors();
+     if !contributors
+         .iter()
+-        .any(|c| c.customizes_compaction(&thread_id))
++        .any(|c| c.schedules_post_turn_compaction(&thread_id, &step_context.extension_data))
+     {
+-        return Ok(None);
++        return Ok(false);
++    }
++    if sess.input_queue.has_pending_input(&sess.active_turn).await {
++        return Ok(true);
+     }
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted);
++    }
++    sess.ensure_rollout_durable().await?;
+     let history = sess.clone_history().await;
+-    let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
+-    let items = history.for_prompt(
+-        &source_step_context
++    let items = history
++        .clone()
++        .for_prompt(&step_context.settings.model_info.input_modalities);
++    let candidate_indexes = compaction_candidate_indexes(&items);
++    let input = codex_extension_api::CompactionInput {
++        step_store: Some(&step_context.extension_data),
++        thread_id: &thread_id,
++        turn_id: &step_context.turn.sub_id,
++        model: &step_context.settings.model_info.slug,
++        model_omitted: step_context
+             .settings
+-            .model_info
++            .request_controls()
++            .hosted_prompt
+             .as_ref()
+-            .input_modalities,
+-    );
++            .and_then(Option::as_ref)
++            .is_some_and(|prompt| prompt.omit_model),
++        automatic: true,
++        optional: true,
++        candidate_indexes: &candidate_indexes,
++        items: &items,
++    };
+     for contributor in contributors {
+-        if !contributor.customizes_compaction(&thread_id) {
++        if !contributor.schedules_post_turn_compaction(&thread_id, &step_context.extension_data) {
+             continue;
+         }
+-        let summary = contributor
+-            .before_compact(codex_extension_api::CompactionInput {
++        let decision = contributor
++            .post_turn_compaction(input.clone())
++            .await
++            .map_err(CodexErr::InvalidRequest)?;
++        if let Some(admitted) = decision {
++            if !admitted || sess.input_queue.has_pending_input(&sess.active_turn).await {
++                return Ok(true);
++            }
++            if cancellation_token.is_cancelled() {
++                return Err(CodexErr::TurnAborted);
++            }
++            run_compact_task_inner(
++                Arc::clone(&sess),
++                Arc::clone(&step_context),
++                Arc::clone(&step_context),
++                Vec::new(),
++                world_state,
++                CompactionTurnMetadata::new(
++                    CompactionTrigger::Auto,
++                    CompactionReason::UserRequested,
++                    CompactionImplementation::Responses,
++                    CompactionPhase::PostTurn,
++                ),
++                cancellation_token,
++                Some((&history, &input)),
++            )
++            .await?;
++            return Ok(true);
++        }
++    }
++    Ok(false)
++}
++
++/// Await a captured callback once, before native summarization retries.
++pub(crate) async fn try_custom_compaction(
++    sess: &Session,
++    source_step_context: &StepContext,
++    replacement_step_context: &StepContext,
++    world_state: &WorldState,
++    metadata: CompactionTurnMetadata,
++    cancellation_token: &CancellationToken,
++) -> CodexResult<Option<String>> {
++    let history = sess.clone_history().await;
++    try_custom_compaction_with_history(
++        sess,
++        source_step_context,
++        replacement_step_context,
++        world_state,
++        metadata,
++        cancellation_token,
++        &history,
++        None,
++    )
++    .await
++}
++
++#[allow(clippy::too_many_arguments)]
++async fn try_custom_compaction_with_history(
++    sess: &Session,
++    source_step_context: &StepContext,
++    replacement_step_context: &StepContext,
++    world_state: &WorldState,
++    metadata: CompactionTurnMetadata,
++    cancellation_token: &CancellationToken,
++    history: &ContextManager,
++    captured_input: Option<&codex_extension_api::CompactionInput<'_>>,
++) -> CodexResult<Option<String>> {
++    let turn_context = &source_step_context.turn;
++    let thread_id = sess.thread_id.to_string();
++    let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
++    let items;
++    let indexes;
++    let current_input;
++    let input = match captured_input {
++        Some(input) => input,
++        None => {
++            items = history
++                .clone()
++                .for_prompt(&source_step_context.settings.model_info.input_modalities);
++            indexes = compaction_candidate_indexes(&items);
++            current_input = codex_extension_api::CompactionInput {
+                 step_store: Some(&source_step_context.extension_data),
+                 thread_id: &thread_id,
+                 turn_id: &turn_context.sub_id,
+-                model: &source_step_context.settings.model_info.as_ref().slug,
++                model: &source_step_context.settings.model_info.slug,
++                model_omitted: source_step_context
++                    .settings
++                    .request_controls()
++                    .hosted_prompt
++                    .as_ref()
++                    .and_then(Option::as_ref)
++                    .is_some_and(|prompt| prompt.omit_model),
+                 automatic: matches!(metadata.trigger(), CompactionTrigger::Auto),
++                optional: matches!(metadata.phase(), CompactionPhase::PostTurn),
++                candidate_indexes: &indexes,
+                 items: &items,
+-            })
++            };
++            &current_input
++        }
++    };
++    for contributor in sess.services.extensions.model_request_contributors() {
++        if !contributor.customizes_compaction(&thread_id) {
++            continue;
++        }
++        let result = contributor
++            .before_compact_result((*input).clone())
+             .await
+             .map_err(CodexErr::InvalidRequest)?;
+-        if let Some(summary) = summary {
+-            publish_compaction_summary(
+-                sess,
+-                source_step_context,
+-                replacement_step_context,
+-                world_state,
+-                &summary,
+-                input_goal_ids,
+-                /*compaction_response*/ None,
+-            )
+-            .await?;
+-            return Ok(Some(summary));
++        match result {
++            None => continue,
++            Some(codex_extension_api::CompactionResult::Summary(summary)) => {
++                if summary.trim().is_empty() {
++                    return Err(CodexErr::InvalidRequest(
++                        "Compaction summary must be nonempty".into(),
++                    ));
++                }
++                publish_compaction_summary(
++                    sess,
++                    source_step_context,
++                    replacement_step_context,
++                    world_state,
++                    &summary,
++                    input_goal_ids,
++                    None,
++                )
++                .await?;
++                return Ok(Some(summary));
++            }
++            Some(codex_extension_api::CompactionResult::Window(window)) => {
++                if window.model.trim().is_empty()
++                    || window
++                        .response_id
++                        .as_ref()
++                        .is_some_and(|id| id.trim().is_empty())
++                    || window
++                        .items
++                        .iter()
++                        .any(|item| matches!(item, ResponseItem::Other))
++                {
++                    return Err(CodexErr::InvalidRequest("Invalid compacted window".into()));
++                }
++                validate_compaction_window(
++                    history,
++                    input.items,
++                    &window.items,
++                    window.verified_provider_scope,
++                )?;
++                // A borrowed client's producer is outside the native catalog owner.
++                let model_hash = None;
++                // Observe only non-control output from the borrowed replacement.
++                let output = window
++                    .items
++                    .iter()
++                    .filter(|item| !is_compaction_control_item(item))
++                    .cloned()
++                    .collect();
++                let captured = history
++                    .model_items()
++                    .iter()
++                    .filter_map(|item| item.item.id().map(|id| (id, item)))
++                    .collect::<HashMap<_, _>>();
++                // Preserve proven metadata only for an unchanged captured item.
++                let items = window
++                    .items
++                    .into_iter()
++                    // Current native context owns system/developer instruction placement.
++                    // Other proven window items keep their existing data and metadata.
++                    .filter(|item| !matches!(item, ResponseItem::Message { role, .. } if role == "system" || role == "developer"))
++                    .map(|item| {
++                        let mut envelope = item
++                            .id()
++                            .and_then(|id| captured.get(id))
++                            .filter(|source| source.item == item)
++                            .map(|source| (**source).clone())
++                            .unwrap_or_else(|| ResponseItemEnvelope::new(item));
++                        if let Some(metadata) = envelope.metadata.as_mut() {
++                            // A full replacement retains its entire returned prefix.
++                            metadata.provider_compaction = false;
++                        }
++                        envelope
++                    })
++                    .collect();
++                publish_compaction_history(
++                    sess,
++                    replacement_step_context,
++                    world_state,
++                    PreparedCompactionHistory {
++                        items,
++                        message: String::new(),
++                        input_goal_ids,
++                        response_id: window.response_id,
++                        model_hash,
++                        completed_output: Some(CompletedCompactionOutput {
++                            source: source_step_context,
++                            registered_turn: &replacement_step_context.turn,
++                            cancellation_token,
++                            items: output,
++                        }),
++                    },
++                )
++                .await?;
++                return Ok(Some(String::new()));
++            }
+         }
+     }
+     Ok(None)
+@@ -327,12 +632,7 @@ async fn publish_compaction_summary(
+     let (compaction_response_id, completed_output) = match compaction_response {
+         Some((response, cancellation_token)) => (
+             Some(response.response_id),
+-            Some(CompletedCompactionOutput {
+-                source: source_step_context,
+-                registered_turn: replacement_step_context.turn.as_ref(),
+-                cancellation_token,
+-                items: response.output,
+-            }),
++            Some((source_step_context, cancellation_token, response.output)),
+         ),
+         None => (None, None),
+     };
+@@ -350,12 +650,57 @@ async fn publish_compaction_summary(
+         // belongs to this compaction turn.
+         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
+     }
++    publish_compaction_history(
++        sess,
++        replacement_step_context,
++        world_state,
++        PreparedCompactionHistory {
++            items: new_history,
++            message: summary_text,
++            input_goal_ids,
++            response_id: compaction_response_id,
++            model_hash: compaction_model_hash,
++            completed_output: completed_output.map(|(source, cancellation_token, items)| {
++                CompletedCompactionOutput {
++                    source,
++                    registered_turn: &replacement_step_context.turn,
++                    cancellation_token,
++                    items,
++                }
++            }),
++        },
++    )
++    .await
++}
++
++struct PreparedCompactionHistory<'a> {
++    items: Vec<ResponseItemEnvelope>,
++    message: String,
++    input_goal_ids: HashSet<ResponseItemId>,
++    response_id: Option<String>,
++    model_hash: Option<String>,
++    completed_output: Option<CompletedCompactionOutput<'a>>,
++}
++
++async fn publish_compaction_history(
++    sess: &Session,
++    replacement_step_context: &StepContext,
++    world_state: &WorldState,
++    publication: PreparedCompactionHistory<'_>,
++) -> CodexResult<()> {
++    let PreparedCompactionHistory {
++        items: mut new_history,
++        message: summary_text,
++        input_goal_ids,
++        response_id: compaction_response_id,
++        model_hash: compaction_model_hash,
++        completed_output,
++    } = publication;
+     let window = if completed_output.is_some() {
+         None
+     } else {
+         Some(sess.advance_auto_compact_window().await)
+     };
+-
+     let (initial_context, world_state_baseline) =
+         build_compaction_initial_context(sess, replacement_step_context, world_state).await;
+     new_history =
+@@ -368,7 +713,7 @@ async fn publish_compaction_summary(
+             input_goal_ids,
+             message: summary_text,
+             window,
+-            compaction_response_id: compaction_response_id,
++            compaction_response_id,
+             compaction_model_hash,
+             reviewer_compaction_hash: None,
+         },
+@@ -379,6 +724,7 @@ async fn publish_compaction_summary(
+     Ok(())
+ }
+ 
++#[allow(clippy::too_many_arguments)]
+ async fn run_compact_task_inner_impl(
+     sess: Arc<Session>,
+     source_step_context: Arc<StepContext>,
+@@ -387,17 +733,29 @@ async fn run_compact_task_inner_impl(
+     world_state: Arc<WorldState>,
+     compaction_metadata: CompactionTurnMetadata,
+     cancellation_token: &CancellationToken,
++    captured_history: Option<(&ContextManager, &codex_extension_api::CompactionInput<'_>)>,
+ ) -> CodexResult<String> {
+     let turn_context = Arc::clone(&source_step_context.turn);
+     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+     sess.emit_turn_item_started(&turn_context, &compaction_item)
+         .await;
+-    if let Some(summary) = try_custom_compaction(
++    let current_history;
++    let (history, captured_input) = match captured_history {
++        Some((history, input)) => (history, Some(input)),
++        None => {
++            current_history = sess.clone_history().await;
++            (&current_history, None)
++        }
++    };
++    if let Some(summary) = try_custom_compaction_with_history(
+         &sess,
+         &source_step_context,
+         &replacement_step_context,
+         &world_state,
+         compaction_metadata,
++        cancellation_token,
++        history,
++        captured_input,
+     )
+     .await?
+     {
+@@ -405,9 +763,14 @@ async fn run_compact_task_inner_impl(
+             .await;
+         return Ok(summary);
+     }
++    if captured_history.is_some() {
++        return Err(CodexErr::InvalidRequest(
++            "Admitted application compaction did not return a replacement".into(),
++        ));
++    }
+     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+ 
+-    let mut history = sess.clone_history().await;
++    let mut history = history.clone();
+     let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
+     history.record_items(
+         &[initial_input_for_turn.into()],
+@@ -1064,3 +1427,125 @@ async fn drain_to_completed(
+ #[cfg(test)]
+ #[path = "compact_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++mod borrowed_window_tests {
++    use super::*;
++    use serde_json::json;
++
++    fn item(value: serde_json::Value) -> ResponseItem {
++        serde_json::from_value(value).unwrap()
++    }
++
++    #[test]
++    fn encrypted_reasoning_requires_captured_occurrences_or_provider_attestation() {
++        let history = ContextManager::new();
++        let plain = item(json!({"type":"reasoning","summary":[]}));
++        validate_compaction_window(&history, &[], &[plain], false).unwrap();
++        let opaque = item(json!({"type":"reasoning","summary":[],"encrypted_content":"opaque"}));
++        assert!(
++            validate_compaction_window(&history, &[], std::slice::from_ref(&opaque), false)
++                .is_err()
++        );
++        validate_compaction_window(&history, &[], std::slice::from_ref(&opaque), true).unwrap();
++        validate_compaction_window(
++            &history,
++            std::slice::from_ref(&opaque),
++            std::slice::from_ref(&opaque),
++            false,
++        )
++        .unwrap();
++        assert!(
++            validate_compaction_window(
++                &history,
++                std::slice::from_ref(&opaque),
++                &[opaque.clone(), opaque.clone()],
++                false
++            )
++            .is_err()
++        );
++    }
++
++    #[test]
++    fn full_window_validation_preserves_prefix_opaque_and_complete_tool_pair() {
++        let history = ContextManager::new();
++        let items = vec![
++            item(
++                json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"before"}]}),
++            ),
++            item(json!({"type":"compaction","encrypted_content":"opaque"})),
++            item(
++                json!({"type":"function_call","call_id":"call","name":"historic","arguments":"{}"}),
++            ),
++            item(json!({"type":"function_call_output","call_id":"call","output":"done"})),
++            item(
++                json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"after"}]}),
++            ),
++        ];
++        assert!(validate_compaction_window(&history, &[], &items, false).is_err());
++        validate_compaction_window(&history, &[], &items, true).unwrap();
++        assert!(history.raw_items().next().is_none());
++        assert_eq!(compaction_candidate_indexes(&items), vec![0, 2, 3, 4]);
++    }
++
++    #[test]
++    fn full_window_validation_requires_captured_control_provenance() {
++        let history = ContextManager::new();
++        let developer = item(json!({
++            "type": "message", "role": "developer",
++            "content": [{"type": "input_text", "text": "original developer"}],
++        }));
++        let system = item(json!({
++            "type": "message", "role": "system",
++            "content": [{"type": "input_text", "text": "original system"}],
++        }));
++        let changed = item(json!({
++            "type": "message", "role": "developer",
++            "content": [{"type": "input_text", "text": "modified developer"}],
++        }));
++        let captured = [developer.clone(), system.clone()];
++        validate_compaction_window(&history, &captured, &captured, false).unwrap();
++        validate_compaction_window(&history, &captured, std::slice::from_ref(&system), false)
++            .unwrap();
++        for replacement in [
++            vec![changed],
++            vec![developer.clone(), developer.clone()],
++            vec![system, developer],
++        ] {
++            assert!(validate_compaction_window(&history, &captured, &replacement, false).is_err());
++        }
++    }
++
++    #[test]
++    fn full_window_validation_preserves_reference_occurrence_provenance() {
++        let history = ContextManager::new();
++        let first = item(json!({"type":"item_reference","id":"msg_first"}));
++        let second = item(json!({"type":"item_reference","id":"msg_second"}));
++        let unknown = item(json!({"type":"item_reference","id":"msg_unknown"}));
++        let captured = [first.clone(), second.clone(), first.clone()];
++        validate_compaction_window(&history, &captured, &captured, false).unwrap();
++        validate_compaction_window(&history, &captured, &[second.clone(), first.clone()], false)
++            .unwrap();
++        validate_compaction_window(&history, &captured, &[], false).unwrap();
++        for replacement in [
++            vec![unknown],
++            vec![first.clone(), second.clone(), first.clone(), first.clone()],
++            vec![first.clone(), first, second],
++        ] {
++            assert!(validate_compaction_window(&history, &captured, &replacement, false).is_err());
++            assert!(history.raw_items().next().is_none());
++        }
++    }
++
++    #[test]
++    fn full_window_validation_rejects_incomplete_pairs_without_mutating_the_source() {
++        let history = ContextManager::new();
++        for value in [
++            json!({"type":"function_call","call_id":"call","name":"historic","arguments":"{}"}),
++            json!({"type":"function_call_output","call_id":"call","output":"done"}),
++        ] {
++            assert!(validate_compaction_window(&history, &[], &[item(value)], false).is_err());
++            assert!(history.raw_items().next().is_none());
++        }
++    }
++}
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index d7d6cded1991d91e3aef58e1e00e5d16fa5fe147..f7780557725160f7947e1b2aaafd8e037ba47850 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -61,6 +61,7 @@ use codex_rollout_trace::InferenceTraceContext;
+ use codex_utils_output_truncation::approx_token_count;
+ use codex_utils_output_truncation::truncate_text;
+ use futures::StreamExt;
++use tokio_util::sync::CancellationToken;
+ 
+ #[path = "compact_remote_v2_attempt.rs"]
+ mod attempt;
+@@ -90,6 +91,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+     world_state: Arc<WorldState>,
+     reason: CompactionReason,
+     phase: CompactionPhase,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let compaction_metadata = CompactionTurnMetadata::new(
+         CompactionTrigger::Auto,
+@@ -104,6 +106,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+         Some(client_session),
+         world_state,
+         compaction_metadata,
++        cancellation_token,
+     )
+     .await
+ }
+@@ -112,6 +115,7 @@ pub(crate) async fn run_remote_compact_task(
+     sess: Arc<Session>,
+     step_context: Arc<StepContext>,
+     world_state: Arc<WorldState>,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let compaction_metadata = CompactionTurnMetadata::new(
+         CompactionTrigger::Manual,
+@@ -126,6 +130,7 @@ pub(crate) async fn run_remote_compact_task(
+         /*client_session*/ None,
+         world_state,
+         compaction_metadata,
++        cancellation_token,
+     )
+     .await
+ }
+@@ -137,6 +142,7 @@ async fn run_remote_compact_task_inner(
+     client_session: Option<&mut ModelClientSession>,
+     world_state: Arc<WorldState>,
+     compaction_metadata: CompactionTurnMetadata,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     let trigger = compaction_metadata.trigger();
+@@ -180,6 +186,7 @@ async fn run_remote_compact_task_inner(
+         world_state,
+         compaction_metadata,
+         &mut analytics_details,
++        cancellation_token,
+     )
+     .await;
+     let status = compaction_status_from_result(&result);
+@@ -219,6 +226,7 @@ async fn run_remote_compact_task_inner(
+     }
+ }
+ 
++#[allow(clippy::too_many_arguments)]
+ async fn run_remote_compact_task_inner_impl(
+     sess: &Arc<Session>,
+     step_context: &Arc<StepContext>,
+@@ -227,6 +235,7 @@ async fn run_remote_compact_task_inner_impl(
+     world_state: Arc<WorldState>,
+     compaction_metadata: CompactionTurnMetadata,
+     analytics_details: &mut CompactionAnalyticsDetails,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     let context_compaction_item = ContextCompactionItem::new();
+@@ -247,6 +256,7 @@ async fn run_remote_compact_task_inner_impl(
+         replacement_step_context,
+         &world_state,
+         compaction_metadata,
++        cancellation_token,
+     )
+     .await?
+     .is_some()
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 2c4014b9945e6b86f11190a98e2aadf8fb12fe06..327259f73b7fa4687069a35ee922c983900ea549 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -487,6 +487,9 @@ pub(crate) async fn run_turn(
+             false,
+             &cancellation_token,
+             &mut stop_hook_active,
++            &mut completion_continuations,
++            &mut client_session,
++            &world_state,
+         )
+         .await?
+         {
+@@ -720,6 +723,9 @@ pub(crate) async fn run_turn(
+                     pending_agent_handoff.is_some(),
+                     &cancellation_token,
+                     &mut stop_hook_active,
++                    &mut completion_continuations,
++                    &mut client_session,
++                    &world_state,
+                 )
+                 .await?
+                 {
+@@ -930,51 +936,15 @@ pub(crate) async fn run_turn(
+                     {
+                         return Ok(None);
+                     }
+-                    // Token-budget resets do not summarize, so preserve their existing rollover
+-                    // policy. Keep summarizing compaction in this task to serialize history updates.
+-                    let config = &turn_context.config;
+-                    if config.model_post_turn_compact_threshold_percent > 0
+-                        && !config.features.enabled(Feature::TokenBudget)
+-                        && super::context_window::context_window_token_status(
+-                            sess.as_ref(),
+-                            turn_context.as_ref(),
+-                        )
+-                        .await
+-                        .turn_end_compaction_threshold_reached
+-                        && !sess.input_queue.has_pending_input(&sess.active_turn).await
+-                        && !cancellation_token.is_cancelled()
+-                        && let Err(err) = run_auto_compact(
+-                            &sess,
+-                            Arc::clone(&step_context),
+-                            Arc::clone(&step_context),
+-                            &mut client_session,
+-                            Arc::clone(&world_state),
+-                            &cancellation_token,
+-                            CompactionReason::ContextLimit,
+-                            CompactionPhase::PostTurn,
+-                        )
+-                        .await
+-                    {
+-                        if matches!(err.details(), CodexErrorDetails::Fatal(_))
+-                            || matches!(
+-                                err.details(),
+-                                CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
+-                            )
+-                        {
+-                            return Err(err);
+-                        }
+-                        let error = err.to_codex_protocol_error();
+-                        if matches!(error, CodexErrorInfo::UsageLimitExceeded) {
+-                            // Preserve the completed answer while stopping automatic work.
+-                            sess.emit_turn_error_lifecycle(
+-                                turn_context.as_ref(),
+-                                error,
+-                                err.details(),
+-                            )
+-                            .await;
+-                        }
+-                        warn!(error = %err, "Post-turn compaction failed; preserving the completed turn");
+-                    }
++                    run_post_turn_compaction(
++                        &sess,
++                        &step_context,
++                        &mut client_session,
++                        &world_state,
++                        &cancellation_token,
++                        true,
++                    )
++                    .await?;
+                     break;
+                 }
+                 continue;
+@@ -1788,6 +1758,79 @@ async fn maybe_run_previous_model_inline_compact(
+     Ok(())
+ }
+ 
++/// Share optional scheduling before either model or terminal-tool completion.
++/// Native model-only threshold behavior remains unchanged without application policy.
++async fn run_post_turn_compaction(
++    sess: &Arc<Session>,
++    step_context: &Arc<StepContext>,
++    client_session: &mut ModelClientSession,
++    world_state: &Arc<WorldState>,
++    cancellation_token: &CancellationToken,
++    native_model_threshold: bool,
++) -> CodexResult<()> {
++    let turn_context = &step_context.turn;
++    if turn_context.config.features.enabled(Feature::TokenBudget) {
++        return Ok(());
++    }
++    let result: CodexResult<()> = async {
++        if crate::compact::run_custom_post_turn_compaction(
++            Arc::clone(sess),
++            Arc::clone(step_context),
++            Arc::clone(world_state),
++            cancellation_token,
++        )
++        .await?
++        {
++            return Ok(());
++        }
++        if native_model_threshold
++            && turn_context
++                .config
++                .model_post_turn_compact_threshold_percent
++                > 0
++            && super::context_window::context_window_token_status(
++                sess.as_ref(),
++                turn_context.as_ref(),
++            )
++            .await
++            .turn_end_compaction_threshold_reached
++            && !sess.input_queue.has_pending_input(&sess.active_turn).await
++            && !cancellation_token.is_cancelled()
++        {
++            run_auto_compact(
++                sess,
++                Arc::clone(step_context),
++                Arc::clone(step_context),
++                client_session,
++                Arc::clone(world_state),
++                cancellation_token,
++                CompactionReason::ContextLimit,
++                CompactionPhase::PostTurn,
++            )
++            .await?;
++        }
++        Ok(())
++    }
++    .await;
++    if let Err(err) = result {
++        if matches!(
++            err.details(),
++            CodexErrorDetails::Fatal(_)
++                | CodexErrorDetails::Interrupted
++                | CodexErrorDetails::TurnAborted
++        ) {
++            return Err(err);
++        }
++        let error = err.to_codex_protocol_error();
++        if matches!(error, CodexErrorInfo::UsageLimitExceeded) {
++            sess.emit_turn_error_lifecycle(turn_context.as_ref(), error, err.details())
++                .await;
++        }
++        warn!(error = %err, "Post-turn compaction failed; preserving the completed turn");
++    }
++    Ok(())
++}
++
+ /// `world_state` belongs to `replacement_step_context`, which may differ from the compactor.
+ #[allow(clippy::too_many_arguments)]
+ #[instrument(
+@@ -1869,6 +1912,7 @@ async fn run_auto_compact(
+                 world_state,
+                 reason,
+                 phase,
++                cancellation_token,
+             )
+             .await?;
+         }
+@@ -3102,6 +3146,7 @@ async fn release_failed_tool_candidates(sess: &Session, step: &StepContext) {
+     release_held_tool_results(sess, step, true).await;
+ }
+ 
++#[allow(clippy::too_many_arguments)]
+ async fn try_complete_tool_turn(
+     sess: &Arc<Session>,
+     step_context: &Arc<StepContext>,
+@@ -3109,6 +3154,9 @@ async fn try_complete_tool_turn(
+     handoff_accepted: bool,
+     cancellation_token: &CancellationToken,
+     stop_hook_active: &mut bool,
++    completion_continuations: &mut usize,
++    client_session: &mut ModelClientSession,
++    world_state: &Arc<WorldState>,
+ ) -> CodexResult<bool> {
+     let proposal = propose_tool_completion(
+         sess,
+@@ -3134,20 +3182,33 @@ async fn try_complete_tool_turn(
+                 .await;
+                 *stop_hook_active = true;
+             }
+-        } else if sess
+-            .input_queue
+-            .reserve_tool_completion(
+-                &sess.active_turn,
+-                &step_context.turn.sub_id,
++        } else {
++            // Policy has accepted settled output; no terminal input reservation
++            // has happened yet. Optional replacement remains cancellation-fenced.
++            run_post_turn_compaction(
++                sess,
++                step_context,
++                client_session,
++                world_state,
+                 cancellation_token,
++                false,
+             )
+-            .await
+-        {
+-            step_context
+-                .turn
+-                .extension_data
+-                .insert(ValidatedToolCompletion(completion));
+-            return Ok(true);
++            .await?;
++            if sess
++                .input_queue
++                .reserve_tool_completion(
++                    &sess.active_turn,
++                    &step_context.turn.sub_id,
++                    cancellation_token,
++                )
++                .await
++            {
++                step_context
++                    .turn
++                    .extension_data
++                    .insert(ValidatedToolCompletion(completion));
++                return Ok(true);
++            }
+         }
+     }
+ 
+diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
+index 0c1e19ff6196ef8cbb1ef70d252d1ce6bf59adb2..f9ee1a269bb6c80778128e99574569e248080a6f 100644
+--- a/codex-rs/core/src/tasks/compact.rs
++++ b/codex-rs/core/src/tasks/compact.rs
+@@ -67,6 +67,7 @@ impl SessionTask for CompactTask {
+                     session.clone(),
+                     step_context,
+                     world_state,
++                    &cancellation_token,
+                 )
+                 .await
+             }
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index a106db511a2ea20be390efdd4876e20d2db79233..19d758252c6a2a7527088fca5e6682cdc895ef01 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -147,6 +147,8 @@ pub use codex_api::ModelInvocationDeadlineState;
+ mod model_request;
+ pub use codex_api::completed_model_response;
+ pub use model_request::CompactionInput;
++pub use model_request::CompactionResult;
++pub use model_request::CompactionWindow;
+ pub use model_request::ModelContextInput;
+ pub use model_request::ModelRequestContributor;
+ pub use model_request::ModelRequestInput;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 729b6fb03faddaa861458e09cc7f774678bf16f0..9df7d86a58ca172dbcfd0f635da4cc2d77bf061f 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -158,16 +158,41 @@ pub struct ModelContextInput<'a> {
+ }
+ 
+ /// Active conversation input before native summarization begins.
++#[derive(Clone)]
+ pub struct CompactionInput<'a> {
+     /// The summarizing source step, independently of its replacement step.
+     pub step_store: Option<&'a ExtensionData>,
+     pub thread_id: &'a str,
+     pub turn_id: &'a str,
+     pub model: &'a str,
++    /// The generation model has been omitted by current resolved controls.
++    pub model_omitted: bool,
+     pub automatic: bool,
++    pub optional: bool,
++    pub candidate_indexes: &'a [usize],
+     pub items: &'a [ResponseItem],
+ }
+ 
++/// Complete canonical window returned by an application-owned compact client.
++/// The response ID identifies this compact call, never a generation anchor.
++#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
++#[serde(deny_unknown_fields)]
++pub struct CompactionWindow {
++    pub items: Vec<ResponseItem>,
++    pub response_id: Option<String>,
++    pub model: String,
++    /// SDK-owned account attestation, never authority from compact-result JSON.
++    #[serde(skip)]
++    pub verified_provider_scope: bool,
++}
++
++/// Additive bridge; existing public text callbacks keep their original meaning.
++#[derive(Debug)]
++pub enum CompactionResult {
++    Summary(String),
++    Window(CompactionWindow),
++}
++
+ /// Cancellation for one tools-only batch's step preparation. Host contributors
+ /// retain and join their exact dispatched callback before returning cancellation.
+ #[derive(Clone, Debug)]
+@@ -229,6 +254,35 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+         Box::pin(async { Ok(None) })
+     }
+ 
++    fn schedules_post_turn_compaction(
++        &self,
++        _thread_id: &str,
++        _step_store: &ExtensionData,
++    ) -> bool {
++        false
++    }
++
++    /// Admit optional work after durable successful completion. None keeps the
++    /// native scheduling policy; false vetoes only this optional admission.
++    fn post_turn_compaction<'a>(
++        &'a self,
++        _input: CompactionInput<'a>,
++    ) -> ExtensionFuture<'a, Result<Option<bool>, String>> {
++        Box::pin(async { Ok(None) })
++    }
++
++    /// Return an entire window without changing the text callback contract.
++    fn before_compact_result<'a>(
++        &'a self,
++        input: CompactionInput<'a>,
++    ) -> ExtensionFuture<'a, Result<Option<CompactionResult>, String>> {
++        Box::pin(async move {
++            self.before_compact(input)
++                .await
++                .map(|value| value.map(CompactionResult::Summary))
++        })
++    }
++
+     /// Whether this exact operation opted into prepared-request editing.
+     /// Keep this captured marker true through retirement; it is not an owner-liveness check.
+     /// Hosts must reject unsupported operation settings before starting work.

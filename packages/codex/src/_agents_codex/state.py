@@ -21,7 +21,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .input import UserInput, _native_input
 from .subagents import SubagentConfig as SubagentConfig
-from .tools import ToolRef as ToolRef
+from .tools import ToolCallInfo as _ToolCallInfo, ToolRef as ToolRef
 from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage
 
 
@@ -245,6 +245,22 @@ class ApplicationToolOutput(BaseModel):
     application_data: dict[str, JsonValue] = Field(repr=False)
 
 
+class _GuardrailCheckpointRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+    kind: Literal["input", "output"]
+    name: str
+    agent_profile: str | None
+    session_id: str
+    turn_id: str
+    subagent_id: str | None = None
+    tripwire_triggered: bool
+    output_info: Any = None
+    tool_call: _ToolCallInfo | None = None
+
+
+_GuardrailCheckpointRecord.model_rebuild(_types_namespace=globals())
+
+
 def _check_saved_prompt_model(model: object) -> None:
     if not isinstance(model, dict):
         return
@@ -341,6 +357,7 @@ class SessionState(BaseModel):
     native_continuation: _ManualContinuation | None = None
     run_budget: _RequestRunBudgetCheckpoint | _TokenRunBudgetCheckpoint | None = None
     run_usage: RunUsage | None = None
+    guardrail_results: list[_GuardrailCheckpointRecord] = Field(default_factory=list)
     # SDK contract identity is checked before importing native state or grants.
     output_version: Literal[1] | None = None
     output_fingerprint: str | None = None
