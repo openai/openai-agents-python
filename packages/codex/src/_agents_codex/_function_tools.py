@@ -79,6 +79,7 @@ from .tools import (
     _CapturedFunction as _CapturedFunction,
     _function_parameters as _function_parameters,
     _hosted_tool_spec,
+    _rebuild_tool_output_adapter,
 )
 from .turn import Turn as Turn
 
@@ -604,7 +605,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             self._spec_json(),
             self,
             TypeAdapter(self.input_type),
-            TypeAdapter(self.output_type),
+            _rebuild_tool_output_adapter(TypeAdapter(self.output_type), self.output_type),
         )
 
     def _check_context(self, context: object) -> None:
@@ -1140,6 +1141,7 @@ def function_tool(
             output_type = result_types[-1]
         try:
             output_adapter = TypeAdapter(output_type)
+            _rebuild_tool_output_adapter(output_adapter, output_type)
         except PydanticSchemaGenerationError as error:
             raise TypeError(
                 f"Tool {selected_name!r} return type cannot be validated; "

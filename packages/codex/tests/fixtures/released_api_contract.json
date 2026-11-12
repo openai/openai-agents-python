@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "85a327bb1c264796e4efe87df6b7b3f2688566cc",
+  "baseline_commit": "2e7fdc414a5f8d594b8f5ef0ab7b4519c17964d3",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1363,11 +1363,18 @@
           "BackoffStrategy": "agents.classic.sandbox.util.retry.BackoffStrategy",
           "BaseSandboxClient": "agents.classic.sandbox.session.sandbox_client.BaseSandboxClient",
           "BoxMount": "agents.classic.sandbox.entries.mounts.providers.box.BoxMount",
+          "CallbackSink": "agents.classic.sandbox.session.sinks.CallbackSink",
+          "ChainedSink": "agents.classic.sandbox.session.sinks.ChainedSink",
           "Dir": "agents.classic.sandbox.entries.artifacts.Dir",
           "DockerVolumeMountStrategy": "agents.classic.sandbox.entries.mounts.base.DockerVolumeMountStrategy",
+          "EventPayloadPolicy": "agents.classic.sandbox.session.events.EventPayloadPolicy",
+          "EventSink": "agents.classic.sandbox.session.sinks.EventSink",
           "FuseMountPattern": "agents.classic.sandbox.entries.mounts.patterns.FuseMountPattern",
           "GCSMount": "agents.classic.sandbox.entries.mounts.providers.gcs.GCSMount",
+          "HttpProxySink": "agents.classic.sandbox.session.sinks.HttpProxySink",
           "InContainerMountStrategy": "agents.classic.sandbox.entries.mounts.base.InContainerMountStrategy",
+          "Instrumentation": "_agents_codex._sandbox_events.Instrumentation",
+          "JsonlOutboxSink": "agents.classic.sandbox.session.sinks.JsonlOutboxSink",
           "LazySkillSource": "_agents_shared.sandbox_skills.LazySkillSource",
           "LocalDir": "agents.classic.sandbox.entries.artifacts.LocalDir",
           "LocalDirLazySkillSource": "_agents_shared.sandbox_skills.LocalDirLazySkillSource",
@@ -1391,6 +1398,9 @@
           "SandboxConcurrencyLimits": "agents.classic.run_config.SandboxConcurrencyLimits",
           "SandboxEnvironmentSource": "_agents_codex.sandbox_skills.SandboxEnvironmentSource",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
+          "SandboxSessionEvent": "typing.Annotated",
+          "SandboxSessionFinishEvent": "agents.classic.sandbox.session.events.SandboxSessionFinishEvent",
+          "SandboxSessionStartEvent": "agents.classic.sandbox.session.events.SandboxSessionStartEvent",
           "SandboxSessionState": "agents.classic.sandbox.session.sandbox_session_state.SandboxSessionState",
           "Skill": "_agents_shared.sandbox_skills.Skill",
           "SkillMetadata": "_agents_shared.sandbox_skills.SkillMetadata",
@@ -1398,6 +1408,7 @@
           "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
           "SnapshotSpec": "agents.classic.sandbox.snapshot.SnapshotSpec",
           "TruncationPolicy": "agents.classic.sandbox.util.token_truncation.TruncationPolicy",
+          "WorkspaceJsonlSink": "agents.classic.sandbox.session.sinks.WorkspaceJsonlSink",
           "apply_diff": "agents.classic.apply_diff.apply_diff",
           "cleanup_stale_default_local_snapshots": "agents.classic.sandbox.snapshot_defaults.cleanup_stale_default_local_snapshots",
           "default_local_snapshot_base_dir": "agents.classic.sandbox.snapshot_defaults.default_local_snapshot_base_dir",
@@ -1415,11 +1426,11 @@
           "from contextlib import AbstractAsyncContextManager",
           "from typing import Any, TypeVar",
           "from ._managed_workspace import ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint",
+          "from ._sandbox_events import Instrumentation as Instrumentation",
           "from .classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from .classic.sandbox.entries import Dir, LocalDir, LocalFile",
           "from .classic.sandbox.entries.mounts import AzureBlobMount, BoxMount, DockerVolumeMountStrategy, FuseMountPattern, GCSMount, InContainerMountStrategy, Mount, MountpointMountPattern, R2Mount, RcloneMountPattern, S3FilesMount, S3FilesMountPattern, S3Mount",
           "from .classic.sandbox.manifest import Manifest",
-          "from .classic.sandbox.session.sandbox_client import BaseSandboxClient",
           "from _agents_shared.apply_diff import apply_diff",
           "from _agents_shared.retry import BackoffStrategy, retry_async",
           "from _agents_shared.sandbox_limits import SandboxArchiveLimits, SandboxConcurrencyLimits",
@@ -1427,7 +1438,10 @@
           "from _agents_shared.snapshot import LocalSnapshot, LocalSnapshotSpec, NoopSnapshot, NoopSnapshotSpec, RemoteSnapshot, RemoteSnapshotSpec, SnapshotBase, SnapshotSpec",
           "from _agents_shared.token_truncation import TruncationPolicy, formatted_truncate_text, formatted_truncate_text_with_token_count, truncate_text, truncate_with_token_budget",
           "from _agents_shared.snapshot_defaults import cleanup_stale_default_local_snapshots as cleanup_stale_default_local_snapshots, default_local_snapshot_base_dir as default_local_snapshot_base_dir, resolve_default_local_snapshot_spec as resolve_default_local_snapshot_spec",
+          "from .classic.sandbox.session.events import EventPayloadPolicy as EventPayloadPolicy, SandboxSessionEvent as SandboxSessionEvent, SandboxSessionFinishEvent as SandboxSessionFinishEvent, SandboxSessionStartEvent as SandboxSessionStartEvent",
+          "from .classic.sandbox.session.sandbox_client import BaseSandboxClient",
           "from .classic.sandbox.session.sandbox_session import SandboxSession",
+          "from .classic.sandbox.session.sinks import CallbackSink as CallbackSink, ChainedSink as ChainedSink, EventSink as EventSink, HttpProxySink as HttpProxySink, JsonlOutboxSink as JsonlOutboxSink, WorkspaceJsonlSink as WorkspaceJsonlSink",
           "from .executor import Environment",
           "from .sandbox_skills import LazySkillSource as LazySkillSource, LocalDirLazySkillSource as LocalDirLazySkillSource, SandboxEnvironmentSource as SandboxEnvironmentSource, Skill as Skill, SkillMetadata as SkillMetadata, Skills as Skills"
         ],
@@ -1436,12 +1450,19 @@
           "BackoffStrategy": "_agents_shared.retry.BackoffStrategy",
           "BaseSandboxClient": "agents.classic.sandbox.session.sandbox_client.BaseSandboxClient",
           "BoxMount": "agents.classic.sandbox.entries.mounts.BoxMount",
+          "CallbackSink": "agents.classic.sandbox.session.sinks.CallbackSink",
+          "ChainedSink": "agents.classic.sandbox.session.sinks.ChainedSink",
           "Dir": "agents.classic.sandbox.entries.Dir",
           "DockerVolumeMountStrategy": "agents.classic.sandbox.entries.mounts.DockerVolumeMountStrategy",
           "Environment": "agents.executor.Environment",
+          "EventPayloadPolicy": "agents.classic.sandbox.session.events.EventPayloadPolicy",
+          "EventSink": "agents.classic.sandbox.session.sinks.EventSink",
           "FuseMountPattern": "agents.classic.sandbox.entries.mounts.FuseMountPattern",
           "GCSMount": "agents.classic.sandbox.entries.mounts.GCSMount",
+          "HttpProxySink": "agents.classic.sandbox.session.sinks.HttpProxySink",
           "InContainerMountStrategy": "agents.classic.sandbox.entries.mounts.InContainerMountStrategy",
+          "Instrumentation": "_agents_codex._sandbox_events.Instrumentation",
+          "JsonlOutboxSink": "agents.classic.sandbox.session.sinks.JsonlOutboxSink",
           "LazySkillSource": "_agents_codex.sandbox_skills.LazySkillSource",
           "LocalDir": "agents.classic.sandbox.entries.LocalDir",
           "LocalDirLazySkillSource": "_agents_codex.sandbox_skills.LocalDirLazySkillSource",
@@ -1465,6 +1486,9 @@
           "SandboxConcurrencyLimits": "_agents_shared.sandbox_limits.SandboxConcurrencyLimits",
           "SandboxEnvironmentSource": "_agents_codex.sandbox_skills.SandboxEnvironmentSource",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
+          "SandboxSessionEvent": "agents.classic.sandbox.session.events.SandboxSessionEvent",
+          "SandboxSessionFinishEvent": "agents.classic.sandbox.session.events.SandboxSessionFinishEvent",
+          "SandboxSessionStartEvent": "agents.classic.sandbox.session.events.SandboxSessionStartEvent",
           "SandboxSessionState": "_agents_shared.sandbox_session_state.SandboxSessionState",
           "Skill": "_agents_codex.sandbox_skills.Skill",
           "SkillMetadata": "_agents_codex.sandbox_skills.SkillMetadata",
@@ -1472,6 +1496,7 @@
           "SnapshotBase": "_agents_shared.snapshot.SnapshotBase",
           "SnapshotSpec": "_agents_shared.snapshot.SnapshotSpec",
           "TruncationPolicy": "_agents_shared.token_truncation.TruncationPolicy",
+          "WorkspaceJsonlSink": "agents.classic.sandbox.session.sinks.WorkspaceJsonlSink",
           "apply_diff": "_agents_shared.apply_diff.apply_diff",
           "cleanup_stale_default_local_snapshots": "_agents_shared.snapshot_defaults.cleanup_stale_default_local_snapshots",
           "default_local_snapshot_base_dir": "_agents_shared.snapshot_defaults.default_local_snapshot_base_dir",
@@ -2389,6 +2414,26 @@
         ],
         "references": {
           "SessionState": "agents.state.SessionState"
+        }
+      },
+      "_agents_codex._sandbox_events": {
+        "declarations": [
+          "class Instrumentation(_Instrumentation):\n\n    def __init__(self, *, sinks: Sequence[EventSink] | None=None, payload_policy: EventPayloadPolicy | None=None, payload_policy_by_op: dict[OpName, EventPayloadPolicy] | None=None, max_pending_events: int=64, delivery_timeout_s: float=5.0) -> None:\n        pass\n\n    @property\n    def sinks(self) -> list[EventSink]:\n        pass\n\n    def add_sink(self, sink: EventSink) -> None:\n        pass\n\n    def remove_sink(self, sink: EventSink) -> bool:\n        pass\n\n    async def emit(self, event: SandboxSessionEvent) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Sequence",
+          "from agents.classic.sandbox.errors import OpName",
+          "from agents.classic.sandbox.session.events import EventPayloadPolicy, SandboxSessionEvent",
+          "from agents.classic.sandbox.session.manager import Instrumentation as _Instrumentation",
+          "from agents.classic.sandbox.session.sinks import EventSink"
+        ],
+        "references": {
+          "EventPayloadPolicy": "agents.classic.sandbox.session.events.EventPayloadPolicy",
+          "EventSink": "agents.classic.sandbox.session.sinks.EventSink",
+          "OpName": "agents.classic.sandbox.errors.OpName",
+          "SandboxSessionEvent": "agents.classic.sandbox.session.events.SandboxSessionEvent",
+          "_Instrumentation": "agents.classic.sandbox.session.manager.Instrumentation"
         }
       },
       "_agents_codex._stored_history": {
@@ -4458,7 +4503,7 @@
       "agents.classic.sandbox.errors": {
         "declarations": [
           "class ErrorCode(str, Enum):\n    INVALID_MANIFEST_PATH = 'invalid_manifest_path'\n    INVALID_COMPRESSION_SCHEME = 'invalid_compression_scheme'\n    EXPOSED_PORT_UNAVAILABLE = 'exposed_port_unavailable'\n    EXEC_NONZERO = 'exec_nonzero'\n    EXEC_TIMEOUT = 'exec_timeout'\n    EXEC_TRANSPORT_ERROR = 'exec_transport_error'\n    PTY_SESSION_NOT_FOUND = 'pty_session_not_found'\n    APPLY_PATCH_INVALID_PATH = 'apply_patch_invalid_path'\n    APPLY_PATCH_INVALID_DIFF = 'apply_patch_invalid_diff'\n    APPLY_PATCH_FILE_NOT_FOUND = 'apply_patch_file_not_found'\n    APPLY_PATCH_DECODE_ERROR = 'apply_patch_decode_error'\n    WORKSPACE_READ_NOT_FOUND = 'workspace_read_not_found'\n    WORKSPACE_ARCHIVE_READ_ERROR = 'workspace_archive_read_error'\n    WORKSPACE_ARCHIVE_WRITE_ERROR = 'workspace_archive_write_error'\n    WORKSPACE_WRITE_TYPE_ERROR = 'workspace_write_type_error'\n    WORKSPACE_STOP_ERROR = 'workspace_stop_error'\n    WORKSPACE_START_ERROR = 'workspace_start_error'\n    WORKSPACE_ROOT_NOT_FOUND = 'workspace_root_not_found'\n    LOCAL_FILE_READ_ERROR = 'local_file_read_error'\n    LOCAL_DIR_READ_ERROR = 'local_dir_read_error'\n    LOCAL_CHECKSUM_ERROR = 'local_checksum_error'\n    GIT_MISSING_IN_IMAGE = 'git_missing_in_image'\n    GIT_CLONE_ERROR = 'git_clone_error'\n    GIT_SUBPATH_ERROR = 'git_subpath_error'\n    GIT_COPY_ERROR = 'git_copy_error'\n    MOUNT_MISSING_TOOL = 'mount_missing_tool'\n    MOUNT_FAILED = 'mount_failed'\n    MOUNT_CONFIG_INVALID = 'mount_config_invalid'\n    SKILLS_CONFIG_INVALID = 'skills_config_invalid'\n    SANDBOX_CONFIG_INVALID = 'sandbox_config_invalid'\n    SNAPSHOT_PERSIST_ERROR = 'snapshot_persist_error'\n    SNAPSHOT_RESTORE_ERROR = 'snapshot_restore_error'\n    SNAPSHOT_NOT_RESTORABLE = 'snapshot_not_restorable'",
-          "OpName = Literal['start', 'stop', 'exec', 'read', 'write', 'shutdown', 'running', 'persist_workspace', 'hydrate_workspace', 'resolve_exposed_port', 'materialize', 'snapshot_persist', 'snapshot_restore', 'apply_patch']"
+          "OpName = Literal['write_stdin', 'view_image', 'start', 'stop', 'exec', 'read', 'write', 'shutdown', 'running', 'persist_workspace', 'hydrate_workspace', 'resolve_exposed_port', 'materialize', 'snapshot_persist', 'snapshot_restore', 'apply_patch']"
         ],
         "exports": {},
         "imports": [
@@ -4613,7 +4658,7 @@
       },
       "agents.classic.sandbox.session.manager": {
         "declarations": [
-          "class Instrumentation:\n\n    def __init__(self, *, sinks: Sequence[EventSink] | None=None, payload_policy: EventPayloadPolicy | None=None, payload_policy_by_op: dict[OpName, EventPayloadPolicy] | None=None) -> None:\n        pass\n\n    @property\n    def sinks(self) -> list[EventSink]:\n        pass\n\n    def add_sink(self, sink: EventSink) -> None:\n        pass\n\n    async def emit(self, event: SandboxSessionEvent) -> None:\n        pass\n\n    async def flush(self) -> None:\n        pass"
+          "class Instrumentation:\n\n    def __init__(self, *, sinks: Sequence[EventSink] | None=None, payload_policy: EventPayloadPolicy | None=None, payload_policy_by_op: dict[OpName, EventPayloadPolicy] | None=None, max_pending_events: int | None=None, delivery_timeout_s: float | None=None) -> None:\n        pass\n\n    @property\n    def sinks(self) -> list[EventSink]:\n        pass\n\n    def add_sink(self, sink: EventSink) -> None:\n        pass\n\n    def remove_sink(self, sink: EventSink) -> bool:\n        pass\n\n    async def emit(self, event: SandboxSessionEvent) -> None:\n        pass\n\n    async def flush(self) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
@@ -4739,15 +4784,24 @@
         "declarations": [
           "DeliveryMode = Literal['sync', 'async', 'best_effort']",
           "OnErrorPolicy = Literal['raise', 'log', 'ignore']",
-          "class EventSink(abc.ABC):\n    name: str | None = None\n    mode: DeliveryMode\n    on_error: OnErrorPolicy\n    payload_policy: EventPayloadPolicy | None\n\n    @abc.abstractmethod\n    async def handle(self, event: SandboxSessionEvent) -> None:\n        pass"
+          "class EventSink(abc.ABC):\n    name: str | None = None\n    mode: DeliveryMode\n    on_error: OnErrorPolicy\n    payload_policy: EventPayloadPolicy | None\n\n    @abc.abstractmethod\n    async def handle(self, event: SandboxSessionEvent) -> None:\n        pass",
+          "class CallbackSink(EventSink):\n\n    def __init__(self, callback: Callable[[SandboxSessionEvent, BaseSandboxSession], object], *, mode: DeliveryMode='sync', on_error: OnErrorPolicy='raise', payload_policy: EventPayloadPolicy | None=None, name: str | None=None) -> None:\n        pass\n\n    def bind(self, session: BaseSandboxSession) -> None:\n        pass\n\n    async def handle(self, event: SandboxSessionEvent) -> None:\n        pass",
+          "class JsonlOutboxSink(EventSink):\n\n    def __init__(self, path: Path, *, mode: DeliveryMode='best_effort', on_error: OnErrorPolicy='log', payload_policy: EventPayloadPolicy | None=None) -> None:\n        pass\n\n    async def handle(self, event: SandboxSessionEvent) -> None:\n        pass",
+          "class WorkspaceJsonlSink(EventSink):\n\n    def __init__(self, *, workspace_relpath: Path=Path('logs/events-{session_id}.jsonl'), ephemeral: bool=False, mode: DeliveryMode='best_effort', on_error: OnErrorPolicy='log', payload_policy: EventPayloadPolicy | None=None, flush_every: int=1, max_bytes: int | None=8 * 1024 * 1024) -> None:\n        pass\n\n    def bind(self, session: BaseSandboxSession) -> None:\n        pass\n\n    async def handle(self, event: SandboxSessionEvent) -> None:\n        pass",
+          "class HttpProxySink(EventSink):\n\n    def __init__(self, endpoint: str, *, headers: dict[str, str] | None=None, timeout_s: float=5.0, spool_path: Path | None=None, mode: DeliveryMode='best_effort', on_error: OnErrorPolicy='log', payload_policy: EventPayloadPolicy | None=None) -> None:\n        pass\n\n    async def handle(self, event: SandboxSessionEvent) -> None:\n        pass",
+          "class ChainedSink(EventSink):\n\n    def __init__(self, *sinks: EventSink) -> None:\n        pass\n\n    async def handle(self, event: SandboxSessionEvent) -> None:\n        pass"
         ],
         "exports": {},
         "imports": [
           "import abc",
+          "from collections.abc import Callable",
+          "from pathlib import Path",
           "from typing import Literal",
+          "from .base_sandbox_session import BaseSandboxSession",
           "from .events import EventPayloadPolicy, SandboxSessionEvent"
         ],
         "references": {
+          "BaseSandboxSession": "agents.classic.sandbox.session.base_sandbox_session.BaseSandboxSession",
           "EventPayloadPolicy": "agents.classic.sandbox.session.events.EventPayloadPolicy",
           "SandboxSessionEvent": "agents.classic.sandbox.session.events.SandboxSessionEvent"
         }

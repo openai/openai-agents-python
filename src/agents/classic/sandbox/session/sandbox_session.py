@@ -28,7 +28,6 @@ from .events import SandboxSessionFinishEvent, SandboxSessionStartEvent
 from .manager import Instrumentation
 from .pty_types import PtyExecUpdate
 from .sandbox_session_state import SandboxSessionState
-from .sinks import ChainedSink, SandboxSessionBoundSink
 from .utils import (
     _best_effort_stream_len,
 )
@@ -245,16 +244,8 @@ class SandboxSession(BaseSandboxSession):
         self._bind_session_to_sinks()
 
     def _bind_session_to_sinks(self) -> None:
-        # Bind sinks to the *inner* session to avoid recursive instrumentation loops.
-        for sink in self._instrumentation.sinks:
-            sinks: list[object]
-            if isinstance(sink, ChainedSink):
-                sinks = list(sink.sinks)
-            else:
-                sinks = [sink]
-            for s in sinks:
-                if isinstance(s, SandboxSessionBoundSink):
-                    s.bind(self._inner)
+        # Bind sinks to the raw resource to avoid recursive event loops.
+        self._instrumentation._bind_session(self._inner)
 
     @property
     def state(self) -> SandboxSessionState:
@@ -302,7 +293,7 @@ class SandboxSession(BaseSandboxSession):
         try:
             await super()._aclose_impl()
         finally:
-            await self._instrumentation.flush()
+            await self._instrumentation._finish_session(self.state.session_id)
 
     def _next_seq(self) -> int:
         self._seq += 1
