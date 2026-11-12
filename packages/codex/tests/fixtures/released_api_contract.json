@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "87cafd89f3353f285116d3dd24fa77e66ea56f25",
+  "baseline_commit": "6ffc72a0afae747b202fb587f86247562803415f",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -835,8 +835,8 @@
           "class NativeStreamingModel(NativeModel, Protocol):\n\n    def stream(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]] | Awaitable[AsyncIterator[Mapping[str, Any]]]:\n        pass",
           "class ModelProvider(Protocol):\n\n    def get_model(self, model_name: str) -> NativeModel:\n        pass",
           "@dataclass(frozen=True, init=False)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n    _stream_enabled: bool = field(default=False, init=False, repr=False)\n    _include_usage: bool = field(default=True, init=False, repr=False)\n\n    def __init__(self, client: Any, model: str | None=None, *, prompt_cache_key: str | None=None, request_options: ModelRequestOptions | ModelRequestOptionsFactory | None=None, stream: bool=False, include_usage: bool=True) -> None:\n        pass\n\n    @property\n    def stream(self) -> Callable[[ModelRequest], AsyncIterator[Mapping[str, Any]]] | None:\n        pass\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
-          "@dataclass(frozen=True)\nclass LitellmModel(ChatCompletionsModel):\n    pass",
-          "@dataclass(frozen=True)\nclass AnyLLMModel(ChatCompletionsModel):\n    pass",
+          "@dataclass(frozen=True, init=False)\nclass LitellmModel(ChatCompletionsModel):\n    pass",
+          "@dataclass(frozen=True, init=False)\nclass AnyLLMModel(ChatCompletionsModel):\n    pass",
           "@dataclass(frozen=True)\nclass ResponsesModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass"
         ],
         "exports": {
