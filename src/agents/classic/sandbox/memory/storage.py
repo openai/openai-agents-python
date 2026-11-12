@@ -64,9 +64,16 @@ class PhaseTwoInputSelection:
 class SandboxMemoryStorage:
     """Read and write sandbox memory files using a configured layout."""
 
-    def __init__(self, *, session: BaseSandboxSession, layout: MemoryLayoutConfig) -> None:
+    def __init__(
+        self,
+        *,
+        session: BaseSandboxSession,
+        layout: MemoryLayoutConfig,
+        bounded: bool = False,
+    ) -> None:
         self._session = session
         self._layout = layout
+        self._bounded = bounded
         self._layout_lock = asyncio.Lock()
 
     @property
@@ -113,6 +120,11 @@ class SandboxMemoryStorage:
         await self._session.write(path, io.BytesIO(b""))
 
     async def read_text(self, path: Path) -> str:
+        if self._bounded:
+            payload = await self._session.read_bounded(path, max_bytes=1_000_001)
+            if len(payload) > 1_000_000:
+                raise ValueError("Sandbox memory file exceeds 1000000 bytes")
+            return decode_payload(payload)
         handle = await self._session.read(path)
         try:
             return decode_payload(handle.read())
@@ -200,11 +212,15 @@ class SandboxMemoryStorage:
         await self.write_text(self.phase_two_selection_path, json.dumps(payload, indent=2) + "\n")
 
     async def _list_current_selection_items(self) -> list[PhaseTwoSelectionItem]:
-        try:
-            entries = await self._session.ls(self.raw_memories_dir)
-        except Exception:
-            return []
-
+        if self._bounded:
+            entries = await self._session._ls_bounded(self.raw_memories_dir, max_entries=1025)
+            if len(entries) > 1024:
+                raise ValueError("Sandbox memory directory exceeds 1024 entries")
+        else:
+            try:
+                entries = await self._session.ls(self.raw_memories_dir)
+            except Exception:
+                return []
         items: list[tuple[tuple[int, str], str, PhaseTwoSelectionItem]] = []
         for entry in entries:
             if entry.is_dir():
@@ -213,7 +229,12 @@ class SandboxMemoryStorage:
             if path.suffix != ".md":
                 continue
             try:
-                raw_memory = (await self.read_text(self.raw_memories_dir / path.name)).rstrip("\n")
+                candidate = self.raw_memories_dir / path.name
+                if self._bounded:
+                    header = await self._session.read_bounded(candidate, max_bytes=8192)
+                    raw_memory = decode_payload(header)
+                else:
+                    raw_memory = (await self.read_text(candidate)).rstrip("\n")
             except (FileNotFoundError, WorkspaceReadNotFoundError):
                 continue
             item = _extract_selection_item(raw_memory)

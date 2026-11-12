@@ -1201,6 +1201,52 @@ class BaseSandboxSession(abc.ABC):
             Portable tar streams are extracted underneath this session's workspace root.
         """
 
+    async def _ls_bounded(
+        self,
+        path: Path | str,
+        *,
+        max_entries: int,
+        user: str | User | None = None,
+    ) -> list[FileEntry]:
+        # Custom providers retain their application-owned acquisition behavior.
+        if type(self).ls is not BaseSandboxSession.ls:
+            return (await self.ls(path, user=user))[:max_entries]
+        path = await self._validate_path_access(path)
+        path_arg = sandbox_path_str(path)
+        byte_limit = 4 * 1024 * 1024
+        result = await self.exec(
+            "sh",
+            "-c",
+            '{ LC_ALL=C ls -laU -- "$1" 2>/dev/null; listing_exit=$?; '
+            'printf "\\n__sdk_bounded_ls_exit__:%s\\n" "$listing_exit"; } | head -c "$2"',
+            "sh",
+            path_arg,
+            str(byte_limit + 1),
+            shell=False,
+            user=user,
+            timeout=30.0,
+        )
+        if not result.ok():
+            raise ExecNonZeroError(result, command=("ls", "--", path_arg))
+        if len(result.stdout) > byte_limit:
+            raise OverflowError("Bounded directory listing exceeds the byte limit")
+        listing, marker, exit_status = result.stdout.rpartition(b"\n__sdk_bounded_ls_exit__:")
+        if not marker:
+            raise RuntimeError("Bounded directory listing did not complete")
+        listing_exit = int(exit_status.strip())
+        if listing_exit:
+            raise ExecNonZeroError(
+                ExecResult(
+                    stdout=listing, stderr=b"Directory listing failed", exit_code=listing_exit
+                ),
+                command=("ls", "--", path_arg),
+            )
+        return parse_ls_la(
+            listing.decode("utf-8", errors="replace"),
+            base=path_arg,
+            max_entries=max_entries,
+        )
+
     async def ls(
         self,
         path: Path | str,

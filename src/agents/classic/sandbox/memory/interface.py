@@ -2,14 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
-
-
-class RolloutExtractionArtifacts(BaseModel):
-    rollout_slug: str
-    rollout_summary: str
-    raw_memory: str
-
+from _agents_shared.sandbox_memory_artifacts import (
+    RolloutExtractionArtifacts as RolloutExtractionArtifacts,
+)
 
 ROLLOUT_EXTRACTION_ARTIFACTS_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
