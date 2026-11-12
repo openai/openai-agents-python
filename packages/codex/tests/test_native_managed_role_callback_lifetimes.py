@@ -16,7 +16,7 @@ from agents import (
     function_tool,
     telemetry,
 )
-from agents.observation import TurnFinished
+from agents.observation import OutputTextDelta, TurnFinished, TurnStarted
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -317,3 +317,71 @@ async def test_managed_callbacks_activate_native_trace_context(
         assert all(context.include_sensitive_data is False for context in seen)
     finally:
         await telemetry.shutdown()
+
+
+@pytest.mark.parametrize("prefix_count,pending_limit", [(1, 1), (300, None)])
+async def test_selector_first_managed_stream_keeps_full_prefix(
+    responses, tmp_path, monkeypatch, prefix_count, pending_limit
+):
+    received, held = [], {}
+    register = Session._register_managed_tool_stream
+    select = Session._select_step
+
+    def hold_marker(self, event):
+        held[event["msg"]["child_turn_id"]] = event
+
+    async def selector_first(self, state, message):
+        marker = held.pop(message["turn_id"], None)
+        if marker is not None:
+            for index in range(prefix_count):
+                self._observations.append(
+                    OutputTextDelta(
+                        session_id=self.id,
+                        turn_id=message["turn_id"],
+                        submission_id=state.handle.submission_id,
+                        item_id="prefix-item",
+                        delta=f"prefix-{index}",
+                    )
+                )
+            register(self, marker)
+            await asyncio.sleep(0)
+        await select(self, state, message)
+
+    async def observe(value):
+        received.append(value["event"])
+
+    monkeypatch.setattr(Session, "_register_managed_tool_stream", hold_marker)
+    monkeypatch.setattr(Session, "_select_step", selector_first)
+    tool = NativeRoleTool(
+        name="research_topic",
+        role="research",
+        description="Research.",
+        on_stream=observe,
+        on_stream_max_pending_events=pending_limit,
+    )
+    responses.respond(collaboration(tool.name, {"input": "Read."}, "prefix-managed"))
+    responses.respond(assistant_output("child result"))
+    responses.respond(assistant_output("parent result"))
+    agent = Agent(
+        instructions="Use the research tool.",
+        model=ROLE_MODEL,
+        provider=provider(responses),
+        tools=[
+            NativeAgents(
+                additional_roles=[_role()], managed_tools=[tool], before_step=lambda step: None
+            )
+        ],
+    )
+    async with timeout(15), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        trust(peer, tmp_path, monkeypatch)
+        async with agent.session(environment=declaration(peer)) as session:
+            assert (
+                await (await session.submit("Research.")).get_result()
+            ).final_output == "parent result"
+    assert not held
+    assert isinstance(received[0], TurnStarted)
+    assert [
+        value.delta
+        for value in received
+        if isinstance(value, OutputTextDelta) and value.item_id == "prefix-item"
+    ] == [f"prefix-{index}" for index in range(prefix_count)]

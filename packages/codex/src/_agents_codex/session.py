@@ -89,7 +89,7 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
-from ._managed_tool_stream import _ManagedToolStream
+from ._managed_tool_stream import _ManagedToolPrefix, _ManagedToolStream
 from ._managed_workspace import (
     _SANDBOX_EVENTS_ATTRIBUTE,
     _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
@@ -1190,6 +1190,7 @@ class _ChildCallbacks:
     run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     model_run_usage: _UsageCollector = field(default_factory=_UsageCollector, repr=False)
     observation_after: int = 0
+    managed_stream_prefix: _ManagedToolPrefix | None = field(default=None, repr=False)
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
@@ -11362,6 +11363,18 @@ class Session(Generic[ContextT, OutputT]):
                 ChildInvocation(self.id, child_id, instance, turn_id),
                 observation_after=self._observations.sequence,
             )
+            if turn_id not in self._managed_tool_streams:
+                limits = [
+                    tool.on_stream_max_pending_events
+                    for tool in self._native_agents.managed_tools
+                    if tool.on_stream is not None
+                ]
+                if limits:
+                    state.managed_stream_prefix = _ManagedToolPrefix(
+                        None
+                        if None in limits
+                        else max(limit for limit in limits if limit is not None)
+                    )
             self._child_callbacks[key] = state
             self._observations.append(
                 TurnStarted(
@@ -11384,6 +11397,7 @@ class Session(Generic[ContextT, OutputT]):
         return state
 
     async def _join_managed_child_stream(self, state: _ChildCallbacks) -> None:
+        state.managed_stream_prefix = None
         stream = self._managed_tool_streams.get(state.handle.turn_id)
         if stream is not None and stream.submission_id == state.handle.submission_id:
             stream.abort()
@@ -11578,6 +11592,17 @@ class Session(Generic[ContextT, OutputT]):
     def _observe_managed_tool(self, event: Observation) -> None:
         stream = self._managed_tool_streams.get(getattr(event, "turn_id", ""))
         if stream is None:
+            for child in self._child_callbacks.values():
+                if (
+                    child.handle.turn_id == getattr(event, "turn_id", None)
+                    and child.handle.submission_id == getattr(event, "submission_id", None)
+                    and child.managed_stream_prefix is not None
+                ):
+                    if isinstance(event, TurnFinished):
+                        child.managed_stream_prefix = None
+                    else:
+                        child.managed_stream_prefix.append(event)
+                    break
             return
         if getattr(event, "submission_id", None) != stream.submission_id:
             return
@@ -11701,7 +11726,10 @@ class Session(Generic[ContextT, OutputT]):
                 self._managed_tool_streams.pop(child_turn)
 
         stream.task.add_done_callback(retired)
-        # Registration precedes the synthetic public TurnStarted observation.
+        child = self._child_callbacks.get((child_id, instance, child_turn))
+        if child is not None and child.managed_stream_prefix is not None:
+            prefix, child.managed_stream_prefix = child.managed_stream_prefix, None
+            prefix.replay(stream)
         self._child_callback_state(child_id, instance, child_turn)
         self._observations.notify()
 

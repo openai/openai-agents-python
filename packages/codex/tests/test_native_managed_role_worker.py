@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from _agents_codex._managed_tool_stream import _ManagedToolStream
+from _agents_codex._managed_tool_stream import _ManagedToolPrefix, _ManagedToolStream
 from _agents_codex.observation import EventStream, _ObservationBuffer
 from agents import NativeRoleToolInvocation, ToolOutput
 from agents.observation import RawProviderEvent, ToolFinished, TurnStarted
@@ -218,3 +218,22 @@ async def test_observation_retention_bounds_private_application_data() -> None:
         event async for event in EventStream(buffer, after=0, _include_execution_details=True)
     ]
     assert not any(isinstance(event, ToolFinished) for event in retained)
+
+
+@pytest.mark.parametrize("kind", ["pending", "application_data"])
+async def test_managed_prefix_overflow_prevents_callback_admission(kind):
+    received, overflows = [], []
+    prefix = _ManagedToolPrefix(1)
+    if kind == "pending":
+        for index in range(3):
+            prefix.append(event(index))
+    else:
+        prefix.append(payload_event(1, {"text": "é" * (17 * 1024 * 1024)}, "application_data"))
+    stream = _ManagedToolStream(
+        origin(), "child", received.append, 1, lambda: overflows.append(True)
+    )
+    prefix.replay(stream)
+    with pytest.raises(RuntimeError, match="limit exceeded"):
+        await stream.drain()
+    assert received == []
+    assert overflows == [True]

@@ -17,6 +17,42 @@ _logger = logging.getLogger("agents.native.managed_tool")
 _MAX_RETAINED_BYTES = 32 * 1024 * 1024
 
 
+class _ManagedToolPrefix:
+    """A bounded prefix while the native call marker is pending."""
+
+    def __init__(self, limit: int | None) -> None:
+        self._limit = limit
+        self._events: deque[Observation] = deque()
+        self._bytes = 0
+        self.error: BaseException | None = None
+
+    def append(self, event: Observation) -> None:
+        if self.error is not None:
+            return
+        size = sum(_observation_sizes(event, utf8=True))
+        if size > _MAX_RETAINED_BYTES - self._bytes:
+            self.error = RuntimeError("Managed role stream retained byte limit exceeded")
+        elif self._limit is not None and len(self._events) >= self._limit + 1:
+            # The first transferred event immediately belongs to the worker.
+            self.error = RuntimeError("Managed role stream pending event limit exceeded")
+        if self.error is not None:
+            self._events.clear()
+            self._bytes = 0
+            return
+        self._events.append(deepcopy(event))
+        self._bytes += size
+
+    def replay(self, stream: _ManagedToolStream) -> None:
+        if self.error is not None:
+            stream.error = self.error
+            stream.abort()
+            stream._overflow()
+        else:
+            while self._events:
+                stream.append(self._events.popleft())
+        self._bytes = 0
+
+
 class _ManagedToolStream:
     def __init__(
         self,
