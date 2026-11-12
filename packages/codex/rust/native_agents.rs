@@ -1251,7 +1251,9 @@ mod steering_capture_tests {
                         "input": [UserInput::Text { text: text.into(), text_elements: vec![] }],
                     })
                 };
-                let root = crate::ops::submit_replaceable(&state, text("Start one child"))
+                let mut opening = text("Start one child");
+                opening["start"] = serde_json::json!({"model_override": "retained-model-fixture"});
+                let root = crate::ops::submit_replaceable(&state, opening)
                     .await
                     .unwrap();
                 assert_eq!(root["status"], "started");
@@ -1278,6 +1280,7 @@ mod steering_capture_tests {
                         .collect()
                 };
                 let initial = child_requests();
+                assert_eq!(initial[0]["model"], "retained-model-fixture");
                 assert_eq!(initial.len(), 1);
                 let metadata: serde_json::Value = serde_json::from_str(
                     initial[0]["client_metadata"]["x-codex-turn-metadata"]
@@ -1375,6 +1378,7 @@ mod steering_capture_tests {
                     assert_eq!(successor.outcome().await.unwrap().result, Ok("done".into()));
                     let requests = child_requests();
                     assert_eq!(requests.len(), 2);
+                    assert_eq!(requests[1]["model"], "retained-model-fixture");
                     let metadata: serde_json::Value = serde_json::from_str(
                         requests[1]["client_metadata"]["x-codex-turn-metadata"]
                             .as_str()

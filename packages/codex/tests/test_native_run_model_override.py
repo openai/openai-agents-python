@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, ModelRequest, ModelResponse, NativeProvider
+from agents import Agent, FunctionTool, ModelRequest, ModelResponse, NativeProvider
+from agents.state import SessionState
 from tests._asyncio import timeout
+from tests.test_native_manual_tools import LookupArgs, next_request
 
 
 def model_names():
@@ -140,3 +142,45 @@ def test_run_sync_forwards_model_override_to_native_admission():
         assert result.final_output == forced
     finally:
         asyncio.run(provider.aclose())
+
+
+async def test_manual_restore_keeps_the_admitted_override_and_future_root_default():
+    initial, forced, _ = model_names()
+    calls = []
+    lookup = FunctionTool(
+        name="lookup", description="Read a key", input_type=LookupArgs, output_type=str
+    )
+
+    class Model:
+        def complete(self, request):
+            calls.append(request.body.get("model"))
+            if len(calls) == 1:
+                return ModelResponse(
+                    [
+                        {
+                            "type": "function_call",
+                            "name": "lookup",
+                            "call_id": "manual-model",
+                            "arguments": '{"key":"A"}',
+                        }
+                    ]
+                )
+            return ModelResponse(message("done"))
+
+    async with timeout(20), NativeProvider(model_backend=Model()) as provider:
+        agent = Agent(model=initial, instructions="Read A.", tools=[lookup], provider=provider)
+        async with agent.session() as source:
+            await source.submit("read", model_override=forced)
+            await next_request(source.interactions(), lookup)
+            saved = await source.suspend()
+        state = SessionState.from_json(saved.to_json())
+        with pytest.raises(ValueError, match="model override"):
+            await agent.run(None, state=state, model_override=initial)
+        async with agent.session(state=state) as restored:
+            request = await next_request(restored.interactions(), lookup)
+            await request.respond("answer-A")
+            assert (await restored.restored_turn.get_result()).final_output == "done"
+            assert (
+                await (await restored.submit("later default")).get_result()
+            ).final_output == "done"
+    assert calls == [forced, forced, initial]
