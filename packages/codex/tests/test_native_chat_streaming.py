@@ -113,7 +113,15 @@ async def test_native_chat_text_arrives_before_provider_finishes():
         entered.set()
         await release.wait()
         yield chunk({"content": " final"}, "stop")
-        yield chunk(usage={"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14})
+        yield chunk(
+            usage={
+                "prompt_tokens": 11,
+                "completion_tokens": 3,
+                "total_tokens": 14,
+                "prompt_tokens_details": {"cached_tokens": 2},
+                "completion_tokens_details": {"reasoning_tokens": 1},
+            }
+        )
 
     async def create(**body):
         return frames()
@@ -136,7 +144,14 @@ async def test_native_chat_text_arrives_before_provider_finishes():
                 assert not pending.done()
             finally:
                 release.set()
-            assert (await pending).final_output == "early final"
+            result = await pending
+            assert result.final_output == "early final"
+            assert result.run_usage.requests == 1
+            assert result.run_usage.input_tokens == 11
+            assert result.run_usage.output_tokens == 3
+            assert result.run_usage.total_tokens == 14
+            assert result.run_usage.cached_input_tokens == 2
+            assert result.run_usage.reasoning_output_tokens == 1
 
 
 async def test_native_chat_tools_wait_for_physical_iterator_cleanup():

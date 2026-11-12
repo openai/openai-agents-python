@@ -1043,8 +1043,8 @@ class ChatCompletionsModel:
         try:
             parameters, apply_patch_wire = self._parameters(request, True)
             chunks = await self._create(request, **parameters)
-            iterator = aiter(chunks)
             try:
+                iterator = aiter(chunks)
                 async for chunk in iterator:
                     raw = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk
                     if not isinstance(raw, dict):
