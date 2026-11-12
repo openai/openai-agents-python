@@ -21,6 +21,7 @@ use codex_thread_store::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::tool_callers::ToolDeclarations;
 use crate::{
     NativeThread,
     engine::{EngineState, ThreadState},
@@ -63,8 +64,8 @@ pub struct Checkpoint {
 pub(crate) fn restore_specs(
     payload: &Value,
     options: &mut options::ThreadOptions,
-    specs: Option<Vec<DynamicToolSpec>>,
-) -> anyhow::Result<Option<Vec<DynamicToolSpec>>> {
+    specs: Option<ToolDeclarations>,
+) -> anyhow::Result<Option<ToolDeclarations>> {
     let Some(opening) = &options.agent_profiles else {
         return Ok(specs);
     };
@@ -843,7 +844,7 @@ pub async fn restore(
     engine: &Arc<EngineState>,
     mut checkpoint: Checkpoint,
     mut options: options::ThreadOptions,
-    python_specs: Option<Vec<DynamicToolSpec>>,
+    python_specs: Option<ToolDeclarations>,
     source: Option<&crate::context::Change>,
 ) -> anyhow::Result<NativeThread> {
     let _lifecycle = engine.lifecycle.lock().await;
@@ -926,6 +927,17 @@ pub async fn restore(
             })
             .transpose()?,
     };
+    // In-process compaction keeps the current live transport. Portable
+    // restores rebind transport to the caller's current profile.
+    let restored_transport = match source {
+        Some(source) => Some(source.request_transport()),
+        None => agent_profiles
+            .as_ref()
+            .map(|profiles| {
+                crate::agent_profiles::restored_request_transport(profiles, &checkpoint.history)
+            })
+            .transpose()?,
+    };
     let mut current_files = options.sdk_instruction_files.clone();
     let manual_slots = std::mem::take(&mut options.manual_tool_slots);
     let transform_context = options.transform_context;
@@ -934,6 +946,9 @@ pub async fn restore(
     let before_complete = options.before_complete;
     let tool_batch_completion = options.tool_batch_completion;
     let (mut startup, instructions) = engine.build_startup(options, None).await?;
+    if let Some(transport) = restored_transport {
+        startup.config.sdk_request_controls.request_transport = transport;
+    }
     // Snapshot data is not authority to enable model-facing goal tools. The
     // validated record still requires goal storage above, but never the feature.
     if let Some(specs) = python_specs {
@@ -950,7 +965,13 @@ pub async fn restore(
             startup.config.model_reasoning_summary = settings.reasoning_summary;
             startup.config.service_tier = settings.service_tier.clone();
             startup.config.sdk_tool_choice = settings.tool_choice;
+            let current_transport = startup
+                .config
+                .sdk_request_controls
+                .request_transport
+                .clone();
             startup.config.sdk_request_controls = settings.request_controls.clone();
+            startup.config.sdk_request_controls.request_transport = current_transport;
         }
         // Validate the actual fixed history and current policy before import:
         // a bad catalog must not leave records that prevent a corrected restore.

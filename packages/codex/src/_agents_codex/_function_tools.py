@@ -71,6 +71,7 @@ from .tools import (
     HostedShell as HostedShell,
     ImageGeneration as ImageGeneration,
     NativeGoals as NativeGoals,
+    ToolCaller as ToolCaller,
     ToolCallInfo as ToolCallInfo,
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
@@ -353,6 +354,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     With defer_loading=True, Core can offer this selected schema through native
     search when the model supports it. Other models receive the schema directly.
     Deferral never admits a tool omitted from the operation.
+    allowed_callers restricts this tool to "direct" model calls, "code" calls
+    from a Code Mode cell, or both. Omit it to retain the default routes.
     strict opts into strict input schemas. output_schema declares the JSON object
     encoded in string results for the Responses API. output_type validates the result.
 
@@ -386,6 +389,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         | None
     ) = field(default=None, repr=False)
     defer_loading: bool = False
+    allowed_callers: tuple[ToolCaller, ...] | None = None
     strict: bool = False
     output_schema: dict[str, Any] | None = None
     timeout_behavior: ToolTimeoutBehavior = "raise_exception"
@@ -436,6 +440,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         ]
         | None = None,
         defer_loading: bool = False,
+        allowed_callers: Sequence[ToolCaller] | None = None,
         strict: bool = False,
         output_schema: dict[str, Any] | None = None,
         timeout_behavior: ToolTimeoutBehavior = "raise_exception",
@@ -519,6 +524,26 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             )
         if not isinstance(self.defer_loading, bool):
             raise TypeError("FunctionTool defer_loading must be a bool")
+        if self.allowed_callers is not None:
+            if not isinstance(self.allowed_callers, Sequence) or isinstance(
+                self.allowed_callers, (str, bytes)
+            ):
+                raise TypeError("FunctionTool allowed_callers must be a sequence of routes")
+            callers = tuple(self.allowed_callers)
+            if (
+                not callers
+                or any(
+                    not isinstance(caller, str) or caller not in ("direct", "code")
+                    for caller in callers
+                )
+                or len(callers) != len(set(callers))
+            ):
+                raise ValueError(
+                    "FunctionTool allowed_callers must select distinct direct or code routes"
+                )
+            object.__setattr__(
+                self, "allowed_callers", ("direct", "code") if len(callers) == 2 else callers
+            )
         if not isinstance(self.input_type, type) or not issubclass(self.input_type, BaseModel):
             raise TypeError("FunctionTool input_type must be a Pydantic BaseModel type")
         for name in ("before", "after"):
@@ -599,6 +624,9 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
 
     def _spec_json(self) -> str:
         input_schema = self.input_type.model_json_schema()
+        caller_options = (
+            {} if self.allowed_callers is None else {"allowedCallers": self.allowed_callers}
+        )
         if self._custom_format is not None:
             kind, syntax, definition = self._custom_format
             format_data = {"type": kind}
@@ -613,6 +641,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                     "inputField": next(iter(input_schema["properties"])),
                     "inputSchema": input_schema,
                     "deferLoading": self.defer_loading,
+                    **caller_options,
                 }
             )
         function: dict[str, Any] = {
@@ -626,16 +655,15 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             function["strict"] = True
         if self.output_schema is not None:
             function["outputSchema"] = self.output_schema
-        if self.namespace is None:
-            return json.dumps(function)
-        return json.dumps(
-            {
+        declaration = function
+        if self.namespace is not None:
+            declaration = {
                 "type": "namespace",
                 "name": self.namespace,
                 "description": self.namespace_description or "",
                 "tools": [function],
             }
-        )
+        return json.dumps(declaration | caller_options)
 
     def _capture(self, context: object) -> _CapturedFunction | _CapturedManual:
         if self._bind is not None:
@@ -931,6 +959,7 @@ def function_tool(
     before: _BeforePolicy[object] | None = None,
     after: _AfterPolicy[object] | None = None,
     defer_loading: bool = False,
+    allowed_callers: Sequence[ToolCaller] | None = None,
     strict: bool = False,
     output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
@@ -957,6 +986,7 @@ def function_tool(
     before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
     after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
     defer_loading: bool = False,
+    allowed_callers: Sequence[ToolCaller] | None = None,
     strict: bool = False,
     output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
@@ -985,6 +1015,7 @@ def function_tool(
     before: _BeforePolicy[object] | None = None,
     after: _AfterPolicy[object] | None = None,
     defer_loading: bool = False,
+    allowed_callers: Sequence[ToolCaller] | None = None,
     strict: bool = False,
     output_schema: dict[str, Any] | None = None,
     timeout_behavior: Literal["raise_exception"] = "raise_exception",
@@ -1011,6 +1042,7 @@ def function_tool(
     before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
     after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
     defer_loading: bool = False,
+    allowed_callers: Sequence[ToolCaller] | None = None,
     strict: bool = False,
     output_schema: dict[str, Any] | None = None,
     timeout_behavior: Literal["raise_exception"] = "raise_exception",
@@ -1039,6 +1071,7 @@ def function_tool(
     before: _BeforePolicy[object] | None = None,
     after: _AfterPolicy[object] | None = None,
     defer_loading: bool = False,
+    allowed_callers: Sequence[ToolCaller] | None = None,
     strict: bool = False,
     output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
@@ -1065,6 +1098,7 @@ def function_tool(
     before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
     after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
     defer_loading: bool = False,
+    allowed_callers: Sequence[ToolCaller] | None = None,
     strict: bool = False,
     output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
@@ -1106,6 +1140,7 @@ def function_tool(
     ]
     | None = None,
     defer_loading: bool = False,
+    allowed_callers: Sequence[ToolCaller] | None = None,
     strict: bool = False,
     output_schema: dict[str, Any] | None = None,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
@@ -1262,6 +1297,7 @@ def function_tool(
             before=before,
             after=after,
             defer_loading=defer_loading,
+            allowed_callers=allowed_callers,
             strict=strict,
             output_schema=output_schema,
             finish_turn=finish_turn,

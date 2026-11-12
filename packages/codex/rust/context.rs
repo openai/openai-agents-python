@@ -130,6 +130,12 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
 }
 
 impl Change {
+    pub(crate) fn request_transport(
+        &self,
+    ) -> Option<Option<codex_protocol::model_request_transport::RequestTransportOverrides>> {
+        self.settings.request_controls.request_transport.clone()
+    }
+
     pub(crate) fn validate_mcp_provider(&self, candidate: &EngineState) -> anyhow::Result<()> {
         let source = &self.state.engine;
         let source_auth = source.manager.auth_manager().auth_cached();

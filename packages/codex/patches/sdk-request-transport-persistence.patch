@@ -1,0 +1,108 @@
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 37568d537a7bcf36bf63acd173a195234566bead..f538be7e373d5c6fa66ac3785c2fc25a17e5f086 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -147,6 +147,14 @@ pub struct RunModelSettingsOverride {
+     pub request_controls: ModelRequestControls,
+ }
+
++impl RunModelSettingsOverride {
++    pub fn for_persistence(&self) -> Self {
++        let mut settings = self.clone();
++        settings.request_controls = settings.request_controls.for_persistence();
++        settings
++    }
++}
++
+ /// Retain the caller's selection, including explicit clears, across capture/restore.
+ /// This is also a sparse update: omitted members leave each owner's selection intact.
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+@@ -347,6 +355,12 @@ pub struct ModelRequestControls {
+ }
+
+ impl ModelRequestControls {
++    pub fn for_persistence(&self) -> Self {
++        let mut controls = self.clone();
++        controls.request_transport = None;
++        controls
++    }
++
+     pub fn is_empty(&self) -> bool {
+         self.request_transport.is_none()
+             && self.retry.is_none()
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 50d5c9ead985117d4958808ffee1785716d2a662..93b45fe52f925f6a6ab0ecff3c921925929e133b 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2991,7 +2991,9 @@ pub struct ThreadSettingsSnapshot {
+     pub invocation_timeout_ms: Option<u32>,
+     #[serde(
+         default,
+-        skip_serializing_if = "crate::model_request_controls::ModelRequestControls::is_empty"
++        skip_serializing_if = "crate::model_request_controls::ModelRequestControls::is_empty",
++        serialize_with = "persisted_request_controls::serialize",
++        deserialize_with = "persisted_request_controls::deserialize"
+     )]
+     #[ts(optional, as = "Option<_>")]
+     pub request_controls: crate::model_request_controls::ModelRequestControls,
+@@ -4176,7 +4178,12 @@ pub struct TurnContextItem {
+     #[schemars(skip)]
+     #[ts(skip)]
+     pub sdk_model_override: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        serialize_with = "persisted_model_settings_override::serialize",
++        deserialize_with = "persisted_model_settings_override::deserialize"
++    )]
+     #[schemars(skip)]
+     #[ts(skip)]
+     pub sdk_model_settings_override:
+@@ -7441,3 +7448,46 @@ mod model_attempt_completion_join_tests {
+         assert_eq!(decoded.response_id, "provider-response");
+     }
+ }
++
++// Durable snapshots retain model preferences and rebind transport at runtime.
++mod persisted_request_controls {
++    use crate::model_request_controls::ModelRequestControls;
++    use serde::{Deserialize, Deserializer, Serialize, Serializer};
++
++    pub fn serialize<S: Serializer>(
++        value: &ModelRequestControls,
++        serializer: S,
++    ) -> Result<S::Ok, S::Error> {
++        value.for_persistence().serialize(serializer)
++    }
++
++    pub fn deserialize<'de, D: Deserializer<'de>>(
++        deserializer: D,
++    ) -> Result<ModelRequestControls, D::Error> {
++        Ok(ModelRequestControls::deserialize(deserializer)?.for_persistence())
++    }
++}
++
++mod persisted_model_settings_override {
++    use crate::model_request_controls::RunModelSettingsOverride;
++    use serde::{Deserialize, Deserializer, Serialize, Serializer};
++
++    pub fn serialize<S: Serializer>(
++        value: &Option<RunModelSettingsOverride>,
++        serializer: S,
++    ) -> Result<S::Ok, S::Error> {
++        value
++            .as_ref()
++            .map(RunModelSettingsOverride::for_persistence)
++            .serialize(serializer)
++    }
++
++    pub fn deserialize<'de, D: Deserializer<'de>>(
++        deserializer: D,
++    ) -> Result<Option<RunModelSettingsOverride>, D::Error> {
++        Ok(
++            Option::<RunModelSettingsOverride>::deserialize(deserializer)?
++                .map(|value| value.for_persistence()),
++        )
++    }
++}

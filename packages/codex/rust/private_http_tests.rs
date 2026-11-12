@@ -177,7 +177,7 @@ async fn process_http_intent_declines_hooks_and_preserves_ordinary_startup() {
         options.process_private_http = true;
         // Real Engine startup without a turn; no model request or WS prewarm.
         let outcome = engine
-            .start_with_initial_messages(options, None, Some(Vec::new()), true, None)
+            .start_with_initial_messages(options, None, Some(Default::default()), true, None)
             .await;
         let observed = outcome.as_ref().ok().map(|native| {
             native.current().map(|state| {
