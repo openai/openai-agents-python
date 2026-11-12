@@ -163,10 +163,10 @@ index 1a2e2a6dd724d543fe16dcad5b7577b5eac7a09e..389aa5c82ae20e2292c94c32ded7d00f
      #[test]
      fn disabled_sampling_has_no_recording() {
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
-index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..47464945765514dc78d150d7e2ef2ef1e23fbab8 100644
+index ee221eaacd2753c9501fbcf44d95f1131a4a76c0..7a3fdab5951012a4febbeec07a453805bf5c4755 100644
 --- a/codex-rs/otel/src/sdk_trace_routes.rs
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
-@@ -184,7 +184,14 @@ fn attributes(span: &SpanData) -> BTreeMap<String, Value> {
+@@ -185,7 +185,14 @@ fn attributes(span: &SpanData) -> BTreeMap<String, Value> {
              opentelemetry::Value::Bool(v) => json!(v),
              opentelemetry::Value::I64(v) => json!(v),
              opentelemetry::Value::F64(v) => json!(v),
@@ -182,7 +182,7 @@ index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..47464945765514dc78d150d7e2ef2ef1
          };
          attrs.insert(key, val);
      }
-@@ -232,11 +239,20 @@ fn event(
+@@ -233,11 +240,27 @@ fn event(
      let credential = credential.filter(|_| !s.credentials_closed);
      // Native fields are copied into an immutable, bounded JSON snapshot. Never copy policy.
      let attrs = attributes(span);
@@ -199,8 +199,35 @@ index c9abc2210dcd469b7c5766aa621f26ec1c8bb4ea..47464945765514dc78d150d7e2ef2ef1
      if credential_required {
          value["credential_required"] = json!(true);
      }
+-    enqueue_event(s, sequence, value, root_descriptor, credential);
++    enqueue_event(
++        s,
++        sequence,
++        value,
++        root_descriptor,
++        credential,
++        max_event_bytes,
++    );
+ }
+ 
+ fn enqueue_event(
+@@ -246,8 +269,9 @@ fn enqueue_event(
+     mut value: Value,
+     root_descriptor: Option<Value>,
+     credential: Option<Arc<TraceCredentials>>,
++    max_event_bytes: usize,
+ ) -> bool {
 -    if serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 {
 +    if serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len()) > max_event_bytes {
          dropped(s, sequence);
-         return;
+         return false;
      }
+@@ -314,7 +338,7 @@ pub async fn dispatch_trace_event(encoded: &str) -> Result<(), String> {
+         value["sequence"] = json!(sequence);
+         value["processor_ids"] = json!(s.processors);
+         // Observation IDs never resolve a native scope or credential lease.
+-        if !enqueue_event(&mut s, sequence, value, descriptor, None) {
++        if !enqueue_event(&mut s, sequence, value, descriptor, None, 65_536) {
+             return Err("Trace event exceeds processor queue capacity".into());
+         }
+         let (sender, acknowledged) = tokio::sync::oneshot::channel();
