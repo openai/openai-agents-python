@@ -228,6 +228,7 @@ async def _restored_session(
             token = _restore_declaration.set(selection)
             try:
                 sealed = source._sealed_checkpoint
+                selection.sealed_checkpoint = sealed
                 if sealed is not None and selection.state.remembered_approvals:
                     trusted = SessionState.from_json(sealed).to_json()
                     selection.verify_remembered_approvals = lambda candidate: (
@@ -237,6 +238,7 @@ async def _restored_session(
                 restored = await manager.__aenter__()
             finally:
                 selection.owner = None
+                selection.sealed_checkpoint = None
                 selection.verify_remembered_approvals = None
                 _restore_declaration.reset(token)
             ready.set_result(None)

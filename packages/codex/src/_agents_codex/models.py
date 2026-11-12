@@ -51,6 +51,12 @@ def _capture_provider_history(value: ProviderHistory | None) -> ProviderHistory 
     )
 
 
+def _capture_model_override(value: str | None) -> str | None:
+    if value is not None and not value.strip():
+        raise ValueError("model_override must be a nonempty model name")
+    return value
+
+
 @dataclass(frozen=True)
 class ModelRequest:
     """Detached provider request. The current application context is never persisted."""

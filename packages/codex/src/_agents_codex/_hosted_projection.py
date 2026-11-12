@@ -16,6 +16,8 @@ def project_hosted_response_item(
     }
     kind = raw.get("type", "")
     fields = {
+        "mcp_list_tools": ("server_label", "tools", "error"),
+        "mcp_call": ("server_label", "name", "arguments", "output", "error"),
         "file_search_call": ("queries", "results"),
         "code_interpreter_call": ("container_id", "code", "outputs"),
         "shell_call": ("call_id", "action"),
@@ -25,15 +27,17 @@ def project_hosted_response_item(
     resolved_id = raw.get("id") or item_id
     if fields is None or not resolved_id:
         return None
+    if kind in {"shell_call", "shell_call_output"}:
+        status = raw.get("status") or "unknown"
+    elif kind in {"mcp_list_tools", "mcp_call"}:
+        status = raw.get("status", "failed" if raw.get("error") is not None else "completed")
+    else:
+        status = raw["status"]
     return {
         "type": kind,
         "id": resolved_id,
         "turn_id": turn_id,
-        "status": (
-            (raw.get("status") or "unknown")
-            if kind in {"shell_call", "shell_call_output"}
-            else raw["status"]
-        ),
+        "status": status,
         "provider_data": raw,
         **{key: raw.get(key) for key in fields},
     }

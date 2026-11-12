@@ -32,7 +32,9 @@ from ._events import (
     ExecutionItem as ExecutionItem,
     FileSearchCallItem,
     FunctionCallStatus as FunctionCallStatus,
+    HostedMcpCallItem,
     ImageGenerationCallItem,
+    McpListToolsItem,
     MessageItem,
     ReasoningItem,
     ShellCallItem,
@@ -178,6 +180,8 @@ class HostedToolCallSummary:
         "image_generation_call",
         "shell_call",
         "shell_call_output",
+        "mcp_list_tools",
+        "mcp_call",
     ]
     id: str
     turn_id: str
@@ -202,6 +206,8 @@ class ModelOutputItemCompleted(_SubmissionEvent):
         MessageItem
         | ReasoningItem
         | WebSearchCallItem
+        | McpListToolsItem
+        | HostedMcpCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ShellCallItem
@@ -672,7 +678,9 @@ class EventStream(AsyncIterator[Observation]):
                                 not self._include_execution_details
                                 and not isinstance(model_item, HostedToolCallSummary)
                                 and (
-                                    model_item["type"] == "file_search_call"
+                                    model_item["type"] == "mcp_list_tools"
+                                    or model_item["type"] == "mcp_call"
+                                    or model_item["type"] == "file_search_call"
                                     or model_item["type"] == "code_interpreter_call"
                                     or model_item["type"] == "shell_call"
                                     or model_item["type"] == "shell_call_output"

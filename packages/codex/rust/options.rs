@@ -10,8 +10,8 @@ use codex_extension_api::{
 };
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::provider_history::ProviderHistorySelection;
 use codex_protocol::protocol::{SessionSource, ThreadHistoryMode, ThreadSource, W3cTraceContext};
+use codex_protocol::provider_history::ProviderHistorySelection;
 use codex_protocol::{ThreadId, ToolName};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};

@@ -1,0 +1,12 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index afde90ba..98b13691 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1384,6 +1384,7 @@ impl ModelClient {
+                     codex_tools::ToolSpec::CodeInterpreter(_)
+                         | codex_tools::ToolSpec::ImageGeneration(_)
+                         | codex_tools::ToolSpec::Shell(_)
++                        | codex_tools::ToolSpec::Mcp(_)
+                 )
+             }) || (request.request_controls.prompt.is_some()
+                 && request.tools.is_none());
