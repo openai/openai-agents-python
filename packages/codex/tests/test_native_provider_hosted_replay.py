@@ -121,6 +121,47 @@ async def test_observed_hosted_effect_cannot_replay(configured, kind, phase):
     assert not decisions
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        {
+            "type": "response.shell_call_command.delta",
+            "item_id": "shell-command",
+            "output_index": 0,
+            "command_index": 0,
+            "delta": "test command",
+        },
+        {
+            "type": "response.shell_call_output_content.delta",
+            "item_id": "shell-receipt",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": {"stdout": "test output", "stderr": ""},
+        },
+    ],
+)
+async def test_hosted_shell_progress_fences_replay_with_an_explicit_empty_catalog(event):
+    decisions = []
+    async with (
+        timeout(20),
+        peer([created(), event], effectful=True) as (provider, attempts, effects, _),
+    ):
+        agent = Agent(
+            instructions="Answer.",
+            hosted_prompt={"id": "pmpt_provider_tools"},
+            tools=[],
+            provider=provider,
+            model_settings=settings(True, decisions),
+        )
+        with pytest.raises(NativeError):
+            await agent.run("run")
+
+    assert len(attempts) == 1
+    assert attempts[0]["tools"] == []
+    assert effects == ["provider-effect"]
+    assert not decisions
+
+
 @pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.parametrize("mode", ["accepted", "no_created", "explicit_empty"])
 async def test_opaque_dispatch_requires_safety_even_before_created(configured, mode):
