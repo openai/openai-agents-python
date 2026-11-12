@@ -63,9 +63,9 @@ async def test_successful_prepare_keeps_checkpoint_private_and_restorable(respon
             def __getattr__(self, name):
                 return getattr(native, name)
 
-            async def _seal_manual(self):
+            async def _seal_manual(self, *args, **kwargs):
                 owners.append(asyncio.current_task())
-                return await native._seal_manual()
+                return await native._seal_manual(*args, **kwargs)
 
         session._native = CaptureOwner()
         try:

@@ -1,7 +1,9 @@
 """Native callback retirement joins only the exact application invocation."""
 
 import asyncio
+import gc
 import json
+import weakref
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -247,3 +249,49 @@ async def test_reader_releases_unclaimed_callback_before_waiting_again(cancel_no
     monkeypatch.setattr(session, "_finish_failed_observations", lambda: None)
     await session._read_events()
     assert released == [receipt("1")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["async", "sync"])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_retained_callback_failure_releases_forwarded_owners(kind, cancelled):
+    original = asyncio.CancelledError() if cancelled else RuntimeError("application failure")
+
+    class Payload:
+        pass
+
+    class Admission:
+        def __call__(self):
+            return True
+
+    class Owner:
+        async def async_body(self, value, *, named):
+            del self, value, named
+            raise original
+
+        def sync_body(self, value, *, named):
+            del self, value, named
+            raise original
+
+    async def invoke():
+        owner, admit, value, named = Owner(), Admission(), Payload(), Payload()
+        refs = tuple(weakref.ref(item) for item in (owner, admit, value, named))
+        try:
+            await _call_callback(
+                owner.async_body if kind == "async" else owner.sync_body,
+                admit,
+                value,
+                named=named,
+            )
+        except BaseException as failure:
+            assert failure is original
+        else:
+            pytest.fail("Application failure was lost")
+        del owner, admit, value, named
+        return refs
+
+    refs = await invoke()
+    await asyncio.sleep(0)
+    gc.collect()
+    assert original.__traceback__ is not None
+    assert [ref() is None for ref in refs] == [True, True, True, True]

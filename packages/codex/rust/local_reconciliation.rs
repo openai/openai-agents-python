@@ -689,6 +689,7 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
             for turn in &expected.interrupted {
                 items.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
                     TurnAbortedEvent {
+                        model_attempt: None,
                         turn_id: Some(turn.clone()),
                         reason: TurnAbortReason::Interrupted,
                         error: None,

@@ -19,6 +19,7 @@ mod engine;
 mod environment;
 mod extensions;
 mod goals;
+mod hosted_prompt;
 mod initial_messages;
 mod live;
 mod local_reconciliation;
@@ -735,8 +736,16 @@ impl NativeThread {
         Ok(())
     }
 
-    fn _release_python_callback(&self, receipt_json: &str) -> PyResult<bool> {
-        self.python_callback_operation(receipt_json, "release")
+    #[pyo3(signature = (receipt_json, *, cleanup_failed=false))]
+    fn _release_python_callback(&self, receipt_json: &str, cleanup_failed: bool) -> PyResult<bool> {
+        self.python_callback_operation(
+            receipt_json,
+            if cleanup_failed {
+                "release_failed"
+            } else {
+                "release"
+            },
+        )
     }
     fn _enter_python_callback(&self, receipt_json: &str) -> PyResult<bool> {
         self.python_callback_operation(receipt_json, "enter")
@@ -2283,12 +2292,13 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (instructions, instruction_files_json=None))]
+    #[pyo3(signature = (instructions, instruction_files_json=None, *, explicit=true))]
     fn _update_instructions<'py>(
         &self,
         py: Python<'py>,
         instructions: String,
         instruction_files_json: Option<String>,
+        explicit: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let files = instruction_files_json
             .as_deref()
@@ -2314,9 +2324,20 @@ impl NativeThread {
             // Once publication begins, any error can conceal changed native history.
             // Consuming the fresh initializer's batch forbids replay after uncertainty.
             let initial_messages = inner.initial_messages.lock().map_err(py_error)?.take();
-            application_instructions::publish_with_files(&inner.thread, instructions, files)
+            if explicit {
+                application_instructions::publish_explicit_with_files(
+                    &inner.thread,
+                    instructions,
+                    files,
+                )
                 .await
                 .map_err(py_error)?;
+            } else {
+                // Opening declarations already carry exact hosted-prompt omissions.
+                application_instructions::publish_with_files(&inner.thread, instructions, files)
+                    .await
+                    .map_err(py_error)?;
+            }
             if let Some(batch) = initial_messages {
                 batch.publish(&inner.thread).await.map_err(py_error)?;
             }
@@ -2324,7 +2345,7 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (generation, specs_json, manual_slots=Vec::new(),default_slots=None,profile_update_json=None,terminal_slots=Vec::new()))]
+    #[pyo3(signature = (generation, specs_json, manual_slots=Vec::new(),default_slots=None,profile_update_json=None,terminal_slots=Vec::new(),input_error_slots=Vec::new()))]
     fn _replace_tools<'py>(
         &self,
         py: Python<'py>,
@@ -2334,6 +2355,7 @@ impl NativeThread {
         default_slots: Option<Vec<usize>>,
         profile_update_json: Option<&str>,
         terminal_slots: Vec<usize>,
+        input_error_slots: Vec<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let specs = serde_json::from_str(specs_json).map_err(py_error)?;
         let profile_update = profile_update_json
@@ -2358,6 +2380,7 @@ impl NativeThread {
                     default_slots.as_deref(),
                     profile_update.as_ref(),
                     &terminal_slots,
+                    &input_error_slots,
                 )
                 .await
                 .map_err(py_error)
@@ -2439,6 +2462,64 @@ impl NativeThread {
             .is_some_and(|tools| tools.reply_model_producer(request_id, data_json, error)))
     }
 
+    #[pyo3(signature = (request_id, data_json=None, error=false, thread=None, instance=None))]
+    fn _reply_model_retry(
+        &self,
+        request_id: u64,
+        data_json: Option<&str>,
+        error: bool,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> PyResult<bool> {
+        let Some(inner) = self.live()? else {
+            return Ok(false);
+        };
+        let Some(tools) = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+        else {
+            return Ok(false);
+        };
+        tools
+            .reply_model_retry(request_id, data_json, error, thread, instance)
+            .map_err(py_error)?;
+        Ok(true)
+    }
+
+    fn _report_model_attempt_usage(&self, owner_json: &str, usage_json: &str) -> PyResult<bool> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct UsageOwner {
+            attempt_id: String,
+            callback: serde_json::Value,
+        }
+        if owner_json.len() > 16_384 || usage_json.len() > 65_536 {
+            return Err(py_error("Model usage report exceeds capacity"));
+        }
+        let owner: UsageOwner = serde_json::from_str(owner_json).map_err(py_error)?;
+        let usage: codex_protocol::protocol::TokenUsage =
+            serde_json::from_str(usage_json).map_err(py_error)?;
+        let Some(inner) = self.live()? else {
+            return Ok(false);
+        };
+        let Some(tools) = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+        else {
+            return Ok(false);
+        };
+        tools
+            .report_model_attempt_usage(
+                &inner.id.to_string(),
+                &owner.attempt_id,
+                &owner.callback,
+                usage,
+            )
+            .map_err(py_error)
+    }
+
     fn _prepare_requests(&self, enabled: bool) -> PyResult<()> {
         let inner = self.current()?;
         let tools = inner
@@ -2516,12 +2597,22 @@ impl NativeThread {
             .ok_or_else(|| py_error("Model context transformation requires Python tools"))?;
         let update = items_json
             .map(|text| {
-                serde_json::from_str::<Option<Vec<codex_protocol::models::ResponseItem>>>(text)
-                    .map(|items| {
-                        items.map_or(
-                            python_tools::ModelContextUpdate::Keep,
-                            python_tools::ModelContextUpdate::Replace,
-                        )
+                serde_json::from_str::<serde_json::Value>(text)
+                    .and_then(|value| {
+                        if value.is_object() {
+                            serde_json::from_value::<python_tools::HostedContextProjection>(value)
+                                .map(python_tools::ModelContextUpdate::Hosted)
+                        } else {
+                            serde_json::from_value::<
+                                Option<Vec<codex_protocol::models::ResponseItem>>,
+                            >(value)
+                            .map(|items| {
+                                items.map_or(
+                                    python_tools::ModelContextUpdate::Keep,
+                                    python_tools::ModelContextUpdate::Replace,
+                                )
+                            })
+                        }
                     })
                     .map_err(|_| py_error("Invalid model context items"))
             })
@@ -2802,6 +2893,16 @@ impl NativeThread {
         })
     }
 
+    fn _manual_children_settled<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            checkpoint::manual_descendants_settled(&inner)
+                .await
+                .map_err(py_error)
+        })
+    }
+
     fn _manual_progress(&self) -> PyResult<u64> {
         let inner = self.current()?;
         let tools = inner
@@ -2828,11 +2929,12 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (output_schema_json=None, *, drain_events=false))]
+    #[pyo3(signature = (output_schema_json=None, include_model_attempt=false, *, drain_events=false))]
     fn _seal_manual<'py>(
         &self,
         py: Python<'py>,
         output_schema_json: Option<&str>,
+        include_model_attempt: bool,
         drain_events: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let output_schema: Option<serde_json::Value> = output_schema_json
@@ -2849,9 +2951,46 @@ impl NativeThread {
         let manual = self.manual.clone();
         async_bridge::future_into_py(py, async move {
             let checkpoint = async_bridge::retain_writer_operation(async move {
-                manual_checkpoint::capture(&inner, &manual, output_schema, drain_events)
-                    .await
-                    .map_err(py_error)
+                let tools = inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>();
+                let pinned = if include_model_attempt {
+                    tools.as_ref().and_then(|tools| {
+                        tools
+                            .pending_manual_keys(&inner.id.to_string())
+                            .ok()
+                            .and_then(|keys| keys.first().map(|key| key.turn.clone()))
+                            .and_then(|turn| {
+                                tools.admission_ready(&turn).ok().map(|owner| (turn, owner))
+                            })
+                    })
+                } else {
+                    None
+                };
+                let checkpoint =
+                    manual_checkpoint::capture(&inner, &manual, output_schema, drain_events)
+                        .await
+                        .map_err(py_error)?;
+                if !include_model_attempt {
+                    return serde_json::to_value(checkpoint).map_err(py_error);
+                }
+                let model_attempt = match (&checkpoint, pinned) {
+                    (Some(checkpoint), Some((turn, owner))) => {
+                        let retained = tools
+                            .as_ref()
+                            .and_then(|tools| tools.admission_ready(&turn).ok());
+                        if checkpoint["native_continuation"]["turn_id"].as_str()
+                            != Some(turn.as_str())
+                            || !retained.is_some_and(|retained| Arc::ptr_eq(&retained, &owner))
+                        {
+                            return Err(py_error("Manual model usage owner changed"));
+                        }
+                        owner.model_attempt_snapshot().map_err(py_error)?
+                    }
+                    _ => None,
+                };
+                Ok(serde_json::json!({"checkpoint":checkpoint,"model_attempt":model_attempt}))
             })
             .await?;
             serde_json::to_string(&checkpoint).map_err(py_error)

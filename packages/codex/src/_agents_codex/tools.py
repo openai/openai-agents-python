@@ -109,6 +109,35 @@ class WebSearch:
     image_settings: WebSearchImageSettings | None = None
 
 
+def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    if search is not None:
+        if search.search_context_size is not None:
+            config["tools.web_search.context_size"] = search.search_context_size
+        if search.allowed_domains is not None:
+            config["tools.web_search.allowed_domains"] = list(search.allowed_domains)
+        if search.blocked_domains is not None:
+            config["tools.web_search.blocked_domains"] = list(search.blocked_domains)
+        if search.location is not None:
+            config["tools.web_search.location"] = dict(search.location)
+        if search.search_content_types is not None:
+            config["tools.web_search.search_content_types"] = list(search.search_content_types)
+        if search.image_settings is not None:
+            image_settings = search.image_settings.copy()
+            # Native configuration uses signed 64-bit TOML integers.
+            max_results = image_settings.get("max_results")
+            if max_results is not None and (
+                isinstance(max_results, bool)
+                or not isinstance(max_results, int)
+                or not 0 <= max_results < 2**63
+            ):
+                raise ValueError(
+                    "WebSearch image max_results must be a non-negative integer below 2**63"
+                )
+            config["tools.web_search.image_settings"] = dict(image_settings)
+    return config
+
+
 @dataclass(frozen=True)
 class NativeGoals:
     """Allow Core's create_goal, get_goal and update_goal in LocalStorage.
@@ -677,8 +706,72 @@ class _ToolCatalog:
             )
         ]
 
+    def input_error_slots(self, *, run_formatter: bool = False) -> list[int]:
+        from ._function_tools import _CapturedApproval
+
+        slots = []
+        for slot, tool in enumerate(self.tools):
+            function = tool.function if isinstance(tool, _CapturedApproval) else tool
+            if isinstance(function, _CapturedFunction) and (
+                function.input_error_function is not None
+                or (run_formatter and function._allow_run_error_formatter)
+            ):
+                slots.append(slot)
+        return slots
+
     def native_specs(self) -> str:
         return json.dumps([json.loads(tool.spec_json) for tool in self.tools])
+
+
+def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
+    kind = spec.get("type")
+    if kind == "applyPatch":
+        return ToolRef("apply_patch")
+    if kind in ("computer", "shell"):
+        return ToolRef(kind)
+    if kind == "toolSearch":
+        return ToolRef("tool_search")
+    if kind == "namespace":
+        tools = spec.get("tools")
+        if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
+            return None
+        namespace = spec.get("name")
+        name = tools[0].get("name")
+        if isinstance(namespace, str) and isinstance(name, str):
+            return ToolRef(name, namespace)
+    else:
+        name = spec.get("name")
+        if isinstance(name, str):
+            return ToolRef(name)
+    return None
+
+
+def _restore_python_catalog(
+    catalog: _ToolCatalog, specs: Sequence[Mapping[str, Any]]
+) -> _ToolCatalog:
+    # Use saved order with current bindings. Native rejects unknown or duplicate
+    # specs when comparing the complete catalogs.
+    by_ref = {tool._ref: tool for tool in catalog.tools}
+    refs = dict.fromkeys(map(_saved_python_ref, specs))
+    return _ToolCatalog(
+        catalog.generation, tuple(by_ref[ref] for ref in refs if ref is not None and ref in by_ref)
+    )
+
+
+def _restore_operation_slots(
+    catalog: _ToolCatalog,
+    selected: Sequence[FunctionTool[Any, Any, Any]],
+    pending_names: Sequence[str],
+) -> tuple[int, ...]:
+    available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
+    if any(tool.ref not in available for tool in selected):
+        raise ValueError("Saved operation names tools outside its native generation")
+    manual_names = {
+        tool.name for tool in selected if tool._bind is None or tool.needs_approval is not False
+    }
+    if any(name not in manual_names for name in pending_names):
+        raise ValueError("Saved operation does not admit its pending manual tools")
+    return tuple(available[tool.ref] for tool in selected)
 
 
 def _capture_tools(
@@ -692,6 +785,9 @@ def _capture_tools(
     )
 
 
+_saved_python_ref.__module__ = "agents.session"
+_restore_python_catalog.__module__ = "agents.session"
+_restore_operation_slots.__module__ = "agents.session"
 _capture_tools.__module__ = "agents.session"
 
 

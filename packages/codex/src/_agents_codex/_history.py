@@ -1,19 +1,19 @@
 """Project canonical rollout records without synthesizing model output."""
 
 import json as json
-from dataclasses import dataclass as dataclass
+from dataclasses import asdict, dataclass as dataclass
 from typing import Any as Any, cast as cast
 
 from pydantic import JsonValue as JsonValue
 
 from ._events import FunctionCallItem as FunctionCallItem, SessionItem as SessionItem
+from ._hosted_projection import project_hosted_response_item as project_hosted_response_item
 from ._projection import (
     EventProjector as EventProjector,
     _execution_item as _execution_item,
     _function_output_fields as _function_output_fields,
     _usage as _usage,
     project_execution_completion as project_execution_completion,
-    project_hosted_response_item,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._web_projection import project_web_search_item as project_web_search_item
@@ -25,6 +25,7 @@ from .history import (
 from .recovery import UncertainCall as UncertainCall, _uncertain_call as _uncertain_call
 from .response_facts import RecordedResponseFact, _response_fact_record
 from .turn_receipt import _project_turn_receipt as _project_turn_receipt
+from .usage import _UsageCollector
 
 
 @dataclass
@@ -239,6 +240,8 @@ def project_history(
     identities: dict[tuple[str, str, str], _HistoryItem] = {}
     latest_calls: dict[tuple[str, str, str], _HistoryItem] = {}
     usage: dict[str, Any] = {}
+    model_owners: dict[str, dict[str | None, _UsageCollector]] = {}
+    legacy_usage: dict[str, _UsageCollector] = {}
     responses: list[tuple[str, RecordedResponse]] = []
     response_facts: list[RecordedResponseFact] = []
     current_turn: str | None = None
@@ -473,6 +476,8 @@ def project_history(
                     for old in removed:
                         turns.pop(old, None)
                         usage.pop(old, None)
+                        model_owners.pop(old, None)
+                        legacy_usage.pop(old, None)
                     responses = [entry for entry in responses if entry[1]["turn_id"] not in removed]
                     items = [item for item in items if item.value["turn_id"] not in removed]
                     identities = {
@@ -489,6 +494,21 @@ def project_history(
             turn_id = payload.get("turn_id") or payload.get("turnId") or current_turn
             if not turn_id:
                 continue
+            if event_kind == "sdk_model_attempt":
+                fact = payload["data"]
+                owners = model_owners.setdefault(turn_id, {})
+                owner = owners.setdefault(fact.get("owner_attempt_id"), _UsageCollector())
+                owner.replace_model_attempt(fact)
+            elif event_kind in {"task_complete", "turn_complete", "turn_aborted"}:
+                snapshot = payload.get("model_attempt")
+                if snapshot is not None:
+                    owners = model_owners.setdefault(turn_id, {})
+                    owner = owners.setdefault(snapshot.get("owner_attempt_id"), _UsageCollector())
+                    owner.replace_model_attempt(snapshot, final=True)
+            elif event_kind == "raw_response_completed" and payload.get("model_attempt_id") is None:
+                legacy_usage.setdefault(turn_id, _UsageCollector()).observe(
+                    payload.get("token_usage")
+                )
             if pending_user is not None and pending_user.value["turn_id"] != turn_id:
                 pending_user = None
             if turn_id not in turn_order:
@@ -561,6 +581,11 @@ def project_history(
     for turn_id, turn in turns.items():
         if turn_id in usage:
             turn["usage"] = usage[turn_id]
+        if turn_id in model_owners:
+            measured = legacy_usage.get(turn_id) or _UsageCollector()
+            for owner in model_owners[turn_id].values():
+                measured.attach(owner)
+            turn["run_usage"] = asdict(measured.snapshot())
     projected_fact_ids: set[str] = set()
     for fact in response_facts:
         fact_turn = turns.get(fact["turn_id"])

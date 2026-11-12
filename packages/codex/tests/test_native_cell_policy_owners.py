@@ -811,3 +811,24 @@ async def test_retired_cell_callback_error_stays_with_original_join(kind):
             finally:
                 sync_release.set()
                 async_release.set()
+
+
+async def test_expired_executor_decision_does_not_fail_owner_join(monkeypatch):
+    async def transform(_ctx, _value):
+        return {"output": "unaccepted"}
+
+    async with owner_session(after=transform) as (_, first, owners, channel):
+        await bind(channel)
+        resolve = channel._resolve_native_interception
+
+        def expire_before_reply(nonce, value):
+            if nonce == 2 and json.loads(value)["action"] == "replace":
+                # Core can retire a nonce after the final host admission check.
+                channel.pending.remove(nonce)
+            return resolve(nonce, value)
+
+        monkeypatch.setattr(channel, "_resolve_native_interception", expire_before_reply)
+        channel.send({"nonce": 2, "request": request()})
+        await channel.released[2].wait()
+        assert 2 not in channel.decisions
+        await owners.join_cell_callbacks(first)
