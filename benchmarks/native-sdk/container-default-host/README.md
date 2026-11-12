@@ -2,7 +2,7 @@
 
 The `--default-host-setup` profile has been exercising the normal `https://api.openai.com/v1` address against a local TLS peer. Container-only hostname mapping and a temporary trusted certificate authority (CA) have been preserving hostname verification without a custom endpoint or certificate override.
 
-Supported workload: fresh, final-only, no-tool calls with the default streaming response mode. Omitted-Provider mode has been accepting the selected wheel's actual default HTTP/SSE or WSS route. Caller-owned mode has been accepting only HTTP/SSE. Buffered responses, retained Sessions, tool calls and live observation workloads have been remaining outside this profile.
+Supported workloads: fresh no-tool calls, or one asynchronous function tool with final-only or active-reader output, using the default streaming response mode. Omitted-Provider mode has been accepting the selected wheel's actual default HTTP/SSE or WSS route. Caller-owned mode has been accepting only HTTP/SSE. Buffered responses, retained-conversation workloads, synchronous tools, tool fanout and multiple tool rounds have been remaining outside this profile.
 
 The example has been selecting `--native-provider-mode omitted`, with the worker setting only its synthetic API key before SDK import. No caller-owned Provider has been entering that route. The default `caller-owned` option has been retaining the earlier Provider ownership. Both modes have been using fresh independent conversations.
 
@@ -96,3 +96,43 @@ rm -rf -- "$CTX"
 Expected result: exit 0, `errors: 0`, `server.errors: 0`, `server.requests: 1`, `default_host: true`, `native_provider_mode: "omitted"`, `full_owner_scope: "adapter-lifetime"` and `wire_transport: "sse"` in `native-smoke.json`. One fresh conversation, without prefill. The worker has been checking exact output, input/history hashes, actual Host/SNI, framing and joined peer cleanup. Its null `sample_index` has been preventing admission to a scored comparison. Container absence after exit and explicit image removal: required cleanup checks. On failure or timeout, the trap has been removing the exact container. Docker-state reconciliation: still required after build cancellation or a partial image. Logs and package inventories in `LAB`; deletion after review and export.
 
 The earlier caller-owned functional smoke has been passing on Ubuntu 24.04/glibc 2.39 with CPython 3.13.16 and one native wheel: two HTTP/SSE requests, zero worker/peer errors, and joined cleanup. That proof has been covering only its caller-owned native worker, without qualifying the omitted mode, comparison controller, stable SDK, WebSockets, HTTP/2, other wheels or complete workload suite. This procedure has been retaining worker timing fields without supporting a performance or memory claim. Its Adapter-lifetime CPU endpoint has not been including process-final cache cleanup.
+
+## Fresh tool and active-reader smoke
+
+The same image and setup have been supporting omitted-provider tool calls without a custom endpoint or transport selector. For these checks, the loop below has been replacing the single `exec env ... worker.py` command inside the existing `docker run` shell. The preceding setup, package-inventory copies, outer timeout and container/image cleanup have been remaining unchanged. This excerpt has been assuming the existing `/opt/sdk`, `/opt/peer`, `/bench`, `/run/sdk-benchmark` and mounted `/out` paths.
+
+```sh
+for case in oneshot_tool oneshot_tool_output_16k_1 oneshot_tool_output_16k_16 \
+            oneshot_tool_output_16k_128 oneshot_tool_output_16k_128_active; do
+  env SDK_BENCH_SERVER_PYTHON=/opt/peer/bin/python \
+    OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 PYTHONHASHSEED=0 \
+    /opt/sdk/bin/python -B /bench/worker.py --engine v1 \
+      --default-host-setup /run/sdk-benchmark/setup.json \
+      --native-transport websocket --native-provider-mode omitted \
+      --case "$case" --iterations 1 --output "/out/$case.json"
+done
+```
+
+Each selected worker has been charging one prefill plus one measured fresh conversation: two native Session IDs, four generating requests, two callbacks and two verified tool outputs. The active-reader case has been checking 128 exact text deltas per conversation, readiness before callback return, any unread terminal suffix and joined reader cleanup. The other dense cases have been checking the same final output without a public stream consumer. All workers have been requiring zero peer errors and retired sockets. No `sample_index` has been entering these smoke rows, so the comparison controller has not been admitting them as scored samples.
+
+These commands have been requiring a native wheel with the public ToolContext/Turn interfaces. The native adapter has been keeping callback, reader and per-call Session cleanup inside each call; the process-owned runtime cache has been remaining outside final Adapter-close ownership. The smoke has not been supplying a performance, resource-retention or optimization claim.
+
+## Provision a reference native wheel
+
+For the paired native command in the [benchmark guide](../README.md#fresh-implicit-tools-and-dense-output), these additional image steps have been supplying the second SDK environment. Insertion point: after the Dockerfile heredoc in **Provision the image**, before its first `docker build`. `REFERENCE_WHEEL`: an absolute path to the recorded reference wheel, with the same Python and platform compatibility as `WHEEL`. The separate `/reference` directory has been avoiding filename collisions between wheels.
+
+```sh
+REFERENCE_WHEEL="/absolute/path/to/exact-reference-native-wheel.whl"
+sha256sum "$REFERENCE_WHEEL" > "$LAB/reference-wheel.sha256"
+cp "$REFERENCE_WHEEL" "$CTX/reference.whl"
+basename "$REFERENCE_WHEEL" > "$CTX/reference-wheel-name.txt"
+cat >> "$CTX/Dockerfile" <<'DOCKERFILE'
+COPY reference.whl reference-wheel-name.txt /reference/
+RUN wheel_name="$(cat /reference/reference-wheel-name.txt)" && mv /reference/reference.whl "/reference/$wheel_name" \
+    && uv venv --python /opt/python/bin/python3.13 /opt/reference \
+    && uv pip install --no-build --compile-bytecode --python /opt/reference/bin/python "/reference/$wheel_name" 'pydantic==2.12.3' 'typing-extensions==4.16.0' 'jsonschema==4.26.0' 'referencing==0.37.0' 'certifi==2026.10.23' \
+    && uv pip freeze --python /opt/reference/bin/python > /reference/packages.txt
+DOCKERFILE
+```
+
+The original build command has been including this environment in the same disposable image. The paired command has been registering all three interpreters with `setup.py`, copying all package inventories to `/out`, and keeping the peer on `/opt/peer`. It has been declaring WSS for both SDK wheels; a wheel selecting another default route has been failing the wire checks rather than receiving a transport override. Recorded wheel hashes, source revisions and package inventories have been supporting interpretation of the comparison, without qualifying different transport or Provider lifetimes as the same operation.
