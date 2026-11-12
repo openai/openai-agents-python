@@ -3377,6 +3377,7 @@ async def _opening_provider_config(
     base_url = provider.base_url or "https://api.openai.com/v1"
     routing: dict[str, Any] = provider._routing_config()
     for name in (
+        "websocket_base_url",
         "request_max_retries",
         "stream_max_retries",
         "stream_idle_timeout_ms",

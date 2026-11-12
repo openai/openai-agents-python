@@ -1,0 +1,932 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index bb5d510a..5cf75a4c 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -598,6 +598,7 @@ mod thread_processor_behavior_tests {
+         let session_provider = ModelProviderInfo {
+             name: "session".to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
++            websocket_base_url: None,
+             model_catalog_url: None,
+             env_key: None,
+             env_key_instructions: None,
+diff --git a/codex-rs/codex-api/src/endpoint/images.rs b/codex-rs/codex-api/src/endpoint/images.rs
+index 2217ce89..e11a4860 100644
+--- a/codex-rs/codex-api/src/endpoint/images.rs
++++ b/codex-rs/codex-api/src/endpoint/images.rs
+@@ -182,6 +182,7 @@ mod tests {
+         Provider {
+             name: "test".to_string(),
+             base_url: "https://example.com/api/codex".to_string(),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: RetryConfig {
+diff --git a/codex-rs/codex-api/src/endpoint/memories.rs b/codex-rs/codex-api/src/endpoint/memories.rs
+index 122ca565..806ad42f 100644
+--- a/codex-rs/codex-api/src/endpoint/memories.rs
++++ b/codex-rs/codex-api/src/endpoint/memories.rs
+@@ -139,6 +139,7 @@ mod tests {
+         Provider {
+             name: "test".to_string(),
+             base_url: base_url.to_string(),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: RetryConfig {
+diff --git a/codex-rs/codex-api/src/endpoint/models.rs b/codex-rs/codex-api/src/endpoint/models.rs
+index c00bc011..13b5f92e 100644
+--- a/codex-rs/codex-api/src/endpoint/models.rs
++++ b/codex-rs/codex-api/src/endpoint/models.rs
+@@ -214,6 +214,7 @@ mod tests {
+         Provider {
+             name: "test".to_string(),
+             base_url: base_url.to_string(),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: RetryConfig {
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_call.rs b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+index e2ed157a..640003b7 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_call.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+@@ -458,6 +458,7 @@ mod tests {
+         Provider {
+             name: "test".to_string(),
+             base_url: base_url.to_string(),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: RetryConfig {
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 285193f9..eb55712d 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -3950,6 +3950,7 @@ mod tests {
+         let client = test_client(Provider {
+             name: "chatgpt".to_string(),
+             base_url: "https://chatgpt.com/backend-api/codex".to_string(),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: RetryConfig {
+@@ -4146,6 +4147,7 @@ mod tests {
+         let provider = Provider {
+             name: "test".to_string(),
+             base_url: format!("http://{addr}"),
++            websocket_base_url: None,
+             query_params: Some(HashMap::new()),
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+@@ -4509,6 +4511,7 @@ mod tests {
+         let provider = Provider {
+             name: "test".to_string(),
+             base_url: format!("http://{addr}"),
++            websocket_base_url: None,
+             query_params: Some(HashMap::new()),
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+@@ -4638,6 +4641,7 @@ mod tests {
+         let provider = Provider {
+             name: "test".to_string(),
+             base_url: format!("http://{addr}"),
++            websocket_base_url: None,
+             query_params: Some(HashMap::new()),
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+@@ -4752,6 +4756,7 @@ mod tests {
+         let provider = Provider {
+             name: "test".to_string(),
+             base_url: format!("http://{addr}"),
++            websocket_base_url: None,
+             query_params: Some(HashMap::new()),
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+@@ -4846,6 +4851,7 @@ mod tests {
+         let provider = Provider {
+             name: "test".to_string(),
+             base_url: format!("http://{addr}"),
++            websocket_base_url: None,
+             query_params: Some(HashMap::new()),
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+@@ -5148,6 +5154,7 @@ mod tests {
+         let client = test_client(Provider {
+             name: "test".into(),
+             base_url: format!("http://{addr}"),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+@@ -5199,6 +5206,7 @@ mod tests {
+         let client = test_client(Provider {
+             name: "test".into(),
+             base_url: format!("http://{}", listener.local_addr().unwrap()),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+@@ -5483,6 +5491,7 @@ mod tests {
+         let client = test_client(Provider {
+             name: "test".into(),
+             base_url: format!("http://{addr}"),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+@@ -5607,6 +5616,7 @@ mod tests {
+         let client = test_client(Provider {
+             name: "test".into(),
+             base_url: format!("http://{addr}"),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: crate::provider::RetryConfig {
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+index c931ed5b..5ec63a3e 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+@@ -378,6 +378,7 @@ fn client(url: String) -> anyhow::Result<crate::ResponsesClient<codex_client::Re
+         crate::Provider {
+             name: "synthetic-json-provider".into(),
+             base_url: url,
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: crate::RetryConfig {
+diff --git a/codex-rs/codex-api/src/endpoint/search.rs b/codex-rs/codex-api/src/endpoint/search.rs
+index 2de48fe7..086a7f1f 100644
+--- a/codex-rs/codex-api/src/endpoint/search.rs
++++ b/codex-rs/codex-api/src/endpoint/search.rs
+@@ -120,6 +120,7 @@ mod tests {
+         Provider {
+             name: "test".to_string(),
+             base_url: "https://example.com/v1".to_string(),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: RetryConfig {
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index 2a6bd55a..501b5e32 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -139,6 +139,7 @@ fn provider(name: &str) -> Provider {
+     Provider {
+         name: name.to_string(),
+         base_url: "https://example.com/v1".to_string(),
++        websocket_base_url: None,
+         query_params: None,
+         headers: HeaderMap::new(),
+         retry: codex_api::RetryConfig {
+diff --git a/codex-rs/codex-api/tests/models_integration.rs b/codex-rs/codex-api/tests/models_integration.rs
+index ed43d8aa..74358600 100644
+--- a/codex-rs/codex-api/tests/models_integration.rs
++++ b/codex-rs/codex-api/tests/models_integration.rs
+@@ -35,6 +35,7 @@ fn provider(base_url: &str) -> Provider {
+     Provider {
+         name: "test".to_string(),
+         base_url: base_url.to_string(),
++        websocket_base_url: None,
+         query_params: None,
+         headers: HeaderMap::new(),
+         retry: RetryConfig {
+diff --git a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+index e43e19eb..ed52ca03 100644
+--- a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
++++ b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+@@ -64,6 +64,7 @@ fn test_provider(base_url: String) -> Provider {
+     Provider {
+         name: "test".to_string(),
+         base_url,
++        websocket_base_url: None,
+         query_params: Some(HashMap::new()),
+         headers: HeaderMap::new(),
+         retry: RetryConfig {
+diff --git a/codex-rs/codex-api/tests/realtime_websocket_tls.rs b/codex-rs/codex-api/tests/realtime_websocket_tls.rs
+index 7b7a3363..78e0543a 100644
+--- a/codex-rs/codex-api/tests/realtime_websocket_tls.rs
++++ b/codex-rs/codex-api/tests/realtime_websocket_tls.rs
+@@ -120,6 +120,7 @@ async fn check_connection(address: String) {
+         Provider {
+             name: "local TLS test".into(),
+             base_url: format!("https://{address}"),
++            websocket_base_url: None,
+             query_params: None,
+             headers: HeaderMap::new(),
+             retry: RetryConfig {
+diff --git a/codex-rs/codex-api/tests/sse_end_to_end.rs b/codex-rs/codex-api/tests/sse_end_to_end.rs
+index aba43ce9..71cc8452 100644
+--- a/codex-rs/codex-api/tests/sse_end_to_end.rs
++++ b/codex-rs/codex-api/tests/sse_end_to_end.rs
+@@ -60,6 +60,7 @@ fn provider(name: &str) -> Provider {
+     Provider {
+         name: name.to_string(),
+         base_url: "https://example.com/v1".to_string(),
++        websocket_base_url: None,
+         query_params: None,
+         headers: HeaderMap::new(),
+         retry: codex_api::RetryConfig {
+diff --git a/codex-rs/codex-client/src/provider.rs b/codex-rs/codex-client/src/provider.rs
+index 41a99420..4499905b 100644
+--- a/codex-rs/codex-client/src/provider.rs
++++ b/codex-rs/codex-client/src/provider.rs
+@@ -45,6 +45,7 @@ impl RetryConfig {
+ pub struct Provider {
+     pub name: String,
+     pub base_url: String,
++    pub websocket_base_url: Option<String>,
+     pub query_params: Option<HashMap<String, String>>,
+     pub headers: HeaderMap,
+     pub retry: RetryConfig,
+@@ -56,6 +57,10 @@ impl std::fmt::Debug for Provider {
+         f.debug_struct("Provider")
+             .field("name", &self.name)
+             .field("base_url", &"<redacted>")
++            .field(
++                "websocket_base_url",
++                &self.websocket_base_url.as_ref().map(|_| "<redacted>"),
++            )
+             .field(
+                 "query_params",
+                 &self
+@@ -72,11 +77,15 @@ impl std::fmt::Debug for Provider {
+ 
+ impl Provider {
+     pub fn url_for_path(&self, path: &str) -> String {
++        self.url_for_path_from(&self.base_url, path)
++    }
++
++    fn url_for_path_from(&self, base: &str, path: &str) -> String {
+         let path = path.trim_start_matches('/');
+         // Keep this infallible helper's existing invalid-URL failure path. Valid
+         // SDK routing declarations are checked before a resource can open.
+-        let Ok(mut url) = Url::parse(&self.base_url) else {
+-            let base = self.base_url.trim_end_matches('/');
++        let Ok(mut url) = Url::parse(base) else {
++            let base = base.trim_end_matches('/');
+             return if path.is_empty() {
+                 base.to_owned()
+             } else {
+@@ -112,7 +121,8 @@ impl Provider {
+     }
+ 
+     pub fn websocket_url_for_path(&self, path: &str) -> Result<Url, url::ParseError> {
+-        let mut url = Url::parse(&self.url_for_path(path))?;
++        let base = self.websocket_base_url.as_deref().unwrap_or(&self.base_url);
++        let mut url = Url::parse(&self.url_for_path_from(base, path))?;
+ 
+         let scheme = match url.scheme() {
+             "http" => "ws",
+diff --git a/codex-rs/config/src/thread_config.rs b/codex-rs/config/src/thread_config.rs
+index 0518ea88..8fd7e796 100644
+--- a/codex-rs/config/src/thread_config.rs
++++ b/codex-rs/config/src/thread_config.rs
+@@ -298,6 +298,7 @@ mod tests {
+         ModelProviderInfo {
+             name: name.to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
++            websocket_base_url: None,
+             model_catalog_url: None,
+             env_key: None,
+             env_key_instructions: None,
+diff --git a/codex-rs/config/src/thread_config/remote.rs b/codex-rs/config/src/thread_config/remote.rs
+index da0af3bc..95a9a96b 100644
+--- a/codex-rs/config/src/thread_config/remote.rs
++++ b/codex-rs/config/src/thread_config/remote.rs
+@@ -173,6 +173,7 @@ fn model_provider_from_proto(
+     let info = ModelProviderInfo {
+         name: provider.name,
+         base_url: provider.base_url,
++        websocket_base_url: None,
+         model_catalog_url: provider.model_catalog_url.map(Into::into),
+         env_key: provider.env_key,
+         env_key_instructions: provider.env_key_instructions,
+@@ -208,6 +209,7 @@ fn model_provider_to_proto(
+     let ModelProviderInfo {
+         name,
+         base_url,
++        websocket_base_url: _,
+         model_catalog_url,
+         env_key,
+         env_key_instructions,
+@@ -553,6 +555,7 @@ mod tests {
+         ModelProviderInfo {
+             name: "Local".to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
++            websocket_base_url: None,
+             model_catalog_url: Some("http://127.0.0.1:8061/api/codex/models".into()),
+             env_key: None,
+             env_key_instructions: None,
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 43d5ed1c..ccd6aed1 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -2845,6 +2845,10 @@
+           "description": "Whether this provider supports the Responses API WebSocket transport.",
+           "type": "boolean"
+         },
++        "websocket_base_url": {
++          "description": "Optional independent base URL for Responses WebSocket requests.",
++          "type": "string"
++        },
+         "websocket_connect_timeout_ms": {
+           "description": "Maximum time (in milliseconds) to wait for a websocket connection attempt before treating it as failed.",
+           "format": "uint64",
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index a9504eab..4cc6e1f6 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -678,6 +678,7 @@ async fn sdk_wire_connection_controlled(
+     let provider = codex_api::Provider {
+         name: "SDK Realtime test".into(),
+         base_url: format!("http://{address}/v1"),
++        websocket_base_url: None,
+         query_params: None,
+         headers: http::HeaderMap::new(),
+         retry: codex_api::RetryConfig {
+@@ -1487,6 +1488,7 @@ async fn sdk_failed_wire_hangup_is_retained_for_cleanup_retry_and_blocks_new_sta
+         codex_api::Provider {
+             name: "synthetic-call-provider".into(),
+             base_url: format!("{}/v1", server.uri()),
++            websocket_base_url: None,
+             query_params: None,
+             headers: http::HeaderMap::new(),
+             retry: codex_api::RetryConfig {
+diff --git a/codex-rs/core/tests/responses_headers.rs b/codex-rs/core/tests/responses_headers.rs
+index 84bf461e..ac3fc389 100644
+--- a/codex-rs/core/tests/responses_headers.rs
++++ b/codex-rs/core/tests/responses_headers.rs
+@@ -74,6 +74,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
+     let provider = ModelProviderInfo {
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: None,
+         env_key_instructions: None,
+@@ -218,6 +219,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
+     let provider = ModelProviderInfo {
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: None,
+         env_key_instructions: None,
+@@ -343,6 +345,7 @@ async fn responses_respects_model_info_overrides_from_config() {
+     let provider = ModelProviderInfo {
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: None,
+         env_key_instructions: None,
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index 8d9720e7..33231525 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -1630,6 +1630,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
+     let provider = ModelProviderInfo {
+         name: "corp".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: None,
+         env_key_instructions: None,
+@@ -3133,6 +3134,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+     let provider = ModelProviderInfo {
+         name: "azure".into(),
+         base_url: Some(format!("{}/openai", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: None,
+         env_key_instructions: None,
+@@ -3767,6 +3769,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
+     let provider = ModelProviderInfo {
+         name: "custom".to_string(),
+         base_url: Some(format!("{}/openai", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         // Reuse the existing environment variable to avoid using unsafe code
+         env_key: Some(EXISTING_ENV_VAR_WITH_NON_EMPTY_VALUE.to_string()),
+@@ -3855,6 +3858,7 @@ async fn env_var_overrides_loaded_auth() {
+     let provider = ModelProviderInfo {
+         name: ModelProviderInfo::create_openai_provider(/*base_url*/ None).name,
+         base_url: Some(format!("{}/openai", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         // Reuse the existing environment variable to avoid using unsafe code
+         env_key: Some(EXISTING_ENV_VAR_WITH_NON_EMPTY_VALUE.to_string()),
+diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
+index 58abbda8..3c7fc1f2 100755
+--- a/codex-rs/core/tests/suite/client_websockets.rs
++++ b/codex-rs/core/tests/suite/client_websockets.rs
+@@ -2649,6 +2649,7 @@ fn websocket_provider_with_connect_timeout(
+     ModelProviderInfo {
+         name: "mock-ws".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: None,
+         env_key_instructions: None,
+diff --git a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
+index c381b78c..a79f7a35 100644
+--- a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
++++ b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
+@@ -66,6 +66,7 @@ async fn continue_after_stream_error() {
+     let provider = ModelProviderInfo {
+         name: "mock-openai".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: Some("PATH".into()),
+         env_key_instructions: None,
+diff --git a/codex-rs/core/tests/suite/stream_no_completed.rs b/codex-rs/core/tests/suite/stream_no_completed.rs
+index 1823275e..ba9b3794 100644
+--- a/codex-rs/core/tests/suite/stream_no_completed.rs
++++ b/codex-rs/core/tests/suite/stream_no_completed.rs
+@@ -48,6 +48,7 @@ async fn retries_on_early_close() {
+     let model_provider = ModelProviderInfo {
+         name: "openai".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         // Environment variable that should exist in the test environment.
+         // ModelClient will return an error if the environment variable for the
+diff --git a/codex-rs/login/src/auth_env_telemetry.rs b/codex-rs/login/src/auth_env_telemetry.rs
+index 6ee0c439..e9f89d9a 100644
+--- a/codex-rs/login/src/auth_env_telemetry.rs
++++ b/codex-rs/login/src/auth_env_telemetry.rs
+@@ -61,6 +61,7 @@ mod tests {
+         let provider = ModelProviderInfo {
+             name: "Custom".to_string(),
+             base_url: None,
++            websocket_base_url: None,
+             model_catalog_url: None,
+             env_key: Some("sk-should-not-leak".to_string()),
+             env_key_instructions: None,
+diff --git a/codex-rs/model-provider-info/src/gateway_oauth.rs b/codex-rs/model-provider-info/src/gateway_oauth.rs
+index 21c5901e..ee3db7ff 100644
+--- a/codex-rs/model-provider-info/src/gateway_oauth.rs
++++ b/codex-rs/model-provider-info/src/gateway_oauth.rs
+@@ -76,6 +76,22 @@ impl GatewayOAuthConfig {
+             .as_deref()
+             .ok_or("gateway_oauth requires base_url")?;
+         validate_url(base_url, "base_url")?;
++        if let Some(endpoint) = &provider.websocket_base_url {
++            let mut websocket =
++                Url::parse(endpoint.as_str()).map_err(|_| "invalid websocket_base_url URL")?;
++            match websocket.scheme() {
++                "ws" => websocket.set_scheme("http"),
++                "wss" => websocket.set_scheme("https"),
++                _ => Ok(()),
++            }
++            .map_err(|_| "invalid websocket_base_url URL")?;
++            let http = Url::parse(base_url).map_err(|_| "invalid base_url URL")?;
++            if websocket.origin() != http.origin() {
++                return Err(
++                    "gateway_oauth requires websocket_base_url to use the base_url origin".into(),
++                );
++            }
++        }
+         if self.client_id.trim().is_empty() || self.redirect_port == Some(0) {
+             return Err(
+                 "gateway_oauth requires a nonempty client_id and a nonzero redirect_port".into(),
+diff --git a/codex-rs/model-provider-info/src/gateway_oauth_tests.rs b/codex-rs/model-provider-info/src/gateway_oauth_tests.rs
+index f5ea122f..b50ec585 100644
+--- a/codex-rs/model-provider-info/src/gateway_oauth_tests.rs
++++ b/codex-rs/model-provider-info/src/gateway_oauth_tests.rs
+@@ -77,3 +77,38 @@ fn rejects_unsafe_endpoints_and_delivery_collisions() {
+     )]));
+     assert!(cookie.validate().is_err());
+ }
++
++#[test]
++fn independent_websocket_gateway_oauth_preserves_normalized_origin() {
++    for delivery in [
++        "delivery = { kind = 'header', name = 'x-gateway-auth' }",
++        "delivery = { kind = 'cookie', name = 'gateway_session' }",
++    ] {
++        let valid = provider(delivery);
++        for endpoint in [
++            "https://gateway.example.test/other?route=socket",
++            "wss://GATEWAY.EXAMPLE.TEST:443/other%23path?route=%23socket",
++        ] {
++            let mut same = valid.clone();
++            same.websocket_base_url = Some(endpoint.into());
++            assert_eq!(same.validate(), Ok(()));
++        }
++        for endpoint in [
++            "wss://different.example.test/v1",
++            "wss://gateway.example.test:444/v1",
++            "ws://gateway.example.test/v1",
++            "http://gateway.example.test/v1",
++        ] {
++            let mut distinct = valid.clone();
++            distinct.websocket_base_url = Some(endpoint.into());
++            let error = distinct
++                .validate()
++                .expect_err("gateway credential must stay on the configured origin");
++            assert!(!error.contains(endpoint));
++        }
++        let mut loopback = valid;
++        loopback.base_url = Some("http://127.0.0.1/v1".into());
++        loopback.websocket_base_url = Some("ws://127.0.0.1:80/other".into());
++        assert_eq!(loopback.validate(), Ok(()));
++    }
++}
+diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
+index 3a328dd2..2a179410 100644
+--- a/codex-rs/model-provider-info/src/lib.rs
++++ b/codex-rs/model-provider-info/src/lib.rs
+@@ -142,6 +142,9 @@ pub struct ModelProviderInfo {
+     pub name: String,
+     /// Base URL for the provider's OpenAI-compatible API.
+     pub base_url: Option<String>,
++    /// Optional independent base URL for Responses WebSocket requests.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub websocket_base_url: Option<RedactedString>,
+     /// Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery
+     /// uses the Codex backend unless `base_url` overrides the inference endpoint.
+     pub model_catalog_url: Option<RedactedString>,
+@@ -296,7 +299,57 @@ other non-default provider fields are not supported"
+         Ok(())
+     }
+ 
++    fn validate_websocket_base_url(&self) -> std::result::Result<(), String> {
++        if let Some(endpoint) = &self.websocket_base_url {
++            let authority = endpoint
++                .split_once("://")
++                .and_then(|(_, rest)| rest.split(['/', '?', '#']).next());
++            let valid_authority =
++                authority.is_some_and(|part| !part.is_empty() && !part.contains('@'));
++            let valid_url = url::Url::parse(endpoint).is_ok_and(|url| {
++                matches!(url.scheme(), "http" | "https" | "ws" | "wss") && url.host_str().is_some()
++            });
++            if !valid_authority
++                || !valid_url
++                || endpoint.contains('#')
++                || endpoint.chars().any(char::is_whitespace)
++            {
++                return Err("websocket_base_url must be an absolute HTTP(S) or WS(S) URL without userinfo or fragment".to_string());
++            }
++        }
++        Ok(())
++    }
++
++    /// An independent endpoint never inherits first-party managed credentials.
++    /// Explicit provider credentials retain their existing selection policy.
++    pub fn validate_websocket_auth(
++        &self,
++        auth_mode: Option<AuthMode>,
++    ) -> std::result::Result<(), String> {
++        if self.websocket_base_url.is_some()
++            && self.requires_openai_auth
++            && self.env_key.is_none()
++            && self.experimental_bearer_token.is_none()
++            && self.auth.is_none()
++            && self.aws.is_none()
++            && matches!(
++                auth_mode,
++                Some(
++                    AuthMode::Chatgpt
++                        | AuthMode::ChatgptAuthTokens
++                        | AuthMode::Headers
++                        | AuthMode::AgentIdentity
++                        | AuthMode::PersonalAccessToken
++                )
++            )
++        {
++            return Err("websocket_base_url requires explicit provider credentials with managed authentication".to_string());
++        }
++        Ok(())
++    }
++
+     pub fn validate(&self) -> std::result::Result<(), String> {
++        self.validate_websocket_base_url()?;
+         if let Some(gateway) = &self.gateway_oauth {
+             gateway.validate(self)?;
+         }
+@@ -434,6 +487,10 @@ other non-default provider fields are not supported"
+ 
+     /// Builds an API provider with managed residency taking precedence over configured headers.
+     pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
++        self.validate_websocket_base_url()
++            .map_err(CodexErr::InvalidRequest)?;
++        self.validate_websocket_auth(auth_mode)
++            .map_err(CodexErr::InvalidRequest)?;
+         let default_base_url = if matches!(
+             auth_mode,
+             Some(
+@@ -471,6 +528,10 @@ other non-default provider fields are not supported"
+         Ok(ApiProvider {
+             name: self.name.clone(),
+             base_url,
++            websocket_base_url: self
++                .websocket_base_url
++                .clone()
++                .map(RedactedString::into_inner),
+             query_params: self.query_params.clone().map(|params| {
+                 params
+                     .into_iter()
+@@ -536,6 +597,7 @@ other non-default provider fields are not supported"
+         ModelProviderInfo {
+             name: OPENAI_PROVIDER_NAME.into(),
+             base_url,
++            websocket_base_url: None,
+             model_catalog_url: None,
+             env_key: None,
+             env_key_instructions: None,
+@@ -583,6 +645,7 @@ other non-default provider fields are not supported"
+             // this is unset. A configured value is therefore unambiguously an
+             // endpoint override.
+             base_url: None,
++            websocket_base_url: None,
+             model_catalog_url: None,
+             env_key: None,
+             env_key_instructions: None,
+@@ -765,6 +828,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
+     ModelProviderInfo {
+         name: "gpt-oss".into(),
+         base_url: Some(base_url.into()),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: None,
+         env_key_instructions: None,
+diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+index 9c15c54b..dd0df967 100644
+--- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
++++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+@@ -78,6 +78,7 @@ base_url = "http://localhost:11434/v1"
+     let expected_provider = ModelProviderInfo {
+         name: "Ollama".into(),
+         base_url: Some("http://localhost:11434/v1".into()),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: None,
+         env_key_instructions: None,
+@@ -115,6 +116,7 @@ query_params = { api-version = "2025-04-01-preview" }
+     let expected_provider = ModelProviderInfo {
+         name: "Azure".into(),
+         base_url: Some("https://xxxxx.openai.azure.com/openai".into()),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: Some("AZURE_OPENAI_API_KEY".into()),
+         env_key_instructions: None,
+@@ -156,6 +158,7 @@ supports_standalone_web_search = true
+     let expected_provider = ModelProviderInfo {
+         name: "Example".into(),
+         base_url: Some("https://example.com".into()),
++        websocket_base_url: None,
+         model_catalog_url: None,
+         env_key: Some("API_KEY".into()),
+         env_key_instructions: None,
+@@ -342,6 +345,7 @@ fn test_create_amazon_bedrock_provider() {
+         ModelProviderInfo {
+             name: "Amazon Bedrock".to_string(),
+             base_url: None,
++            websocket_base_url: None,
+             model_catalog_url: None,
+             env_key: None,
+             env_key_instructions: None,
+@@ -882,3 +886,138 @@ model_catalog_url = "https://gateway.example/codex/catalog?token=catalog-secret"
+         "https://gateway.example/v1"
+     );
+ }
++
++#[test]
++fn websocket_override_keeps_http_and_encoded_path_query() {
++    for (scheme, expected_scheme) in [
++        ("http", "ws"),
++        ("https", "wss"),
++        ("ws", "ws"),
++        ("wss", "wss"),
++    ] {
++        let mut info = ModelProviderInfo::create_openai_provider(Some(
++            "https://http.example/http%2Froot?original=a%26b&original=".into(),
++        ));
++        info.websocket_base_url = Some(
++            format!("{scheme}://socket.example/ws%2Froot%23slot?original=%23&original=").into(),
++        );
++        info.query_params = Some(maplit::hashmap! {"extra".into() => "a&=+%#".into()});
++        let provider = info.to_api_provider(Some(AuthMode::ApiKey)).unwrap();
++        assert_eq!(
++            provider.url_for_path("/responses"),
++            "https://http.example/http%2Froot/responses?original=a%26b&original=&extra=a%26%3D%2B%25%23"
++        );
++        let websocket = provider.websocket_url_for_path("/responses").unwrap();
++        assert_eq!(
++            websocket.as_str(),
++            format!(
++                "{expected_scheme}://socket.example/ws%2Froot%23slot/responses?original=%23&original=&extra=a%26%3D%2B%25%23"
++            )
++        );
++    }
++    let info = ModelProviderInfo::create_openai_provider(Some(
++        "https://http.example/v1?original=%23".into(),
++    ));
++    let provider = info.to_api_provider(None).unwrap();
++    assert_eq!(
++        provider
++            .websocket_url_for_path("responses")
++            .unwrap()
++            .as_str(),
++        "wss://http.example/v1/responses?original=%23"
++    );
++    assert!(
++        !toml::to_string(&info)
++            .unwrap()
++            .contains("websocket_base_url")
++    );
++}
++
++#[test]
++fn websocket_override_rejects_ambiguous_urls_and_redacts_debug() {
++    for value in [
++        "",
++        "relative",
++        "https:socket.example",
++        "https:///socket.example",
++        "https://",
++        "https://@socket.example",
++        "https://:@socket.example",
++        "https://user@socket.example",
++        "https://socket.example/#",
++        "https://socket.example/#private",
++        " https://socket.example",
++        "https://socket.example/a b",
++        "https://socket.example/\n",
++    ] {
++        let info = ModelProviderInfo {
++            websocket_base_url: Some(value.into()),
++            ..ModelProviderInfo::default()
++        };
++        assert!(info.validate().is_err(), "{value:?}");
++        assert!(info.to_api_provider(None).is_err(), "{value:?}");
++    }
++    let endpoint = "wss://private-socket.example/path%23item?private=synthetic-endpoint-secret%23";
++    let info = ModelProviderInfo {
++        websocket_base_url: Some(endpoint.into()),
++        ..ModelProviderInfo::default()
++    };
++    assert!(info.validate().is_ok());
++    assert!(!format!("{info:?}").contains("private-socket"));
++    let provider = info.to_api_provider(None).unwrap();
++    assert!(!format!("{provider:?}").contains("synthetic-endpoint-secret"));
++    assert!(!format!("{provider:?}").contains("private-socket"));
++    assert!(
++        toml::to_string(&info)
++            .unwrap()
++            .contains("websocket_base_url")
++    );
++}
++
++#[test]
++fn websocket_override_keeps_explicit_keys_and_denies_managed_auth() {
++    let mut info =
++        ModelProviderInfo::create_openai_provider(Some("https://http.example/v1".into()));
++    info.websocket_base_url = Some("wss://socket.example/v1".into());
++    for mode in [
++        AuthMode::Chatgpt,
++        AuthMode::ChatgptAuthTokens,
++        AuthMode::Headers,
++        AuthMode::AgentIdentity,
++        AuthMode::PersonalAccessToken,
++    ] {
++        assert!(info.to_api_provider(Some(mode)).is_err());
++        assert!(info.validate_websocket_auth(Some(mode)).is_err());
++    }
++    assert!(info.to_api_provider(Some(AuthMode::ApiKey)).is_ok());
++    info.experimental_bearer_token = Some("synthetic-explicit-key".into());
++    assert!(info.to_api_provider(Some(AuthMode::Chatgpt)).is_ok());
++    info.experimental_bearer_token = None;
++    info.env_key = Some("SYNTHETIC_EXPLICIT_PROVIDER_KEY".into());
++    assert!(info.to_api_provider(Some(AuthMode::Chatgpt)).is_ok());
++    info.env_key = None;
++    info.requires_openai_auth = false;
++    assert!(info.to_api_provider(Some(AuthMode::Chatgpt)).is_ok());
++}
++
++#[test]
++fn websocket_override_schema_keeps_an_optional_string() {
++    let schema = schemars::r#gen::SchemaSettings::draft07()
++        .with(|settings| settings.option_add_null_type = false)
++        .into_generator()
++        .into_root_schema_for::<ModelProviderInfo>();
++    let object = schema.schema.object.unwrap();
++    assert!(!object.required.contains("websocket_base_url"));
++    let schemars::schema::Schema::Object(property) = &object.properties["websocket_base_url"]
++    else {
++        panic!("expected an endpoint string schema");
++    };
++    assert_eq!(
++        property.instance_type,
++        Some(schemars::schema::InstanceType::String.into())
++    );
++    assert_eq!(
++        property.metadata.as_ref().unwrap().description.as_deref(),
++        Some("Optional independent base URL for Responses WebSocket requests.")
++    );
++}
+diff --git a/codex-rs/model-provider/src/auth.rs b/codex-rs/model-provider/src/auth.rs
+index f4d27646..3b4a4764 100644
+--- a/codex-rs/model-provider/src/auth.rs
++++ b/codex-rs/model-provider/src/auth.rs
+@@ -198,6 +198,9 @@ pub(crate) fn resolve_provider_auth(
+     auth: Option<&CodexAuth>,
+     provider: &ModelProviderInfo,
+ ) -> codex_protocol::error::Result<SharedAuthProvider> {
++    provider
++        .validate_websocket_auth(auth.map(CodexAuth::auth_mode))
++        .map_err(CodexErr::InvalidRequest)?;
+     if let Some(auth) = bearer_auth_for_provider(provider)? {
+         return Ok(Arc::new(auth));
+     }
+@@ -227,6 +230,9 @@ pub(crate) async fn resolve_provider_auth_for_scope(
+     provider: &ModelProviderInfo,
+     scope: ProviderAuthScope,
+ ) -> codex_protocol::error::Result<ResolvedProviderAuth> {
++    provider
++        .validate_websocket_auth(auth.map(CodexAuth::auth_mode))
++        .map_err(CodexErr::InvalidRequest)?;
+     let ProviderAuthScope {
+         agent_identity_policy,
+         session_source,
+@@ -852,3 +858,66 @@ mod tests {
+         assert_eq!(registration_count.load(Ordering::SeqCst), 3);
+     }
+ }
++
++#[cfg(test)]
++mod websocket_endpoint_auth_tests {
++    use super::*;
++    use codex_protocol::auth::AuthMode;
++
++    fn managed_headers() -> CodexAuth {
++        let mut headers = HeaderMap::new();
++        headers.insert(
++            http::header::AUTHORIZATION,
++            HeaderValue::from_static("Bearer synthetic-managed"),
++        );
++        CodexAuth::Headers(AuthHeaders::new(headers))
++    }
++
++    #[test]
++    fn websocket_endpoint_auth_keeps_explicit_key_over_ambient_managed_headers() {
++        let ambient = managed_headers();
++        let mut provider =
++            ModelProviderInfo::create_openai_provider(Some("https://http.example/v1".into()));
++        provider.websocket_base_url = Some("wss://socket.example/v1".into());
++        assert_eq!(ambient.auth_mode(), AuthMode::Headers);
++        assert!(resolve_provider_auth(Some(&ambient), &provider).is_err());
++        provider.experimental_bearer_token = Some("synthetic-explicit-key".into());
++        let headers = resolve_provider_auth(Some(&ambient), &provider)
++            .unwrap()
++            .to_auth_headers();
++        assert_eq!(
++            headers.get(http::header::AUTHORIZATION).unwrap(),
++            "Bearer synthetic-explicit-key"
++        );
++    }
++
++    #[tokio::test]
++    async fn websocket_endpoint_auth_is_checked_before_scoped_managed_resolution() {
++        let ambient = managed_headers();
++        let mut provider =
++            ModelProviderInfo::create_openai_provider(Some("https://http.example/v1".into()));
++        provider.websocket_base_url = Some("wss://socket.example/v1".into());
++        let scope = ProviderAuthScope {
++            agent_identity_policy: AgentIdentityAuthPolicy::ChatGptAuth,
++            session_source: SessionSource::Cli,
++            agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
++        };
++        assert!(
++            resolve_provider_auth_for_scope(None, Some(&ambient), &provider, scope.clone())
++                .await
++                .is_err()
++        );
++        provider.experimental_bearer_token = Some("synthetic-explicit-key".into());
++        let resolved = resolve_provider_auth_for_scope(None, Some(&ambient), &provider, scope)
++            .await
++            .unwrap();
++        assert_eq!(
++            resolved
++                .auth
++                .to_auth_headers()
++                .get(http::header::AUTHORIZATION)
++                .unwrap(),
++            "Bearer synthetic-explicit-key"
++        );
++    }
++}
+diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
+index f8f0790d..8779e9c1 100644
+--- a/codex-rs/model-provider/src/provider.rs
++++ b/codex-rs/model-provider/src/provider.rs
+@@ -636,6 +636,7 @@ mod tests {
+         ModelProviderInfo {
+             name: "mock".into(),
+             base_url: Some(base_url),
++            websocket_base_url: None,
+             model_catalog_url: None,
+             env_key: None,
+             env_key_instructions: None,
