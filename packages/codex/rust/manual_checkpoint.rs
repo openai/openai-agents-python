@@ -104,7 +104,8 @@ impl ToolOutcomes {
             .filter_map(|item| match item {
                 RolloutItem::ResponseItem(item) => match &item.item {
                     ResponseItem::FunctionCall { call_id, .. }
-                    | ResponseItem::CustomToolCall { call_id, .. } => Some(call_id.clone()),
+                    | ResponseItem::CustomToolCall { call_id, .. }
+                    | ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id.clone()),
                     ResponseItem::ToolSearchCall { call_id, .. } => call_id.clone(),
                     _ => None,
                 },
@@ -129,6 +130,9 @@ impl ToolOutcomes {
                     ResponseItem::CustomToolCallOutput {
                         call_id, output, ..
                     } => (Some(call_id.as_str()), output.success),
+                    ResponseItem::ApplyPatchCallOutput { call_id, status, .. } => (
+                        Some(call_id.as_str()), Some(*status == codex_protocol::models::ApplyPatchStatus::Completed)
+                    ),
                     ResponseItem::ToolSearchOutput {
                         call_id,
                         status,
@@ -230,7 +234,7 @@ pub(crate) struct Frame {
 
 fn manual_call_id(item: &ResponseItem) -> Option<&String> {
     match item {
-        ResponseItem::FunctionCall { call_id, .. } => Some(call_id),
+        ResponseItem::FunctionCall { call_id, .. } | ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id),
         ResponseItem::ShellCall {
             provider_fields, ..
         } => crate::local_reconciliation::shell_call_id(provider_fields),
@@ -524,8 +528,19 @@ fn validate_frame(
         "Manual continuation changed its admitted model override"
     );
 
+    let mut retained_manual: HashSet<&str> = pending.iter()
+        .filter_map(|value| value["call_id"].as_str()).collect();
+    // A sibling may still be pending after this exact typed result was accepted.
+    // The canonical ownership and final partition checks remain independent.
+    retained_manual.extend(accepted.iter().filter_map(|(id, envelope)| {
+        match &envelope.item {
+            ResponseItem::ApplyPatchCallOutput { call_id, .. }
+                if call_id == id && envelope.item.turn_id() == Some(turn.as_str()) => Some(id.as_str()),
+            _ => None,
+        }
+    }));
     ensure!(
-        portable_manual_actions(&history),
+        portable_manual_actions(&history, &retained_manual),
         "Manual continuation contains nonportable native work"
     );
     ensure!(
@@ -597,7 +612,7 @@ fn validate_frame(
                 }
                 if matches!(
                     raw["type"].as_str(),
-                    Some("function_call" | "custom_tool_call" | "shell_call")
+                    Some("function_call" | "custom_tool_call" | "shell_call" | "apply_patch_call")
                 ) {
                     let call = raw["call_id"]
                         .as_str()
@@ -611,7 +626,7 @@ fn validate_frame(
                 }
                 if matches!(
                     raw["type"].as_str(),
-                    Some("function_call_output" | "custom_tool_call_output" | "shell_call_output")
+                    Some("function_call_output" | "custom_tool_call_output" | "shell_call_output" | "apply_patch_call_output")
                 ) {
                     let call = raw["call_id"]
                         .as_str()
@@ -660,6 +675,7 @@ fn validate_frame(
         .filter_map(|spec| match spec {
             DynamicToolSpec::Function(spec) => Some(spec.name.as_str()),
             DynamicToolSpec::Shell(_) => Some("shell"),
+            DynamicToolSpec::ApplyPatch => Some("apply_patch"),
             _ => None,
         })
         .collect();
@@ -706,6 +722,7 @@ fn validate_frame(
         let saved = calls
             .get(call)
             .context("Pending manual has no canonical call")?;
+        let patch = saved["type"] == "apply_patch_call";
         let shell = saved["type"] == "shell_call";
         let matching_arguments = if shell {
             name == "shell"
@@ -728,6 +745,8 @@ fn validate_frame(
                             })
                         })
                 })
+        } else if patch {
+            name == "apply_patch" && serde_json::from_str::<Value>(args)? == *saved
         } else {
             saved["type"] == "function_call"
                 && saved["name"] == name
@@ -738,11 +757,21 @@ fn validate_frame(
             matching_arguments,
             "Pending manual arguments or name differ from accepted history"
         );
+        if patch {
+            if let Some(effective) = value["effective_arguments"].as_str() {
+                let effective: Value = serde_json::from_str(effective)?;
+                ensure!(effective["type"] == saved["type"]
+                    && effective["call_id"] == saved["call_id"]
+                    && effective["operation"] == saved["operation"],
+                    "Pending application patch action differs from accepted history");
+            }
+        }
         let slot = specs
             .iter()
             .position(|spec| match spec {
-                DynamicToolSpec::Function(spec) => !shell && spec.name == name,
+                DynamicToolSpec::Function(spec) => !shell && !patch && spec.name == name,
                 DynamicToolSpec::Shell(_) => shell && name == "shell",
+                DynamicToolSpec::ApplyPatch => patch && name == "apply_patch",
                 _ => false,
             })
             .context("Current catalog does not allow a pending manual tool")?;
@@ -824,6 +853,25 @@ fn validate_frame(
     })
 }
 
+pub(crate) fn manual_request(item: &ResponseItem) -> Result<(codex_tools::ToolName, String, Value)> {
+    match item {
+        ResponseItem::FunctionCall { name, namespace, arguments, call_id, .. } => Ok((
+            codex_tools::ToolName::new(namespace.clone(), name), call_id.clone(),
+            serde_json::from_str(arguments)?,
+        )),
+        ResponseItem::ApplyPatchCall { call_id, .. } => Ok((
+            codex_tools::ToolName::new(None, "apply_patch"), call_id.clone(),
+            serde_json::to_value(item)?,
+        )),
+        ResponseItem::ShellCall { provider_fields, .. } => Ok((
+            codex_tools::ToolName::new(None, "shell"),
+            crate::local_reconciliation::shell_call_id(provider_fields).context("Pending Shell lacks identity")?.clone(),
+            serde_json::to_value(item)?,
+        )),
+        _ => anyhow::bail!("Manual continuation requires an admitted application tool"),
+    }
+}
+
 fn receipt_matches(call: &Value, receipt: &Value) -> bool {
     if call["type"] == "shell_call" {
         let validate = || -> Result<bool> {
@@ -861,16 +909,16 @@ fn receipt_matches(call: &Value, receipt: &Value) -> bool {
             (Some("function_call"), Some("function_call_output"))
                 | (Some("custom_tool_call"), Some("custom_tool_call_output"))
                 | (Some("shell_call"), Some("shell_call_output"))
+                | (Some("apply_patch_call"), Some("apply_patch_call_output"))
         )
 }
 
 pub(crate) type Owner = Arc<Mutex<Option<Frame>>>;
 pub(crate) type WeakOwner = Weak<Mutex<Option<Frame>>>;
 
-// v3 carries completed typed function and apply_patch receipts. The native
-// completed-ID set establishes settlement before capture. Pending grants stay
-// manual FunctionCalls; no native call acquires a new grant from saved data.
-fn portable_manual_actions(history: &[RolloutItem]) -> bool {
+// Pending typed patches require the application's canonical ownership marker
+// and an exact manual waiter. Restore still binds a fresh current declaration.
+fn portable_manual_actions(history: &[RolloutItem], retained: &HashSet<&str>) -> bool {
     // Search only reads the admitted catalog. Carry a completed client search
     // as history, never as a pending effect or a destination grant.
     let mut search_receipts = HashSet::new();
@@ -935,7 +983,7 @@ fn portable_manual_actions(history: &[RolloutItem]) -> bool {
             ResponseItem::ApplyPatchCall { call_id, .. } => {
                 if !crate::local_reconciliation::owns_application_patch(envelope)
                     || !patch_calls.insert(call_id)
-                    || !patch_receipts.remove(call_id)
+                    || (!patch_receipts.remove(call_id) && !retained.contains(call_id.as_str()))
                 {
                     return false;
                 }
@@ -1048,30 +1096,9 @@ impl Frame {
         invocation: u64,
         generation: Arc<crate::python_tools::Generation>,
         value: &DynamicToolResponse,
+        receipt: ResponseItem,
     ) {
         if !self.sealed && key.turn == self.turn && self.order.contains(&key.call) {
-            let receipt = if let Some(item @ ResponseItem::ShellCall { .. }) = self
-                .pending
-                .iter()
-                .find(|item| manual_call_id(item) == Some(&key.call))
-            {
-                let Ok(receipt) = serde_json::to_string(item)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|arguments| {
-                        crate::local_reconciliation::shell_receipt(
-                            &arguments,
-                            value.clone(),
-                            &key.turn,
-                            &key.call,
-                        )
-                    })
-                else {
-                    return;
-                };
-                receipt
-            } else {
-                crate::python_tools::PythonOutput(value.clone()).receipt(key)
-            };
             if let Some(outcomes) = &mut self.tool_outcomes {
                 outcomes.record(&key.call, value.success);
             }
@@ -1446,7 +1473,7 @@ pub(crate) async fn ready(thread: &crate::engine::ThreadState, owner: &Owner) ->
         check_unused_code_state(thread, thread.id, &history)?;
     }
     ensure!(
-        restored || portable_manual_actions(&history),
+        restored || portable_manual_actions(&history, &pending.iter().map(|key| key.call.as_str()).collect()),
         UnsupportedManualState::NativeWork
     );
     // Finished calls may have registered a child or background terminal.
@@ -1658,7 +1685,8 @@ pub(crate) async fn capture(
         if let RolloutItem::ResponseItem(item) = item {
             match &item.item {
                 ResponseItem::FunctionCall { call_id, .. }
-                | ResponseItem::CustomToolCall { call_id, .. } => {
+                | ResponseItem::CustomToolCall { call_id, .. }
+                | ResponseItem::ApplyPatchCall { call_id, .. } => {
                     calls.push((call_id.clone(), item.item.clone()))
                 }
                 ResponseItem::ShellCall {
@@ -1670,7 +1698,8 @@ pub(crate) async fn capture(
                 }
                 ResponseItem::FunctionCallOutput { .. }
                 | ResponseItem::CustomToolCallOutput { .. }
-                | ResponseItem::ShellCallOutput { .. } => {
+                | ResponseItem::ShellCallOutput { .. }
+                | ResponseItem::ApplyPatchCallOutput { .. } => {
                     let output = serde_json::to_value(&item.item)?;
                     let call_id = output["call_id"]
                         .as_str()
@@ -1730,12 +1759,11 @@ pub(crate) async fn capture(
         if !pending_ids.contains(id.as_str()) {
             continue;
         }
-        let (name, arguments) = match item {
-            ResponseItem::FunctionCall {
-                name, arguments, ..
-            } => (name.as_str(), arguments.clone()),
-            ResponseItem::ShellCall { .. } => ("shell", serde_json::to_string(item)?),
-            _ => anyhow::bail!("This call cannot own a manual reply"),
+        let (name, _, arguments) = manual_request(item)?;
+        let name = name.name;
+        let arguments = match item {
+            ResponseItem::FunctionCall { arguments, .. } => arguments.clone(),
+            _ => arguments.to_string(),
         };
         let (required, effective_arguments) = approvals
             .get(id)
@@ -1765,10 +1793,9 @@ pub(crate) async fn capture(
                 if let RolloutItem::ResponseItem(response) = &item {
                     let call_id = match &response.item {
                         ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_ref(),
-                        ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id),
-                        ResponseItem::ShellCallOutput {
-                            provider_fields, ..
-                        } => crate::local_reconciliation::shell_call_id(provider_fields),
+                        ResponseItem::CustomToolCallOutput { call_id, .. }
+                        | ResponseItem::ApplyPatchCallOutput { call_id, .. } => Some(call_id),
+                        ResponseItem::ShellCallOutput { provider_fields, .. } => crate::local_reconciliation::shell_call_id(provider_fields),
                         _ => None,
                     };
                     if call_id.is_some_and(|id| order.contains(id)) {
@@ -1821,25 +1848,25 @@ mod apply_patch_portability_tests {
 
     #[test]
     fn settled_application_patch_is_portable_without_another_execution_grant() {
-        assert!(portable_manual_actions(&records(true)));
-        assert!(!portable_manual_actions(&records(false)));
+        assert!(portable_manual_actions(&records(true), &HashSet::new()));
+        assert!(!portable_manual_actions(&records(false), &HashSet::new()));
     }
 
     #[test]
     fn missing_duplicate_or_cross_kind_patch_receipts_remain_nonportable() {
         let mut history = records(true);
         let output = history.pop().unwrap();
-        assert!(!portable_manual_actions(&history));
+        assert!(!portable_manual_actions(&history, &HashSet::new()));
         history.push(serde_json::from_value(serde_json::json!({
             "type":"response_item","payload":{"type":"function_call_output","call_id":"patch","output":"done"}
         })).unwrap());
-        assert!(!portable_manual_actions(&history));
+        assert!(!portable_manual_actions(&history, &HashSet::new()));
         history.pop();
         history.push(output.clone());
         history.push(output);
-        assert!(!portable_manual_actions(&history));
+        assert!(!portable_manual_actions(&history, &HashSet::new()));
         let mut duplicate_pairs = records(true);
         duplicate_pairs.extend(records(true));
-        assert!(!portable_manual_actions(&duplicate_pairs));
+        assert!(!portable_manual_actions(&duplicate_pairs, &HashSet::new()));
     }
 }

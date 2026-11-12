@@ -546,18 +546,22 @@ impl MemoryThreadStore {
             Shell,
         }
         let mut calls = HashMap::new();
+        let mut application_patches = HashSet::new();
         for item in prefix {
             match item {
                 RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
                     unfinished.clear();
                     calls.clear();
+                    application_patches.clear();
                 }
                 RolloutItem::ResponseItem(item) => match &item.item {
                     ResponseItem::FunctionCall { call_id, .. }
                     | ResponseItem::CustomToolCall { call_id, .. }
                     | ResponseItem::ApplyPatchCall { call_id, .. }
-                    | ResponseItem::ComputerCall { call_id, .. }
-            | ResponseItem::ApplyPatchCall { call_id, .. } => {
+                    | ResponseItem::ComputerCall { call_id, .. } => {
+                        if crate::local_reconciliation::owns_application_patch(item) {
+                            application_patches.insert(call_id.as_str());
+                        }
                         let kind = match &item.item {
                             ResponseItem::FunctionCall { .. } => CallKind::Function,
                             ResponseItem::CustomToolCall { .. } => CallKind::Custom,
@@ -626,10 +630,11 @@ impl MemoryThreadStore {
             }
         }
         anyhow::ensure!(
-            pending.iter().all(|key| !matches!(
-                calls.get(key.call.as_str()),
-                Some(CallKind::Custom | CallKind::Computer | CallKind::ApplyPatch)
-            )),
+            pending.iter().all(|key| match calls.get(key.call.as_str()) {
+                Some(CallKind::ApplyPatch) => application_patches.contains(key.call.as_str()),
+                Some(CallKind::Custom | CallKind::Computer) => false,
+                _ => true,
+            }),
             UnsupportedManualState::NativeWork
         );
         if unfinished
@@ -639,7 +644,7 @@ impl MemoryThreadStore {
             return Ok(None);
         }
         let Some(suspension) =
-            LossSuspension::bind(&writer.sampling, pending.to_vec(), history.items)
+            LossSuspension::bind_pending(&writer.sampling, pending.to_vec(), history.items, true)
         else {
             return Ok(None);
         };
@@ -1208,6 +1213,15 @@ impl LossSuspension {
         pending: Vec<crate::python_tools::PendingKey>,
         items: Vec<RolloutItem>,
     ) -> Option<Self> {
+        Self::bind_pending(sampling, pending, items, false)
+    }
+
+    fn bind_pending(
+        sampling: &SamplingState,
+        pending: Vec<crate::python_tools::PendingKey>,
+        items: Vec<RolloutItem>,
+        application_patches: bool,
+    ) -> Option<Self> {
         let turn_id = sampling.turn_id.clone()?;
         let Some(start) = items.iter().rposition(|item| {
             matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(turn))
@@ -1228,21 +1242,16 @@ impl LossSuspension {
             let mut calls = 0;
             for item in &items[start..] {
                 if let RolloutItem::ResponseItem(envelope) = item {
-                    // Only exact function or application Shell calls can own
-                    // manual keys. Another call kind makes attribution unsafe.
-                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } | ResponseItem::ApplyPatchCall { call_id, .. }
-                        if *call_id == key.call)
-                    {
+                    if matches!(&envelope.item, ResponseItem::ApplyPatchCall { call_id, .. } if *call_id == key.call) {
+                        if !application_patches || !crate::local_reconciliation::owns_application_patch(envelope) { return None; }
+                        calls += 1;
+                    } else if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. } if *call_id == key.call) {
                         return None;
-                    }
-                    let call_id = match &envelope.item {
-                        ResponseItem::FunctionCall { call_id, .. } => Some(call_id),
-                        ResponseItem::ShellCall {
-                            provider_fields, ..
-                        } => crate::local_reconciliation::shell_call_id(provider_fields),
-                        _ => None,
-                    };
-                    if call_id == Some(&key.call) {
+                    } else if match &envelope.item {
+                        ResponseItem::FunctionCall { call_id, .. } => call_id == &key.call,
+                        ResponseItem::ShellCall { provider_fields, .. } => crate::local_reconciliation::shell_call_id(provider_fields) == Some(&key.call),
+                        _ => false,
+                    } {
                         calls += 1;
                     }
                 }
@@ -1273,6 +1282,9 @@ impl LossSuspension {
                     RolloutItem::ResponseItem(envelope)
                     if matches!(&envelope.item, ResponseItem::ShellCall { provider_fields, .. }
                         if crate::local_reconciliation::shell_call_id(provider_fields) == Some(&key.call))));
+                let patch = self.prefix.iter().any(|row| matches!(row,
+                    RolloutItem::ResponseItem(envelope) if crate::local_reconciliation::owns_application_patch(envelope)
+                        && matches!(&envelope.item, ResponseItem::ApplyPatchCall { call_id, .. } if *call_id == key.call)));
                 let mut matches = Vec::new();
                 // None until this binding's call, and again after its attempt
                 // ends. A completion from another turn cannot arm this key.
@@ -1299,12 +1311,12 @@ impl LossSuspension {
                             tool_calls = 0;
                         }
                         RolloutItem::ResponseItem(envelope) => match &envelope.item {
-                            ResponseItem::FunctionCall { call_id, .. } => {
+                            ResponseItem::FunctionCall { call_id, .. }
+                            | ResponseItem::ApplyPatchCall { call_id, .. } if matches!(&envelope.item, ResponseItem::FunctionCall { .. })
+                                || crate::local_reconciliation::owns_application_patch(envelope) => {
                                 tool_calls += 1;
                                 if *call_id == key.call {
-                                    if shell {
-                                        preserve = false;
-                                    }
+                                    if shell || matches!(&envelope.item, ResponseItem::ApplyPatchCall { .. }) != patch { preserve = false; }
                                     sampled = Some(tool_calls <= self.completed_tool_calls);
                                     if ordinal >= self.prefix.len() {
                                         // Another attempt makes attribution ambiguous.
@@ -1352,12 +1364,20 @@ impl LossSuspension {
                                     preserve = false;
                                 }
                             }
-                            ResponseItem::ComputerCallOutput { call_id, .. }
-                            | ResponseItem::ApplyPatchCallOutput { call_id, .. }
-                                if *call_id == key.call =>
-                            {
+                            ResponseItem::ApplyPatchCallOutput {
+                                call_id, status, internal_chat_message_metadata_passthrough: meta, ..
+                            } if *call_id == key.call => {
+                                if patch && sampled == Some(true) && ordinal >= self.prefix.len()
+                                    && *status == codex_protocol::models::ApplyPatchStatus::Failed
+                                    && meta.as_ref().and_then(|m| m.turn_id.as_deref()) == Some(key.turn.as_str()) {
+                                    matches.push(ordinal - self.prefix.len());
+                                } else { preserve = false; }
+                            }
+                            ResponseItem::ComputerCallOutput { call_id, .. } if *call_id == key.call => {
                                 preserve = false;
                             }
+                            ResponseItem::FunctionCallOutput { call_id: Some(call_id), .. }
+                                if *call_id == key.call && patch => { preserve = false; }
                             ResponseItem::FunctionCallOutput {
                                 call_id: Some(call_id),
                                 name,
@@ -1365,6 +1385,7 @@ impl LossSuspension {
                                 internal_chat_message_metadata_passthrough: meta,
                                 ..
                             } if *call_id == key.call
+                                && !patch
                                 && sampled == Some(true)
                                 && ordinal >= self.prefix.len() =>
                             {

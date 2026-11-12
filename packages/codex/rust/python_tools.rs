@@ -2408,8 +2408,16 @@ impl PythonTools {
             };
             call.original_payload.clone()
         };
+        Self::response_receipt_from_payload(key, response, payload).map(Some)
+    }
+
+    fn response_receipt_from_payload(
+        key: &PendingKey,
+        response: DynamicToolResponse,
+        payload: Option<ToolPayload>,
+    ) -> Result<ResponseItem> {
         let Some(payload) = payload else {
-            return Ok(Some(PythonOutput(response).receipt(key)));
+            return Ok(PythonOutput(response).receipt(key));
         };
         let output: Box<dyn ToolOutput> = match &payload {
             ToolPayload::ApplyPatch { arguments } => Box::new(
@@ -2424,10 +2432,9 @@ impl PythonTools {
             ToolPayload::Shell { arguments } => {
                 return crate::local_reconciliation::shell_receipt(
                     arguments, response, &key.turn, &key.call,
-                )
-                .map(Some);
+                );
             }
-            _ => return Ok(Some(PythonOutput(response).receipt(key))),
+            _ => return Ok(PythonOutput(response).receipt(key)),
         };
         let mut item: ResponseItem = output.to_response_item(&key.call, &payload).into();
         if let ResponseItem::ComputerCallOutput {
@@ -2443,7 +2450,7 @@ impl PythonTools {
             );
         }
         item.set_turn_id_if_missing(&key.turn);
-        Ok(Some(item))
+        Ok(item)
     }
 
     fn prepare(&self, id: u64, specs: Vec<DynamicToolSpec>) -> Result<Generation> {
@@ -3746,6 +3753,7 @@ impl PythonTools {
         {
             return false;
         }
+        let Ok(Some(item)) = self.response_receipt(&grant.key, response.clone()) else { return false; };
         let mut pending = self.pending.lock().expect("Python replies poisoned");
         if !pending.get(&grant.key).is_some_and(|call| {
             call.invocation == grant.invocation
@@ -3775,7 +3783,7 @@ impl PythonTools {
                 .and_then(|owner| owner.upgrade())
             {
                 if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
-                    frame.record(&grant.key, grant.invocation, generation.clone(), &receipt);
+                    frame.record(&grant.key, grant.invocation, generation.clone(), &receipt, item);
                 }
             }
         }
@@ -3891,31 +3899,29 @@ impl PythonTools {
         Ok(true)
     }
 
-    pub(crate) fn record_approved_result(&self, key: &PendingKey, response: &DynamicToolResponse) {
+    pub(crate) fn record_approved_result(&self, key: &PendingKey, response: &DynamicToolResponse) -> Result<()> {
         let Some(generation) = self.resolve_generation(key.reply.generation) else {
-            return;
+            return Ok(());
         };
-        let invocation = self
+        let captured = self
             .pending
             .lock()
             .expect("Python replies poisoned")
             .get(key)
             .filter(|call| call.approval_request.is_some())
-            .map(|call| call.invocation);
-        let Some(invocation) = invocation else {
-            return;
+            .map(|call| (call.invocation, call.original_payload.clone()));
+        let Some((invocation, payload)) = captured else {
+            return Ok(());
         };
-        if let Some(owner) = self
-            .manual_restore
-            .lock()
-            .expect("Manual restore poisoned")
-            .as_ref()
-            .and_then(|owner| owner.upgrade())
-        {
+        let owner = self.manual_restore.lock().expect("Manual restore poisoned")
+            .as_ref().and_then(|owner| owner.upgrade());
+        if let Some(owner) = owner {
+            let item = Self::response_receipt_from_payload(key, response.clone(), payload)?;
             if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
-                frame.record(key, invocation, generation, response);
+                frame.record(key, invocation, generation, response, item);
             }
         }
+        Ok(())
     }
 
     pub(crate) fn bind_manual_restore(&self, owner: crate::manual_checkpoint::WeakOwner) {
@@ -3949,41 +3955,17 @@ impl PythonTools {
             self.admits_generation(&generation),
             "Expired manual continuation catalog"
         );
-        let (name, namespace, arguments, call_id, shell) = match item {
-            ResponseItem::FunctionCall {
-                name,
-                namespace,
-                arguments,
-                call_id,
-                ..
-            } => (
-                name.as_str(),
-                namespace.clone(),
-                serde_json::from_str(arguments)?,
-                call_id.as_str(),
-                false,
-            ),
-            ResponseItem::ShellCall {
-                provider_fields, ..
-            } => (
-                "shell",
-                None,
-                serde_json::to_value(item)?,
-                crate::local_reconciliation::shell_call_id(provider_fields)
-                    .context("Pending Shell lacks identity")?
-                    .as_str(),
-                true,
-            ),
-            _ => anyhow::bail!("Manual continuation requires an application tool call"),
-        };
+        let (name, call_id, arguments) = crate::manual_checkpoint::manual_request(item)?;
+        let patch = matches!(item, ResponseItem::ApplyPatchCall { .. });
+        let shell = matches!(item, ResponseItem::ShellCall { .. });
         let slot = generation
             .entries
             .iter()
             .position(|entry| {
                 entry.manual
-                    && matches!(&entry.spec, ToolSpec::ApplicationShell { .. }) == shell
-                    && entry.name.clone().with_default_namespace()
-                        == ToolName::new(namespace.clone(), name).with_default_namespace()
+                    && entry.name.clone().with_default_namespace() == name.clone().with_default_namespace()
+                    && (matches!(entry.spec, ToolSpec::ApplyPatch {}) == patch)
+                    && (matches!(entry.spec, ToolSpec::ApplicationShell { .. }) == shell)
             })
             .context("Pending manual declaration is absent")?;
         self.enqueue_profile(
@@ -3991,7 +3973,7 @@ impl PythonTools {
             &generation,
             slot,
             turn,
-            call_id,
+            &call_id,
             arguments,
             None,
             &ToolCallSource::Direct,
