@@ -878,8 +878,8 @@
     },
     {
       "path": "sdk-native-custom-string-tools.patch",
-      "sha256": "31bc0e71fc849d423f3222a79d33046551c4dd25df0771c938858a48567b24f8"
+      "sha256": "cb1835cce8e8926674ac438a8b6713ec71053c73db1270dd88ee27d763c3322f"
     }
   ],
-  "result_tree": "63e5aaeaacca88328400dea746cebde8816ad549"
+  "result_tree": "0d5d75333911f56b38001ab46430ede541c650cf"
 }

@@ -145,11 +145,14 @@ async def test_native_custom_string_tool_preserves_finish_turn(responses):
     assert len(responses.requests) == 1
 
 
-async def test_native_completed_custom_string_call_survives_manual_checkpoint(responses):
+@pytest.mark.parametrize("finish_turn", [False, True])
+async def test_native_completed_custom_string_call_survives_manual_checkpoint(
+    responses, finish_turn
+):
     calls = []
     custom_finished = asyncio.Event()
 
-    @function_tool
+    @function_tool(finish_turn=finish_turn)
     def raw_editor(source: str) -> str:
         calls.append(source)
         custom_finished.set()
@@ -171,6 +174,10 @@ async def test_native_completed_custom_string_call_survives_manual_checkpoint(re
         assert (await next_request(source.interactions(), confirm)).call_id == "manual"
         await custom_finished.wait()
         saved = SessionState.from_json((await source.suspend()).to_json())
+        if finish_turn:
+            assert "SELECT RAW" not in json.dumps(saved.history)
+            outcomes = json.loads(saved.to_json())["native_continuation"]["tool_outcomes"]
+            assert outcomes["held_call_ids"] == ["raw"]
 
     async with timeout(20), agent.session(state=saved) as restored:
         turn = restored.restored_turn
@@ -178,11 +185,18 @@ async def test_native_completed_custom_string_call_survives_manual_checkpoint(re
         request = await next_request(restored.interactions(), confirm)
         assert request.call_id == "manual"
         await request.approve()
-        assert (await turn.get_result()).final_output == "done"
+        completed = await turn.get_result()
+        assert completed.final_output == (RAW_INPUT.upper() if finish_turn else "done")
+        if finish_turn:
+            assert completed.tool_call is not None and completed.tool_call.call_id == "raw"
+            assert len(responses.requests) == 1
+            history = await restored.history_snapshot()
+            output = tool_output({"input": list(history.items)}, "raw", "custom_tool_call_output")
+        else:
+            output = tool_output(responses.requests[-1], "raw", "custom_tool_call_output")
+        assert output == RAW_INPUT.upper()
 
     assert calls == [RAW_INPUT]
-    output = tool_output(responses.requests[-1], "raw", "custom_tool_call_output")
-    assert output == RAW_INPUT.upper()
 
 
 async def test_native_pending_custom_string_call_remains_nonportable(responses):
@@ -248,3 +262,40 @@ async def test_native_agents_admits_granted_sdk_custom_callback(
         assert "direct provider call payload" in output
     else:
         assert "unowned_editor" in output
+
+
+@pytest.mark.parametrize("reject", [False, True])
+async def test_custom_terminal_guardrail_controls_history_publication(responses, reject):
+    from agents import GuardrailResult, GuardrailTripwire, OutputGuardrail
+
+    calls = []
+    marker = "SYNTHETIC_CUSTOM_TERMINAL_RESULT"
+
+    @function_tool(finish_turn=True)
+    def raw_editor(source: str) -> str:
+        calls.append(source)
+        return marker
+
+    async def check(request, agent):
+        return GuardrailResult(reject)
+
+    responses.respond(custom_call())
+    async with (
+        timeout(20),
+        Agent(
+            instructions="Use the tool.",
+            tools=[raw_editor.as_custom()],
+            output_guardrails=[OutputGuardrail("terminal", check)],
+            provider=provider(responses),
+        ).session() as session,
+    ):
+        turn = await session.submit("begin")
+        if reject:
+            with pytest.raises(GuardrailTripwire):
+                await turn.get_result()
+        else:
+            assert (await turn.get_result()).final_output == marker
+        history = await session.history_snapshot()
+        encoded = json.dumps(list(history.items))
+        assert (marker in encoded) is not reject
+    assert calls == [RAW_INPUT]

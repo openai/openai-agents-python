@@ -1508,13 +1508,19 @@ pub(crate) async fn capture(
         .finish_manual_suspension(thread.id, suspended_turn)
         .await;
     let suspended = suspended_turn.is_some();
+    let held_outputs = tools.held_tool_outputs(&turn);
     let mut tool_outcomes = None;
     let snapshot = match preserved {
         Ok(true) if suspended_turn == Some(turn.as_str()) => {
             async {
                 let final_history = thread.engine.load_checkpoint_history(thread.id).await?;
                 ensure!(
-                    portable_manual_actions(&final_history, |_| false),
+                    portable_manual_actions(&final_history, |call| {
+                        held_outputs.iter().any(|(envelope, _)| {
+                            matches!(&envelope.item,
+                                ResponseItem::CustomToolCallOutput { call_id, .. } if call_id == call)
+                        })
+                    }),
                     UnsupportedManualState::NativeWork
                 );
                 tool_outcomes = ToolOutcomes::capture(&final_history, thread.id, &turn)?;
@@ -1585,14 +1591,14 @@ pub(crate) async fn capture(
         }
     }
     let start = active_start.context("Core lost the pending turn history")?;
-    let held_outputs = tools.held_tool_outputs(&turn);
     let mut held_ids = HashSet::new();
     for (output, succeeded) in held_outputs {
-        let ResponseItem::FunctionCallOutput {
-            call_id: Some(id), ..
-        } = &output.item
-        else {
-            anyhow::bail!("Invalid held terminal output");
+        let id = match &output.item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(id), ..
+            }
+            | ResponseItem::CustomToolCallOutput { call_id: id, .. } => id,
+            _ => anyhow::bail!("Invalid held terminal output"),
         };
         ensure!(
             held_ids.insert(id.clone()) && !outputs.contains_key(id),

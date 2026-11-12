@@ -4089,7 +4089,10 @@ impl PythonTools {
                 codex_history::RolloutItem::ResponseItem(envelope) => match &envelope.item {
                     ResponseItem::FunctionCallOutput {
                         call_id: Some(id), ..
-                    } => Some(id),
+                    } => Some((id.as_str(), false)),
+                    ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                        Some((call_id.as_str(), true))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -4101,22 +4104,17 @@ impl PythonTools {
                 let codex_history::RolloutItem::ResponseItem(envelope) = row else {
                     return None;
                 };
-                let ResponseItem::FunctionCall {
-                    call_id,
-                    name,
-                    namespace,
-                    ..
-                } = &envelope.item
-                else {
-                    return None;
-                };
+                let (call_id, name, namespace) = terminal_tool_call(&envelope.item)?;
+                let custom = matches!(&envelope.item, ResponseItem::CustomToolCall { .. });
                 (private_calls.contains(call_id)
-                    && !published.contains(call_id)
+                    && !published.contains(&(call_id, custom))
                     && generation.entries.iter().any(|entry| {
                         entry.finish_turn
-                            && entry.name == ToolName::new(namespace.clone(), name.clone())
+                            && entry.name
+                                == ToolName::new(namespace.map(str::to_owned), name.to_owned())
+                            && matches!(entry.spec, ToolSpec::Freeform(_)) == custom
                     }))
-                .then(|| call_id.clone())
+                .then(|| call_id.to_owned())
             })
             .collect())
     }
