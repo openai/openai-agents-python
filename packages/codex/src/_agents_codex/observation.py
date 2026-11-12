@@ -426,6 +426,7 @@ class _ObservationBuffer:
         self.changed = asyncio.Event()
         self._callback_check: weakref.WeakMethod[Callable[[str], None]] | None = None
         self.repair_parent: tuple[_ObservationBuffer, str] | None = None
+        self.on_record: weakref.WeakMethod[Callable[[Observation], None]] | None = None
 
     def _check_read(self) -> None:
         if self._callback_check is not None:
@@ -563,6 +564,8 @@ class _ObservationBuffer:
         ):
             buffer, parent_id = self.repair_parent
             buffer.append(cast(Observation, replace(event, parent_submission_id=parent_id)))
+        if self.on_record is not None and (observer := self.on_record()) is not None:
+            observer(event)
         return event
 
     def finish(self, reason: Literal["closed", "failed"]) -> None:

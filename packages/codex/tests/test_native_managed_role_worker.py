@@ -1,0 +1,98 @@
+"""A managed observer bounds queued work without counting its active callback."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from _agents_codex._managed_tool_stream import _ManagedToolStream
+from agents import NativeRoleToolInvocation
+from agents.observation import TurnStarted
+from tests._asyncio import timeout
+
+
+def origin() -> NativeRoleToolInvocation:
+    return {
+        "tool_name": "research",
+        "role": "worker",
+        "input": "original",
+        "native_call_id": "call",
+        "parent_thread_id": "root",
+        "parent_turn_id": "parent",
+        "child_thread_id": "child",
+        "child_turn_id": "turn",
+        "cell_id": None,
+        "runtime_tool_call_id": None,
+    }
+
+
+def event(sequence: int) -> TurnStarted:
+    return TurnStarted(
+        session_id="session", submission_id="child", turn_id="turn", sequence=sequence
+    )
+
+
+@pytest.mark.parametrize("limit", [1, None])
+async def test_managed_worker_excludes_the_running_handler(limit: int | None) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    received = []
+    overflows = []
+
+    async def observe(value):
+        received.append(value["event"].sequence)
+        assert value["invocation"]["input"] == "original"
+        value["invocation"]["input"] = "detached mutation"
+        if len(received) == 1:
+            started.set()
+            await release.wait()
+
+    stream = _ManagedToolStream(origin(), "child", observe, limit, lambda: overflows.append(True))
+    async with timeout(5):
+        stream.append(event(1))
+        await started.wait()
+        count = 2 if limit == 1 else 1100
+        for sequence in range(2, count + 1):
+            stream.append(event(sequence))
+        assert not overflows
+        stream.finish()
+        release.set()
+        await stream.drain()
+    assert received == list(range(1, count + 1))
+
+
+async def test_managed_worker_overflow_cancels_the_owned_handler() -> None:
+    started = asyncio.Event()
+    overflows = []
+
+    async def observe(_value):
+        started.set()
+        await asyncio.Event().wait()
+
+    stream = _ManagedToolStream(origin(), "child", observe, 1, lambda: overflows.append(True))
+    async with timeout(5):
+        stream.append(event(1))
+        await started.wait()
+        stream.append(event(2))
+        stream.append(event(3))
+        with pytest.raises(RuntimeError, match="pending event limit"):
+            await stream.drain()
+    assert overflows == [True]
+    stream.append(event(4))
+
+
+async def test_managed_worker_logs_handler_errors_and_keeps_order() -> None:
+    received = []
+
+    def observe(value):
+        received.append(value["event"].sequence)
+        if len(received) == 1:
+            raise ValueError("handler failure")
+
+    stream = _ManagedToolStream(origin(), "child", observe, None, lambda: None)
+    stream.append(event(1))
+    stream.append(event(2))
+    stream.finish()
+    async with timeout(5):
+        await stream.drain()
+    assert received == [1, 2]
