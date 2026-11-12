@@ -348,24 +348,27 @@ async def test_supervisor_reports_native_connection_loss(
         async with serving(
             session, "Ask before proceeding.", monkeypatch, turn_timeout=3
         ) as socket:
-            attention = await command(socket, "wait")
-            assert attention["status"] == "attention"
-            disconnect.set()
-            await retiring.wait()
-            with pytest.raises(RuntimeError, match="cannot continue"):
-                await session.pending_interactions()
-            wait = asyncio.create_task(command(socket, "wait"))
             try:
-                await entered.wait()
-                await attempted.wait()
-                assert (await command(socket, "status"))["status"] == "active"
+                attention = await command(socket, "wait")
+                assert attention["status"] == "attention"
+                disconnect.set()
+                await retiring.wait()
+                with pytest.raises(RuntimeError, match="cannot continue"):
+                    await session.pending_interactions()
+                wait = asyncio.create_task(command(socket, "wait"))
+                try:
+                    await entered.wait()
+                    await attempted.wait()
+                    assert (await command(socket, "status"))["status"] == "active"
+                finally:
+                    release.set()
+                    outcome = await wait
+                assert outcome["status"] == "connection_lost"
+                assert await command(
+                    socket, "steer", attention["turn_id"], data=b"Late correction.", exit_code=1
+                ) == {"error": "stale_turn"}
             finally:
                 release.set()
-                outcome = await wait
-            assert outcome["status"] == "connection_lost"
-            assert await command(
-                socket, "steer", attention["turn_id"], data=b"Late correction.", exit_code=1
-            ) == {"error": "stale_turn"}
 
 
 async def test_supervisor_reports_connection_loss_during_owner_startup(
