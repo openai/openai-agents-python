@@ -143,6 +143,10 @@ class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
         return cast(str | None, getattr(self._source, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, None))
 
     @property
+    def skill_tools(self) -> Any:
+        return getattr(self._source, "skill_tools", ())
+
+    @property
     def _sdk_sandbox_memory(self) -> _SandboxMemoryOwner | None:
         return cast(
             _SandboxMemoryOwner | None, getattr(self._source, _MEMORY_OWNER_ATTRIBUTE, None)

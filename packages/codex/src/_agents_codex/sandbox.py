@@ -103,6 +103,16 @@ from .sandbox_memory import (
     SandboxMemoryOptions as SandboxMemoryOptions,
     _capture_sandbox_memory,
 )
+from .sandbox_skills import (
+    LazySkillSource as LazySkillSource,
+    LocalDirLazySkillSource as LocalDirLazySkillSource,
+    SandboxEnvironmentSource as SandboxEnvironmentSource,
+    Skill as Skill,
+    SkillMetadata as SkillMetadata,
+    Skills as Skills,
+    _append_skill_instructions,
+    _SkillLease,
+)
 
 _OptionsT = TypeVar("_OptionsT")
 _ContextT = TypeVar("_ContextT")
@@ -161,6 +171,7 @@ def sandbox_environment(
     manifest: Manifest,
     options: _OptionsT | Mapping[str, Any],
     connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]],
+    skills: Skills | None = None,
     snapshot: SnapshotSpec | SnapshotBase | None = None,
     session: SandboxSession | None = None,
     authorized_resume_state: SandboxSessionState | None = None,
@@ -169,7 +180,7 @@ def sandbox_environment(
     managed_workspace: bool = False,
     authorized_resume_checkpoint: ManagedWorkspaceCheckpoint | None = None,
     memory: SandboxMemoryOptions | None = None,
-) -> AbstractAsyncContextManager[Environment[_ContextT]]:
+) -> SandboxEnvironmentSource[_ContextT]:
     """Own a provider-selected sandbox and its native gateway for one native Session.
 
     Each prepared acquisition has been supplying filesystem and mount guidance to
@@ -229,7 +240,19 @@ def sandbox_environment(
             raise ValueError("Trusted checkpoint authorization requires managed provider resume")
     original_authorized_state = authorized_resume_state
     authorized_payload = None
+    if skills is not None and not isinstance(skills, Skills):
+        raise TypeError("skills must be current Skills declarations")
+    captured_skills = None if skills is None else skills._capture()
+    if (
+        session is not None
+        and captured_skills is not None
+        and (captured_skills.skills or captured_skills.from_ is not None)
+    ):
+        raise ValueError("Eager skills require a new sandbox resource")
+    skill_lease = None if captured_skills is None else _SkillLease(captured_skills)
     captured_manifest = _manifest(manifest)
+    if captured_skills is not None:
+        captured_manifest = captured_skills.process_manifest(captured_manifest)
     if session is not None or authorized_resume_state is not None:
         captured_manifest = _manifest(
             client.resolve_trusted_manifest_for_resume(captured_manifest, captured_options)
@@ -355,30 +378,42 @@ def sandbox_environment(
                     selected._set_concurrency_limits(concurrency_limits)
                 if archive_limits is not None:
                     selected._set_archive_limits(archive_limits)
+            if skill_lease is not None and (
+                original_authorized_state is not None or isinstance(snapshot, SnapshotBase)
+            ):
+                await skill_lease.materialize_eager(selected)
             environment = await owners.enter_async_context(connect(selected))
-            setattr(
-                source_manager,
-                _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
-                _render_workspace_instructions(selected.state.manifest, environment),
-            )
-            if create_memory is not None:
-                setattr(source_manager, _MEMORY_OWNER_ATTRIBUTE, create_memory(selected))
-            observer = (
-                _OperationObserver(selected)
-                if isinstance(selected._instrumentation, Instrumentation)
-                else None
-            )
-            if observer is not None:
-                setattr(source_manager, _SANDBOX_EVENTS_ATTRIBUTE, observer)
-                if managed_source is not None:
-                    setattr(managed_source, _SANDBOX_EVENTS_ATTRIBUTE, observer)
+            observer = None
             try:
+                instructions = _render_workspace_instructions(selected.state.manifest, environment)
+                if skill_lease is not None:
+                    skill_instructions = await skill_lease.activate(
+                        selected,
+                        environment,
+                        borrowed_manifest=captured_manifest if session is not None else None,
+                    )
+                    instructions = _append_skill_instructions(instructions, skill_instructions)
+                setattr(source_manager, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, instructions)
+                if create_memory is not None:
+                    setattr(source_manager, _MEMORY_OWNER_ATTRIBUTE, create_memory(selected))
+                observer = (
+                    _OperationObserver(selected)
+                    if isinstance(selected._instrumentation, Instrumentation)
+                    else None
+                )
+                if observer is not None:
+                    setattr(source_manager, _SANDBOX_EVENTS_ATTRIBUTE, observer)
+                    if managed_source is not None:
+                        setattr(managed_source, _SANDBOX_EVENTS_ATTRIBUTE, observer)
                 yield environment
             finally:
                 if observer is not None:
                     observer.active = False
+                if skill_lease is not None:
+                    skill_lease.retire()
 
     source_manager = source()
+    cast(Any, source_manager).skill_tools = () if skill_lease is None else skill_lease.tools
     if managed_workspace:
         if original_authorized_state is not None:
             authorized_payload = client.serialize_session_state(original_authorized_state)
@@ -388,8 +423,12 @@ def sandbox_environment(
             authorized_payload=authorized_payload,
             authorized_checkpoint=authorized_resume_checkpoint,
         )
-        return managed_source
-    return source_manager
+        if skill_lease is not None:
+            skill_lease.source = managed_source
+        return cast(SandboxEnvironmentSource[_ContextT], managed_source)
+    if skill_lease is not None:
+        skill_lease.source = source_manager
+    return cast(SandboxEnvironmentSource[_ContextT], source_manager)
 
 
 @redact_mount_error_data_sync
