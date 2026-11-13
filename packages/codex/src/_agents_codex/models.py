@@ -655,6 +655,7 @@ class ChatCompletionsModel:
         audio_separator: Any = None
         choice: Any = None
         content: Any = None
+        converted: Any = None
         declaration: Any = None
         extra_controls: Any = None
         item: Any = None
@@ -663,6 +664,7 @@ class ChatCompletionsModel:
         messages: list[dict[str, Any]] | None = None
         native_tools: Any = None
         options: dict[str, Any] | None = None
+        original: Any = None
         output: Any = None
         output_format: Any = None
         part: Any = None
@@ -980,6 +982,7 @@ class ChatCompletionsModel:
                 audio_separator,
                 choice,
                 content,
+                converted,
                 declaration,
                 extra_controls,
                 item,
@@ -988,6 +991,7 @@ class ChatCompletionsModel:
                 messages,
                 native_tools,
                 options,
+                original,
                 output,
                 output_format,
                 part,
