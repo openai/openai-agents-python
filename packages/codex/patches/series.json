@@ -1003,7 +1003,11 @@
     {
       "path": "sdk-provider-websocket-frame-cap.patch",
       "sha256": "4236dfecf6a01d471582da77fdbb78d1416c0e61249bffed060138a51e07702e"
+    },
+    {
+      "path": "sdk-api-demand-text-coalescing.patch",
+      "sha256": "1b79a88ebc1410402b65558ccc541a3b3d9c4c1771525423c1d9db6fdea199e1"
     }
   ],
-  "result_tree": "691233eb5a1e1133061eaa84be7c70c948279bc9"
+  "result_tree": "344872c04d0f0c7fefcdc85198809d914dfc8249"
 }

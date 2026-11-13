@@ -338,7 +338,8 @@ async def test_lost_turns_resync_but_a_fully_retained_later_turn_remains_viewabl
     responses: ResponsesFixture,
 ) -> None:
     responses.respond(*text_response("msg_old", "old"))
-    responses.respond(*text_response("msg_flood", *(["x"] * 350)))
+    # Exceed the character budget even when adjacent text deltas coalesce.
+    responses.respond(*text_response("msg_flood", *(["x" * 200] * 350)))
     responses.respond(*text_response("msg_current", "fully ", "retained"))
     async with (
         timeout(20),
@@ -347,7 +348,7 @@ async def test_lost_turns_resync_but_a_fully_retained_later_turn_remains_viewabl
         old = await session.submit("old")
         assert (await old.get_result()).final_output == "old"
         flood = await session.submit("flood")
-        assert (await flood.get_result()).final_output == "x" * 350
+        assert (await flood.get_result()).final_output == "x" * 70_000
         for lost in (old, flood):
             frames = await read_body(stream_turn(lost, session=session, output_type=None))
             assert len(frames) == 2
@@ -355,7 +356,7 @@ async def test_lost_turns_resync_but_a_fully_retained_later_turn_remains_viewabl
             assert frames[0].run_id == lost.submission_id
             assert isinstance(frames[1], agui.RunErrorEvent)
             assert frames[1].code == "resync_required"
-        assert "x" * 350 in repr([item async for item in session.items()])
+        assert "x" * 70_000 in repr([item async for item in session.items()])
         current = await session.submit("current")
         frames = await read_body(stream_turn(current, session=session, output_type=None))
         assert (await current.get_result()).final_output == "fully retained"
@@ -419,7 +420,7 @@ async def test_evicted_root_with_retained_repair_requires_resync(
     class Answer(BaseModel):
         value: int
 
-    # Real repair events fill the bounded suffix exactly, evicting the
+    # Keep individual deltas for the exact eviction boundary: lose the
     # original start while retaining the repair start and its output.
     responses.respond(*text_response("msg_invalid", "not json"))
     responses.respond(*text_response("msg_repair", *([" "] * 249), '{"value":7}'))
@@ -428,8 +429,12 @@ async def test_evicted_root_with_retained_repair_requires_resync(
         Agent(instructions="Answer.", provider=provider(responses)).session() as session,
     ):
         selected = PromptedOutput(Answer, max_retries=1)
-        turn = await session.submit("Return a value", output_type=selected)
-        result = await turn.get_result()
+        observer = session.events()
+        try:
+            turn = await session.submit("Return a value", output_type=selected)
+            result = await turn.get_result()
+        finally:
+            await observer.aclose()
         assert result.final_output == Answer(value=7) and result.turn is turn
         raw = [event async for event in turn.events()]
         assert isinstance(raw[0], EventGap)
@@ -462,7 +467,8 @@ async def test_queued_cancel_without_native_start_is_not_history_loss(
         return "held"
 
     if older_eviction:
-        responses.respond(*text_response("msg_old_flood", *(["x"] * 350)))
+        # Exceed the character budget even when adjacent text deltas coalesce.
+        responses.respond(*text_response("msg_old_flood", *(["x" * 200] * 350)))
     responses.respond(function_call("hold", {}, "hold-first"))
     responses.respond(assistant_output("first survived"))
     responses.respond(assistant_output("later survived"))
@@ -474,7 +480,7 @@ async def test_queued_cancel_without_native_start_is_not_history_loss(
     ):
         if older_eviction:
             old = await session.submit("old")
-            assert (await old.get_result()).final_output == "x" * 350
+            assert (await old.get_result()).final_output == "x" * 70_000
         previous_requests = int(older_eviction)
         first = await session.submit("first")
         try:
