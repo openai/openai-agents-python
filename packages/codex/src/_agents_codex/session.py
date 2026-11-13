@@ -4393,6 +4393,8 @@ class Session(Generic[ContextT, OutputT]):
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
+                startup_transport = settings.get("request_controls", {}).get("request_transport")
+
                 def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool, bool]:
                     private_run = (
                         (_atomic_first_turn or _private_default_opening)
@@ -4418,6 +4420,7 @@ class Session(Generic[ContextT, OutputT]):
                     if (
                         private_run
                         and (_private_text_run or use_completed_owner)
+                        and (startup_transport or {}).get("mode") != "websocket"
                         and _default_private_tls_profile(
                             provider, provider_config, websockets_enabled
                         )
@@ -4486,7 +4489,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if hosted_verification is not None and chatgpt_apps is not None:
                     raise ValueError("Select one explicit Apps registration per Session")
-                startup_transport = settings.get("request_controls", {}).get("request_transport")
                 options = {
                     "_hosted_tools": hosted_tools,
                     **(
