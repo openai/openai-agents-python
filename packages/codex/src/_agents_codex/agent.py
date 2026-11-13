@@ -953,6 +953,9 @@ class Agent(Generic[ContextT, OutputT]):
     Targets are resolved once when the Session captures the graph; subsequent
     model handoffs select from those captured declarations.
 
+    ``tool_name_collision_policy="warn"`` keeps the last eager bare function or
+    handoff with a given name. A handoff takes precedence over a function.
+
     ``transform_context`` runs before each model request, including children,
     output repair, and model-based compaction. Return replacement input items
     or None to keep the original input. The callback does not edit saved history.
@@ -983,6 +986,7 @@ class Agent(Generic[ContextT, OutputT]):
     instructions: str
     name: str | None
     tools: tuple[Tool[ContextT], ...]
+    tool_name_collision_policy: Literal["error", "warn"]
     handoffs: tuple[
         Agent[ContextT, OutputT]
         | Handoff[ContextT, OutputT]
@@ -1097,6 +1101,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         output_type: None = None,
         programmatic_tool_calling: bool = False,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1132,6 +1137,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         output_type: None = None,
         programmatic_tool_calling: bool = False,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1163,6 +1169,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1196,6 +1203,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1226,6 +1234,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
@@ -1303,6 +1312,9 @@ class Agent(Generic[ContextT, OutputT]):
         )
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
+        if tool_name_collision_policy not in ("error", "warn"):
+            raise ValueError("tool_name_collision_policy must be error or warn")
+        object.__setattr__(self, "tool_name_collision_policy", tool_name_collision_policy)
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
@@ -1391,6 +1403,7 @@ class Agent(Generic[ContextT, OutputT]):
         only be checked when a Session opens. This never reads credentials or
         connects to a provider, executor or MCP server.
         """
+        from ._agent_profiles import _capture_agent_graph, _resolve_tool_name_collisions
         from .schema import _prepare_spec
         from .session import _OpeningTools
 
@@ -1418,9 +1431,12 @@ class Agent(Generic[ContextT, OutputT]):
             _prepare_spec(declaration.output_type)
 
         if self.handoffs:
-            from ._agent_profiles import _capture_agent_graph
-
             declarations = tuple(profile.declaration for profile in _capture_agent_graph(self))
+        elif self.tool_name_collision_policy == "warn" and getattr(
+            self, "_hosted_tools_provided", True
+        ):
+            tools, _ = _resolve_tool_name_collisions(self.tools, ())
+            declarations = (replace(self, tools=tools),)
         else:
             declarations = (self,)
         for declaration in declarations:

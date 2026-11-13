@@ -58,9 +58,11 @@ from ._agent_profiles import (
     _capture_agent_graph,
     _check_handoff_tool_names,
     _python_tool_slot,
+    _resolve_tool_name_collisions,
 )
 from ._agent_tool import _ConfiguredAgentTool
 from ._callback_execution import (
+    _call_application_callback as _call_application_callback,
     _call_callback as _call_callback,
     _call_callback_body as _call_callback_body,
     _call_callback_entered as _call_callback_entered,
@@ -105,6 +107,7 @@ from ._lifecycle import (
 )
 from ._managed_tool_stream import _ManagedToolPrefix, _ManagedToolStream
 from ._managed_workspace import (
+    _SANDBOX_CAPABILITIES_ATTRIBUTE,
     ManagedWorkspaceCheckpoint,
     _capture_retired_workspace,
     _ManagedWorkspaceSource,
@@ -2365,6 +2368,67 @@ class _OpeningTools:
         return _capture_tools(generation, self.python, context)
 
 
+def _bind_sandbox_opening_tools(
+    agent: Agent[Any, Any],
+    context: Any,
+    saved: SessionState | None,
+    *,
+    project_guidance: bool,
+) -> tuple[_ToolCatalog, tuple[FunctionTool[Any, Any, Any], ...], list[dict[str, str]]]:
+    declared = _OpeningTools.capture(agent.tools, agent.programmatic_tool_calling)
+    mcp_names = declared.validate_collisions(project_guidance=project_guidance)
+    catalog = declared.bind(context)
+    if saved is not None and saved.managed_tool_specs is not None:
+        catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
+    return catalog, declared.python, mcp_names
+
+
+def _apply_sandbox_contributions(
+    agent: Agent[Any, Any],
+    lease: _EnvironmentLease | None,
+    *,
+    has_graph: bool,
+    manual_restore: bool,
+) -> bool:
+    if lease is None:
+        return False
+    contributions = getattr(lease.source, _SANDBOX_CAPABILITIES_ATTRIBUTE, None)
+    if contributions is None:
+        return False
+    from .sandbox import _SandboxContributions
+
+    if not isinstance(contributions, _SandboxContributions):
+        raise TypeError("Sandbox capabilities require a sandbox_environment source")
+    if has_graph or manual_restore:
+        raise CapabilityError(
+            "Sandbox capability callbacks require a single root and an idle opening"
+        )
+    original_transform = agent.transform_context
+    capability_transforms = contributions.transforms()
+    transforms = (
+        *capability_transforms,
+        *((original_transform,) if original_transform is not None else ()),
+    )
+
+    async def transform(request: ModelRequestContext[Any]) -> Sequence[dict[str, Any]]:
+        items = request.items
+        for callback in transforms:
+            changed = await _call_application_callback(
+                callback, (replace(request, items=items),), {}
+            )
+            if changed is not None:
+                items = tuple(changed)
+        return items
+
+    object.__setattr__(
+        agent, "model_settings", MappingProxyType(contributions.settings(agent.model_settings))
+    )
+    if capability_transforms:
+        object.__setattr__(agent, "transform_context", transform)
+    object.__setattr__(agent, "tools", (*agent.tools, *contributions.tools))
+    return True
+
+
 def _check_native_agents_provider(
     native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
@@ -3804,6 +3868,68 @@ def _capture_opening_guardrails(
     return inputs, outputs
 
 
+def _validate_opening_environment(
+    executor: Environment[Any] | None,
+    allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
+    saved: SessionState | None,
+    native_agents: NativeAgents[Any] | None,
+    restored_defaults: Sequence[ToolRef | _MCPResourceRef] | None,
+    restored_available: Sequence[Tool[Any]],
+    restored_handoffs: Mapping[str, str] | None,
+    *,
+    project_guidance: bool,
+    programmatic_tool_calling: bool,
+) -> None:
+    _check_environment_python_tool_collisions(executor, allowed_tools)
+    if saved is not None:
+        _check_restored_environment(saved, executor)
+    _check_native_agents_environment(native_agents, executor)
+    if restored_defaults is not None:
+        # Resolve only against destination declarations, without acquiring
+        # MCP connections or replacing the active manual roster.
+        _split_tools(
+            restored_defaults,
+            programmatic_tool_calling,
+            available=restored_available,
+            handoffs=restored_handoffs,
+            environment=executor,
+            native_agents=native_agents,
+            project_guidance=project_guidance,
+        )
+
+
+def _capture_tool_name_winner(
+    agent: Agent[ContextT, OutputT], profiles: tuple[_AgentProfile, ...]
+) -> Agent[ContextT, OutputT]:
+    if agent.tool_name_collision_policy != "warn":
+        return agent
+    if profiles:
+        admitted_tools = profiles[0].opening_tools
+    else:
+        admitted_tools, _ = _resolve_tool_name_collisions(agent.tools, ())
+    if _same_opening_tools(agent.tools, admitted_tools):
+        return agent
+    return replace(agent, tools=admitted_tools)
+
+
+def _check_seatbelt_proxy_settings() -> None:
+    if os.environ.get("CODEX_SANDBOX") == "seatbelt" and any(
+        os.environ.get(name)
+        for name in (
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        )
+    ):
+        raise ValueError(
+            "The pinned Core cannot honor HTTP proxy settings in seatbelt mode. "
+            "Run outside that sandboxed environment or remove unused proxy settings."
+        )
+
+
 def _selected_opening_declaration(
     agent: Agent[Any, Any], state: SessionState | None
 ) -> _RestoreDeclaration | None:
@@ -3952,6 +4078,7 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
+            agent = _capture_tool_name_winner(agent, profiles)
             auth = agent.provider.auth if agent.provider is not None else None
             codex_login = auth if isinstance(auth, CodexLogin) else None
             uses_siwc = isinstance(auth, SignInWithChatGPT)
@@ -4176,21 +4303,7 @@ class Session(Generic[ContextT, OutputT]):
             manual_slots = catalog.manual_slots()
             if state is not None:
                 _check_restored_output_contract(saved, restored_output)
-            if os.environ.get("CODEX_SANDBOX") == "seatbelt" and any(
-                os.environ.get(name)
-                for name in (
-                    "HTTP_PROXY",
-                    "http_proxy",
-                    "HTTPS_PROXY",
-                    "https_proxy",
-                    "ALL_PROXY",
-                    "all_proxy",
-                )
-            ):
-                raise ValueError(
-                    "The pinned Core cannot honor HTTP proxy settings in seatbelt mode. "
-                    "Run outside that sandboxed environment or remove unused proxy settings."
-                )
+            _check_seatbelt_proxy_settings()
             if manual_restore:
                 _check_restored_hosted_mcp(
                     saved, operation_declaration.tools, hosted_restore_grants, selected
@@ -4259,22 +4372,43 @@ class Session(Generic[ContextT, OutputT]):
                 raise TypeError("environment must be an Environment")
             if project_guidance and executor is None:
                 raise ValueError("project_guidance requires an Environment")
-            _check_environment_python_tool_collisions(executor, allowed_tools)
-            if state is not None:
-                _check_restored_environment(saved, executor)
-            _check_native_agents_environment(native_agents, executor)
-            if restored_defaults is not None:
-                # Resolve only against destination declarations, without acquiring
-                # MCP connections or replacing the active manual roster.
-                _split_tools(
-                    restored_defaults,
-                    programmatic_tool_calling,
-                    available=restored_available,
-                    handoffs=restored_handoffs,
-                    environment=executor,
-                    native_agents=native_agents,
+            if _apply_sandbox_contributions(
+                agent,
+                lease,
+                has_graph=bool(profiles or native_agents),
+                manual_restore=manual_restore,
+            ):
+                catalog, allowed_tools, mcp_names = _bind_sandbox_opening_tools(
+                    agent,
+                    context,
+                    saved if state is not None else None,
                     project_guidance=project_guidance,
                 )
+                available = restored_available = agent.tools
+                bound_tools, restored_catalog = catalog.tools, catalog
+                native_specs, manual_slots = catalog.native_specs(), catalog.manual_slots()
+                native._validate_python_tool_declarations(native_specs)
+                model, settings = _prepare_opening_model_settings(
+                    agent,
+                    model,
+                    instructions,
+                    codex_login,
+                    restored_model_settings,
+                    restored_profile,
+                    profile_roster,
+                    provider_history,
+                )
+            _validate_opening_environment(
+                executor,
+                allowed_tools,
+                saved if state is not None else None,
+                native_agents,
+                restored_defaults,
+                restored_available,
+                restored_handoffs,
+                project_guidance=project_guidance,
+                programmatic_tool_calling=programmatic_tool_calling,
+            )
             if manual_restore and saved.operation_tools is not None:
                 (
                     operation_slots,
