@@ -198,6 +198,57 @@ fn accepted_envelope(envelope: &ResponseItemEnvelope) -> Result<Option<Accepted>
     Ok(Some(accepted))
 }
 
+// Detached originals can rebuild model context during pop. Retain legacy
+// instruction copies only when validated canonical history already owns them.
+fn validate_detached_instruction_projections(history: &[RolloutItem]) -> Result<()> {
+    use codex_history::sdk_originals::SdkOriginalHistoryCheckpoint;
+
+    for record in history {
+        let RolloutItem::Compacted(compacted) = record else {
+            continue;
+        };
+        let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) = &compacted.sdk_originals
+        else {
+            continue;
+        };
+        for original in &originals.items {
+            let Some(projection) = &original.projection else {
+                continue;
+            };
+            let reserved_id = projection.item.id().is_some_and(|id| {
+                id.strip_prefix(ID_PREFIX)
+                    .is_some_and(|suffix| suffix.starts_with('_'))
+            });
+            let reserved_tag = matches!(&projection.item,
+                ResponseItem::Message { internal_chat_message_metadata_passthrough: Some(metadata), .. }
+                if metadata.content_item_kinds.as_ref().is_some_and(|kinds|
+                    kinds.iter().any(|kind| matches!(kind.0.as_str(), ACCEPTED | PROJECTED)))
+            );
+            if !reserved_id && !reserved_tag {
+                continue;
+            }
+            let same = |canonical: &ResponseItemEnvelope| {
+                same_receipt(&projection.item, &canonical.item)
+                    && projection.metadata.clone().unwrap_or_default()
+                        == canonical.metadata.clone().unwrap_or_default()
+            };
+            let admitted = history.iter().any(|record| match record {
+                RolloutItem::ResponseItem(canonical) => same(canonical),
+                RolloutItem::Compacted(compacted) => compacted
+                    .replacement_history
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(same)),
+                _ => false,
+            });
+            ensure!(
+                admitted,
+                "SDK original instruction projection has no admitted canonical receipt"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Only original accepted items change authority. Compaction copies never do.
 pub(crate) fn latest(history: &[RolloutItem]) -> Result<Accepted> {
     let mut originals: Vec<(&ResponseItem, Accepted)> = Vec::new();
@@ -293,6 +344,7 @@ pub(crate) fn latest(history: &[RolloutItem]) -> Result<Accepted> {
             "compacted history places older application instructions after the latest accepted instructions"
         );
     }
+    validate_detached_instruction_projections(history)?;
     Ok(latest.clone())
 }
 
@@ -719,6 +771,102 @@ impl ContextContributor for Contributor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detached_originals_validate_instructions_without_losing_caller_data() {
+        use codex_history::sdk_originals::{
+            SdkOriginalHistory, SdkOriginalHistoryCheckpoint, SdkOriginalItem,
+        };
+        let caller_original = serde_json::to_string(&json!({
+            "type":"message", "role":"user", "content":"caller-owned audit value",
+            "application_field":{"retained":true}
+        }))
+        .unwrap();
+        let public: ResponseItem = serde_json::from_value(json!({
+            "type":"message", "role":"developer",
+            "content":[{"type":"input_text","text":"caller-owned projected value"}],
+            "internal_chat_message_metadata_passthrough":{"content_item_kinds":["customer.note"]}
+        }))
+        .unwrap();
+        let mut originals = SdkOriginalHistory::default();
+        originals.append(SdkOriginalItem {
+            original: caller_original.clone(),
+            projection: Some(public.into()),
+        });
+        let compacted: RolloutItem = serde_json::from_value(json!({
+            "type":"compacted", "payload":{"message":"summary", "replacement_history":[], "sdk_originals": originals}
+        })).unwrap();
+        let canonical: ResponseItemEnvelope = publication("A").into();
+        let history = vec![RolloutItem::ResponseItem(canonical.clone()), compacted];
+        assert!(latest(&history).is_ok());
+        for tag in [ACCEPTED, PROJECTED] {
+            let mut rejected = history.clone();
+            let RolloutItem::Compacted(compacted) = &mut rejected[1] else {
+                unreachable!()
+            };
+            let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) =
+                &mut compacted.sdk_originals
+            else {
+                unreachable!()
+            };
+            assert_eq!(originals.items[0].original, caller_original);
+            let ResponseItem::Message {
+                internal_chat_message_metadata_passthrough: Some(metadata),
+                ..
+            } = &mut originals.items[0].projection.as_mut().unwrap().item
+            else {
+                unreachable!()
+            };
+            metadata.content_item_kinds = Some(vec![ContentItemKind(tag.to_owned())]);
+            assert!(
+                latest(&rejected)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("no admitted canonical receipt")
+            );
+        }
+        for projected in [false, true] {
+            let mut legacy = history.clone();
+            let mut admitted = canonical.clone();
+            if projected {
+                let ResponseItem::Message {
+                    id,
+                    internal_chat_message_metadata_passthrough: Some(metadata),
+                    ..
+                } = &mut admitted.item
+                else {
+                    unreachable!()
+                };
+                *id = None;
+                metadata.content_item_kinds = Some(vec![ContentItemKind(PROJECTED.to_owned())]);
+                legacy.push(RolloutItem::ResponseItem(admitted.clone()));
+            }
+            let RolloutItem::Compacted(compacted) = &mut legacy[1] else {
+                unreachable!()
+            };
+            let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) =
+                &mut compacted.sdk_originals
+            else {
+                unreachable!()
+            };
+            originals.items[0].projection = Some(admitted);
+            assert_eq!(originals.items[0].original, caller_original);
+            assert!(latest(&legacy).is_ok());
+        }
+        let mut audit_only = history;
+        let RolloutItem::Compacted(compacted) = &mut audit_only[1] else {
+            unreachable!()
+        };
+        let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) = &mut compacted.sdk_originals
+        else {
+            unreachable!()
+        };
+        originals.items[0].original =
+            serde_json::to_string(&publication("opaque caller data")).unwrap();
+        originals.items[0].projection = None;
+        assert!(latest(&audit_only).is_ok());
+    }
+
     use super::*;
     use serde_json::json;
     use std::sync::{Arc, atomic::Ordering};

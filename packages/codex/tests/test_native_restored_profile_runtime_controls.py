@@ -2,11 +2,10 @@
 
 from dataclasses import replace
 
+from agents import Agent, ModelRetrySettings, NativeProvider
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_model_invocation_deadline import latest_settings
-
-from agents import Agent, ModelRetrySettings, NativeProvider
 
 
 async def test_restored_handoff_rebinds_native_runtime_controls_before_update(responses):

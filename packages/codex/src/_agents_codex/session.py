@@ -12183,9 +12183,9 @@ class Session(Generic[ContextT, OutputT]):
             except OutputValidationError as error:
                 issues = error.issues
         # Never expose validator inputs through an attached exception context.
-        error = OutputValidationError(text, issues)
-        error._run_recoverable = True
-        raise error
+        exhausted = OutputValidationError(text, issues)
+        exhausted._run_recoverable = True
+        raise exhausted
 
     async def _repair_output_once(
         self,

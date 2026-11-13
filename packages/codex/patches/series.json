@@ -1059,7 +1059,15 @@
     {
       "path": "sdk-original-item-eligibility.patch",
       "sha256": "7c9fbb9c6c03a4dd1029b53ea2ab2c82bc799aedebcdbb23384b02f0844df691"
+    },
+    {
+      "path": "sdk-bounded-original-eligibility.patch",
+      "sha256": "3792d52a17994495de7382f4f2831ea2bab91eb9de30cf7507f680e66a84fb54"
+    },
+    {
+      "path": "sdk-model-only-history-projection.patch",
+      "sha256": "a2428a8f5dfad3c965b1daaebb66ff1333f63cad909696ed9d817895ca99df44"
     }
   ],
-  "result_tree": "61328c1878abd8f21b4e0fab323e2ffcefbf2b1c"
+  "result_tree": "f926940b47750804504b47625db79c759bdfeabf"
 }

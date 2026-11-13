@@ -159,3 +159,31 @@ async def test_clearing_stored_branch_keeps_parent_materialized_history(response
                 await (await branch.submit("New branch input.")).get_result()
             ).final_output == "branch fresh"
             assert "KEEP_" not in json.dumps(responses.requests[1]["input"])
+
+
+@pytest.mark.parametrize("kind", ["local", "custom"])
+async def test_bounded_originals_exclude_native_instruction_publications(responses, tmp_path, kind):
+    storage = (
+        LocalStorage(tmp_path / "store")
+        if kind == "local"
+        else CustomStorage(SQLiteSessionStore(tmp_path / "store.sqlite"))
+    )
+    items = [{"type": "future_history_record", "large": "x" * (128 * 1024)}, *originals()[-2:]]
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=responses.url, api_key="synthetic-originals", supports_websockets=False
+        ) as provider,
+    ):
+        agent = Agent(instructions="Opening configuration.", provider=provider)
+        async with agent.session(storage=storage) as session:
+            initial = await session.history_snapshot()
+            await session.transact_history(expected_revision=initial.revision, keep=0, items=items)
+            before = await session.history_snapshot()
+            assert before.items == tuple(items)
+            await session.update(instructions="Current native configuration.")
+            assert await session.history_snapshot(limit=len(items)) == before
+            context = json.dumps((await session.model_context()).items)
+            assert "Current native configuration." in context
+            assert "KEEP_CALLER_DEVELOPER" in context
+            assert not responses.requests
