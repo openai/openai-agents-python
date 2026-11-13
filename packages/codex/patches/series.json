@@ -1087,7 +1087,11 @@
     {
       "path": "sdk-native-handoff-prompted-output.patch",
       "sha256": "152b1fd21cfad8db17afb32e58aa12ee75431810762ecd8c701e10ed22014a1c"
+    },
+    {
+      "path": "sdk-imported-history-age-bound.patch",
+      "sha256": "27f263f66e329f84c98c1d4cab2679626af705f8d1840b0f16019b5c07d9073f"
     }
   ],
-  "result_tree": "d7dce1cb3cf7fbab8cb13f04a197b5fb478179ca"
+  "result_tree": "65463c35ac0248adc6bae152c2ac6da521dcaf1b"
 }
