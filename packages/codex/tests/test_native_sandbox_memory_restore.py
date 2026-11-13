@@ -1,17 +1,20 @@
 import json
 import os
+import sys
 
 import pytest
 
 from agents import Agent, SessionState
-from agents.classic.sandbox.sandboxes.unix_local import (
-    UnixLocalSandboxClient,
-    UnixLocalSandboxClientOptions,
-)
 from agents.sandbox import LocalSnapshotSpec, Manifest, SandboxMemoryOptions, sandbox_environment
 from agents.testing import ScriptedResponses, text
 from tests._asyncio import timeout
 from tests.test_native_sandbox_memory import _workspace_gateway
+
+if sys.platform != "win32":
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="UnixLocal memory fixture")
 

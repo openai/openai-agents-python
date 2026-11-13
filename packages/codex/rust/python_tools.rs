@@ -469,7 +469,7 @@ pub(crate) struct TurnAdmission {
     prepared_operation: Option<u64>,
     state: watch::Sender<AdmissionState>,
     completed_calls: Mutex<HashSet<String>>,
-    held_tool_outputs: Arc<codex_extension_api::HeldToolCompletionResults>,
+    pub(crate) held_tool_outputs: Arc<codex_extension_api::HeldToolCompletionResults>,
     graceful_requested: AtomicBool,
     sampling_stop: Arc<TurnSamplingStop>,
     // A turn born while the graph is stopped must stay fenced even if a
