@@ -33,6 +33,7 @@ async def test_missing_zero_detailed_usage_and_duplicate_completion():
     ]
     totals = [None, 0, 15, 22, 22]
     snapshots = []
+    accounting: list[tuple[int, int]] = []
     steps = [
         RealtimeStep(
             "session.update",
@@ -46,6 +47,7 @@ async def test_missing_zero_detailed_usage_and_duplicate_completion():
             "type": "response.done",
             "response": {
                 "id": f"r{index}",
+                "status": "cancelled" if index == 3 else "completed",
                 **({} if usage is None else {"usage": {**usage, "vendor_counter": index}}),
             },
         }
@@ -89,6 +91,15 @@ async def test_missing_zero_detailed_usage_and_duplicate_completion():
                             )
                             assert event.cumulative_usage == session.realtime_usage
                             snapshots.append(event.cumulative_usage)
+                            assert event.usage_accounting is not None
+                            assert event.usage_accounting == voice.usage_accounting
+                            assert session.realtime_usage_accounting == voice.usage_accounting
+                            accounting.append(
+                                (
+                                    event.usage_accounting.finished_responses,
+                                    event.usage_accounting.usage_reports,
+                                )
+                            )
                             break
                 assert (None if voice.usage is None else voice.usage.total_tokens) == (
                     totals[index]
@@ -98,6 +109,10 @@ async def test_missing_zero_detailed_usage_and_duplicate_completion():
         assert [None if value is None else value.total_tokens for value in snapshots] == totals
         assert voice.usage is not None
         assert voice.usage.total_tokens == 22
+        assert session.realtime_usage_accounting is None
+        assert voice.usage_accounting.finished_responses == 5
+        assert voice.usage_accounting.usage_reports == 3
+        assert accounting == [(1, 0), (2, 1), (3, 2), (4, 3), (5, 3)]
         assert voice.usage.input_token_details == values[2]["input_token_details"]
         detached = voice.usage.input_token_details
         assert isinstance(detached, dict)
@@ -178,9 +193,16 @@ async def test_tool_usage_snapshot_preserves_application_context_and_connection_
             if managed:
                 assert len(policy_contexts) == 1
                 assert policy_contexts[0].realtime_usage == session.realtime_usage
+                assert (
+                    policy_contexts[0].realtime_usage_accounting
+                    == session.realtime_usage_accounting
+                )
             snapshot = contexts[0].realtime_usage
             assert snapshot is not None
             assert snapshot.total_tokens == 7
+            assert contexts[0].realtime_usage_accounting == voice.usage_accounting
+            assert contexts[0].realtime_usage_accounting is not None
+            assert contexts[0].realtime_usage_accounting.usage_reports == 1
             assert isinstance(snapshot.input_token_details, dict)
             snapshot.input_token_details["audio_tokens"] = 999
             assert session.realtime_usage is not None
@@ -200,6 +222,8 @@ async def test_tool_usage_snapshot_preserves_application_context_and_connection_
             )
             assert len(contexts) == 2
             assert contexts[1].realtime_usage is None
+            assert contexts[1].realtime_usage_accounting is not None
+            assert contexts[1].realtime_usage_accounting.usage_reports == 0
             assert len(policy_contexts) == (2 if managed else 0)
             if managed:
                 assert policy_contexts[1].realtime_usage is None

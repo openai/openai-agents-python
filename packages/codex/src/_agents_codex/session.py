@@ -401,7 +401,7 @@ if TYPE_CHECKING:
     from ._sandbox_events import _OperationObserver
     from .hosted_mcp import HostedMCP
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
-    from .realtime_usage import RealtimeUsage
+    from .realtime_usage import RealtimeUsage, RealtimeUsageAccounting
     from .turn import ChildTurn
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -3778,6 +3778,34 @@ def _opening_tool_policy(
     }
 
 
+def _capture_opening_guardrails(
+    input_guardrails: Sequence[InputGuardrail[Any]],
+    output_guardrails: Sequence[OutputGuardrail[Any]],
+) -> tuple[tuple[InputGuardrail[Any], ...], tuple[OutputGuardrail[Any], ...]]:
+    inputs = tuple(input_guardrails)
+    outputs = tuple(output_guardrails)
+    if any(not isinstance(check, InputGuardrail) for check in inputs):
+        raise TypeError("input_guardrails contains an invalid guardrail")
+    if any(not isinstance(check, OutputGuardrail) for check in outputs):
+        raise TypeError("output_guardrails contains an invalid guardrail")
+    return inputs, outputs
+
+
+def _selected_opening_declaration(
+    agent: Agent[Any, Any], state: SessionState | None
+) -> _RestoreDeclaration | None:
+    selected = _restore_declaration.get()
+    if (
+        selected is not None
+        and selected.owner is not None
+        and selected.owner is asyncio.current_task()
+        and selected.agent is agent
+        and (selected.state is state or selected.state == state)
+    ):
+        return selected
+    return None
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -3850,12 +3878,9 @@ class Session(Generic[ContextT, OutputT]):
         native_environment: dict[str, Any] | None = None
         session = None
         with opening:
-            input_guardrails = tuple(input_guardrails)
-            output_guardrails = tuple(output_guardrails)
-            if any(not isinstance(check, InputGuardrail) for check in input_guardrails):
-                raise TypeError("input_guardrails contains an invalid guardrail")
-            if any(not isinstance(check, OutputGuardrail) for check in output_guardrails):
-                raise TypeError("output_guardrails contains an invalid guardrail")
+            input_guardrails, output_guardrails = _capture_opening_guardrails(
+                input_guardrails, output_guardrails
+            )
             retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
             if retention_omitted:
                 observation_retention = "bounded"
@@ -3880,14 +3905,8 @@ class Session(Generic[ContextT, OutputT]):
             reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
             model, authorized_restore_model = _capture_opening_model(state, model, model_settings)
             policy_agent = agent
-            selected = _restore_declaration.get()
-            if (
-                selected is not None
-                and selected.owner is not None
-                and selected.owner is asyncio.current_task()
-                and selected.agent is agent
-                and (selected.state is state or selected.state == state)
-            ):
+            selected = _selected_opening_declaration(agent, state)
+            if selected is not None:
                 agent = selected.declaration
                 if resume_budget is None:
                     resume_budget = selected.resume_budget
@@ -5462,6 +5481,11 @@ class Session(Generic[ContextT, OutputT]):
         starts its own totals. Retain a RealtimeSession to read its totals after close.
         """
         return None if self._realtime is None else self._realtime.usage
+
+    @property
+    def realtime_usage_accounting(self) -> RealtimeUsageAccounting | None:
+        """Completed response and usage report counts for the current voice owner."""
+        return None if self._realtime is None else self._realtime.usage_accounting
 
     def _check_realtime_provider(self) -> None:
         if any(profile.profile.decision_handoffs for profile in self._profiles.values()):
@@ -7663,6 +7687,7 @@ class Session(Generic[ContextT, OutputT]):
             call=call,
             trace_context=_native_trace_context(message.get("_sdk_trace")),
             realtime_usage=self.realtime_usage,
+            realtime_usage_accounting=self.realtime_usage_accounting,
         )
         text = await _call_callback(callback, admit, context, error, deepcopy(original))
         if not admit():
@@ -7780,6 +7805,7 @@ class Session(Generic[ContextT, OutputT]):
                 _snapshot_function_arguments(kwargs, function._ref),
                 call=request.call,
                 realtime_usage=self.realtime_usage,
+                realtime_usage_accounting=self.realtime_usage_accounting,
             )
 
             object.__setattr__(context, "_environment", self._executor)
@@ -11166,7 +11192,7 @@ class Session(Generic[ContextT, OutputT]):
         native_admission: dict[str, Any] | BaseException | None = None,
     ) -> None:
         outcome = None
-        error = None
+        error: BaseException | None = None
         confirmed_rejection = False
         delegate_close = False
         usage_request: asyncio.Future[Any] | None = None
@@ -11181,8 +11207,8 @@ class Session(Generic[ContextT, OutputT]):
                     project = policy if run_policy is None else run_policy.project
                     try:
                         history = await self._read_canonical_history(None, for_replay=True)
-                    except RuntimeError as error:
-                        if str(error) != (
+                    except RuntimeError as history_error:
+                        if str(history_error) != (
                             "Run completed, but its one-shot conversation history "
                             "exceeds the result size limit"
                         ):
@@ -11190,7 +11216,7 @@ class Session(Generic[ContextT, OutputT]):
                         raise NativeError(
                             "Input storage policy history exceeds the admission size limit "
                             "(4096 records or 8 MiB)"
-                        ) from error
+                        ) from history_error
 
                     def active() -> bool:
                         return (
@@ -16457,6 +16483,7 @@ class Session(Generic[ContextT, OutputT]):
                     effective_arguments,
                     trace_context=_native_trace_context(message.get("_sdk_trace")),
                     realtime_usage=self.realtime_usage,
+                    realtime_usage_accounting=self.realtime_usage_accounting,
                     call=call,
                 )
                 object.__setattr__(tool_context, "_environment", self._executor)
@@ -16601,7 +16628,10 @@ class Session(Generic[ContextT, OutputT]):
                 else entry.callback
             )
 
+            entered_media_owner: RealtimeSession | None = None
+
             def enter_body() -> None:
+                nonlocal entered_media_owner
                 if self._realtime is None:
                     return
                 source = message.get("_sdk_realtime_tool_call")
@@ -16618,15 +16648,19 @@ class Session(Generic[ContextT, OutputT]):
                     ),
                     None,
                 )
-                if original is not None:
-                    self._realtime._tool_body_started(
-                        source, message["_sdk_realtime_tool_name"], original
-                    )
+                if original is not None and self._realtime._tool_body_started(
+                    source, message["_sdk_realtime_tool_name"], original
+                ):
+                    entered_media_owner = self._realtime
 
             async def invoke_body_callback(active: Callable[[], bool]) -> Any:
-                return await self._call_decision_callback_entered(
-                    state, message, callback, active, enter_body, args, kwargs
-                )
+                try:
+                    return await self._call_decision_callback_entered(
+                        state, message, callback, active, enter_body, args, kwargs
+                    )
+                finally:
+                    if entered_media_owner is not None:
+                        entered_media_owner._tool_body_ended()
 
             try:
                 from ._hosted_mcp_binding import _CapturedHostedMCPApproval
@@ -17531,7 +17565,7 @@ class Session(Generic[ContextT, OutputT]):
         before_seal: Callable[[], None] | None = None,
     ) -> SessionState:
         if self._configured_capture is not None:
-            return await _join(self._configured_capture)
+            return cast(SessionState, await _join(self._configured_capture))
         if self._sealed_checkpoint is not None:
             return SessionState.from_json(self._sealed_checkpoint)
         self._check_portable_capture()
@@ -17594,7 +17628,7 @@ class Session(Generic[ContextT, OutputT]):
             capture = _create_task(capture_configured())
             self._configured_capture = capture
             try:
-                return await _join(capture)
+                return cast(SessionState, await _join(capture))
             finally:
                 self._configured_capture = None
         return await self._checkpoint(active, before_seal=before_seal)

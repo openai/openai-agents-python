@@ -824,6 +824,7 @@ class _NativeInterception:
                     callback_id,
                     call=info,
                     realtime_usage=session.realtime_usage,
+                    realtime_usage_accounting=session.realtime_usage_accounting,
                 )
                 value = await session._call_decision_callback(
                     state,
