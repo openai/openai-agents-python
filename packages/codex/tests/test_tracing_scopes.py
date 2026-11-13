@@ -20,7 +20,10 @@ from urllib.parse import unquote
 
 import pytest
 
-from _agents_codex import telemetry as runtime_telemetry
+from _agents_codex import (
+    _trace_processor_worker as processor_worker,
+    telemetry as runtime_telemetry,
+)
 from _agents_codex._queued_roots import _QueuedRoots
 from _agents_codex._submission import _Submission
 from _agents_codex.schema import _prepare_spec
@@ -1076,7 +1079,7 @@ async def test_stalled_processor_does_not_stop_healthy_route_or_exceed_worker_bu
 ) -> None:
     healthy: list[str] = []
     blocked: list[asyncio.Event] = []
-    monkeypatch.setattr(runtime_telemetry, "_MAX_PROCESSOR_WORKERS", 1)
+    monkeypatch.setattr(processor_worker, "_MAX_PROCESSOR_WORKERS", 1)
 
     class Stalled:
         async def on_trace_event(self, event: Mapping[str, Any]) -> None:
@@ -1090,7 +1093,7 @@ async def test_stalled_processor_does_not_stop_healthy_route_or_exceed_worker_bu
 
     # Wait for earlier tests' cooperatively closed workers to retire.
     async def idle() -> None:
-        while runtime_telemetry._worker_count:
+        while processor_worker._worker_count:
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(idle(), timeout=1)
@@ -1117,7 +1120,7 @@ async def test_stalled_processor_does_not_stop_healthy_route_or_exceed_worker_bu
                 }
             )
             await _wait_for_ack(native, sequence)
-            assert runtime_telemetry._worker_count == 1
+            assert processor_worker._worker_count == 1
         assert healthy == []
         assert native.acks == [(4, 4), (5, 1), (6, 1), (7, 1)]
         assert len(runtime_telemetry._processors) == 1
