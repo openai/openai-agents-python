@@ -190,9 +190,10 @@ async def test_native_modality_updates_restore_and_provider_isolation() -> None:
         assert not has_audio(seen[-1])
 
 
+@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("adapter", ["chat", "litellm"])
 async def test_native_audio_and_named_selector_through_real_chat_client(
-    adapter: str, monkeypatch
+    adapter: str, monkeypatch, streaming: bool
 ) -> None:
     import json
 
@@ -203,7 +204,7 @@ async def test_native_audio_and_named_selector_through_real_chat_client(
 
     def backend(client):
         if adapter == "chat":
-            return ChatCompletionsModel(client)
+            return ChatCompletionsModel(client, stream=streaming)
         monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
         litellm = pytest.importorskip("litellm")
         monkeypatch.setattr(litellm, "telemetry", False)
@@ -215,14 +216,14 @@ async def test_native_audio_and_named_selector_through_real_chat_client(
                     client=client, api_base=str(client.base_url), api_key=client.api_key, **options
                 )
 
-        return LitellmModel(Borrowed(), "openai/gpt-4.1")
+        return LitellmModel(Borrowed(), "openai/gpt-4.1", stream=streaming)
 
     seen: list[dict[str, Any]] = []
     effects: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content))
-        message = (
+        message: dict[str, Any] = (
             {"role": "assistant", "content": "ok"}
             if len(seen) > 1
             else {
@@ -237,6 +238,35 @@ async def test_native_audio_and_named_selector_through_real_chat_client(
                 ],
             }
         )
+        if streaming:
+            delta: dict[str, Any] = dict(message)
+            if delta.get("tool_calls"):
+                delta["tool_calls"] = [
+                    {"index": index, **call} for index, call in enumerate(delta["tool_calls"])
+                ]
+
+            def chunk(delta, finish=None, usage=None):
+                return {
+                    "id": "chat_audio",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "fixture",
+                    "choices": []
+                    if usage
+                    else [{"index": 0, "delta": delta, "finish_reason": finish}],
+                    **({"usage": usage} if usage else {}),
+                }
+
+            frames = [
+                chunk(delta),
+                chunk({}, "stop" if len(seen) > 1 else "tool_calls"),
+                chunk({}, usage={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}),
+            ]
+            wire = (
+                "".join("data: " + json.dumps(frame) + "\n\n" for frame in frames)
+                + "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=wire)
         return httpx.Response(
             200,
             json={

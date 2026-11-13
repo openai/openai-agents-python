@@ -184,6 +184,8 @@ class HostedToolCallSummary:
         "shell_call_output",
         "mcp_list_tools",
         "mcp_call",
+        "program",
+        "program_output",
     ]
     id: str
     turn_id: str
@@ -197,7 +199,7 @@ class ModelOutputItemCompleted(_SubmissionEvent):
     Open the Session with include_model_output_items=True to record ordinary
     assistant messages and provider reasoning summaries.
 
-    FileSearch, CodeInterpreter, and ImageGeneration calls default to
+    FileSearch, CodeInterpreter, ImageGeneration, and program items default to
     HostedToolCallSummary. Read with
     include_execution_details=True to receive their complete typed items.
     Citation offsets refer to the individual text part. Use Session.items()
@@ -722,6 +724,8 @@ class EventStream(AsyncIterator[Observation]):
                                     or model_item["type"] == "shell_call"
                                     or model_item["type"] == "shell_call_output"
                                     or model_item["type"] == "image_generation_call"
+                                    or model_item["type"] == "program"
+                                    or model_item["type"] == "program_output"
                                 )
                             ):
                                 model_item = HostedToolCallSummary(

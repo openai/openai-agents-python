@@ -1050,6 +1050,8 @@ class ChatCompletionsModel:
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
             choice = value["choices"][0]
             message = choice["message"]
+            if message.get("audio") is not None:
+                raise ValueError("Chat adapters do not support output audio")
             if isinstance(self, LitellmModel) and message.get("refusal") is None:
                 provider_data = (message.get("provider_specific_fields") or {}).get("refusal")
                 if provider_data is not None:
