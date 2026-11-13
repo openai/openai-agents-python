@@ -459,60 +459,12 @@ pub(crate) fn check_pairs(
     items: &[codex_protocol::models::ResponseItem],
     indices: &[usize],
 ) -> anyhow::Result<()> {
-    use codex_protocol::models::ResponseItem;
     use std::collections::HashMap;
     let mut calls: HashMap<(&str, &str), usize> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
-        let (family, id, is_call) = match item {
-            ResponseItem::FunctionCall { call_id, .. } => {
-                ("function", Some(call_id.as_str()), true)
-            }
-            ResponseItem::ApplyPatchCall { call_id, .. } => {
-                ("apply_patch", Some(call_id.as_str()), true)
-            }
-            ResponseItem::ApplyPatchCallOutput { call_id, .. } => {
-                ("apply_patch", Some(call_id.as_str()), false)
-            }
-            ResponseItem::ShellCall {
-                provider_fields, ..
-            }
-            | ResponseItem::ShellCallOutput {
-                provider_fields, ..
-            } => (
-                "shell",
-                provider_fields.get("call_id").and_then(Value::as_str),
-                matches!(item, ResponseItem::ShellCall { .. }),
-            ),
-            ResponseItem::LocalShellCall { call_id, .. } => ("function", call_id.as_deref(), true),
-            ResponseItem::FunctionCallOutput { call_id, .. } => {
-                ("function", call_id.as_deref(), false)
-            }
-            ResponseItem::ComputerCall { call_id, .. } => {
-                ("computer", Some(call_id.as_str()), true)
-            }
-            ResponseItem::ComputerCallOutput { call_id, .. } => {
-                ("computer", Some(call_id.as_str()), false)
-            }
-            ResponseItem::CustomToolCall { call_id, .. } => {
-                ("custom", Some(call_id.as_str()), true)
-            }
-            ResponseItem::CustomToolCallOutput { call_id, .. } => {
-                ("custom", Some(call_id.as_str()), false)
-            }
-            ResponseItem::McpApprovalRequest { id, .. } => {
-                ("mcp-approval", id.as_ref().map(|id| id.as_str()), true)
-            }
-            ResponseItem::McpApprovalResponse {
-                approval_request_id,
-                ..
-            } => ("mcp-approval", Some(approval_request_id.as_str()), false),
-            ResponseItem::ToolSearchCall {
-                call_id, execution, ..
-            } if execution != "server" => ("search", call_id.as_deref(), true),
-            ResponseItem::ToolSearchOutput {
-                call_id, execution, ..
-            } if execution != "server" => ("search", call_id.as_deref(), false),
-            _ => continue,
+        let Some((family, id, is_call)) = codex_history::sdk_originals::client_tool_pair_part(item)
+        else {
+            continue;
         };
         let Some(id) = id else {
             anyhow::bail!("application compaction cannot preserve an unidentified tool pair");

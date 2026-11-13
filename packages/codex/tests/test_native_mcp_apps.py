@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from aiohttp import web
@@ -77,6 +77,49 @@ async def test_linked_resource_uses_the_existing_native_connection(responses: Re
             assert app.view["resource"] == RESOURCE
             assert sum(request.get("method") == "initialize" for request in peer.requests) == 1
             assert sum(request.get("method") == "resources/read" for request in peer.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("server_mode", "tool_mode", "allowed"),
+    [("native", "preapproved", True), ("preapproved", "native", False)],
+)
+async def test_app_uses_the_originating_raw_tools_effective_approval(
+    responses: ResponsesFixture,
+    server_mode: Literal["native", "preapproved"],
+    tool_mode: Literal["native", "preapproved"],
+    allowed: bool,
+):
+    peer = Peer(call_result=app_result())
+    responses.respond(mcp_call("search", "mcp__counter", "counter-call"))
+    responses.respond(assistant_output("Counter opened."))
+    async with timeout(20), peer.serve() as url:
+        declaration = HttpMCP(
+            name="counter",
+            url=url,
+            tools=["search"],
+            approval_mode=server_mode,
+            tool_approval_overrides={"search": tool_mode},
+        )
+        async with Agent(
+            instructions="Open counter.", provider=provider(responses), tools=[declaration]
+        ).session() as session:
+            turn = await session.submit("Open")
+            await turn.get_result()
+            if not allowed:
+                with pytest.raises(ValueError, match="preapproved"):
+                    await MCPApp.open(session, turn, "counter-call")
+                assert [(call["name"], call["arguments"]) for call in peer.calls] == [
+                    ("search", {"key": "43"})
+                ]
+                return
+            app = await MCPApp.open(session, turn, "counter-call")
+            assert app.view["resource"] == RESOURCE
+            await app.call_tool("search", {"key": "44"})
+            app.close()
+            assert [(call["name"], call["arguments"]) for call in peer.calls] == [
+                ("search", {"key": "43"}),
+                ("search", {"key": "44"}),
+            ]
 
 
 async def test_embedded_app_view_is_copied_and_rejects_other_tools(responses: ResponsesFixture):

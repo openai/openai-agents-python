@@ -7,6 +7,7 @@ import inspect
 import json
 import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, TypeAlias, cast
@@ -523,7 +524,7 @@ class _BorrowedResponsesEvent(dict[str, Any]):
         self.request_id = request_id
 
 
-async def _close_chat_stream(value: Any) -> None:
+async def _close_borrowed_stream(value: Any) -> None:
     close = result = None
     try:
         close = getattr(value, "aclose", None)
@@ -1297,10 +1298,10 @@ class ChatCompletionsModel:
                     finish_reason = choice.get("finish_reason")
             finally:
                 try:
-                    await _close_chat_stream(iterator)
+                    await _close_borrowed_stream(iterator)
                 finally:
                     if chunks is not iterator:
-                        await _close_chat_stream(chunks)
+                        await _close_borrowed_stream(chunks)
             if response_id is None or finish_reason is None:
                 raise ValueError("Chat stream ended without a completed choice")
             ordered = [calls[index] for index in sorted(calls)]
@@ -1479,7 +1480,76 @@ class AnyLLMModel(ChatCompletionsModel):
     Inherited native cache hints are omitted for providers declaring them unsupported.
     Explicit adapter cache overrides, including empty strings, remain provider-validated.
     Generic completion requests omit the native ``store=False`` default.
+    Set ``api="responses"`` for the AnyLLM OpenAI provider with public
+    ``aresponses(extra_body=...)`` support. ``api="auto"`` selects Responses
+    when both conditions hold, otherwise it uses Chat Completions. The default
+    uses Chat Completions. ``include_usage`` applies to Chat Completions only.
     """
+
+    _responses: _AnyLLMResponsesModel | None = field(default=None, init=False, repr=False)
+
+    def __init__(
+        self,
+        client: Any,
+        model: str | None = None,
+        *,
+        prompt_cache_key: str | None = None,
+        request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = None,
+        stream: bool = False,
+        include_usage: bool = True,
+        api: Literal["chat_completions", "responses", "auto"] = "chat_completions",
+    ) -> None:
+        if api not in ("chat_completions", "responses", "auto"):
+            raise ValueError("AnyLLMModel api must be chat_completions, responses or auto")
+        use_responses = False
+        if api != "chat_completions":
+            is_openai = getattr(client, "PROVIDER_NAME", None) == "openai"
+            advertises_responses = getattr(client, "SUPPORTS_RESPONSES", False) is True
+            if is_openai and advertises_responses:
+                create = getattr(client, "aresponses", None)
+                if callable(create):
+                    create = inspect.unwrap(create)
+                    if inspect.iscoroutinefunction(create):
+                        extra_body = inspect.signature(create).parameters.get("extra_body")
+                        use_responses = extra_body is not None and extra_body.kind in (
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.KEYWORD_ONLY,
+                        )
+            if api == "responses" and not use_responses:
+                raise ValueError(
+                    "AnyLLM Responses requires the OpenAI provider with public "
+                    "aresponses extra_body support"
+                )
+            if use_responses and request_options is not None:
+                raise TypeError("request_options requires an OpenAI-compatible client adapter")
+        super().__init__(
+            client,
+            model,
+            prompt_cache_key=prompt_cache_key,
+            request_options=request_options,
+            stream=stream,
+            include_usage=include_usage,
+        )
+        if use_responses:
+            object.__setattr__(
+                self,
+                "_responses",
+                _AnyLLMResponsesModel(
+                    client, model, prompt_cache_key=prompt_cache_key, stream=stream
+                ),
+            )
+
+    @property
+    def stream(self) -> Callable[[ModelRequest], AsyncIterator[Mapping[str, Any]]] | None:
+        return self._responses.stream if self._responses is not None else super().stream
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        try:
+            if self._responses is not None:
+                return await self._responses.complete(request)
+            return await super().complete(request)
+        finally:
+            del request
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:
         return None
@@ -1592,19 +1662,28 @@ class ResponsesModel:
         finally:
             del request, body, selected, client, create
 
+    @asynccontextmanager
+    async def _opened_stream(self, response: Any) -> AsyncIterator[AsyncIterator[Any]]:
+        try:
+            async with response:
+                yield response
+        finally:
+            del response
+
     async def _stream_response(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]]:
         response: Any = None
         event: Any = None
         headers: Any = None
         request_id: Any = None
         payload: Any = None
+        events: Any = None
         try:
             response = await self._create(request, stream=True)
-            async with response:
+            async with self._opened_stream(response) as events:
                 headers = getattr(getattr(response, "response", None), "headers", None)
                 if headers is not None:
                     request_id = headers.get("x-request-id")
-                async for event in response:
+                async for event in events:
                     payload = (
                         event.model_dump(mode="json", exclude_unset=True)
                         if hasattr(event, "model_dump")
@@ -1615,7 +1694,7 @@ class ResponsesModel:
                     request_id = None
                     yield payload
         finally:
-            del request, response, event, headers, request_id, payload
+            del request, response, event, headers, request_id, payload, events
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         response: Any = None
@@ -1704,6 +1783,47 @@ class ResponsesModel:
                 item,
                 part,
             )
+
+
+class _AnyLLMResponsesModel(ResponsesModel):
+    """Forward native requests through the public AnyLLM Responses method."""
+
+    async def _create(self, request: ModelRequest, *, stream: bool) -> Any:
+        body = {}
+        create: Any = None
+        try:
+            if request.disable_provider_retries:
+                raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
+            create = self.client.aresponses
+            if not inspect.iscoroutinefunction(inspect.unwrap(create)):
+                raise TypeError("AnyLLMModel requires an asynchronous provider")
+            body = dict(request.body)
+            model = self.model or body["model"]
+            body.pop("model")
+            body["input_data"] = body.pop("input")
+            body["stream"] = stream
+            if "client_metadata" in body:
+                # Core's transport metadata is outside AnyLLM's typed Responses fields.
+                body["extra_body"] = {"client_metadata": body.pop("client_metadata")}
+            if self.prompt_cache_key is not None:
+                body["prompt_cache_key"] = self.prompt_cache_key
+            elif getattr(self.client, "PROMPT_CACHE_KEY_SUPPORT", None) == "unsupported":
+                body.pop("prompt_cache_key", None)
+            return await create(model=model, **body)
+        finally:
+            del request, body, create
+
+    @asynccontextmanager
+    async def _opened_stream(self, response: Any) -> AsyncIterator[AsyncIterator[Any]]:
+        if hasattr(response, "__aenter__"):
+            async with super()._opened_stream(response) as events:
+                yield events
+            return
+        try:
+            yield response
+        finally:
+            await _close_borrowed_stream(response)
+            del response
 
 
 _preserve_module_identity(globals(), "agents.models")

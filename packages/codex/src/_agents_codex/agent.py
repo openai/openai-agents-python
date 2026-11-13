@@ -71,6 +71,7 @@ from .compaction import ResponsesCompaction, _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
+from .history import _InputStoragePolicy
 from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage, _native_input, _response_content
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
     from .decision_handoff import DecisionHandoff
     from .executor import Environment, EnvironmentSource
     from .handoffs import Handoff
+    from .history import CanonicalHistorySnapshot
     from .input import UserInput
     from .native_agents import NativeAgents
     from .prepared_request import _PrepareRequest
@@ -860,6 +862,31 @@ _PROVIDER_LOCK = RLock()
 
 # dataclasses.replace forwards the public fields. Empty markers retain omission
 # while keeping their normal string and tuple behavior.
+def _capture_run_audio_input(
+    input: UserInput,
+    initial_messages: Sequence[InitialMessage] | None,
+    audio_budget: list[int],
+) -> list[dict[str, Any]]:
+    parts = _native_input(input, _audio_budget=audio_budget)
+    _check_audio_json({"initial_messages": initial_messages, "input": parts})
+    return parts
+
+
+@dataclass(frozen=True)
+class _RunInputStoragePolicy:
+    project: _InputStoragePolicy
+    initial_messages: Sequence[InitialMessage] | None
+    available_audio: int
+
+    def __call__(
+        self, input: UserInput, history: CanonicalHistorySnapshot
+    ) -> UserInput | None | Awaitable[UserInput | None]:
+        return self.project(input, history)
+
+    def capture(self, input: UserInput) -> list[dict[str, Any]]:
+        return _capture_run_audio_input(input, self.initial_messages, [self.available_audio])
+
+
 class _OmittedInstructions(str):
     __slots__ = ()
 
@@ -1905,6 +1932,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         return_raw_usage: bool = False,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1942,6 +1970,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         return_raw_usage: bool = False,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1979,6 +2008,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         return_raw_usage: bool = False,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -2020,6 +2050,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         return_raw_usage: bool = False,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -2064,6 +2095,9 @@ class Agent(Generic[ContextT, OutputT]):
         tool_not_found_behavior selects the new turn's handling of unknown direct function
         calls. Pass "raise_error" to stop the turn, or use the default model-visible error.
 
+        input_storage_policy prepares new user input before native submission and storage.
+        Return replacement input or None to sample the retained history alone.
+
         Pass state to restore with current bindings. For a supported pending
         manual checkpoint, input=None resumes the existing turn. Idle state
         needs input for a new turn. return_state=True captures a successful
@@ -2088,20 +2122,31 @@ class Agent(Generic[ContextT, OutputT]):
         Read the snapshot from RunDiagnosticError.details. The original error is its cause.
         """
         provider_history = _capture_provider_history(provider_history)
+        if input_storage_policy is not None:
+            if not callable(input_storage_policy):
+                raise TypeError("input_storage_policy must be callable")
+            if input is None:
+                raise TypeError("Cannot add input_storage_policy when resuming a run")
+            input = deepcopy(input)
         capture_error_details = capture_error_details is True
-        error_input = deepcopy(input) if capture_error_details else None
+        error_input = (
+            deepcopy(input) if capture_error_details and input_storage_policy is None else None
+        )
         if error_input is not None:
             input = error_input
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(
             initial_messages, state=state, _audio_budget=audio_budget
         )
+        if input_storage_policy is not None:
+            input_storage_policy = _RunInputStoragePolicy(
+                input_storage_policy, initial_messages, audio_budget[0]
+            )
         if input is not None and (
             audio_budget[0] != _MAX_AUDIO_INPUT_BYTES or _contains_audio(input)
         ):
-            parts = _native_input(input, _audio_budget=audio_budget)
-            _check_audio_json({"initial_messages": initial_messages, "input": parts})
-            if not isinstance(input, str):
+            parts = _capture_run_audio_input(input, initial_messages, audio_budget)
+            if not isinstance(input, str) and input_storage_policy is None:
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
         if capture_error_details:
@@ -2283,6 +2328,7 @@ class Agent(Generic[ContextT, OutputT]):
                 and state is None
                 and initial_messages is None
                 and input is not None
+                and input_storage_policy is None
                 and tools is None
                 and environment is None
                 and before_step is None
@@ -2486,6 +2532,8 @@ class Agent(Generic[ContextT, OutputT]):
                         submit_options["model_override"] = model_override
                     if tool_not_found_behavior is not None:
                         submit_options["tool_not_found_behavior"] = tool_not_found_behavior
+                    if input_storage_policy is not None:
+                        submit_options["input_storage_policy"] = input_storage_policy
                     if prepare_request is not None:
                         submit_options["prepare_request"] = prepare_request
                     if budget is not None:
@@ -2496,7 +2544,7 @@ class Agent(Generic[ContextT, OutputT]):
                         submission = await session.submit(
                             input, tools=tools, before_step=before_step, **submit_options
                         )
-                if capture_error_details and input is not None:
+                if capture_error_details and input is not None and input_storage_policy is None:
                     session._remember_run_error_input(submission, error_input)
                 if session._interaction_handler is None and pause_manual:
                     return await session._run_with_interactions(
@@ -2571,6 +2619,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         return_raw_usage: bool = False,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -2608,6 +2657,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         return_raw_usage: bool = False,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -2645,6 +2695,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         return_raw_usage: bool = False,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -2686,6 +2737,7 @@ class Agent(Generic[ContextT, OutputT]):
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         return_raw_usage: bool = False,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -2762,6 +2814,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model_override"] = model_override
                 if tool_not_found_behavior is not None:
                     options["tool_not_found_behavior"] = tool_not_found_behavior
+                if input_storage_policy is not None:
+                    options["input_storage_policy"] = input_storage_policy
                 return _SyncRun().run(
                     self.run(
                         input,

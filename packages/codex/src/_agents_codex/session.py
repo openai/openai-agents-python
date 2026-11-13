@@ -160,6 +160,7 @@ from .agent import (
     OutputT as OutputT,
     SignInWithChatGPT,
     _copy_model_settings as _copy_model_settings,
+    _RunInputStoragePolicy,
 )
 from .apply_patch import _ApplyPatchTool
 from .canonical_storage import (
@@ -195,7 +196,12 @@ from .guardrails import (
     InputGuardrail,
     OutputGuardrail,
 )
-from .history import CanonicalHistorySnapshot, RecordedTurn as RecordedTurn
+from .history import (
+    CanonicalHistoryPop,
+    CanonicalHistorySnapshot,
+    RecordedTurn as RecordedTurn,
+    _InputStoragePolicy,
+)
 from .input import UserInput as UserInput, _native_input as _native_input
 from .manual import (
     _DEFAULT_APPROVAL_REASON as _DEFAULT_APPROVAL_REASON,
@@ -6699,6 +6705,7 @@ class Session(Generic[ContextT, OutputT]):
         model_override: str | None = None,
         model_settings_override: ModelSettings | None = None,
         tool_not_found_behavior: ToolNotFoundBehavior | None = None,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -6719,6 +6726,7 @@ class Session(Generic[ContextT, OutputT]):
         model_override: str | None = None,
         model_settings_override: ModelSettings | None = None,
         tool_not_found_behavior: ToolNotFoundBehavior | None = None,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -6738,6 +6746,7 @@ class Session(Generic[ContextT, OutputT]):
         model_override: None = None,
         model_settings_override: None = None,
         tool_not_found_behavior: None = None,
+        input_storage_policy: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -6757,12 +6766,19 @@ class Session(Generic[ContextT, OutputT]):
         model_override: str | None = None,
         model_settings_override: ModelSettings | None = None,
         tool_not_found_behavior: ToolNotFoundBehavior | None = None,
+        input_storage_policy: _InputStoragePolicy | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
         parent_trace overrides the Session parent for this new root and its
         automatic continuations. None and omission inherit the Session parent.
         Queued work captures its carrier now. Steering cannot change a parent.
+
+        input_storage_policy receives a detached input and the accepted canonical
+        history at admission. Return replacement input or None to sample existing
+        history without adding user input. Queued roots use their current history
+        after predecessors settle. Admission rejects before the callback when the full
+        history exceeds 4096 records or 8 MiB.
 
         Omission inherits the Agent's output. Bare str selects plain text.
         PromptedOutput adds JSON guidance to this root's user input only.
@@ -6871,6 +6887,7 @@ class Session(Generic[ContextT, OutputT]):
                 or model_override is not None
                 or model_settings_override is not None
                 or tool_not_found_behavior is not None
+                or input_storage_policy is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -6888,6 +6905,8 @@ class Session(Generic[ContextT, OutputT]):
             await self._refresh_profile_bindings()
             output = self._default_output if output_type is None else _prepare_spec(output_type)
             parts = _native_input(input)
+            if input_storage_policy is not None and not callable(input_storage_policy):
+                raise TypeError("input_storage_policy must be callable")
             roots = None
             if writable_roots is not None:
                 if self._executor is None:
@@ -6916,11 +6935,17 @@ class Session(Generic[ContextT, OutputT]):
                         "does not apply to later requests.",
                     }
                 )
+            captured_input = deepcopy(input)
             return await self._start(
                 parts,
                 output,
                 output_override=output_type is not None,
-                guardrail_input=deepcopy(input),
+                guardrail_input=captured_input if input_storage_policy is None else None,
+                input_storage_policy=(
+                    (input_storage_policy, captured_input)
+                    if input_storage_policy is not None
+                    else None
+                ),
                 tools=tools,
                 before_step=before_step,
                 enqueue=if_busy != "reject",
@@ -8554,20 +8579,57 @@ class Session(Generic[ContextT, OutputT]):
         captured = json.dumps([json.dumps(item) for item in items])
 
         async def replace() -> str:
-            value = json.loads(
+            value = self._history_mutation_value(
                 await self._native._transact_history(expected_revision, keep, captured)
             )
-            if value.get("outcome") == "uncertain":
-                self._history_context_retired = True
-                self._broken = True
-                self._model_context_snapshots.clear()
-                raise NativeError(
-                    "Canonical history commit outcome is uncertain; close and restore the Session"
-                )
             self._model_context_snapshots.clear()
             return str(value["revision"])
 
         return await self._join_mutation(asyncio.create_task(replace()))
+
+    async def pop_history(
+        self, *, expected_revision: str, rebuild_model_context: bool = False
+    ) -> CanonicalHistoryPop:
+        """Remove the last original item in this idle Session.
+
+        Use the revision from `history_snapshot()`. An empty history returns
+        `item=None`. If a tool output is removed, its call remains in original
+        history for repair and leaves the executable model context. Set
+        `rebuild_model_context=True` to allow rebuilding from previously admitted
+        originals when the current compacted projection cannot be preserved.
+        """
+        self._check_callback_operation("edit canonical history from its own Session")
+        self._check_idle_update()
+        if not isinstance(expected_revision, str) or not expected_revision:
+            raise ValueError("expected_revision must be nonempty text")
+        if not isinstance(rebuild_model_context, bool):
+            raise TypeError("rebuild_model_context must be a bool")
+
+        async def pop() -> CanonicalHistoryPop:
+            value = self._history_mutation_value(
+                await self._native._pop_history(expected_revision, rebuild_model_context)
+            )
+            original = value["item"]
+            if original is not None:
+                self._model_context_snapshots.clear()
+            return CanonicalHistoryPop(
+                revision=str(value["revision"]),
+                item=None if original is None else json.loads(original),
+                rebuilt_model_context=bool(value["rebuilt_context"]),
+            )
+
+        return await self._join_mutation(asyncio.create_task(pop()))
+
+    def _history_mutation_value(self, payload: str) -> dict[str, Any]:
+        value: dict[str, Any] = json.loads(payload)
+        if value.get("outcome") == "uncertain":
+            self._history_context_retired = True
+            self._broken = True
+            self._model_context_snapshots.clear()
+            raise NativeError(
+                "Canonical history commit outcome is uncertain; close and restore the Session"
+            )
+        return value
 
     async def model_context(self) -> ModelContextSnapshot:
         """Read the current native model context of an idle Session.
@@ -9291,6 +9353,7 @@ class Session(Generic[ContextT, OutputT]):
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
         guardrail_input: UserInput | None = None,
+        input_storage_policy: tuple[_InputStoragePolicy, UserInput] | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         try:
@@ -9410,6 +9473,7 @@ class Session(Generic[ContextT, OutputT]):
                     else None
                 ),
                 guardrail_input=guardrail_input,
+                input_storage_policy=input_storage_policy,
                 run_usage=run_usage or _UsageCollector(),
                 observation_after=self._observations.sequence,
                 before_step=before_step,
@@ -10440,15 +10504,21 @@ class Session(Generic[ContextT, OutputT]):
     ) -> None:
         errors: list[BaseException] = []
         if state is not None:
+            preparing = (
+                mode == "graceful"
+                and self._active is state
+                and state.handle is None
+                and state.input_storage_policy is not None
+            )
             try:
                 handle = (
                     self._last_turn
-                    if mode == "force"
+                    if (mode == "force" or preparing)
                     and self._last_turn is not None
                     and self._owned_submission(self._last_turn) is state
                     else await asyncio.shield(state.accepted)
                 )
-                if mode == "force":
+                if mode == "force" or preparing:
                     await self._cancel(handle, accepted=accepted)
                 else:
                     if (
@@ -10572,9 +10642,15 @@ class Session(Generic[ContextT, OutputT]):
             elif state is None or not state.restored_pending:
                 accepted.set_result(None)
             if state is not None:
+                preparing = (
+                    mode == "graceful"
+                    and self._active is state
+                    and state.handle is None
+                    and state.input_storage_policy is not None
+                )
                 try:
                     if (
-                        mode == "force"
+                        (mode == "force" or preparing)
                         and state.handle is None
                         and not state.restored_pending
                         and self._last_turn is not None
@@ -10939,6 +11015,60 @@ class Session(Generic[ContextT, OutputT]):
         delegate_close = False
         usage_request: asyncio.Future[Any] | None = None
         try:
+            if state.input_storage_policy is not None:
+                assert input is not None and not admitted and native_admission is None
+                confirmed_rejection = True
+                policy, captured = state.input_storage_policy
+                # Host-preparation marker until capture; cleared before native admission.
+                try:
+                    run_policy = policy if isinstance(policy, _RunInputStoragePolicy) else None
+                    project = policy if run_policy is None else run_policy.project
+                    try:
+                        history = await self._read_canonical_history(None, for_replay=True)
+                    except RuntimeError as error:
+                        if str(error) != (
+                            "Run completed, but its one-shot conversation history "
+                            "exceeds the result size limit"
+                        ):
+                            raise
+                        raise NativeError(
+                            "Input storage policy history exceeds the admission size limit "
+                            "(4096 records or 8 MiB)"
+                        ) from error
+
+                    def active() -> bool:
+                        return (
+                            self._active is state
+                            and not state.stopping
+                            and not self._closing
+                            and not self._root_interrupts
+                            and not self._graph_interrupts
+                        )
+
+                    if not active():
+                        raise asyncio.CancelledError
+                    guard = _Invocation(self)
+                    token = _invocation.set(guard)
+                    try:
+                        selected = await _call_callback_entered(
+                            project, active, (captured, history), {}, None
+                        )
+                    finally:
+                        guard.active = False
+                        _invocation.reset(token)
+                    if not active():
+                        raise asyncio.CancelledError
+                    projected = deepcopy(selected)
+                    capture = _native_input if run_policy is None else run_policy.capture
+                    parts = [] if projected is None else capture(projected)
+                    if state.output.mode == "prompted":
+                        parts.extend(input[-1:])
+                    input = parts
+                    state.original_input = projected
+                    state.guardrail_input = "" if projected is None else projected
+                    confirmed_rejection = False
+                finally:
+                    state.input_storage_policy = None
             if self._profiles and not admitted:
                 await self._refresh_profile_bindings()
                 if not state.output_override and state.realtime_tool is None:
