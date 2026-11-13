@@ -26,6 +26,7 @@ from agents import (
     NetworkPolicy,
     ReconciledCall,
     ToolContext,
+    ToolRef,
     _native,
     function_tool,
 )
@@ -223,13 +224,19 @@ async def worker() -> None:
         supports_websockets=False,
     )
     native = None if request["no_children"] else NativeAgents(max_children=2, max_depth=2)
+    if request["mode"] == "cold-hosted-root":
+        native = NativeAgents(
+            max_children=2,
+            max_depth=2,
+            before_step=lambda step: [ToolRef("lookup", "functions")],
+        )
     agent = Agent(
         instructions="Record a memory.",
         model=request["model"],
         provider=connection,
         programmatic_tool_calling=False,
         tools=([lookup] if native is None else [lookup, native])
-        + ([ImageGeneration()] if request["mode"] == "cold-hosted" else []),
+        + ([ImageGeneration()] if request["mode"] in {"cold-hosted", "cold-hosted-root"} else []),
     )
     try:
         async with (
@@ -781,6 +788,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
         (2, True, None, False),
         (1, False, "shell", False),
         (1, False, "hosted-progress", False),
+        (1, False, "settled-hosted-root", False),
         (1, False, None, True),
         (1, False, None, "followup"),
     ],
@@ -788,7 +796,12 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
 async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
     tmp_path, monkeypatch, depth, no_children, native_effect, root_active
 ):
-    model = "gpt-5.5" if native_effect == "hosted-progress" else DESCENDANT_MODEL
+    model = (
+        "gpt-5.5"
+        if native_effect in {"hosted-progress", "settled-hosted-root"}
+        else DESCENDANT_MODEL
+    )
+    unsafe_effect = native_effect in {"shell", "hosted-progress"}
     peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     entered, release = asyncio.Event(), asyncio.Event()
     root_entered = asyncio.Event()
@@ -878,6 +891,8 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             if root_active == "followup"
             else "cold-hosted"
             if native_effect == "hosted-progress"
+            else "cold-hosted-root"
+            if native_effect == "settled-hosted-root"
             else "cold-active",
             depth,
             model=model,
@@ -921,6 +936,18 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             and row["payload"].get("sdk_receipt", {}).get("thread_id") == child_id
         )
         assert sampling_receipt["provider_effects_possible"] is (native_effect == "hosted-progress")
+        if native_effect == "settled-hosted-root":
+            [root_rollout] = (tmp_path / "profile").rglob(f"*{opened['opened']}.jsonl")
+            root_history = [json.loads(line) for line in root_rollout.read_text().splitlines()]
+            assert any(
+                row["type"] == "turn_context"
+                and row["payload"].get("sdk_receipt", {}).get("provider_effects_possible") is True
+                for row in root_history
+            )
+            assert any(
+                row["type"] == "event_msg" and row["payload"]["type"] == "task_complete"
+                for row in root_history
+            )
         if native_effect == "hosted-progress":
             child_request = next(
                 body
@@ -968,7 +995,7 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
                 model=model,
             )
             code, rows, err = await _collect(restored)
-            if native_effect is not None:
+            if unsafe_effect:
                 assert code != 0 and "unknown tool effects" in rows[0].get("message", ""), (
                     rows,
                     err,
@@ -985,7 +1012,7 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             assert any(turn["status"] == "cancelled" for turn in leaf["turns"])
             assert len(peer.requests) == before
             assert not (tmp_path / "effects").exists()
-        if native_effect is not None:
+        if unsafe_effect:
             return
         restored = await start(
             peer,
@@ -995,6 +1022,7 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             depth,
             identity=opened["opened"],
             no_children=no_children,
+            model=model,
         )
         code, rows, err = await _collect(restored)
         assert code == 0 and rows[0]["opened"] == opened["opened"], (rows, err)

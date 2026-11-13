@@ -897,9 +897,31 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     } else {
         HashSet::new()
     };
+    let mut active_root_turns = HashSet::new();
+    for row in &history {
+        match row {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                active_root_turns.insert(event.turn_id.as_str());
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                active_root_turns.remove(event.turn_id.as_str());
+            }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
+                if let Some(turn) = event.turn_id.as_deref() {
+                    active_root_turns.remove(turn);
+                }
+            }
+            _ => {}
+        }
+    }
+    let interrupted_root_turns: Vec<_> = request
+        .root_recovery_turns
+        .iter()
+        .filter(|turn| active_root_turns.contains(turn.as_str()))
+        .cloned()
+        .collect();
     let root_automatic = request.automatic_root_turns.clone().unwrap_or_else(|| {
-        request
-            .root_recovery_turns
+        interrupted_root_turns
             .iter()
             .filter(|turn| {
                 !root_receipts
@@ -915,7 +937,11 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
             .all(|turn| request.root_recovery_turns.contains(turn)),
         "Invalid automatic root recovery turn"
     );
-    validate_automatic_sampling(&history, state.id, &root_automatic)?;
+    let root_automatic: Vec<_> = root_automatic
+        .into_iter()
+        .filter(|turn| interrupted_root_turns.contains(turn))
+        .collect();
+    validate_sampling_effects(&history, state.id, &interrupted_root_turns, &root_automatic)?;
     let (root_append, protected) = plan(&history, &root_receipts)?;
     validate_interrupted_effects(
         &history,
@@ -955,7 +981,7 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
                 .all(|turn| expected.interrupted.contains(turn)),
             "Invalid automatic descendant recovery turn"
         );
-        validate_automatic_sampling(&history, id, &automatic)?;
+        validate_sampling_effects(&history, id, &expected.interrupted, &automatic)?;
         let (outputs, protected) = plan(&history, &receipts)?;
         if !protected.is_empty() {
             protected_children.insert(id.to_string(), protected);
@@ -1009,27 +1035,8 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     // Validate every supplied result before recording any part of the batch.
     // Publish interrupted ancestors before receipts that could clear the last
     // unresolved call and allow the next open without confirmations.
-    let mut active_root_turns = HashSet::new();
-    for row in &history {
-        match row {
-            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                active_root_turns.insert(event.turn_id.as_str());
-            }
-            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
-                active_root_turns.remove(event.turn_id.as_str());
-            }
-            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
-                if let Some(turn) = event.turn_id.as_deref() {
-                    active_root_turns.remove(turn);
-                }
-            }
-            _ => {}
-        }
-    }
-    let root_interruptions: Vec<_> = request
-        .root_recovery_turns
+    let root_interruptions: Vec<_> = interrupted_root_turns
         .iter()
-        .filter(|turn| active_root_turns.contains(turn.as_str()))
         .map(|turn| interruption(turn.clone()))
         .collect();
     if !root_interruptions.is_empty() {
@@ -1096,9 +1103,10 @@ fn completed_hosted_mcp(item: &ResponseItem) -> bool {
             && provider_fields.get("error").is_none_or(Value::is_null))
 }
 
-fn validate_automatic_sampling(
+fn validate_sampling_effects(
     history: &[RolloutItem],
     thread: ThreadId,
+    interrupted: &[String],
     automatic: &[String],
 ) -> Result<()> {
     let mut proven = HashSet::new();
@@ -1110,12 +1118,19 @@ fn validate_automatic_sampling(
         let Some(turn) = context.turn_id.as_deref() else {
             continue;
         };
-        if !automatic.iter().any(|selected| selected == turn) {
+        if !interrupted.iter().any(|selected| selected == turn) {
             continue;
         }
         let Some(receipt) = &context.sdk_receipt else {
             continue;
         };
+        // Exact call receipts retain the legacy missing-marker path, never
+        // permission to ignore explicit negative evidence for another effect.
+        if !automatic.iter().any(|selected| selected == turn)
+            && receipt.get("provider_effects_possible").is_none()
+        {
+            continue;
+        }
         ensure!(
             receipt.get("version").and_then(Value::as_u64) == Some(1)
                 && receipt.get("thread_id").and_then(Value::as_str) == Some(thread.as_str())
@@ -1123,7 +1138,7 @@ fn validate_automatic_sampling(
                     .get("provider_effects_possible")
                     .and_then(Value::as_bool)
                     == Some(false),
-            "Native local history contains unknown tool effects; automatic recovery lacks safe provider dispatch evidence"
+            "Native local history contains unknown tool effects; interruption lacks safe provider dispatch evidence"
         );
         proven.insert(turn);
     }
@@ -1799,45 +1814,92 @@ mod tests {
         let turns = vec!["turn".to_owned()];
         let safe =
             serde_json::json!({"version":1, "thread_id":thread, "provider_effects_possible":false});
-        assert!(validate_automatic_sampling(&[], thread, &turns).is_err());
+        assert!(validate_sampling_effects(&[], thread, &turns, &turns).is_err());
         assert!(
-            validate_automatic_sampling(&[context("turn", safe.clone())], thread, &turns).is_ok()
+            validate_sampling_effects(&[context("turn", safe.clone())], thread, &turns, &turns)
+                .is_ok()
         );
         assert!(
-            validate_automatic_sampling(&[context("other", safe.clone())], thread, &turns).is_err()
+            validate_sampling_effects(&[context("other", safe.clone())], thread, &turns, &turns)
+                .is_err()
         );
         for flag in [
-            serde_json::Value::Null,
             serde_json::json!(true),
+            serde_json::Value::Null,
             serde_json::json!("false"),
         ] {
             let mut receipt = safe.clone();
             receipt["provider_effects_possible"] = flag;
             assert!(
-                validate_automatic_sampling(
+                validate_sampling_effects(
                     &[
                         context("turn", safe.clone()),
                         context("turn", receipt.clone())
                     ],
                     thread,
+                    &turns,
                     &turns
                 )
                 .is_err()
             );
-            assert!(validate_automatic_sampling(&[context("turn", receipt)], thread, &[]).is_ok());
+            assert!(
+                validate_sampling_effects(&[context("turn", receipt)], thread, &turns, &[])
+                    .is_err()
+            );
         }
         let mut legacy = safe.clone();
         legacy
             .as_object_mut()
             .unwrap()
             .remove("provider_effects_possible");
-        assert!(validate_automatic_sampling(&[context("turn", legacy)], thread, &turns).is_err());
+        assert!(
+            validate_sampling_effects(&[context("turn", legacy)], thread, &turns, &turns).is_err()
+        );
+        let mut legacy_receipt = safe.clone();
+        legacy_receipt
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_effects_possible");
+        assert!(
+            validate_sampling_effects(&[context("turn", legacy_receipt)], thread, &turns, &[])
+                .is_ok()
+        );
+        let mut true_receipt = safe.clone();
+        true_receipt["provider_effects_possible"] = true.into();
+        assert!(
+            validate_sampling_effects(
+                &[
+                    context("turn", true_receipt.clone()),
+                    context("turn", safe.clone())
+                ],
+                thread,
+                &turns,
+                &[]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_sampling_effects(
+                &[
+                    context("settled", true_receipt),
+                    context("turn", safe.clone())
+                ],
+                thread,
+                &turns,
+                &turns
+            )
+            .is_ok()
+        );
         let mut foreign = safe.clone();
         foreign["thread_id"] = ThreadId::new().to_string().into();
-        assert!(validate_automatic_sampling(&[context("turn", foreign)], thread, &turns).is_err());
+        assert!(
+            validate_sampling_effects(&[context("turn", foreign)], thread, &turns, &turns).is_err()
+        );
         let mut unknown = safe;
         unknown["version"] = 2.into();
-        assert!(validate_automatic_sampling(&[context("turn", unknown)], thread, &turns).is_err());
+        assert!(
+            validate_sampling_effects(&[context("turn", unknown)], thread, &turns, &turns).is_err()
+        );
     }
 
     #[test]
