@@ -639,10 +639,13 @@ def test_single_sdk_producer_checks_installed_wheel_before_upload() -> None:
     assert not any(name.startswith("packaged-contract-") for name in jobs)
     for platform in ("linux", "macos"):
         assert jobs[f"produce-{platform}"]["needs"] == "changes"
-        assert jobs[f"produce-{platform}"]["if"] == "needs.changes.outputs.code == 'true'"
+        assert jobs[f"produce-{platform}"]["if"] == (
+            "needs.changes.outputs.warm != 'true' && needs.changes.outputs.code == 'true'"
+        )
         assert set(jobs[f"native-{platform}"]["needs"]) == {
             "changes",
             "produce-linux",
+            "produce-linux-arm64",
             "produce-windows",
             "produce-macos",
         }
@@ -814,24 +817,34 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     workflow = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
     assert "workflow_dispatch" in workflow["on"]
     jobs = workflow["jobs"]
-    for platform in ("linux", "macos"):
-        producer = jobs[f"produce-{platform}"]
-        assert producer["needs"] == "changes"
-        assert producer["if"] == "needs.changes.outputs.code == 'true'"
     producer = jobs["produce-windows"]
     assert producer["needs"] == "changes"
     assert producer["if"] == (
-        "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'"
+        "needs.changes.outputs.warm != 'true' && needs.changes.outputs.code == 'true' && "
+        "needs.changes.outputs.windows == 'true'"
     )
-    suites = jobs["tests-windows"]
-    assert suites["needs"] == "native-windows"
-    assert suites["if"] == "${{ !inputs.native_only }}"
-    assert suites["strategy"]["matrix"]["python-version"] == ["3.10", "3.14"]
-    assert suites["runs-on"] == (
-        "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
-        '\'{"group":"codex-runners","labels":"codex-windows-x64"}\' || '
-        "'\"windows-latest\"') }}"
+    suites = jobs["tests-windows-shards"]
+    assert set(suites["needs"]) == {
+        "changes",
+        "produce-linux",
+        "produce-linux-arm64",
+        "produce-windows",
+        "produce-macos",
+    }
+    assert suites["strategy"]["matrix"] == {
+        "python-version": ["3.10", "3.14"],
+        "shard": ["0", "1"],
+    }
+    assert "codex-windows-x64" in suites["runs-on"]
+    source = next(
+        step for step in suites["steps"] if step.get("name") == "Use the shared native build"
     )
+    assert "needs.changes.outputs.native_source_run" in source["with"]["source-run"]
+    assert "needs.produce-windows.outputs.artifact_id" in source["with"]["snapshots"]
+    gate = jobs["tests-windows"]
+    assert gate["needs"] == "tests-windows-shards"
+    assert gate["strategy"]["matrix"]["python-version"] == ["3.10", "3.14"]
+    assert gate["steps"][0]["run"] == 'test "$RESULT" = success'
     assert "packaged-contract-windows" not in jobs
     win_typecheck = jobs["mypy-win32"]
     assert win_typecheck["needs"] == "native-linux"
@@ -987,6 +1000,18 @@ def test_native_selection_routes_stack_sources_and_pr_provenance(
 @pytest.mark.parametrize(
     "scenario",
     [
+        "warm_replay_reuse",
+        "warm_replay_tree_changed",
+        "warm_replay_arm_missing",
+        "warm_replay_arm_failed",
+        "warm_replay_arm_late",
+        "warm_replay_qualification_failed",
+        "warm_replay_failed_run",
+        "warm_replay_wrong_branch",
+        "warm_replay_wrong_workflow",
+        "warm_replay_context_wrong",
+        "warm_replay_expired",
+        "warm_replay_untrusted",
         "reuse",
         "host_autocrlf",
         "python_dependencies_changed",
@@ -1180,6 +1205,8 @@ def test_native_build_selection(
     import urllib.parse
     import urllib.request
 
+    warm_replay = scenario.startswith("warm_replay_")
+    scenario = scenario.removeprefix("warm_replay_")
     dependency_cache = scenario.startswith("dependencies_")
     prefer_wheel = scenario == "dependencies_prefer_wheel"
     missing_cleanup = scenario == "dependencies_missing_cleanup"
@@ -1618,7 +1645,7 @@ def test_native_build_selection(
         donor = _commit(repo, "unrelated.txt")
         _git(repo, "checkout", "main")
     else:
-        donor = base
+        donor = head if warm_replay and scenario != "tree_changed" else base
     repository = "openai/openai-agents-python"
     pr_donor = scenario.startswith("pr_") or scenario == "push_pr_source"
     current_pr = pr_donor and scenario not in {"pr_default_merged", "push_pr_source"}
@@ -1674,6 +1701,8 @@ def test_native_build_selection(
         if scenario in {"failed_run", "retried_during_selection"}
         else "success",
     }
+    if warm_replay and scenario != "wrong_branch":
+        source["head_branch"] = "ci/hillclimb/python-warm-seed-10"
     source["referenced_workflows"] = [
         {
             "path": f"{repository}/{path}@{donor}",
@@ -1859,6 +1888,7 @@ def test_native_build_selection(
             ("windows", "windows-latest"),
             ("macos", "macos-latest"),
         )
+        + ((("linux-arm64", "ubuntu-24.04-arm"),) if warm_replay else ())
     ]
     if dependency_cache:
         for job in jobs:
@@ -1897,6 +1927,7 @@ def test_native_build_selection(
                 "native-snapshot-Windows-X64",
                 "native-snapshot-macOS-ARM64",
             )
+            + (("native-snapshot-Linux-ARM64",) if warm_replay else ())
         )
     ]
     if prefer_wheel:
@@ -1966,6 +1997,7 @@ def test_native_build_selection(
             ("windows", "windows-latest"),
             ("macos", "macos-latest"),
         )
+        + ((("linux-arm64", "ubuntu-24.04-arm"),) if warm_replay else ())
     )
     if scenario == "cross_platform_interleaving":
         jobs.append({"name": "tests (3.11)", "started_at": "2026-11-04T01:00:04Z"})
@@ -1996,6 +2028,29 @@ def test_native_build_selection(
         )
     if scenario == "invalid_snapshot_digest":
         artifacts[0]["digest"] = "invalid"
+
+    if warm_replay:
+        if scenario == "arm_missing":
+            jobs = [job for job in jobs if "linux-arm64 /" not in job["name"]]
+            artifacts = [
+                artifact for artifact in artifacts if "Linux-ARM64" not in artifact["name"]
+            ]
+        elif scenario == "arm_failed":
+            next(job for job in jobs if job["name"].startswith("produce-linux-arm64 /"))[
+                "conclusion"
+            ] = "failure"
+        elif scenario == "arm_late":
+            publication = next(
+                job for job in jobs if job["name"].startswith("produce-linux-arm64 /")
+            )["steps"][-1]
+            publication.update(
+                started_at="2026-11-04T01:00:29Z", completed_at="2026-11-04T01:00:30Z"
+            )
+            next(artifact for artifact in artifacts if "Linux-ARM64" in artifact["name"])[
+                "created_at"
+            ] = "2026-11-04T01:00:29Z"
+        elif scenario == "context_wrong":
+            source["referenced_workflows"][0]["sha"] = "a" * 40
 
     from zipfile import ZipFile
 
@@ -2295,6 +2350,33 @@ def test_native_build_selection(
     if scenario == "pr_missing_number":
         monkeypatch.setenv("CURRENT_PR", "")
     script = selection["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
+    if warm_replay:
+        monkeypatch.setenv("WARM_SNAPSHOT_REPLAY", "true")
+        monkeypatch.setenv("REQUIRE_ARM64", "true")
+        monkeypatch.setenv("REQUIRE_WINDOWS", "true")
+        monkeypatch.setenv("GITHUB_REF_NAME", "ci/hillclimb/python-warm-consumer-10")
+        monkeypatch.setenv("SOURCE_BRANCH", "ci/hillclimb/python-warm-seed-10")
+        if scenario != "reuse":
+            with pytest.raises(SystemExit, match="Approved warm replay requires"):
+                exec(compile(script, workflow_path, "exec"), {})
+            assert not output.exists()
+            return
+        exec(compile(script, workflow_path, "exec"), {})
+        fields = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert fields["warm"] == "true" and fields["run_id"] == "123"
+        selected = json.loads(fields["artifacts"])
+        assert set(selected) == {"Linux-X64", "Windows-X64", "macOS-ARM64", "Linux-ARM64"}
+        for index, identity in enumerate(
+            ("Linux-X64", "Windows-X64", "macOS-ARM64", "Linux-ARM64")
+        ):
+            assert selected[identity] == {
+                "id": 1000 + index,
+                "digest": "sha256:" + "a" * 64,
+                "provenance": provenance,
+                "name": "native-snapshot-" + identity + "-" + native_identity,
+            }
+        assert not fields.get("dependency_run")
+        return
     if scenario.startswith("incomplete_"):
         with pytest.raises(SystemExit, match="Incomplete source metadata"):
             exec(compile(script, workflow_path, "exec"), {})

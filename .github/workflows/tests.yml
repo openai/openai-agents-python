@@ -47,6 +47,7 @@ jobs:
       actions: read
       pull-requests: read
     outputs:
+      warm: ${{ steps.native-source.outputs.warm }}
       code: ${{ steps.changes.outputs.run }}
       windows: ${{ steps.release-windows.outputs.run }}
       native_source_run: ${{ steps.native-source.outputs.run_id }}
@@ -178,7 +179,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_BRANCH: >-
-            ${{ ((github.event.pull_request.stack.base.ref || github.base_ref ||
+            ${{ (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10') &&
+            'ci/hillclimb/python-warm-seed-10' || ((github.event.pull_request.stack.base.ref || github.base_ref ||
             steps.producer-identity.outputs.base_ref || github.ref_name) == 'feat/codex-harness' ||
              startsWith(github.ref_name, 'ci/hillclimb/')) &&
             'feat/codex-harness' || github.event.repository.default_branch }}
@@ -187,6 +189,8 @@ jobs:
           CURRENT_HEAD_REF: ${{ github.head_ref || github.ref_name }}
           CURRENT_BASE_REF: ${{ github.base_ref || steps.producer-identity.outputs.base_ref || '' }}
           REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
+          REQUIRE_ARM64: ${{ github.event_name == 'push' && (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10') }}
+          WARM_SNAPSHOT_REPLAY: ${{ github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref_name == 'ci/hillclimb/python-warm-consumer-10' }}
         run: |
           python -I -S - <<'PYTHON'
           import json
@@ -203,6 +207,10 @@ jobs:
           from zipfile import ZipFile
 
           repo = os.environ['GITHUB_REPOSITORY']
+          warm_replay = (os.environ.get('WARM_SNAPSHOT_REPLAY') == 'true'
+                         and repo == 'openai/openai-agents-python'
+                         and os.environ['GITHUB_EVENT_NAME'] == 'push'
+                         and os.environ.get('GITHUB_REF_NAME') == 'ci/hillclimb/python-warm-consumer-10')
           api = os.environ['GITHUB_API_URL'] + '/repos/' + repo + '/actions'
           headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
           download_archive = runpy.run_path('.github/scripts/download-native-snapshot.py')['download_archive']
@@ -270,6 +278,13 @@ jobs:
                           or item['ref'] != 'refs/heads/' + run['head_branch']):
                       return False
               source = run['head_sha']
+              if warm_replay:
+                  if not canonical_source or run['head_branch'] != 'ci/hillclimb/python-warm-seed-10':
+                      return False
+                  original_tree = subprocess.check_output(['git', 'rev-parse', source + '^{tree}'], text=True).strip()
+                  current_tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+                  if original_tree != current_tree:
+                      return False
               for path in expected | {run['path'], '.github/workflows/tests.yml'}:
                   prior = subprocess.run(['git', 'show', f'{source}:{path}'], capture_output=True)
                   if prior.returncode or prior.stdout != Path(path).read_bytes():
@@ -385,6 +400,8 @@ jobs:
               elif provenance['pull_request'] is not None:
                   raise SystemExit('Canonical native producer has unexpected PR scope')
               platforms = {'linux': ('ubuntu-24.04', 'Linux-X64'), 'macos': ('macos-latest', 'macOS-ARM64')}
+              if not dependencies and os.environ.get('REQUIRE_ARM64') == 'true':
+                  platforms['linux-arm64'] = ('ubuntu-24.04-arm', 'Linux-ARM64')
               if os.environ.get('REQUIRE_WINDOWS') != 'false':
                   platforms['windows'] = ('windows-latest', 'Windows-X64')
               selected = {}
@@ -476,17 +493,21 @@ jobs:
                       if selected:
                           run_key, artifact_key = ('dependency_run', 'dependencies') if dependencies else ('run_id', 'artifacts')
                           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                              if warm_replay and not dependencies and 'Linux-ARM64' in selected:
+                                  output.write('warm=true\n')
                               output.write(f"{run_key}={run['id']}\n")
                               output.write(artifact_key + '=' + json.dumps(selected, sort_keys=True) + '\n')
                           print(f"Reusing {'Rust dependencies' if dependencies else 'native build'} from {repo} push run {run['id']} at {run['head_sha']}")
                           return
+                  if warm_replay and not dependencies:
+                      raise SystemExit('Approved warm replay requires a completed verified four-platform seed')
               print('No qualified native build or dependencies are available. Building from source now.')
           select()
           PYTHON
 
   produce-linux:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.warm != 'true' && needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
       runner: ubuntu-24.04
@@ -498,7 +519,7 @@ jobs:
 
   produce-windows:
     needs: changes
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'
+    if: needs.changes.outputs.warm != 'true' && needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
       runner: windows-latest
@@ -510,7 +531,7 @@ jobs:
 
   produce-macos:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.warm != 'true' && needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
       runner: macos-latest
@@ -523,6 +544,7 @@ jobs:
   produce-linux-arm64:
     needs: changes
     if: >-
+      needs.changes.outputs.warm != 'true' &&
       !inputs.native_only && needs.changes.outputs.code == 'true' &&
       ((github.event_name == 'push' && (github.ref == 'refs/heads/feat/codex-harness' || startsWith(github.ref, 'refs/heads/ci/hillclimb/'))) ||
       (github.event_name == 'pull_request' && github.base_ref == 'feat/codex-harness') ||
@@ -545,9 +567,15 @@ jobs:
   native-linux-arm64:
     # Push runs can supply legacy snapshots. Their publication precedes earliest_sdk.
     needs: [changes, produce-linux-arm64, produce-linux, produce-windows, produce-macos]
-    if: github.event_name == 'push'
+    if: >-
+      !cancelled() &&
+      ((needs.changes.outputs.warm == 'true' && needs.changes.result == 'success' && needs.changes.outputs.code == 'true') ||
+      ((github.event_name == 'push' && needs.changes.outputs.code == 'true' && needs.produce-linux-arm64.result == 'success' && needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' && (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success' || needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped')) &&
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
+      native_source_run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || '' }}
+      native_artifacts: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_artifacts || '{}' }}
       runner: ubuntu-24.04-arm
       artifact_id: ${{ needs.produce-linux-arm64.outputs.artifact_id }}
       artifact_digest: ${{ needs.produce-linux-arm64.outputs.artifact_digest }}
@@ -556,53 +584,70 @@ jobs:
   native-linux:
     # PRs qualify platform-specific artifacts independently of Windows failures.
     # Push runs retain the producer ordering for reusable snapshots.
-    needs: [changes, produce-linux, produce-windows, produce-macos]
+    needs: [changes, produce-linux, produce-windows, produce-macos, produce-linux-arm64]
     if: >-
-      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      !cancelled() &&
+      ((needs.changes.outputs.warm == 'true' && needs.changes.result == 'success' && needs.changes.outputs.code == 'true') ||
+      ((!cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
       (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
       (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
-      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))) &&
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
+      native_source_run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || '' }}
+      native_artifacts: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_artifacts || '{}' }}
       runner: ubuntu-24.04
       artifact_id: ${{ needs.produce-linux.outputs.artifact_id }}
       artifact_digest: ${{ needs.produce-linux.outputs.artifact_digest }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   native-windows:
-    needs: [changes, produce-linux, produce-windows, produce-macos]
+    needs: [changes, produce-linux, produce-windows, produce-macos, produce-linux-arm64]
     if: >-
-      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      !cancelled() &&
+      ((needs.changes.outputs.warm == 'true' && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true') ||
+      ((!cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
       ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
-      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped')) && needs.changes.outputs.windows == 'true'
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped')) && needs.changes.outputs.windows == 'true') &&
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
+      native_source_run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || '' }}
+      native_artifacts: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_artifacts || '{}' }}
       runner: windows-latest
       artifact_id: ${{ needs.produce-windows.outputs.artifact_id }}
       artifact_digest: ${{ needs.produce-windows.outputs.artifact_digest }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   native-macos:
-    needs: [changes, produce-linux, produce-windows, produce-macos]
+    needs: [changes, produce-linux, produce-windows, produce-macos, produce-linux-arm64]
     if: >-
-      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      !cancelled() &&
+      ((needs.changes.outputs.warm == 'true' && needs.changes.result == 'success' && needs.changes.outputs.code == 'true') ||
+      ((!cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
       (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
       (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
-      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))) &&
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
+      native_source_run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || '' }}
+      native_artifacts: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_artifacts || '{}' }}
       runner: macos-latest
       artifact_id: ${{ needs.produce-macos.outputs.artifact_id }}
       artifact_digest: ${{ needs.produce-macos.outputs.artifact_digest }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   lint:
-    needs: [changes, produce-linux, produce-windows, produce-macos]
+    needs: [changes, produce-linux, produce-windows, produce-macos, produce-linux-arm64]
     if: >-
-      !inputs.native_only &&
+      !cancelled() &&
+      ((!inputs.native_only && needs.changes.outputs.warm == 'true' && needs.changes.result == 'success' && needs.changes.outputs.code == 'true') ||
+      ((!inputs.native_only &&
       !cancelled() && needs.changes.result == 'success' &&
       ((needs.changes.outputs.code == 'false' && needs.produce-linux.result == 'skipped' &&
       needs.produce-windows.result == 'skipped' && needs.produce-macos.result == 'skipped') ||
@@ -610,7 +655,8 @@ jobs:
       needs.produce-macos.result == 'success' &&
       (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
       (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
-      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))) &&
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
     env:
       UV_NO_SYNC: "1"
       PYTHONPATH: src:packages/codex/src
@@ -864,11 +910,29 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
 
-  native-macos-sandbox:
-    if: ${{ !inputs.native_only }}
-    needs: native-macos
+  native-macos-sandbox-shards:
+    # Source tests install the current checkout with the same verified native
+    # payload used by package qualification, so the two can run in parallel.
+    needs: [changes, produce-linux, produce-linux-arm64, produce-windows, produce-macos]
+    if: >-
+      !inputs.native_only && !cancelled() && needs.changes.result == 'success' &&
+      needs.changes.outputs.code == 'true' &&
+      (needs.changes.outputs.warm == 'true' ||
+       (needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
+        (needs.produce-linux-arm64.result == 'success' ||
+         (needs.produce-linux-arm64.result == 'skipped' &&
+          !(github.event_name == 'push' &&
+            (github.ref == 'refs/heads/feat/codex-harness' || startsWith(github.ref, 'refs/heads/ci/hillclimb/'))))) &&
+        (needs.produce-windows.result == 'success' ||
+         (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped') ||
+         github.event_name == 'pull_request' || github.event_name == 'merge_group')))
     runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
+    name: macOS sandbox shard (${{ matrix.shard }})
     timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
@@ -890,6 +954,13 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          source-run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || github.run_id }}
+          snapshots: >-
+            ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_artifacts ||
+              format('{{"macOS-ARM64":{{"id":"{0}","digest":"sha256:{1}","provenance":{2},"name":"{3}"}}}}',
+                needs.produce-macos.outputs.artifact_id, needs.produce-macos.outputs.artifact_digest,
+                needs.changes.outputs.native_provenance, needs.produce-macos.outputs.artifact_name) }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -934,15 +1005,48 @@ jobs:
         env:
           PYTEST_ADDOPTS: "-ra -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
           PYTHONUNBUFFERED: "1"
-        run: make tests
+          SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
+          SDK_TEST_SHARD_COUNT: ${{ strategy.job-total }}
+        run: make tests-parallel
+      - name: Run serial tests after all workers exit
+        if: steps.changes.outputs.run == 'true' && matrix.shard == 0
+        timeout-minutes: 35
+        env:
+          PYTEST_ADDOPTS: "-ra -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
+          PYTHONUNBUFFERED: "1"
+        run: make tests-serial
       - name: Skip native macOS sandbox tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping native macOS sandbox tests for non-code changes."
 
-  tests-windows:
-    if: ${{ !inputs.native_only }}
-    needs: native-windows
+  native-macos-sandbox:
+    needs: native-macos-sandbox-shards
+    if: ${{ always() && needs.native-macos-sandbox-shards.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all macOS test shards
+        env:
+          RESULT: ${{ needs.native-macos-sandbox-shards.result }}
+        run: test "$RESULT" = success
+
+  tests-windows-shards:
+    # Source tests install the current checkout with the same verified native
+    # payload used by package qualification, so the two can run in parallel.
+    needs: [changes, produce-linux, produce-linux-arm64, produce-windows, produce-macos]
+    if: >-
+      !inputs.native_only && !cancelled() && needs.changes.result == 'success' &&
+      needs.changes.outputs.code == 'true' &&
+      (needs.changes.outputs.warm == 'true' ||
+       (needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
+        (needs.produce-linux-arm64.result == 'success' ||
+         (needs.produce-linux-arm64.result == 'skipped' &&
+          !(github.event_name == 'push' &&
+            (github.ref == 'refs/heads/feat/codex-harness' || startsWith(github.ref, 'refs/heads/ci/hillclimb/'))))) &&
+        (needs.produce-windows.result == 'success' ||
+         (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
+      && needs.changes.outputs.windows == 'true'
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
+    name: Windows test shard (${{ matrix.python-version }}, ${{ matrix.shard }})
     timeout-minutes: 100
     strategy:
       fail-fast: false
@@ -950,6 +1054,7 @@ jobs:
         python-version:
           - "3.10"
           - "3.14"
+        shard: [0, 1]
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
@@ -973,25 +1078,51 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          source-run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || github.run_id }}
+          snapshots: >-
+            ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_artifacts ||
+              format('{{"Windows-X64":{{"id":"{0}","digest":"sha256:{1}","provenance":{2},"name":"{3}"}}}}',
+                needs.produce-windows.outputs.artifact_id, needs.produce-windows.outputs.artifact_digest,
+                needs.changes.outputs.native_provenance, needs.produce-windows.outputs.artifact_name) }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: uv sync --group dev
       - name: Run parallel tests
         id: parallel-tests
         if: steps.changes.outputs.run == 'true'
+        env:
+          SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
+          SDK_TEST_SHARD_COUNT: 2
         # Native completions use loopback sockets on Windows.
         run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 4 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
       - name: Run serial tests after all workers exit
-        if: ${{ !cancelled() && (steps.parallel-tests.outcome == 'success' || steps.parallel-tests.outcome == 'failure') }}
+        if: ${{ !cancelled() && matrix.shard == 0 && (steps.parallel-tests.outcome == 'success' || steps.parallel-tests.outcome == 'failure') }}
         run: uv run python .github/scripts/run_serial_tests.py
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
 
+  tests-windows:
+    needs: tests-windows-shards
+    if: ${{ always() && needs.tests-windows-shards.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - name: Require all Windows test shards
+        env:
+          RESULT: ${{ needs.tests-windows-shards.result }}
+        run: test "$RESULT" = success
+
   build-docs:
-    needs: [changes, produce-linux, produce-windows, produce-macos]
+    needs: [changes, produce-linux, produce-windows, produce-macos, produce-linux-arm64]
     if: >-
-      !inputs.native_only &&
+      !cancelled() &&
+      ((!inputs.native_only && needs.changes.outputs.warm == 'true' && needs.changes.result == 'success' && needs.changes.outputs.code == 'true') ||
+      ((!inputs.native_only &&
       !cancelled() && needs.changes.result == 'success' &&
       ((needs.changes.outputs.code == 'false' && needs.produce-linux.result == 'skipped' &&
       needs.produce-windows.result == 'skipped' && needs.produce-macos.result == 'skipped') ||
@@ -999,7 +1130,8 @@ jobs:
       needs.produce-macos.result == 'success' &&
       (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
       (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
-      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))) &&
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     env:
