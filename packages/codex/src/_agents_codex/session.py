@@ -8447,7 +8447,7 @@ class Session(Generic[ContextT, OutputT]):
             # is cancelled. Retain its mutation ownership through the
             # admission acknowledgement before retirement can pass it.
             context = submission.tracing.context if submission.tracing is not None else None
-            tracing_args = {}
+            tracing_args: dict[str, Any] = {}
             if context is not None:
                 tracing_args["tracing_context"] = context
             if submission.parent_trace is not None:
