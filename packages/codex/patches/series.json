@@ -1075,7 +1075,11 @@
     {
       "path": "sdk-auditable-collaboration-history.patch",
       "sha256": "2c798b0e66ffce1ec2b1c7278220673db2edb79901851860c90f1d7d680534f1"
+    },
+    {
+      "path": "sdk-stamp-imported-history-retention.patch",
+      "sha256": "d9c3191b8fa82db77a7415e30480be559d293c3067acd1cab52d6316930d0844"
     }
   ],
-  "result_tree": "fd7c8874b66a234c70218dbed1e4ca22d5bac76f"
+  "result_tree": "5cc6b4e3a846dd087b4e58ed8cec9cc30ac54e11"
 }
