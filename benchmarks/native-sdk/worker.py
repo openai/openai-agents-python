@@ -355,7 +355,9 @@ def validate_receipts(workload, result, stats):
                 raise AssertionError(f"Incorrect tool-output history for {operation['id']}")
 
 
-def validate_transport(workload, stats, *, engine, response_mode, native_transport="http", peer_http_mode="h1"):
+def validate_transport(
+    workload, stats, *, engine, response_mode, native_transport="http", peer_http_mode="h1"
+):
     """Validate actual provider work, independent of public observation granularity."""
     expected_stream = workload.stream if engine == "v0" else response_mode == "streaming"
     expected_requests = (
@@ -383,9 +385,11 @@ def validate_transport(workload, stats, *, engine, response_mode, native_transpo
             if not connection or receipt.get("http_version") != expected_version:
                 raise ValueError("Actual HTTP protocol differs from the dual peer schedule")
             allowed_alpn = ("h2",) if expected_version == "2" else (None, "http/1.1")
-            if (connection.get("http_version") != expected_version
+            if (
+                connection.get("http_version") != expected_version
                 or receipt.get("tls_alpn_protocol") not in allowed_alpn
-                or connection.get("alpn_protocol") != receipt.get("tls_alpn_protocol")):
+                or connection.get("alpn_protocol") != receipt.get("tls_alpn_protocol")
+            ):
                 raise ValueError("Actual TLS/ALPN connection receipt differs from the request")
             if not websocket and receipt.get("response_body_complete") is not True:
                 raise ValueError("HTTP response body has not completed")
@@ -569,7 +573,8 @@ def main():
                         server_python,
                         "-B",
                         str(Path(__file__).with_name("protocol_peer.py")),
-                        "--peer-http-mode", args.peer_http_mode,
+                        "--peer-http-mode",
+                        args.peer_http_mode,
                         "--tools-per-round",
                         str(workload.tools_per_round),
                         "--tool-rounds",

@@ -176,9 +176,16 @@ class Peer:
                 for op_id, op in self.operations.items()
             },
             "receipts": list(self.receipts),
-            **({"http_server": getattr(self, "http_server", None),
-                "tls_transports": {str(row["id"]): row for row in self.tls_connections.values()}}
-               if getattr(self.args, "peer_http_mode", "h1") == "dual" else {}),
+            **(
+                {
+                    "http_server": getattr(self, "http_server", None),
+                    "tls_transports": {
+                        str(row["id"]): row for row in self.tls_connections.values()
+                    },
+                }
+                if getattr(self.args, "peer_http_mode", "h1") == "dual"
+                else {}
+            ),
         }
 
     def response(
@@ -407,18 +414,24 @@ class Peer:
             secure = request.transport.get_extra_info("ssl_object")
             if getattr(self.args, "peer_http_mode", "h1") == "dual":
                 version = "2" if request.version.major == 2 else "1.1"
-                connection = self.tls_connections.setdefault(secure, {
-                    "id": len(self.tls_connections) + 1,
-                    "http_version": version,
-                    "alpn_protocol": secure.selected_alpn_protocol(),
-                    "tls_version": secure.version(),
-                    "session_reused": secure.session_reused,
-                    "requests": 0,
-                })
+                connection = self.tls_connections.setdefault(
+                    secure,
+                    {
+                        "id": len(self.tls_connections) + 1,
+                        "http_version": version,
+                        "alpn_protocol": secure.selected_alpn_protocol(),
+                        "tls_version": secure.version(),
+                        "session_reused": secure.session_reused,
+                        "requests": 0,
+                    },
+                )
                 assert connection["http_version"] == version
                 connection["requests"] += 1
-                receipt.update(tls_connection_id=connection["id"], http_version=version,
-                               tls_alpn_protocol=connection["alpn_protocol"])
+                receipt.update(
+                    tls_connection_id=connection["id"],
+                    http_version=version,
+                    tls_alpn_protocol=connection["alpn_protocol"],
+                )
             receipt.update(
                 request_host=request.headers.get("Host"), tls_sni=self.tls_names.get(secure)
             )

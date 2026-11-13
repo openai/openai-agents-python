@@ -71,8 +71,7 @@ class Application:
         secure = scope["benchmark_ssl_object"]
         request = SimpleNamespace(
             headers=CIMultiDict(
-                (key.decode("latin1"), value.decode("latin1"))
-                for key, value in scope["headers"]
+                (key.decode("latin1"), value.decode("latin1")) for key, value in scope["headers"]
             ),
             transport=SimpleNamespace(get_extra_info=lambda name: secure),
             version=SimpleNamespace(
@@ -108,15 +107,28 @@ class Application:
             if started:
                 raise ConnectionError("Response failed after its headers were sent")
             started = True
-            headers = [(b"content-type", b"text/event-stream" if streaming else b"application/json")]
+            headers = [
+                (b"content-type", b"text/event-stream" if streaming else b"application/json")
+            ]
             if streaming:
                 headers.append((b"cache-control", b"no-cache"))
                 await send({"type": "http.response.start", "status": status, "headers": headers})
                 events = self.peer.events(response, chunks)
                 for index, event in enumerate(events):
-                    frame = b"event: " + event["type"].encode() + b"\ndata: " + self.encode(event) + b"\n\n"
-                    await send({"type": "http.response.body", "body": frame,
-                                "more_body": index + 1 < len(events)})
+                    frame = (
+                        b"event: "
+                        + event["type"].encode()
+                        + b"\ndata: "
+                        + self.encode(event)
+                        + b"\n\n"
+                    )
+                    await send(
+                        {
+                            "type": "http.response.body",
+                            "body": frame,
+                            "more_body": index + 1 < len(events),
+                        }
+                    )
                     self.peer.response_bytes += len(frame)
                     if event["type"] == "response.output_text.delta":
                         self.peer.emitted_text_chunks += 1
@@ -157,11 +169,14 @@ def connection_server(original):
 async def serve(args, peer, encode):
     if importlib.metadata.version("hypercorn") != HYPERCORN_VERSION:
         raise RuntimeError("The dual peer requires hypercorn==" + HYPERCORN_VERSION)
-    peer.http_server = {"mode": "dual", "hypercorn": HYPERCORN_VERSION,
-                        "h2": importlib.metadata.version("h2")}
+    peer.http_server = {
+        "mode": "dual",
+        "hypercorn": HYPERCORN_VERSION,
+        "h2": importlib.metadata.version("h2"),
+    }
+    import hypercorn.asyncio.run as hypercorn_run
     from aiohttp import web
     from hypercorn.asyncio import serve as hypercorn_serve
-    import hypercorn.asyncio.run as hypercorn_run
     from hypercorn.config import Config
     from hypercorn.logging import Logger
 
@@ -209,6 +224,7 @@ async def serve(args, peer, encode):
         return web.json_response(peer.snapshot(summary=request.query.get("summary") == "1"))
 
     control.router.add_get("/stats", stats)
+
     async def health(request):
         return web.json_response({"ok": True})
 
@@ -219,7 +235,9 @@ async def serve(args, peer, encode):
         await runner.setup()
         await web.TCPSite(runner, "127.0.0.1", args.port).start()
         task = asyncio.create_task(
-            hypercorn_serve(Application(peer, encode), config, shutdown_trigger=stop.wait, mode="asgi")
+            hypercorn_serve(
+                Application(peer, encode), config, shutdown_trigger=stop.wait, mode="asgi"
+            )
         )
         await asyncio.wait_for(ready.wait(), timeout=10)
         if task.done():
@@ -227,8 +245,15 @@ async def serve(args, peer, encode):
             raise RuntimeError("Dual peer stopped before readiness")
         port = sockets.secure_sockets[0].getsockname()[1]
         origin = "https://api.openai.com" if port == 443 else f"https://api.openai.com:{port}"
-        print(json.dumps({"base_url": origin + "/v1",
-                          "control_base_url": f"http://127.0.0.1:{runner.addresses[0][1]}/v1"}), flush=True)
+        print(
+            json.dumps(
+                {
+                    "base_url": origin + "/v1",
+                    "control_base_url": f"http://127.0.0.1:{runner.addresses[0][1]}/v1",
+                }
+            ),
+            flush=True,
+        )
         await stop.wait()
     finally:
         stop.set()
