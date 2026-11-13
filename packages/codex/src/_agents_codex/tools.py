@@ -12,6 +12,7 @@ from collections.abc import (
 )
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
+from types import MappingProxyType
 from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Literal, cast
 
 from pydantic import (
@@ -656,6 +657,46 @@ def _rebuild_tool_output_adapter(adapter: TypeAdapter[Any], output_type: Any) ->
     return adapter
 
 
+def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Mapping[str, Any]:
+    # deepcopy cannot copy mappingproxy, which a validated Mapping can produce.
+    # Prepare only those copies; deepcopy still owns copying all other values.
+    memo: dict[int, Any] = {}
+    proxies: list[tuple[Mapping[Any, Any], dict[Any, Any]]] = []
+    seen: set[int] = set()
+    pending: list[Any] = [arguments]
+    while pending:
+        value = pending.pop()
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(value, MappingProxyType):
+            backing: dict[Any, Any] = {}
+            memo[identity] = MappingProxyType(backing)
+            proxies.append((value, backing))
+            pending.extend(value.values())
+        elif type(value) is dict:
+            pending.extend(value.values())
+        elif type(value) in (list, tuple, set, frozenset):
+            pending.extend(value)
+        elif isinstance(value, BaseModel):
+            pending.extend(
+                value.__dict__[name] for name in type(value).model_fields if name in value.__dict__
+            )
+            pending.append(value.__pydantic_extra__)
+    # Register every proxy first so shared and recursive values use one memo.
+    try:
+        for original, backing in proxies:
+            backing.update(deepcopy(dict(original), memo))
+        return MappingProxyType(deepcopy(arguments, memo))
+    except Exception as error:
+        tool_identity = f"{tool.namespace}.{tool.name}" if tool.namespace else tool.name
+        raise TypeError(
+            f"Tool {tool_identity!r} requires deep-copyable validated arguments for "
+            "ToolContext.effective_arguments, including private model state"
+        ) from error
+
+
 @dataclass(frozen=True)
 class _CapturedFunction:
     """One immutable snapshot for schema publication and callback execution."""
@@ -724,6 +765,29 @@ class _CapturedFunction:
 
     def _arguments(self, parsed: BaseModel) -> dict[str, Any]:
         return {name: getattr(parsed, name) for name in self.field_names}
+
+    def _validated_result(self, value: Any) -> tuple[Any, ToolOutput, bool] | None:
+        """Validate the callback result and prepare its SDK output representation."""
+        background = isinstance(value, BackgroundResult)
+        try:
+            value = self.output_adapter.validate_python(value)
+            content = value.value if isinstance(value, BackgroundResult) else value
+            if isinstance(content, ToolOutput):
+                output = content
+            else:
+                wire = self.output_adapter.dump_json(value, warnings="error").decode()
+                if isinstance(value, BackgroundResult):
+                    wire = json.dumps(
+                        json.loads(wire)["value"], ensure_ascii=False, separators=(",", ":")
+                    )
+                # Declared strings retain raw text; other results keep JSON wire semantics.
+                text = json.loads(wire) if isinstance(content, str) else wire
+                output = ToolOutput.text(text if isinstance(text, str) else wire)
+            output._validate()
+        except Exception:
+            # Callers can report a validation failure without retaining the raw payload.
+            return None
+        return value, output, background
 
 
 @dataclass(frozen=True)

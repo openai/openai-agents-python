@@ -15,7 +15,7 @@ from .retry import ModelRetrySettings
 from .tools import ToolRef
 
 if TYPE_CHECKING:
-    from openai import Omit
+    from openai import Omit as Omit
 
     from .agent import ModelSettings
 else:

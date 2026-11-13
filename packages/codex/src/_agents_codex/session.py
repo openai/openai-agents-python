@@ -354,6 +354,7 @@ from .tools import (
     _restore_operation_slots as _restore_operation_slots,
     _restore_python_catalog as _restore_python_catalog,
     _saved_python_ref as _saved_python_ref,
+    _snapshot_function_arguments,
     _ToolCatalog as _ToolCatalog,
 )
 from .turn import (
@@ -2500,46 +2501,6 @@ def _same_approval_arguments(
     if hasattr(left, "__dict__"):
         return _same_approval_arguments(vars(left), vars(right), seen)
     return bool(left == right)
-
-
-def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Mapping[str, Any]:
-    # deepcopy cannot copy mappingproxy, which a validated Mapping can produce.
-    # Prepare only those copies; deepcopy still owns copying all other values.
-    memo: dict[int, Any] = {}
-    proxies: list[tuple[Mapping[Any, Any], dict[Any, Any]]] = []
-    seen: set[int] = set()
-    pending: list[Any] = [arguments]
-    while pending:
-        value = pending.pop()
-        identity = id(value)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        if isinstance(value, MappingProxyType):
-            backing: dict[Any, Any] = {}
-            memo[identity] = MappingProxyType(backing)
-            proxies.append((value, backing))
-            pending.extend(value.values())
-        elif type(value) is dict:
-            pending.extend(value.values())
-        elif type(value) in (list, tuple, set, frozenset):
-            pending.extend(value)
-        elif isinstance(value, BaseModel):
-            pending.extend(
-                value.__dict__[name] for name in type(value).model_fields if name in value.__dict__
-            )
-            pending.append(value.__pydantic_extra__)
-    # Register every proxy first so shared and recursive values use one memo.
-    try:
-        for original, backing in proxies:
-            backing.update(deepcopy(dict(original), memo))
-        return MappingProxyType(deepcopy(arguments, memo))
-    except Exception as error:
-        tool_identity = f"{tool.namespace}.{tool.name}" if tool.namespace else tool.name
-        raise TypeError(
-            f"Tool {tool_identity!r} requires deep-copyable validated arguments for "
-            "ToolContext.effective_arguments, including private model state"
-        ) from error
 
 
 @dataclass(frozen=True)
@@ -12704,6 +12665,7 @@ class Session(Generic[ContextT, OutputT]):
                 return
             declaration = self._agent_for_message(message)
             retry = declaration.model_settings.get("retry")
+            policy: RetryPolicy | None
             if isinstance(state, _Submission) and state.retry_policy_override is not None:
                 policy = state.retry_policy_override
             else:
@@ -16499,33 +16461,14 @@ class Session(Generic[ContextT, OutputT]):
             output: ToolOutput | None = failure_output
             background = False
             if failure_output is None:
-                background = isinstance(value, BackgroundResult)
-                content: Any = None
-                try:
-                    value = entry.output_adapter.validate_python(value)
-                    content = value.value if isinstance(value, BackgroundResult) else value
-                    if isinstance(content, ToolOutput):
-                        output = content
-                    else:
-                        wire = entry.output_adapter.dump_json(value, warnings="error").decode()
-                        if isinstance(value, BackgroundResult):
-                            wire = json.dumps(
-                                json.loads(wire)["value"], ensure_ascii=False, separators=(",", ":")
-                            )
-                        # Declared strings retain raw text; other results keep JSON wire semantics.
-                        text = json.loads(wire) if isinstance(content, str) else wire
-                        output = ToolOutput.text(text if isinstance(text, str) else wire)
-                        del wire, text
-                    output._validate()
-                except Exception:
-                    output = None
-                finally:
-                    del content
-                if output is None:
+                result = entry._validated_result(value)
+                if result is None:
                     # End ownership of the original admission request and every
                     # invocation data reference without altering caller-owned objects.
                     del request, message, formatter_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
+                value, output, background = result
+                del result
             if entry.after is not None and failure_output is None:
                 assert context is not None
                 original_output = output
