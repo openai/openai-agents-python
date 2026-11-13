@@ -1236,13 +1236,13 @@ class RealtimeSession:
             for sibling, settled in owned.automatic_order.items():
                 if sibling in self._finished_functions:
                     settled.set()
-        previous = None
+        if call_id not in owned.automatic_order:
+            return
         for sibling, settled in owned.automatic_order.items():
             if sibling == call_id:
-                if previous is not None:
-                    await previous.wait()
                 return
-            previous = settled
+            # Rejected approvals can settle before their earlier siblings.
+            await settled.wait()
 
     def _tool_body_started(
         self, source: Any, wire_name: str, tool: FunctionTool[Any, Any, Any]

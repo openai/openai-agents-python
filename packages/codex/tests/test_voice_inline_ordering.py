@@ -328,3 +328,55 @@ async def test_mixed_automatic_namespaced_sibling_keeps_provider_source_order(
             assert order == ["first", "second", "namespaced"]
         finally:
             release.set()
+
+
+async def test_rejected_middle_approval_does_not_release_later_function(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    order: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def first() -> str:
+        order.append("first")
+        return "FIRST"
+
+    @function_tool(needs_approval=True)
+    async def middle() -> str:
+        order.append("middle")
+        return "MIDDLE"
+
+    @function_tool
+    async def last() -> str:
+        order.append("last")
+        return "LAST"
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-rejected-predecessor",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Use tools.", tools=[first, middle, last], provider=provider).session(
+            max_function_concurrency=1
+        ) as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")),
+        aclosing(cast(AsyncGenerator[Interaction, None], session.interactions())) as interactions,
+    ):
+        await peer.functions(
+            [("first", {}, "first"), ("middle", {}, "middle"), ("last", {}, "last")],
+            response_id="middle-rejected",
+        )
+        pending_first = pending_middle = None
+        async for event in interactions:
+            pending_first = first.match(event) or pending_first
+            pending_middle = middle.match(event) or pending_middle
+            if pending_first is not None and pending_middle is not None:
+                break
+        assert pending_first is not None and pending_middle is not None
+        await pending_middle.reject("SKIP_MIDDLE")
+        await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "middle")
+        await pending_first.approve()
+        await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "last")
+        assert order == ["first", "last"]
