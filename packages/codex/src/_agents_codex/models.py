@@ -48,8 +48,11 @@ class ProviderConversation(TypedDict):
 
 
 class ProviderResponseChain(TypedDict):
+    """Select a response and optionally import its owned output IDs once."""
+
     type: Literal["previous_response"]
     id: NotRequired[str]
+    item_ids: NotRequired[list[str]]
 
 
 ProviderHistory: TypeAlias = ProviderConversation | ProviderResponseChain
@@ -66,9 +69,25 @@ def _capture_provider_history(value: ProviderHistory | None) -> ProviderHistory 
         raise ValueError("conversation history requires an id")
     if identity is not None and not identity.strip():
         raise ValueError("provider history id must be nonempty")
+    item_ids = value.get("item_ids")
+    if item_ids is not None:
+        if kind != "previous_response" or identity is None:
+            raise ValueError("Provider item IDs require an exact previous-response anchor")
+        if not isinstance(item_ids, list) or not 1 <= len(item_ids) <= 4096:
+            raise ValueError("Provider item IDs require 1..4096 entries")
+        if any(not isinstance(item, str) or not item.strip() for item in item_ids):
+            raise ValueError("Provider item IDs must be nonempty strings")
+        if sum(len(item.encode("utf-8")) for item in item_ids) > 8 * 1024 * 1024:
+            raise ValueError("Provider item IDs exceed the history byte limit")
+        if len(set(item_ids)) != len(item_ids):
+            raise ValueError("Provider item IDs must be unique")
     return cast(
         ProviderHistory,
-        {"type": kind, **({"id": identity} if identity is not None else {})},
+        {
+            "type": kind,
+            **({"id": identity} if identity is not None else {}),
+            **({"item_ids": list(item_ids)} if item_ids is not None else {}),
+        },
     )
 
 

@@ -847,7 +847,7 @@
       "agents.models": {
         "declarations": [
           "class ProviderConversation(TypedDict):\n    type: Literal['conversation']\n    id: str",
-          "class ProviderResponseChain(TypedDict):\n    type: Literal['previous_response']\n    id: NotRequired[str]",
+          "class ProviderResponseChain(TypedDict):\n    type: Literal['previous_response']\n    id: NotRequired[str]\n    item_ids: NotRequired[list[str]]",
           "ProviderHistory: TypeAlias = ProviderConversation | ProviderResponseChain",
           "@dataclass(frozen=True, eq=False)\nclass ModelRunOwner:\n    session_id: str\n    turn_id: str",
           "@dataclass(frozen=True)\nclass ModelRequest:\n    body: dict[str, Any] = field(repr=False)\n    context: Any = field(repr=False)\n    session_id: str\n    turn_id: str\n    attempt_id: str | None = field(default=None, kw_only=True)\n    attempt: int | None = field(default=None, kw_only=True)\n    retry_configured: bool = field(default=False, kw_only=True)\n    disable_provider_retries: bool = field(default=False, kw_only=True)\n    run_owner: ModelRunOwner | None = field(default=None, repr=False, kw_only=True)\n    _report_usage: Callable[[dict[str, int]], bool] | None = field(default=None, repr=False, compare=False, kw_only=True)\n\n    def report_usage(self, usage: Mapping[str, int]) -> bool:\n        pass",

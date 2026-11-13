@@ -1071,7 +1071,11 @@
     {
       "path": "sdk-bounded-hosted-program-replay.patch",
       "sha256": "46c1b0fe713389d2e3760d38858b6b7bd21e8345bca59787e5ce1e026089931d"
+    },
+    {
+      "path": "sdk-provider-history-output-references.patch",
+      "sha256": "176905297a6285c529cbf074c7b9da5412a14d5a710bf3d37975e061664c128a"
     }
   ],
-  "result_tree": "2b19cfaeb45e8111f9db55af44f4b298b394bd2c"
+  "result_tree": "d064e65d18bbf42da4da3f70d3ac4ef8ec5883ed"
 }
