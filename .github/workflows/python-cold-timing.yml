@@ -1,0 +1,19 @@
+name: Python cold Windows timing
+
+on:
+  push:
+    branches: [ci/hillclimb/python-cold-timing-19]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  profile-windows:
+    if: >-
+      github.repository == 'openai/openai-agents-python' && !github.event.deleted &&
+      github.ref == 'refs/heads/ci/hillclimb/python-cold-timing-19'
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: windows-latest
+      native_provenance: ${{ format('{{"repository_id":"{0}","source_sha":"{1}","head_ref":"{2}","run_id":"{3}","run_attempt":"{4}","pull_request":null}}', github.repository_id, github.sha, github.ref_name, github.run_id, github.run_attempt) }}

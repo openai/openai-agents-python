@@ -911,7 +911,11 @@ def test_native_only_push_routes_through_the_existing_global_pipeline() -> None:
         }:
             assert "!inputs.native_only" in job["if"], name
     changes = suite["jobs"]["changes"]
-    assert changes["if"] == "github.event_name != 'push' || !github.event.deleted"
+    assert changes["if"] == (
+        "(github.event_name != 'push' || !github.event.deleted) && "
+        "!(github.event_name == 'push' && github.repository == 'openai/openai-agents-python' && "
+        "github.ref_name == 'ci/hillclimb/python-cold-timing-19')"
+    )
     checkout = changes["steps"][0]
     assert "ref" not in checkout["with"]  # PR Tests retains its event merge checkout.
     windows = next(step for step in changes["steps"] if step.get("id") == "release-windows")
@@ -922,6 +926,15 @@ def test_native_only_push_routes_through_the_existing_global_pipeline() -> None:
     ("repository", "event", "branch", "deleted", "native_push", "tests"),
     [
         ("openai/openai-agents-python", "push", "feature", False, False, True),
+        (
+            "openai/openai-agents-python",
+            "push",
+            "ci/hillclimb/python-cold-timing-19",
+            False,
+            False,
+            False,
+        ),
+        ("example/fork", "push", "ci/hillclimb/python-cold-timing-19", False, False, True),
         ("openai/openai-agents-python", "push", "ci/native-bundle/seed", False, True, True),
         ("openai/openai-agents-python", "push", "ci/native-bundle/seed", True, False, False),
         ("example/fork", "push", "ci/native-bundle/seed", False, False, True),

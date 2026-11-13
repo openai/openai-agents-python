@@ -150,8 +150,25 @@ def main():
     if mode == "build" and manylinux:
         # Qualify the same Linux glibc baseline even if Maturin detects an older one.
         output.extend(["--compatibility", manylinux])
+    maturin_timings = []
+    linker_timings = []
+    if environment.get("OPENAI_AGENTS_NATIVE_LINK_TIMINGS") == "1":
+        if sys.platform != "win32" or environment.get("LINK") or environment.get("_LINK_"):
+            raise ValueError("Link timing requires Windows with no existing LINK or _LINK_ options")
+        environment["LINK"] = "/TIME"
+        maturin_timings = cargo_timings
+        linker_timings = ["--", "-W", "linker_messages"]
     subprocess.run(
-        ["maturin", mode, "--locked", *cargo_options, *flags, *output],
+        [
+            "maturin",
+            mode,
+            "--locked",
+            *cargo_options,
+            *flags,
+            *output,
+            *maturin_timings,
+            *linker_timings,
+        ],
         cwd=project,
         env=environment,
         check=True,

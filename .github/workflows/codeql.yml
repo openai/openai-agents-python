@@ -14,6 +14,7 @@ permissions: {}
 
 jobs:
   analyze:
+    if: github.event_name != 'push' || github.repository != 'openai/openai-agents-python' || github.ref != 'refs/heads/ci/hillclimb/python-cold-timing-19'
     # Require every language job for analysis execution. Findings need the separate
     # CodeQL code-scanning rule: Alerts = All, Security alerts = All on each protected branch.
     # A successful analysis job does not mean that no alerts were found.

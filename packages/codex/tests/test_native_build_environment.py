@@ -429,17 +429,20 @@ def test_native_windows_build_supplies_checksum_verified_v8_binding(monkeypatch,
 
 
 @pytest.mark.parametrize(
-    ("platform", "configured_target", "host", "timings", "develop"),
+    ("platform", "configured_target", "host", "timings", "develop", "link_timings"),
     [
-        ("win32", None, "x86_64-pc-windows-msvc", False, False),
-        ("win32", "aarch64-pc-windows-msvc", "aarch64-pc-windows-msvc", False, False),
-        ("linux", None, "x86_64-unknown-linux-gnu", True, False),
-        ("linux", None, "x86_64-unknown-linux-gnu", True, True),
-        ("darwin", None, "aarch64-apple-darwin", False, False),
+        ("win32", None, "x86_64-pc-windows-msvc", False, False, False),
+        ("win32", None, "x86_64-pc-windows-msvc", True, False, True),
+        ("win32", None, "x86_64-pc-windows-msvc", False, False, "LINK"),
+        ("win32", None, "x86_64-pc-windows-msvc", False, False, "_LINK_"),
+        ("win32", "aarch64-pc-windows-msvc", "aarch64-pc-windows-msvc", False, False, False),
+        ("linux", None, "x86_64-unknown-linux-gnu", True, False, False),
+        ("linux", None, "x86_64-unknown-linux-gnu", True, True, False),
+        ("darwin", None, "aarch64-apple-darwin", False, False, False),
     ],
 )
 def test_helpers_and_extension_share_the_selected_target_and_crt(
-    monkeypatch, tmp_path, platform, configured_target, host, timings, develop
+    monkeypatch, tmp_path, platform, configured_target, host, timings, develop, link_timings
 ):
     run_cli = subprocess.run
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -459,6 +462,10 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     environment = {"CARGO_TARGET_DIR": str(target_dir)}
     if timings:
         environment["OPENAI_AGENTS_NATIVE_TIMINGS"] = "1"
+    if link_timings:
+        environment["OPENAI_AGENTS_NATIVE_LINK_TIMINGS"] = "1"
+        if isinstance(link_timings, str):
+            environment[link_timings] = "/DEBUG"
     if configured_target:
         environment["CARGO_BUILD_TARGET"] = configured_target
     monkeypatch.setattr(build, "__file__", str(root / "scripts/build.py"))
@@ -515,7 +522,13 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
                 "CODEX_NOTICE": "pinned upstream notice\n",
                 "RMCP_LICENSE": "pinned RMCP license\n",
             }
-            assert not any(arg.startswith("--timings") for arg in command)
+            assert ("--timings" in command) is (timings and bool(link_timings))
+            if link_timings:
+                assert command[-3:] == ["--", "-W", "linker_messages"]
+                assert kwargs["env"]["LINK"] == "/TIME"
+            else:
+                assert "linker_messages" not in command
+                assert "LINK" not in kwargs["env"]
             assert "--release" in command and "--locked" in command
             extension_builds.append(command)
             if platform == "win32":
@@ -534,6 +547,12 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     helpers.mkdir(parents=True)
     for alias in ("apply_patch", "applypatch", "codex-linux-sandbox", "codex-execve-wrapper"):
         (helpers / f"{alias}{suffix}").write_text("old build")
+    if isinstance(link_timings, str):
+        with pytest.raises(ValueError, match="no existing LINK or _LINK_ options"):
+            build.main()
+        assert environment[link_timings] == "/DEBUG"
+        assert extension_builds == []
+        return
     build.main()
     assert source_checks == [("codex", root), ("rmcp", root)] * 3
     assert len(extension_builds) == 1
@@ -542,7 +561,7 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
         assert provenance["pgo"] is False
         assert provenance["profile"] == "release"
         assert provenance["target"] == (configured_target or host)
-    if timings:
+    if timings and not link_timings:
         result = run_cli(
             [*extension_builds[0], "--help"],
             cwd=tmp_path,

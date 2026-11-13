@@ -54,7 +54,7 @@ jobs:
           (inputs.native_source_run == '' &&
            ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
              (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness') ||
-            (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09'))) &&
+            (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-timing-19')))) &&
            '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
            '{"group":"codex-runners","labels":"codex-windows-x64"}') ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' &&
@@ -272,12 +272,14 @@ jobs:
           PYTHON
       - name: Build the SDK and native runtime together
         if: inputs.native_source_run == ''
+        env:
+          OPENAI_AGENTS_NATIVE_LINK_TIMINGS: ${{ github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-cold-timing-19' && inputs.runner == 'windows-latest' && '1' || '' }}
         run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
       - name: Test Windows project-search filename handling
         if: >-
           runner.os == 'Windows' && inputs.native_source_run == '' &&
           !(github.repository == 'openai/openai-agents-python' &&
-          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09'))
+          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-timing-19')))
         run: |
           python -I -S - <<'PYTHON'
           import os
@@ -327,7 +329,7 @@ jobs:
               os.environ.get("RUNNER_OS") == "Windows"
               and os.environ.get("GITHUB_REPOSITORY") == "openai/openai-agents-python"
               and os.environ.get("GITHUB_EVENT_NAME") == "push"
-              and os.environ.get("GITHUB_REF_NAME") in {"feat/codex-harness", "ci/hillclimb/python-production-09"}
+              and os.environ.get("GITHUB_REF_NAME") in {"feat/codex-harness", "ci/hillclimb/python-production-09", "ci/hillclimb/python-cold-timing-19"}
           ):
               subprocess.run(
                   ["cargo", "test", "--release", "--locked", *options,
@@ -550,7 +552,7 @@ jobs:
     if: >-
       inputs.runner == 'windows-latest' && inputs.native_source_run == '' &&
       github.repository == 'openai/openai-agents-python' &&
-      github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09')
+      github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-timing-19'))
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
     defaults:

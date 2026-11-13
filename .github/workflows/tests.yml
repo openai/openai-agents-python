@@ -40,7 +40,7 @@ env:
 
 jobs:
   changes:
-    if: github.event_name != 'push' || !github.event.deleted
+    if: (github.event_name != 'push' || !github.event.deleted) && !(github.event_name == 'push' && github.repository == 'openai/openai-agents-python' && github.ref_name == 'ci/hillclimb/python-cold-timing-19')
     runs-on: ubuntu-latest
     permissions:
       contents: read
