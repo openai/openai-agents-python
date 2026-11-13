@@ -1374,7 +1374,7 @@ def test_hosted_mcp_restore_keeps_original_ceiling_and_binding(active_profile: b
         SimpleNamespace(
             operation_tools=(lookup.ref, docs.ref),
             native_continuation=SimpleNamespace(
-                pending_manual=(SimpleNamespace(tool=lookup.name),)
+                pending_manual=(SimpleNamespace(tool=lookup.name, continuation=None),)
             ),
         ),
     )

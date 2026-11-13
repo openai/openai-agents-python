@@ -32,7 +32,7 @@ def owner():
         cell_id=None,
         nested_call_id=None,
     )
-    return SimpleNamespace(realtime_usage=None), state, call
+    return SimpleNamespace(realtime_usage=None, realtime_usage_accounting=None), state, call
 
 
 async def test_recovery_rechecks_revoked_admission_before_callback():
@@ -79,7 +79,7 @@ async def test_recovery_discards_late_formatter_after_revocation():
             call,
         )
     )
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=1)
     live = False
     release.set()
     assert await task is None

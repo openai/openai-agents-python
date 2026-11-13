@@ -82,6 +82,10 @@ async def test_collaboration_approval_captures_detached_realtime_usage(
                     async for event in events:
                         if isinstance(event, RealtimeResponse) and event.status == "done":
                             break
+                expected_accounting = session.realtime_usage_accounting
+                assert expected_accounting is not None
+                assert expected_accounting.finished_responses == 1
+                assert expected_accounting.usage_reports == int(with_usage)
                 expected = session.realtime_usage
                 assert (None if expected is None else expected.total_tokens) == (
                     7 if with_usage else None
@@ -90,6 +94,9 @@ async def test_collaboration_approval_captures_detached_realtime_usage(
                     await (await session.submit("Use two children")).get_result()
                 assert contexts
                 assert all(context.realtime_usage == expected for context in contexts)
+                assert all(
+                    context.realtime_usage_accounting == expected_accounting for context in contexts
+                )
                 if with_usage:
                     snapshot = contexts[0].realtime_usage
                     assert snapshot is not None
@@ -101,6 +108,10 @@ async def test_collaboration_approval_captures_detached_realtime_usage(
                     assert current.input_token_details == {"audio_tokens": 7}
                 assert peer.child_requests == {}
             assert session.realtime_usage is None
+            assert session.realtime_usage_accounting is None
+            assert all(
+                context.realtime_usage_accounting == expected_accounting for context in contexts
+            )
             assert all(
                 (None if context.realtime_usage is None else context.realtime_usage.total_tokens)
                 == (7 if with_usage else None)

@@ -69,7 +69,10 @@ from .native_agents import (
 )
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
 from .realtime_result import BackgroundResult as BackgroundResult
-from .realtime_usage import RealtimeUsage as RealtimeUsage
+from .realtime_usage import (
+    RealtimeUsage as RealtimeUsage,
+    RealtimeUsageAccounting as RealtimeUsageAccounting,
+)
 from .tools import (
     Checklist as Checklist,
     CodeInterpreter as CodeInterpreter,
@@ -165,6 +168,7 @@ class ToolInputErrorContext(Generic[ContextT_co]):
     call: ToolCallInfo = field(kw_only=True)
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
     realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)
+    realtime_usage_accounting: RealtimeUsageAccounting | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -194,6 +198,7 @@ class ToolContext(Generic[ContextT_co]):
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
     # Detached speech usage at callback creation; application context stays caller-owned.
     realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)
+    realtime_usage_accounting: RealtimeUsageAccounting | None = field(default=None, kw_only=True)
 
     _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(
         default=None, init=False, repr=False, compare=False
