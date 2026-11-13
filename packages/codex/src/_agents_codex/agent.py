@@ -85,7 +85,7 @@ if TYPE_CHECKING:
     class _TracingOpeningOptions(TypedDict, total=False, closed=True):
         _tracing_context: str
 
-    from ._function_tools import Tool
+    from ._function_tools import Tool, _PythonTool
     from ._managed_workspace import ManagedWorkspaceCheckpoint
     from .canonical_storage import CustomStorage
     from .decision_handoff import DecisionHandoff
@@ -1375,6 +1375,22 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(variant, "output_type", output_type)
         return cast("Agent[ContextT, NewOutputT]", variant)
 
+    def as_tool(
+        self,
+        tool_name: str,
+        tool_description: str | None = None,
+        *,
+        custom_output_extractor: Callable[[Completed[OutputT]], str | Awaitable[str]] | None = None,
+    ) -> _PythonTool[ContextT, object]:
+        """The issuing parent has been owning live child interactions and cleanup.
+
+        Pending children have been requiring live replies. Portable suspension
+        through a configured child has been remaining unsupported.
+        """
+        from ._agent_tool import _create_agent_tool
+
+        return _create_agent_tool(self, tool_name, tool_description, custom_output_extractor)
+
     @overload
     def session(
         self: Agent[None, OutputT],
@@ -2430,6 +2446,7 @@ class Agent(Generic[ContextT, OutputT]):
                 session._fail_unhandled_questions = (
                     session._interaction_handler is None and not pause_manual
                 )
+                session._fail_unhandled_configured_children = session._interaction_handler is None
                 if return_raw_usage:
                     session._start_raw_usage()
                 if return_items or capture_error_details:

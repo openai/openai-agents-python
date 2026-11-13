@@ -177,6 +177,9 @@ fn relative(root: &PathUri, path: &PathUri) -> Option<String> {
 }
 
 impl<'call> ToolExecutor<ToolCall<'call>> for Search {
+    fn is_native_environment_tool(&self) -> bool {
+        true
+    }
     fn tool_name(&self) -> ToolName {
         ToolName::new(None, self.tool.name())
     }

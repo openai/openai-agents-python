@@ -1,0 +1,9 @@
+{
+  "models": [
+    {
+      "slug": "gpt-6-astra",
+      "supported_in_api": true,
+      "multi_agent_version": "v2"
+    }
+  ]
+}

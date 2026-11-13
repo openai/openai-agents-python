@@ -933,9 +933,13 @@
       "sha256": "edac1f3bc0818c8454af005f8393dc583a5e579c625dab7f93489067ffaec9d7"
     },
     {
+      "path": "sdk-final-step-builtin-tools.patch",
+      "sha256": "e01c2fd4518cb72b33b4d440454baf0042160546d4d66958914c6478e6d4b94a"
+    },
+    {
       "path": "skip-uncaptured-empty-websocket-probability-facts.patch",
       "sha256": "a413c918a62fab29c0ae57a5446fadc3095247837abd5871908b3ea54046ed52"
     }
   ],
-  "result_tree": "b13faaf95954c2a53266e511271e6ab686e30487"
+  "result_tree": "522215db1c2697138194041693f8e08e555fca53"
 }
