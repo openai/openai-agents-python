@@ -13667,11 +13667,13 @@ class Session(Generic[ContextT, OutputT]):
             ) == target_id or target_id in source.decision_handoffs.get(name, {}).get("targets", ())
             if target is None or not declared:
                 raise NativeError("Handoff input destination differs from its captured target")
-            groups = [
+            input_items, previous, generated = (
                 tuple(json.loads(json.dumps(message[name], allow_nan=False)))
                 for name in ("input", "previous", "generated")
-            ]
-            request = HandoffInput(*groups, context=self._context, target=target.profile.agent)
+            )
+            request = HandoffInput(
+                input_items, previous, generated, context=self._context, target=target.profile.agent
+            )
             return callback, request
 
         def reply(result: Any) -> None:
