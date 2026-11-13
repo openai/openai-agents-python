@@ -5067,6 +5067,15 @@ class Session(Generic[ContextT, OutputT]):
             for turn in turns
             if turn["status"] == "in_progress"
         )
+        receipt_turns = {
+            (thread, turn)
+            for thread, turn, _ in missing | supplied | prior
+            if (thread, turn) in recovery_turns
+            or any(
+                item["id"] == turn and item["status"] == "in_progress"
+                for item in recorded.get(thread, [])
+            )
+        }
         recovery_lineage: dict[str, str] = {}
         for thread in {thread for thread, _ in recovery_turns} | {
             thread for thread, _, _ in supplied
@@ -5078,30 +5087,41 @@ class Session(Generic[ContextT, OutputT]):
         # The crashed owner's spawning turn can still be open when its child
         # records an effect. Use the completed spawn to identify that exact turn.
         if recovery_lineage:
-            for item in recorded_items:
-                if (
-                    item["type"] == "create_subagent_call"
-                    and item["status"] == "completed"
-                    and (spawned := item["subagent_id"]) is not None
-                    and recovery_lineage.get(spawned) == item["agent_id"]
-                ):
-                    recovery_turns.add((item["agent_id"], item["turn_id"]))
-                if (
-                    item["type"] == "send_subagent_input_call"
-                    and item["status"] == "completed"
-                    and (item["sender_agent_id"], item["id"]) in followup_calls
-                    and recovery_lineage.get(item["recipient_agent_id"]) == item["sender_agent_id"]
-                    and any(
-                        turn["status"] == "in_progress"
-                        and (
-                            item["sender_agent_id"] != self.id
-                            or child_root_turns.get((item["recipient_agent_id"], turn["id"]))
-                            == item["turn_id"]
-                        )
-                        for turn in recorded[item["recipient_agent_id"]]
-                    )
-                ):
-                    recovery_turns.add((item["sender_agent_id"], item["turn_id"]))
+            for selected in (recovery_turns, receipt_turns):
+                while True:
+                    previous = len(selected)
+                    for item in recorded_items:
+                        if (
+                            item["type"] == "create_subagent_call"
+                            and item["status"] == "completed"
+                            and (spawned := item["subagent_id"]) is not None
+                            and recovery_lineage.get(spawned) == item["agent_id"]
+                            and any(thread == spawned for thread, _ in selected)
+                        ):
+                            selected.add((item["agent_id"], item["turn_id"]))
+                        if (
+                            selected is recovery_turns
+                            and item["type"] == "send_subagent_input_call"
+                            and item["status"] == "completed"
+                            and (item["sender_agent_id"], item["id"]) in followup_calls
+                            and recovery_lineage.get(item["recipient_agent_id"])
+                            == item["sender_agent_id"]
+                            and any(
+                                turn["status"] == "in_progress"
+                                and (item["recipient_agent_id"], turn["id"]) in selected
+                                and (
+                                    item["sender_agent_id"] != self.id
+                                    or child_root_turns.get(
+                                        (item["recipient_agent_id"], turn["id"])
+                                    )
+                                    == item["turn_id"]
+                                )
+                                for turn in recorded[item["recipient_agent_id"]]
+                            )
+                        ):
+                            selected.add((item["sender_agent_id"], item["turn_id"]))
+                    if len(selected) == previous:
+                        break
         if any(thread in children for thread, _ in recovery_turns) and any(
             turn["status"] == "in_progress" and (self.id, turn["id"]) not in recovery_turns
             for turn in recorded[self.id][-1:]
@@ -5119,6 +5139,9 @@ class Session(Generic[ContextT, OutputT]):
                     "Native local history has an active descendant; its runtime cannot be restored"
                 )
             histories[child_id]["interrupted"] = interrupted
+            histories[child_id]["automatic_turns"] = [
+                turn for turn in interrupted if (child_id, turn) not in receipt_turns
+            ]
         if isinstance(self._storage, LocalStorage):
             await self._publish_startup(
                 self._native._reconcile_local_calls(
@@ -5130,6 +5153,14 @@ class Session(Generic[ContextT, OutputT]):
                                 turn["id"]
                                 for turn in recorded[self.id]
                                 if recovery_lineage and (self.id, turn["id"]) in recovery_turns
+                            ],
+                            "automatic_root_turns": [
+                                turn["id"]
+                                for turn in recorded[self.id]
+                                if recovery_lineage
+                                and turn["status"] == "in_progress"
+                                and (self.id, turn["id"]) in recovery_turns
+                                and (self.id, turn["id"]) not in receipt_turns
                             ],
                         }
                     )

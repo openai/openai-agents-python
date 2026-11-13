@@ -507,6 +507,8 @@ struct RecoveryRequest {
     histories: HashMap<ThreadId, DescendantHistory>,
     #[serde(default)]
     root_recovery_turns: Vec<String>,
+    #[serde(default)]
+    automatic_root_turns: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -516,6 +518,8 @@ struct DescendantHistory {
     parent: ThreadId,
     status: String,
     interrupted: Vec<String>,
+    #[serde(default)]
+    automatic_turns: Option<Vec<String>>,
 }
 
 pub(crate) fn encode_history(history: &[RolloutItem]) -> serde_json::Result<String> {
@@ -893,6 +897,25 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     } else {
         HashSet::new()
     };
+    let root_automatic = request.automatic_root_turns.clone().unwrap_or_else(|| {
+        request
+            .root_recovery_turns
+            .iter()
+            .filter(|turn| {
+                !root_receipts
+                    .iter()
+                    .any(|receipt| &receipt.turn_id == *turn)
+            })
+            .cloned()
+            .collect()
+    });
+    ensure!(
+        root_automatic
+            .iter()
+            .all(|turn| request.root_recovery_turns.contains(turn)),
+        "Invalid automatic root recovery turn"
+    );
+    validate_automatic_sampling(&history, state.id, &root_automatic)?;
     let (root_append, protected) = plan(&history, &root_receipts)?;
     validate_interrupted_effects(
         &history,
@@ -918,6 +941,21 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
             "Native descendant history changed during local recovery"
         );
         let receipts = receipts_by_thread.remove(&id).unwrap_or_default();
+        let automatic = expected.automatic_turns.clone().unwrap_or_else(|| {
+            expected
+                .interrupted
+                .iter()
+                .filter(|turn| !receipts.iter().any(|receipt| &receipt.turn_id == *turn))
+                .cloned()
+                .collect()
+        });
+        ensure!(
+            automatic
+                .iter()
+                .all(|turn| expected.interrupted.contains(turn)),
+            "Invalid automatic descendant recovery turn"
+        );
+        validate_automatic_sampling(&history, id, &automatic)?;
         let (outputs, protected) = plan(&history, &receipts)?;
         if !protected.is_empty() {
             protected_children.insert(id.to_string(), protected);
@@ -1058,6 +1096,66 @@ fn completed_hosted_mcp(item: &ResponseItem) -> bool {
             && provider_fields.get("error").is_none_or(Value::is_null))
 }
 
+fn validate_automatic_sampling(
+    history: &[RolloutItem],
+    thread: ThreadId,
+    automatic: &[String],
+) -> Result<()> {
+    let mut proven = HashSet::new();
+    let thread = thread.to_string();
+    for row in history {
+        let RolloutItem::TurnContext(context) = row else {
+            continue;
+        };
+        let Some(turn) = context.turn_id.as_deref() else {
+            continue;
+        };
+        if !automatic.iter().any(|selected| selected == turn) {
+            continue;
+        }
+        let Some(receipt) = &context.sdk_receipt else {
+            continue;
+        };
+        ensure!(
+            receipt.get("version").and_then(Value::as_u64) == Some(1)
+                && receipt.get("thread_id").and_then(Value::as_str) == Some(thread.as_str())
+                && receipt
+                    .get("provider_effects_possible")
+                    .and_then(Value::as_bool)
+                    == Some(false),
+            "Native local history contains unknown tool effects; automatic recovery lacks safe provider dispatch evidence"
+        );
+        proven.insert(turn);
+    }
+    ensure!(
+        automatic.iter().all(|turn| proven.contains(turn.as_str())),
+        "Native local history contains unknown tool effects; automatic recovery lacks a retained safe sampling receipt"
+    );
+    Ok(())
+}
+
+fn completed_hosted_item(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::CodeInterpreterCall {
+            id: Some(id),
+            status,
+            provider_fields,
+            ..
+        }
+        | ResponseItem::ImageGenerationCall {
+            id: Some(id),
+            status,
+            provider_fields,
+            ..
+        } => {
+            !id.as_str().is_empty()
+                && status == "completed"
+                && provider_fields.get("error").is_none_or(Value::is_null)
+        }
+        _ => false,
+    }
+}
+
 // Aborting a cold turn changes its lifecycle, never the outcome of its tools.
 // Check original retained invocations, including native tools omitted by the
 // application reconciliation projection, before publishing any interruption.
@@ -1076,6 +1174,7 @@ fn validate_interrupted_effects(
     let mut outputs = HashMap::new();
     let mut terminal_commands = HashSet::new();
     let mut terminal_processes = Vec::new();
+    let mut application_shells = HashSet::new();
     for row in history {
         match row {
             RolloutItem::TurnContext(turn) => context = turn.turn_id.as_deref().or(context),
@@ -1109,6 +1208,30 @@ fn validate_interrupted_effects(
                     }
                     continue;
                 }
+                if let ResponseItem::ShellCall {
+                    provider_fields, ..
+                } = item
+                {
+                    ensure!(
+                        envelope
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.sdk_application_tool.as_deref())
+                            == Some("shell"),
+                        "Native local history contains unknown tool effects; hosted shell has no application owner"
+                    );
+                    let id = shell_call_id(provider_fields)
+                        .context("Native shell invocation lacks identity")?;
+                    application_shells.insert((turn, id.as_str()));
+                }
+                if matches!(item, ResponseItem::ShellCallOutput { .. }) {
+                    let (id, _) =
+                        output_identity(item).context("Native shell result lacks identity")?;
+                    ensure!(
+                        application_shells.contains(&(turn, id)),
+                        "Native local history contains unknown tool effects; shell result has no application owner"
+                    );
+                }
                 let call = match item {
                     ResponseItem::FunctionCall { call_id, .. }
                     | ResponseItem::CustomToolCall { call_id, .. }
@@ -1127,9 +1250,11 @@ fn validate_interrupted_effects(
                             .as_str(),
                     ),
                     ResponseItem::McpCall { id, .. }
+                    | ResponseItem::CodeInterpreterCall { id, .. }
+                    | ResponseItem::ImageGenerationCall { id, .. }
                     | ResponseItem::McpApprovalRequest { id, .. } => Some(
                         id.as_ref()
-                            .context("Hosted MCP item lacks identity")?
+                            .context("Hosted provider item lacks identity")?
                             .as_str(),
                     ),
                     _ => None,
@@ -1153,6 +1278,16 @@ fn validate_interrupted_effects(
     }
     for (key, call) in &calls {
         let call = *call;
+        if matches!(
+            call,
+            ResponseItem::CodeInterpreterCall { .. } | ResponseItem::ImageGenerationCall { .. }
+        ) {
+            ensure!(
+                completed_hosted_item(call),
+                "Native local history contains an unproven hosted effect"
+            );
+            continue;
+        }
         if matches!(call, ResponseItem::McpCall { .. }) {
             ensure!(
                 completed_hosted_mcp(call),
@@ -1649,6 +1784,153 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn cold_interruption_requires_safe_sampling_receipts() {
+        let thread = ThreadId::new();
+        let context = |turn, receipt| {
+            RolloutItem::TurnContext(serde_json::from_value(serde_json::json!({
+            "turn_id":turn, "cwd":std::env::current_dir().unwrap(), "approval_policy":"never",
+            "sandbox_policy":{"type":"danger-full-access"}, "model":"synthetic", "summary":"auto",
+            "sdk_receipt":receipt
+        })).unwrap())
+        };
+        let turns = vec!["turn".to_owned()];
+        let safe =
+            serde_json::json!({"version":1, "thread_id":thread, "provider_effects_possible":false});
+        assert!(validate_automatic_sampling(&[], thread, &turns).is_err());
+        assert!(
+            validate_automatic_sampling(&[context("turn", safe.clone())], thread, &turns).is_ok()
+        );
+        assert!(
+            validate_automatic_sampling(&[context("other", safe.clone())], thread, &turns).is_err()
+        );
+        for flag in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!("false"),
+        ] {
+            let mut receipt = safe.clone();
+            receipt["provider_effects_possible"] = flag;
+            assert!(
+                validate_automatic_sampling(
+                    &[
+                        context("turn", safe.clone()),
+                        context("turn", receipt.clone())
+                    ],
+                    thread,
+                    &turns
+                )
+                .is_err()
+            );
+            assert!(validate_automatic_sampling(&[context("turn", receipt)], thread, &[]).is_ok());
+        }
+        let mut legacy = safe.clone();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_effects_possible");
+        assert!(validate_automatic_sampling(&[context("turn", legacy)], thread, &turns).is_err());
+        let mut foreign = safe.clone();
+        foreign["thread_id"] = ThreadId::new().to_string().into();
+        assert!(validate_automatic_sampling(&[context("turn", foreign)], thread, &turns).is_err());
+        let mut unknown = safe;
+        unknown["version"] = 2.into();
+        assert!(validate_automatic_sampling(&[context("turn", unknown)], thread, &turns).is_err());
+    }
+
+    #[test]
+    fn cold_interruption_requires_terminal_hosted_code_and_image() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let start = || {
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"turn", "root_turn_id":"turn"})).unwrap())
+        };
+        let turns = vec!["turn".to_owned()];
+        for kind in ["code_interpreter_call", "image_generation_call"] {
+            for payload in [serde_json::Value::Null, serde_json::json!([])] {
+                let completed = serde_json::json!({"type":kind, "id":"hosted", "status":"completed", "outputs":payload, "result":null});
+                assert!(
+                    validate_interrupted_effects(
+                        &[start(), row(completed.clone())],
+                        &turns,
+                        &HashSet::new(),
+                        &[],
+                        &[]
+                    )
+                    .is_ok()
+                );
+                for status in ["in_progress", "failed", "unknown"] {
+                    let mut item = completed.clone();
+                    item["status"] = status.into();
+                    assert!(
+                        validate_interrupted_effects(
+                            &[start(), row(item)],
+                            &turns,
+                            &HashSet::new(),
+                            &[],
+                            &[]
+                        )
+                        .is_err()
+                    );
+                }
+                for id in [serde_json::Value::Null, serde_json::json!("")] {
+                    let mut item = completed.clone();
+                    item["id"] = id;
+                    assert!(
+                        validate_interrupted_effects(
+                            &[start(), row(item)],
+                            &turns,
+                            &HashSet::new(),
+                            &[],
+                            &[]
+                        )
+                        .is_err()
+                    );
+                }
+                let mut item = completed;
+                item["error"] = serde_json::json!({"message":"failed"});
+                assert!(
+                    validate_interrupted_effects(
+                        &[start(), row(item)],
+                        &turns,
+                        &HashSet::new(),
+                        &[],
+                        &[]
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cold_interruption_requires_application_shell_ownership() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let mut history=vec![
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"turn", "root_turn_id":"turn"})).unwrap()),
+            row(serde_json::json!({"type":"shell_call", "id":"command", "call_id":"shell", "status":"completed"})),
+            row(serde_json::json!({"type":"shell_call_output", "id":"receipt", "call_id":"shell", "status":"completed", "output":[]})),
+        ];
+        let turns = vec!["turn".to_owned()];
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        if let RolloutItem::ResponseItem(envelope) = &mut history[1] {
+            envelope.metadata = Some(codex_history::CodexHarnessMetadata {
+                sdk_application_tool: Some("shell".into()),
+                ..Default::default()
+            });
+        }
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_ok());
+        history.remove(1);
+        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
     }
 
     #[test]

@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestServer
 from agents import (
     Agent,
     Environment,
+    ImageGeneration,
     LocalRecoveryRequired,
     LocalStorage,
     NativeAgents,
@@ -227,7 +228,8 @@ async def worker() -> None:
         model=request["model"],
         provider=connection,
         programmatic_tool_calling=False,
-        tools=[lookup] if native is None else [lookup, native],
+        tools=([lookup] if native is None else [lookup, native])
+        + ([ImageGeneration()] if request["mode"] == "cold-hosted" else []),
     )
     try:
         async with (
@@ -778,6 +780,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
         (1, True, None, False),
         (2, True, None, False),
         (1, False, "shell", False),
+        (1, False, "hosted-progress", False),
         (1, False, None, True),
         (1, False, None, "followup"),
     ],
@@ -785,6 +788,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
 async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
     tmp_path, monkeypatch, depth, no_children, native_effect, root_active
 ):
+    model = "gpt-5.5" if native_effect == "hosted-progress" else DESCENDANT_MODEL
     peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     entered, release = asyncio.Event(), asyncio.Event()
     root_entered = asyncio.Event()
@@ -828,6 +832,14 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             # its final message so it cannot finish before the process dies.
             message = assistant_output("leaf not yet settled")
             message["item"]["id"] = "held-leaf-without-tool"
+            if native_effect == "hosted-progress":
+                return [
+                    {
+                        "type": "response.image_generation_call.generating",
+                        "item_id": "unfinished-hosted",
+                    },
+                    message,
+                ]
             return [message]
         result = original_response()
         if (
@@ -862,8 +874,13 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             peer,
             executor,
             tmp_path,
-            "cold-followup" if root_active == "followup" else "cold-active",
+            "cold-followup"
+            if root_active == "followup"
+            else "cold-hosted"
+            if native_effect == "hosted-progress"
+            else "cold-active",
             depth,
+            model=model,
         )
         try:
             assert source.stdout is not None
@@ -890,14 +907,32 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
                 source.kill()
                 await _collect(source)
         before = len(peer.requests)
-        if native_effect is not None:
-            child_id = next(
-                metadata(body, headers)["thread_id"]
+        child_id = next(
+            metadata(body, headers)["thread_id"]
+            for body, headers in zip(peer.requests, peer.request_headers, strict=True)
+            if metadata(body, headers)["agent_name"] == "/root/alpha"
+        )
+        [rollout] = (tmp_path / "profile").rglob(f"*{child_id}.jsonl")
+        history = [json.loads(line) for line in rollout.read_text().splitlines()]
+        sampling_receipt = next(
+            row["payload"]["sdk_receipt"]
+            for row in reversed(history)
+            if row["type"] == "turn_context"
+            and row["payload"].get("sdk_receipt", {}).get("thread_id") == child_id
+        )
+        assert sampling_receipt["provider_effects_possible"] is (native_effect == "hosted-progress")
+        if native_effect == "hosted-progress":
+            child_request = next(
+                body
                 for body, headers in zip(peer.requests, peer.request_headers, strict=True)
                 if metadata(body, headers)["agent_name"] == "/root/alpha"
             )
-            [rollout] = (tmp_path / "profile").rglob(f"*{child_id}.jsonl")
-            history = [json.loads(line) for line in rollout.read_text().splitlines()]
+            assert any(tool["type"] == "image_generation" for tool in child_request["tools"])
+            assert not any(
+                row["type"] == "response_item" and row["payload"]["type"] == "image_generation_call"
+                for row in history
+            )
+        if native_effect == "shell":
             turn_id = next(
                 row["payload"]["turn_id"]
                 for row in reversed(history)
@@ -930,6 +965,7 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
                 depth,
                 identity=opened["opened"],
                 no_children=no_children,
+                model=model,
             )
             code, rows, err = await _collect(restored)
             if native_effect is not None:
