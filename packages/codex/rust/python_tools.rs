@@ -4072,6 +4072,25 @@ impl PythonTools {
                     && matches!(generation.specs[slot], DynamicToolSpec::Function(_))
             })
             .context("Current configured continuation function is absent")?;
+        // The host intersects this fresh opening ceiling with current Environment tools.
+        let defaults = self.step_defaults.read().expect("Step defaults poisoned");
+        let builtin_tools = self
+            .policy
+            .allowed_tools
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .map(ToolName::with_default_namespace)
+            .filter(|name| {
+                defaults.as_ref().is_none_or(|names| {
+                    names
+                        .iter()
+                        .any(|selected| selected.clone().with_default_namespace() == *name)
+                })
+            })
+            .collect::<HashSet<_>>();
+        drop(defaults);
         let (key, _, receiver) = self.enqueue_profile(
             owner,
             &generation,
@@ -4086,7 +4105,7 @@ impl PythonTools {
             None,
             None,
             None,
-            None,
+            Some(&builtin_tools),
         )?;
         // Opening has not published the Thread or started its Python reader yet.
         self.pending
