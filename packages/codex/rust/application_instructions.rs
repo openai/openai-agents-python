@@ -278,25 +278,88 @@ fn validate_detached_instruction_projections(history: &[RolloutItem]) -> Result<
     Ok(())
 }
 
+fn validate_projected_parts(
+    item: &ResponseItem,
+    check_legacy_marker: bool,
+    mut validate: impl FnMut(&str, &str) -> Result<()>,
+) -> Result<()> {
+    let ResponseItem::Message {
+        role,
+        content,
+        internal_chat_message_metadata_passthrough: metadata,
+        ..
+    } = item
+    else {
+        return Ok(());
+    };
+    let kinds = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.content_item_kinds.as_deref());
+    let tagged = kinds.is_some_and(|kinds| kinds.iter().any(|kind| kind.0 == PROJECTED));
+    if tagged {
+        ensure!(
+            role == "developer" && kinds.is_some_and(|kinds| kinds.len() == content.len()),
+            "invalid projected application instructions"
+        );
+    }
+    for (index, part) in content.iter().enumerate() {
+        let tagged = kinds
+            .and_then(|kinds| kinds.get(index))
+            .is_some_and(|kind| kind.0 == PROJECTED);
+        let marked = check_legacy_marker
+            && role == "developer"
+            && matches!(part, ContentItem::InputText { text } if text.starts_with(MARKERS.0));
+        if !tagged && !marked {
+            continue;
+        }
+        ensure!(tagged, "invalid projected application instructions");
+        let ContentItem::InputText { text } = part else {
+            anyhow::bail!("invalid projected application instructions");
+        };
+        let (id, text) = decode(text)?;
+        validate(id, text)?;
+    }
+    Ok(())
+}
+
 /// Only original accepted items change authority. Compaction copies never do.
 pub(crate) fn latest(history: &[RolloutItem]) -> Result<Accepted> {
-    let mut originals: Vec<(&ResponseItem, Accepted)> = Vec::new();
+    let mut originals = std::collections::HashMap::new();
+    let mut latest = None;
     for row in history {
-        if let RolloutItem::ResponseItem(item) = row {
-            if let Some(accepted) = accepted_envelope(item)? {
-                ensure!(
-                    !originals
-                        .iter()
-                        .any(|(original, _)| original.id() == item.item.id()),
-                    "duplicate accepted application instructions identity"
-                );
-                originals.push((&item.item, accepted));
-            }
+        if let RolloutItem::ResponseItem(item) = row
+            && let Some(accepted) = accepted_envelope(item)?
+        {
+            let id = item
+                .item
+                .id()
+                .context("missing native application instructions identity")?;
+            ensure!(
+                originals
+                    .insert(id.as_str(), (&item.item, accepted))
+                    .is_none(),
+                "duplicate accepted application instructions identity"
+            );
+            latest = Some(id.as_str());
         }
     }
-    let (_, latest) = originals.last().context(
+    let (_, latest) = latest.and_then(|id| originals.get(id)).context(
         "checkpoint has no accepted application instructions; legacy checkpoints are unsupported",
     )?;
+    let validate_projection = |id: &str, text: &str| {
+        ensure!(
+            originals
+                .get(id)
+                .is_some_and(|(_, accepted)| accepted.text == text),
+            "projected application instructions have no accepted original"
+        );
+        Ok(())
+    };
+    for row in history {
+        if let RolloutItem::ResponseItem(item) = row {
+            validate_projected_parts(&item.item, false, validate_projection)?;
+        }
+    }
     for row in history {
         let RolloutItem::Compacted(compacted) = row else {
             continue;
@@ -312,59 +375,20 @@ pub(crate) fn latest(history: &[RolloutItem]) -> Result<Accepted> {
             if let Some(accepted) = accepted(item)? {
                 ensure!(
                     originals
-                        .iter()
-                        .any(|(original, _)| same_receipt(item, original)),
+                        .get(accepted.id.as_str())
+                        .is_some_and(|(original, _)| same_receipt(item, original)),
                     "compacted application instructions differ from their accepted original"
                 );
                 latest_is_last = accepted.id == latest.id;
                 contains_latest |= latest_is_last;
                 continue;
             }
-            if let ResponseItem::Message {
-                role,
-                content,
-                internal_chat_message_metadata_passthrough: metadata,
-                ..
-            } = item
-            {
-                let kinds = metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.content_item_kinds.as_deref());
-                if kinds.is_some_and(|kinds| kinds.iter().any(|kind| kind.0 == PROJECTED)) {
-                    ensure!(
-                        kinds.is_some_and(|kinds| kinds.len() == content.len()),
-                        "invalid projected application instructions"
-                    );
-                }
-                for (index, part) in content.iter().enumerate() {
-                    let tagged = kinds
-                        .and_then(|kinds| kinds.get(index))
-                        .is_some_and(|kind| kind.0 == PROJECTED);
-                    let marked = role == "developer"
-                        && matches!(part, ContentItem::InputText { text } if text.starts_with(MARKERS.0));
-                    if tagged || marked {
-                        ensure!(
-                            role == "developer"
-                                && tagged
-                                && kinds.is_some_and(|kinds| kinds.len() == content.len()),
-                            "invalid projected application instructions"
-                        );
-                        let ContentItem::InputText { text } = part else {
-                            anyhow::bail!("invalid projected application instructions")
-                        };
-                        let (id, text) = decode(text)?;
-                        ensure!(
-                            originals
-                                .iter()
-                                .any(|(_, accepted)| accepted.id.as_str() == id
-                                    && accepted.text == text),
-                            "projected application instructions have no accepted original"
-                        );
-                        latest_is_last = latest.id.as_str() == id;
-                        contains_latest |= latest_is_last;
-                    }
-                }
-            }
+            validate_projected_parts(item, true, |id, text| {
+                validate_projection(id, text)?;
+                latest_is_last = latest.id.as_str() == id;
+                contains_latest |= latest_is_last;
+                Ok(())
+            })?;
         }
         // Core's retained matcher finds any exact copy. If that copy is present,
         // an older fragment after it would suppress the necessary current update.

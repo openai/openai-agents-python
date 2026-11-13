@@ -2177,8 +2177,8 @@ class Agent(Generic[ContextT, OutputT]):
         Return RecoverRun to supply schema-validated output, or None to propagate
         the failure. The replacement can be added as an assistant history item.
         Provider refusal, final output validation and the request budget are
-        eligible. Recovery is unavailable when output guards or uncertain cleanup
-        prevent safe completion.
+        eligible. Output guardrails check the replacement before it is returned
+        or saved. Uncertain cleanup prevents recovery.
         """
         provider_history = _capture_provider_history(provider_history)
         if input_storage_policy is not None:

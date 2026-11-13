@@ -156,26 +156,60 @@ async def test_refusal_fallback_and_unhandled_failure_keep_their_own_causes():
             await native.aclose()
 
 
-async def test_fallback_respects_existing_output_guardrails(responses):
+@pytest.mark.parametrize("tripwire", [False, True])
+async def test_fallback_respects_existing_output_guardrails(responses, tripwire):
+    from agents import GuardrailTripwire
+
     responses.respond(assistant_output("bad output"))
     native = provider(responses)
-    called: list[RunFailure] = []
+    seen: list[RunFailure] = []
+    guarded = []
 
     def recover(failure: RunFailure) -> RecoverRun[Record]:
-        called.append(failure)
+        seen.append(failure)
         return RecoverRun(Record(count=3))
 
+    async def guard(context, actual_agent):
+        guarded.append((context, actual_agent))
+        assert context.final_output == Record(count=3)
+        assert context.model == "gpt-5.5"
+        return GuardrailResult(tripwire)
+
     agent = Agent(
+        name="recovery owner",
+        model="gpt-5.5",
         instructions="Return a record.",
         provider=native,
         output_type=PromptedOutput(Record, max_retries=0),
-        output_guardrails=[OutputGuardrail("final", lambda *_: GuardrailResult(True))],
+        output_guardrails=[OutputGuardrail("final", guard)],
     )
     try:
-        async with timeout(20):
-            with pytest.raises(OutputValidationError):
-                await agent.run("first", error_handler=recover)
-            assert not called
+        async with timeout(20), agent.session() as session:
+            turn = await session.submit("first")
+            if tripwire:
+                with pytest.raises(GuardrailTripwire) as caught:
+                    await session._one_shot_result(turn, recover, True, "first")
+                assert caught.value.record.name == "final"
+                assert all(
+                    part.get("text") != '{"count": 3}'
+                    for item in (await session.history_snapshot()).items
+                    if item.get("role") == "assistant"
+                    for part in item.get("content", [])
+                )
+            else:
+                result = await session._one_shot_result(turn, recover, True, "first")
+                assert result.final_output == Record(count=3)
+                assert [record.name for record in result.guardrail_results] == ["final"]
+                assert any(
+                    item.get("role") == "assistant"
+                    and any(part.get("text") == '{"count": 3}' for part in item.get("content", []))
+                    for item in (await session.history_snapshot()).items
+                )
+            assert len(seen) == len(guarded) == 1
+            context, actual_agent = guarded[0]
+            assert actual_agent is agent and context.session_id == session.id
+            assert context.turn_id == turn.turn_id
+            assert len(responses.requests) == 1
     finally:
         await native.aclose()
 

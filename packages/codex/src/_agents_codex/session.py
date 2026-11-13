@@ -4095,7 +4095,7 @@ class Session(Generic[ContextT, OutputT]):
                 programmatic_tool_calling=programmatic_tool_calling,
                 checklist=checklist,
                 mcp_tools=mcp_tools,
-                has_environment=opening.environment is not None,
+                environment=opening.environment,
                 available=available,
                 tools=tools,
             )
@@ -9498,7 +9498,6 @@ class Session(Generic[ContextT, OutputT]):
             and not self._broken
             and submission.turn_id is not None
             and details.last_agent is not None
-            and not (self._output_guardrails or details.last_agent.output_guardrails)
         ):
             result = await self._recover_one_shot(
                 submission, handler, RunFailure(kind, error, details, self._context)
@@ -9557,6 +9556,58 @@ class Session(Generic[ContextT, OutputT]):
         check_owner()
         if current.revision != revision.revision:
             raise RuntimeError("Cannot recover a run after its Session history has changed")
+        agent = failure.details.last_agent
+        turn_id = submission.turn_id
+        assert agent is not None and turn_id is not None
+        captured = self._effective_agent()
+        checks = (*self._output_guardrails, *captured.output_guardrails)
+        records = list(failure.details.guardrail_results)
+        if checks:
+            model = next(
+                (
+                    turn["receipt"]["model"]
+                    for turn in [row async for row in self.turns()]
+                    if turn["id"] == turn_id and "receipt" in turn
+                ),
+                captured.model,
+            )
+            check_owner()
+            if model is None:
+                raise CapabilityError("Cannot validate recovered output without its model receipt")
+            guard_request = CompletionContext(
+                context=self._context,
+                text=None,
+                session_id=self.id,
+                turn_id=turn_id,
+                subagent_id=None,
+                model=model,
+                continuation_count=0,
+                final_output=output,
+            )
+            scope = _Invocation(self)
+            token = _invocation.set(scope)
+
+            def active() -> bool:
+                return scope.active and not self._closing and self._last_turn is submission
+
+            async def invoke(
+                guardrail: OutputGuardrail[Any], request: CompletionContext[Any]
+            ) -> Any:
+                async with _bind_decisions(request, active, captured.decisions):
+                    return await _call_callback(guardrail.callback, active, request, agent)
+
+            try:
+                await _settle_output_guardrails(
+                    checks, agent, guard_request, records, invoke, active
+                )
+            finally:
+                scope.active = False
+                _invocation.reset(token)
+            check_owner()
+            current = await self.history_snapshot(limit=0)
+            check_owner()
+            if current.revision != revision.revision:
+                raise RuntimeError("Cannot recover a run after its Session history has changed")
         items = failure.details.items
         if recovery.include_in_history:
             text = wire
@@ -9566,10 +9617,6 @@ class Session(Generic[ContextT, OutputT]):
                     ensure_ascii=False,
                     allow_nan=False,
                 )
-            turn_id = submission.turn_id
-            assert turn_id is not None
-            agent = failure.details.last_agent
-            assert agent is not None
             item_id = f"msg_{uuid4().hex}"
 
             async def append_recovered() -> None:
@@ -9598,7 +9645,7 @@ class Session(Generic[ContextT, OutputT]):
             submission,
             cast(OutputT, output),
             usage,
-            guardrail_results=failure.details.guardrail_results,
+            guardrail_results=tuple(records),
             items=items,
         )
         object.__setattr__(submission, "_recovered_result", result)

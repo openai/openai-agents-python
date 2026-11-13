@@ -108,7 +108,7 @@ The SDK rejects later reuse of a reconciled call ID. A new call ID can still req
 
 ## Store history in an application backend
 
-`CustomStorage` supports root Sessions with automatic Python tools in `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md). It rejects standalone native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
+`CustomStorage` supports root Sessions with automatic Python tools. It also supports an authenticated remote `Environment` with `read_only=True` that grants only `project_glob` or `project_grep` and has no capability directories. Process tools, writable environments, child agents, goals, checklists, code mode, and manual tools remain unsupported. Use a [matching preview wheel](installation.md).
 
 Import `CustomStorage` and `SessionStore` from `agents`. Set `storage = CustomStorage(backend)` with an application backend implementing `SessionStore`, then open with `agent.session(storage=storage)`. Retain `session.id` and reopen with the same backend and `resume=saved_id`. The [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage) provides a persistent SQLite adapter and a two-process walkthrough.
 
