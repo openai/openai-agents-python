@@ -92,6 +92,7 @@ def validate_sample(
     native_transport="http",
     default_host=False,
     native_provider_mode="caller-owned",
+    native_request_transport=None,
     peer_http_mode="h1",
 ):
     """Check scheduling, declared identities and existing worker count receipts."""
@@ -114,6 +115,9 @@ def validate_sample(
         or native_provider_mode not in ("caller-owned", "omitted")
     ):
         raise ValueError("Unknown scheduled reference engine or native transport")
+    expected_request_transport = native_request_transport if engine == "v1" else None
+    if row.get("native_request_transport") != expected_request_transport:
+        raise ValueError("Native request transport differs from its schedule")
     expected_provider_mode = native_provider_mode if engine == "v1" else None
     if (
         row.get("native_provider_mode", "caller-owned" if engine == "v1" else None)
@@ -278,6 +282,7 @@ def summarize(
     reference_transport=None,
     default_host=False,
     native_provider_mode="caller-owned",
+    native_request_transport=None,
     peer_http_mode="h1",
 ):
     if reference_response_mode is not None and reference_engine != "v1":
@@ -317,6 +322,7 @@ def summarize(
                     else native_transport,
                     default_host=default_host,
                     native_provider_mode=native_provider_mode,
+                    native_request_transport=native_request_transport,
                     peer_http_mode=peer_http_mode,
                 )
         fields = ["import_ms"]
@@ -366,6 +372,7 @@ def summarize(
             "native_transport": native_transport,
             "peer_http_mode": peer_http_mode,
             "native_provider_mode": native_provider_mode,
+            "native_request_transport": native_request_transport,
             "reference_response_mode": (reference_response_mode or v1_response_mode)
             if reference_engine == "v1" and case != "startup_import"
             else None,
@@ -385,12 +392,20 @@ def main():
     parser.add_argument(
         "--default-host-setup",
         type=Path,
-        help="Container setup JSON; omit endpoint/transport overrides and verify actual Host/SNI",
+        help="Container setup JSON; omit Provider endpoint/transport overrides and verify Host/SNI",
     )
     parser.add_argument(
         "--reference-transport",
         choices=["http", "websocket"],
         help="Expected wire for a v1 reference arm in default-host mode",
+    )
+    parser.add_argument(
+        "--native-request-transport",
+        choices=["auto", "http", "websocket"],
+        help=(
+            "Per-run request transport for every v1 arm; omission preserves SDK defaults "
+            "(requires omitted Provider default-host calls)"
+        ),
     )
     parser.add_argument("--peer-http-mode", choices=("h1", "dual"), default="h1")
     parser.add_argument("--reference-engine", choices=["v0", "v1"], default="v0")
@@ -442,6 +457,10 @@ def main():
         or not args.v1_version.strip()
     ):
         parser.error("Use positive counts/timeout, distinct cases and explicit expected versions")
+    if args.native_request_transport is not None and (
+        not args.default_host_setup or args.native_provider_mode != "omitted"
+    ):
+        parser.error("Request transport requires omitted Provider default-host calls")
     if args.native_provider_mode == "omitted" and not args.default_host_setup:
         parser.error("Omitted Provider mode: default-host workloads only")
     if args.reference_response_mode is not None and args.reference_engine != "v1":
@@ -533,6 +552,7 @@ def main():
         "native_transport": args.native_transport,
         "peer_http_mode": args.peer_http_mode,
         "native_provider_mode": args.native_provider_mode,
+        "native_request_transport": args.native_request_transport,
         "reference_transport": args.reference_transport,
         "default_host_setup": str(args.default_host_setup) if args.default_host_setup else None,
         "v1_response_mode": args.v1_response_mode,
@@ -604,6 +624,8 @@ def main():
                     )
                     if engine == "v1" and scheduled_transport != "http":
                         command += ["--native-transport", scheduled_transport]
+                    if engine == "v1" and args.native_request_transport is not None:
+                        command += ["--native-request-transport", args.native_request_transport]
                     if engine == "v1" and args.native_provider_mode != "caller-owned":
                         command += ["--native-provider-mode", args.native_provider_mode]
                     if args.peer_http_mode != "h1":
@@ -697,6 +719,7 @@ def main():
                         native_transport=scheduled_transport,
                         default_host=bool(args.default_host_setup),
                         native_provider_mode=args.native_provider_mode,
+                        native_request_transport=args.native_request_transport,
                         peer_http_mode=args.peer_http_mode,
                     )
                     records[case][side].append(data)
@@ -717,6 +740,7 @@ def main():
                 reference_transport=args.reference_transport,
                 default_host=bool(args.default_host_setup),
                 native_provider_mode=args.native_provider_mode,
+                native_request_transport=args.native_request_transport,
                 peer_http_mode=args.peer_http_mode,
             )
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

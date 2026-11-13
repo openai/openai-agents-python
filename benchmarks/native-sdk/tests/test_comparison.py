@@ -659,15 +659,19 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                 self.options = options
                 self.provider = options.get("provider")
                 self.run = mock.AsyncMock(
-                    side_effect=lambda prompt: SimpleNamespace(final_output=prompt)
+                    side_effect=lambda prompt, **options: SimpleNamespace(final_output=prompt)
                 )
                 self.session = mock.Mock(
                     side_effect=AssertionError("A retained Session has been opening")
                 )
                 instances.append(self)
 
-        for mode in ("caller-owned", "omitted"):
-            with self.subTest(mode=mode):
+        for mode, request_transport in (
+            ("caller-owned", None),
+            ("omitted", None),
+            ("omitted", "http"),
+        ):
+            with self.subTest(mode=mode, request_transport=request_transport):
                 provider = SimpleNamespace(__aenter__=mock.AsyncMock(), __aexit__=mock.AsyncMock())
                 constructor = mock.Mock(return_value=provider)
                 telemetry = SimpleNamespace(configure=mock.AsyncMock(), shutdown=mock.AsyncMock())
@@ -686,7 +690,11 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                         str(Path(worker.__file__).with_name("v1_adapter.py"))
                     )["Adapter"]
                     options = (
-                        {"provider_mode": mode, "transport": "websocket"}
+                        {
+                            "provider_mode": mode,
+                            "transport": "websocket",
+                            "request_transport": request_transport,
+                        }
                         if mode == "omitted"
                         else {}
                     )
@@ -694,8 +702,14 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((await adapter.run("first"))["text"], "first")
                         self.assertEqual((await adapter.run("second"))["text"], "second")
                 agent = instances[-1]
+                run_options = (
+                    {"model_settings": {"request_transport": request_transport}}
+                    if request_transport is not None
+                    else {}
+                )
                 self.assertEqual(
-                    agent.run.await_args_list, [mock.call("first"), mock.call("second")]
+                    agent.run.await_args_list,
+                    [mock.call("first", **run_options), mock.call("second", **run_options)],
                 )
                 agent.session.assert_not_called()
                 if mode == "omitted":
@@ -712,6 +726,93 @@ class ProviderModeTests(unittest.IsolatedAsyncioTestCase):
                     provider.__aexit__.assert_awaited_once()
                 telemetry.configure.assert_awaited_once()
                 telemetry.shutdown.assert_awaited_once()
+
+    def test_common_request_transport_reaches_both_native_workers(self):
+        previous = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        commands, collected = [], {"oneshot_text": {"v0": [], "v1": []}}
+        with tempfile.TemporaryDirectory() as directory:
+            setup, output = Path(directory) / "setup.json", Path(directory) / "result"
+            setup.write_text("{}")
+            arguments = [
+                "compare.py",
+                "--v0-python",
+                "/opt/reference/python",
+                "--v1-python",
+                "/opt/target/python",
+                "--v0-version",
+                VERSIONS["v1"],
+                "--v1-version",
+                VERSIONS["v1"],
+                "--server-python",
+                "/opt/peer/python",
+                "--output-dir",
+                str(output),
+                "--cases",
+                "oneshot_text",
+                "--samples",
+                "1",
+                "--reference-engine",
+                "v1",
+                "--reference-transport",
+                "http",
+                "--default-host-setup",
+                str(setup),
+                "--native-provider-mode",
+                "omitted",
+                "--native-request-transport",
+                "http",
+            ]
+
+            def launch(command, **kwargs):
+                commands.append(command)
+                path = Path(command[command.index("--output") + 1])
+                side = "v0" if path.stem.endswith("-v0") else "v1"
+
+                def wait(timeout):
+                    value = row("v1", 0)
+                    value.update(
+                        default_host=True,
+                        native_provider_mode="omitted",
+                        native_request_transport="http",
+                    )
+                    collected["oneshot_text"][side].append(value)
+                    path.write_text(json.dumps(value))
+                    return 0
+
+                return SimpleNamespace(pid=12345, wait=wait)
+
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch.object(sys, "argv", arguments),
+                mock.patch.object(compare.platform, "platform", return_value="test-platform"),
+                mock.patch.object(compare.subprocess, "Popen", side_effect=launch),
+                mock.patch.object(compare, "terminate_group"),
+                mock.patch("builtins.print"),
+            ):
+                compare.main()
+            self.assertEqual(len(commands), 2)
+            for command in commands:
+                self.assertEqual(command[command.index("--engine") + 1], "v1")
+                self.assertEqual(command[command.index("--native-request-transport") + 1], "http")
+                self.assertEqual(command[command.index("--native-provider-mode") + 1], "omitted")
+            metadata = json.loads((output / "metadata.json").read_text())
+            summary = json.loads((output / "summary.json").read_text())["oneshot_text"]
+            self.assertEqual(metadata["native_request_transport"], "http")
+            self.assertEqual(summary["native_request_transport"], "http")
+            for side in ("v0", "v1"):
+                collected["oneshot_text"][side][0]["native_request_transport"] = None
+                with self.assertRaisesRegex(ValueError, "request transport"):
+                    compare.summarize(
+                        collected,
+                        expected_versions=dict.fromkeys(VERSIONS, VERSIONS["v1"]),
+                        reference_engine="v1",
+                        reference_transport="http",
+                        default_host=True,
+                        native_provider_mode="omitted",
+                        native_request_transport="http",
+                    )
+                collected["oneshot_text"][side][0]["native_request_transport"] = "http"
 
     def test_native_reference_requires_the_same_declared_provider_mode(self):
         value = records()
