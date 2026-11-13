@@ -208,33 +208,29 @@ async def test_native_portable_lineage_requires_current_anchor_and_account():
         ]
 
 
-async def test_native_lineage_refuses_websocket_before_any_request():
-    async with (
-        timeout(30),
-        history_peer() as (_provider, _model, _reads, base_url, wire),
-    ):
-        async with NativeProvider(
-            base_url=base_url,
-            api_key="current-owner",
-            supports_websockets=True,
-            request_max_retries=0,
-            stream_max_retries=0,
-        ) as provider:
-            agent = Agent(
-                instructions="No dispatch.",
-                model="gpt-5.2",
-                provider=provider,
-                model_settings={"store": True},
-            )
-            with pytest.raises((NativeError, ValueError, RuntimeError), match="WebSocket"):
-                await agent.run(
-                    "Never dispatch.",
-                    provider_history={
-                        "type": "previous_response",
-                        "id": "resp_current",
-                    },
-                )
-        assert wire == []
+async def test_native_websocket_lineage_keeps_unstored_history_on_one_connection():
+    from tests.test_native_provider_websockets import message_text, peer as websocket_peer
+
+    async with timeout(30), websocket_peer() as model:
+        model.respond(assistant_output("Before."))
+        model.respond(assistant_output("After."))
+        agent = Agent(
+            instructions="Continue the current response chain.",
+            model="gpt-5.5",
+            provider=model.provider(),
+            model_settings={"store": False},
+        )
+        async with agent.session(provider_history={"type": "previous_response"}) as session:
+            await (await session.submit("Before.")).get_result()
+            await (await session.submit("After.")).get_result()
+        assert model.connections == 1
+        assert model.warmups == 0
+        assert not model.http_requests
+        assert len(model.frames) == 2
+        assert model.frames[0].get("previous_response_id") is None
+        assert model.frames[1]["previous_response_id"] == "resp_ws_1"
+        assert model.frames[1]["store"] is False
+        assert message_text(model.frames[1]["input"], "user") == ["After."]
 
 
 @pytest.mark.parametrize("current_store", [False, None])
@@ -262,6 +258,59 @@ async def test_native_conversation_restore_rebinds_current_storage(current_store
             await (await session.submit("After.")).get_result()
         assert [request["store"] for request in model.requests] == [True, False]
         assert [request["conversation"] for request in model.requests] == ["conv_current"] * 2
+
+
+async def test_native_websocket_unsent_revocation_clears_pending_history():
+    import asyncio
+
+    from _agents_codex.state import _saved_thread_settings
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    frames = []
+    connections = 0
+
+    async def websocket(request):
+        nonlocal connections
+        entered.set()
+        await release.wait()
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        connections += 1
+        async for frame in socket:
+            frames.append(frame.json())
+        return socket
+
+    app = web.Application()
+    app.router.add_get("/v1/responses", websocket)
+    async with timeout(30), TestServer(app) as server:
+        async with NativeProvider(
+            base_url=str(server.make_url("/v1")),
+            api_key="synthetic-key",
+            supports_websockets=True,
+            request_max_retries=0,
+            stream_max_retries=0,
+        ) as provider:
+            agent = Agent(
+                instructions="Never dispatch a revoked request.",
+                model="gpt-5.5",
+                provider=provider,
+                model_settings={"store": False},
+            )
+            async with agent.session(provider_history={"type": "previous_response"}) as session:
+                turn = await session.submit("Known unsent.")
+                await entered.wait()
+                # Retire the captured native owner while the real upgrade waits.
+                session._native._revoke_native_interception()
+                release.set()
+                with pytest.raises(NativeError, match="interception"):
+                    await turn.get_result()
+                state = await session.save_state()
+                settings = _saved_thread_settings(state.history, state.source_session_id)
+                assert settings is not None
+                assert not settings["provider_history"].get("pending", False)
+        assert connections == 1
+        assert frames == []
 
 
 async def test_native_response_chain_profile_restore_retains_current_storage():

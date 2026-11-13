@@ -10,6 +10,7 @@ from _agents_codex.input import (
     InputImage as InputImage,
     InputImageFile as InputImageFile,
     InputText as InputText,
+    InputVideo as InputVideo,
     Literal as Literal,
     Mapping as Mapping,
     NotRequired as NotRequired,

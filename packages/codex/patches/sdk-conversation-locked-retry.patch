@@ -1,0 +1,34 @@
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -175,6 +175,13 @@
+ 
+                 if status == http::StatusCode::BAD_REQUEST
+                     && !is_chatgpt_plan_unsupported_capability(status, &body_text)
++                    // Keep the structured 400 for the bounded Core lock retry.
++                    && !(body_text.len() <= 16_384
++                        && serde_json::from_str::<Value>(&body_text).is_ok_and(|body| {
++                            body.get("error")
++                                .and_then(|error| error.get("code"))
++                                .and_then(Value::as_str) == Some("conversation_locked")
++                        }))
+                 {
+                     if let Ok(parsed) = serde_json::from_str::<Value>(&body_text)
+                         && let Some(error) = parsed.get("error")
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2609,6 +2609,13 @@
+                 && context.normalized.error_code.as_deref() == Some("conversation_locked")
+                 && retry_settings.and_then(|settings| settings.max_retries) != Some(0)
+                 && locked_retries < 3;
++            // A typed conversation-lock 400 may use only the compatibility retry.
++            // Opt-out, exhaustion and unsafe requests keep the rejection terminal.
++            let hard_veto = hard_veto
++                || (!compatibility_retry
++                    && context.normalized.error_code.as_deref() == Some("conversation_locked")
++                    && context.normalized.status_code == Some(400));
++            context.policy_enabled &= !hard_veto;
+             let mut resolution = None;
+             if !stop_at_plan_error
+                 && !permanently_stopped

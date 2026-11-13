@@ -3607,10 +3607,23 @@ def _prepare_opening_model_settings(
         model, settings = restored_model_settings
         settings.setdefault("request_controls", {}).update(attempt_controls)
         settings["invocation_timeout_ms"] = invocation_timeout
+    websocket_history = (
+        agent.provider is not None
+        and agent.provider.supports_websockets is True
+        and agent.provider.model_backend is None
+    )
     if provider_history is not None:
-        if provider_history["type"] == "previous_response" and current_store is not True:
+        if (
+            provider_history["type"] == "previous_response"
+            and current_store is not True
+            and not websocket_history
+        ):
             raise ValueError("Previous-response HTTP history requires current store=True")
-        if provider_history["type"] == "previous_response" and profile_roster:
+        if (
+            provider_history["type"] == "previous_response"
+            and profile_roster
+            and not websocket_history
+        ):
             by_id = {row["id"]: row for row in profile_roster}
             pending = [profile_roster[0]["id"]]
             visited = set()
@@ -9830,6 +9843,7 @@ class Session(Generic[ContextT, OutputT]):
             and self._provider_history is not None
             and self._provider_history["type"] == "previous_response"
             and controls["store"] is not True
+            and not self._websockets_enabled
         ):
             raise ValueError("Previous-response HTTP history requires current store=True")
         captured_tools = tuple(tools) if tools is not None else None
@@ -14315,7 +14329,13 @@ class Session(Generic[ContextT, OutputT]):
                         or not all(
                             isinstance(part, dict)
                             and part.get("type")
-                            in {"input_text", "input_image", "input_file", "input_audio"}
+                            in {
+                                "input_text",
+                                "input_image",
+                                "input_file",
+                                "input_audio",
+                                "input_video",
+                            }
                             for part in parts
                         )
                     ):
