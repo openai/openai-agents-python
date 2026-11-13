@@ -339,12 +339,14 @@ from .tools import (
     Checklist as Checklist,
     NativeGoals as NativeGoals,
     ToolCallInfo as ToolCallInfo,
+    ToolNotFoundBehavior,
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
     ToolSearch,
     WebSearch as WebSearch,
     _capture_application_data,
     _capture_hosted_tools,
+    _capture_tool_not_found_behavior,
     _capture_tools as _capture_tools,
     _capture_web_search_config as _capture_web_search_config,
     _CapturedFunction as _CapturedFunction,
@@ -4865,6 +4867,7 @@ class Session(Generic[ContextT, OutputT]):
                         model_override=continuation.model_override,
                         model_settings_override=continuation.model_settings_override,
                         retry_policy_override=restored_retry_policy,
+                        raise_on_unknown_tool=session._native._manual_raises_unknown_tool(),
                         guardrail_results=session._restore_guardrail_records(saved),
                         run_usage=_UsageCollector(saved.run_usage),
                         original_input=saved.original_input,
@@ -6655,6 +6658,7 @@ class Session(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         model_override: str | None = None,
         model_settings_override: ModelSettings | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -6674,6 +6678,7 @@ class Session(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         model_override: str | None = None,
         model_settings_override: ModelSettings | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -6692,6 +6697,7 @@ class Session(Generic[ContextT, OutputT]):
         budget: None = None,
         model_override: None = None,
         model_settings_override: None = None,
+        tool_not_found_behavior: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -6710,6 +6716,7 @@ class Session(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         model_override: str | None = None,
         model_settings_override: ModelSettings | None = None,
+        tool_not_found_behavior: ToolNotFoundBehavior | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -6725,6 +6732,9 @@ class Session(Generic[ContextT, OutputT]):
         if_busy="steer" disallows overrides and awaits native acceptance for
         the captured active root. Use Turn.steer_exact to target one native root turn.
         New work returns before native admission; await Turn.get_result() for completion.
+
+        tool_not_found_behavior selects how Core handles an unknown direct function call in
+        this turn. "raise_error" fails the turn. The default sends a tool error to the model.
         prepare_request(turn, request, *, preparation_index, recovery_attempt)
         receives detached native sampling JSON and returns a complete replacement
         or None. Eager ordinary function/MCP tools and Responses HTTP are required;
@@ -6804,6 +6814,7 @@ class Session(Generic[ContextT, OutputT]):
                 if captured_settings is None
                 else _native_model_settings(None, captured_settings)
             )
+            raise_on_unknown_tool = _capture_tool_not_found_behavior(tool_not_found_behavior)
             parent_trace = _trace_context(parent_trace)
             self._check_callback_operation("start work in its own Session")
             self._check_graph_admission()
@@ -6819,6 +6830,7 @@ class Session(Generic[ContextT, OutputT]):
                 or budget is not None
                 or model_override is not None
                 or model_settings_override is not None
+                or tool_not_found_behavior is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -6878,6 +6890,7 @@ class Session(Generic[ContextT, OutputT]):
                 model_override=model_override,
                 model_settings_override=encoded_settings,
                 retry_policy_override=retry_policy_override,
+                raise_on_unknown_tool=raise_on_unknown_tool,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -9188,6 +9201,7 @@ class Session(Generic[ContextT, OutputT]):
         model_override: str | None = None,
         model_settings_override: dict[str, Any] | None = None,
         retry_policy_override: RetryPolicy | None = None,
+        raise_on_unknown_tool: bool = False,
         run_usage: _UsageCollector | None = None,
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
@@ -9319,6 +9333,7 @@ class Session(Generic[ContextT, OutputT]):
                 model_override=model_override,
                 model_settings_override=model_settings_override,
                 retry_policy_override=retry_policy_override,
+                raise_on_unknown_tool=raise_on_unknown_tool,
                 tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
@@ -11044,6 +11059,8 @@ class Session(Generic[ContextT, OutputT]):
                             request.setdefault("start", {})["model_settings_override"] = (
                                 state.model_settings_override
                             )
+                        if state.raise_on_unknown_tool:
+                            request["raise_on_unknown_tool"] = True
                         if state.writable_roots is not None:
                             request["writable_roots"] = state.writable_roots
                         state.observation_after = self._observations.sequence
@@ -11353,6 +11370,7 @@ class Session(Generic[ContextT, OutputT]):
                     model_override=state.model_override,
                     model_settings_override=state.model_settings_override,
                     retry_policy_override=state.retry_policy_override,
+                    raise_on_unknown_tool=state.raise_on_unknown_tool,
                     run_usage=state.run_usage,
                     submission_request_attempts=state.submission_request_attempts,
                     original_input=state.original_input,
@@ -11647,6 +11665,7 @@ class Session(Generic[ContextT, OutputT]):
                         model_override=state.model_override,
                         model_settings_override=repair_model_settings,
                         retry_policy_override=state.retry_policy_override,
+                        raise_on_unknown_tool=state.raise_on_unknown_tool,
                         run_usage=state.run_usage,
                     )
                 except NativeError as error:
