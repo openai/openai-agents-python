@@ -380,8 +380,11 @@ class SignInWithChatGPT:
         raise failure
 
 
-class _ProviderStrings(dict[str, str]):
-    """Frozen captured strings that preserve dataclass asdict/copy/pickle support."""
+_ProviderValue = TypeVar("_ProviderValue", str, int | None)
+
+
+class _ProviderOptions(dict[str, _ProviderValue]):
+    """Frozen captured settings that support asdict, copying, and pickle."""
 
     def _immutable(self: object, *args: Any, **kwargs: Any) -> NoReturn:
         raise TypeError("Captured provider routing is immutable")
@@ -532,7 +535,7 @@ class NativeProvider:
                     type(value) is not int or not minimum <= value <= 2**63 - 1
                 ):
                     raise ValueError(f"{name} must be an integer >= {minimum} or None")
-            object.__setattr__(self, "websocket_options", MappingProxyType(options))
+            object.__setattr__(self, "websocket_options", _ProviderOptions(options))
         for name in ("base_url", "api_key", "websocket_base_url"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
@@ -629,7 +632,7 @@ class NativeProvider:
             ):
                 raise TypeError(f"{name} must be a string map with nonempty keys")
             captured[name] = dict(value) if value is not None else None
-            object.__setattr__(self, name, _ProviderStrings(value) if value is not None else None)
+            object.__setattr__(self, name, _ProviderOptions(value) if value is not None else None)
         protected = {
             "authorization",
             "proxy-authorization",
@@ -743,7 +746,7 @@ class NativeProvider:
             return reduction
         # Copy settings and the closed fence, never another descriptor's resource.
         dictionary = dictionary.copy()
-        for name in ("query_params", "headers", "env_headers"):
+        for name in ("query_params", "headers", "env_headers", "websocket_options"):
             if dictionary.get(name) is not None:
                 dictionary[name] = dict(dictionary[name])
         dictionary.pop("_transport", None)
@@ -758,8 +761,11 @@ class NativeProvider:
             if attributes is None:
                 continue
             for name, value in attributes.items():
-                if name in ("query_params", "headers", "env_headers") and value is not None:
-                    value = _ProviderStrings(value)
+                if (
+                    name in ("query_params", "headers", "env_headers", "websocket_options")
+                    and value is not None
+                ):
+                    value = _ProviderOptions(value)
                 object.__setattr__(self, name, value)
 
     def _acquire_lease(self) -> tuple[Any, Any, Any]:
