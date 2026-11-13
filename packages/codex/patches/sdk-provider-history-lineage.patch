@@ -1,0 +1,3408 @@
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+index b6bf3d5b..43acb833 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+@@ -30,6 +30,7 @@ fn settings_item(
+         ThreadSettingsAppliedEvent {
+             thread_id: None,
+             thread_settings: ThreadSettingsSnapshot {
++                provider_history: None,
+                 request_controls: Default::default(),
+                 tool_choice: None,
+                 disabled_plugin_ids: Vec::new(),
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index d3212088..06aca9aa 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -282,12 +282,31 @@ impl Serialize for ResponsesApiTools {
+     }
+ }
+ 
++/// Request-local canonical hashes and their unchanged wire occurrence map.
++#[derive(Debug, Clone, PartialEq)]
++pub struct ProviderHistoryInputProjection {
++    pub retained_item_count: usize,
++    pub retained_json_bytes: usize,
++    pub boundary: codex_protocol::provider_history::ProviderHistoryInputBoundary,
++    pub item_sha256: Vec<[u8; 32]>,
++    pub item_ids: Vec<Option<String>>,
++    pub sampling_item_sha256: Vec<[u8; 32]>,
++    pub delivered_input_indices: Vec<usize>,
++    pub wire_input_indices: Vec<usize>,
++    pub prefix_len: usize,
++}
++
+ /// Effective wire values. Cleared and omitted SDK settings emit no member here.
+ #[derive(Debug, Default, Serialize, Clone, PartialEq)]
+ pub struct ResponsesRequestControls {
+     // Core suppresses the outer scalar when this captured selector is present.
+     #[serde(rename = "tool_choice", skip_serializing_if = "Option::is_none")]
+     pub hosted_tool_choice: Option<codex_protocol::model_request_controls::HostedToolChoice>,
++    /// Local prepared-request data; never sent to the provider.
++    #[serde(skip)]
++    pub canonical_history_input: Option<ProviderHistoryInputProjection>,
++    #[serde(flatten, serialize_with = "serialize_provider_history")]
++    pub provider_history: Option<codex_protocol::provider_history::ProviderHistorySelection>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub prompt: Option<codex_protocol::model_request_controls::HostedPromptReference>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -315,6 +334,29 @@ pub struct ResponsesRequestControls {
+     pub prompt_cache_options: Option<PromptCacheOptions>,
+ }
+ 
++fn serialize_provider_history<S>(
++    history: &Option<codex_protocol::provider_history::ProviderHistorySelection>,
++    serializer: S,
++) -> Result<S::Ok, S::Error>
++where
++    S: serde::Serializer,
++{
++    use codex_protocol::provider_history::ProviderHistorySelection;
++    use serde::ser::SerializeMap;
++
++    let mut map = serializer.serialize_map(None)?;
++    match history {
++        Some(ProviderHistorySelection::Conversation { id }) => {
++            map.serialize_entry("conversation", id)?;
++        }
++        Some(ProviderHistorySelection::PreviousResponse { id: Some(id) }) => {
++            map.serialize_entry("previous_response_id", id)?;
++        }
++        Some(ProviderHistorySelection::PreviousResponse { id: None }) | None => {}
++    }
++    map.end()
++}
++
+ #[derive(Debug, Serialize, Clone, PartialEq)]
+ pub struct PromptCacheOptions {
+     pub ttl: codex_protocol::model_request_controls::PromptCacheTtl,
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index aca02a2d..a4fea21c 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -52,6 +52,75 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         }
+     }
+ 
++    /// Authenticated exact-anchor lookup, without generation or saved credentials.
++    pub async fn verify_history_anchor(
++        &self,
++        selection: &codex_protocol::provider_history::ProviderHistorySelection,
++        stored_response: Option<bool>,
++        headers: HeaderMap,
++    ) -> Result<(), ApiError> {
++        use codex_protocol::provider_history::ProviderHistorySelection;
++
++        let invalid = |message: &str| ApiError::InvalidRequest {
++            message: message.into(),
++        };
++        selection
++            .validate_shape()
++            .map_err(|message| invalid(&message))?;
++        let (resource, id) = match selection {
++            ProviderHistorySelection::Conversation { id } => ("conversations", id),
++            ProviderHistorySelection::PreviousResponse { id: Some(id) } => {
++                if stored_response == Some(false) {
++                    return Err(invalid(
++                        "Unstored provider history requires its live WebSocket owner",
++                    ));
++                }
++                ("responses", id)
++            }
++            ProviderHistorySelection::PreviousResponse { id: None } => {
++                return Err(invalid(
++                    "Cold provider history requires an exact response anchor",
++                ));
++            }
++        };
++        if id == "." || id == ".." {
++            return Err(invalid("Invalid provider history anchor"));
++        }
++        let mut path = url::Url::parse("https://provider-history.invalid/")
++            .expect("static provider history URL");
++        path.path_segments_mut()
++            .expect("hierarchical URL")
++            .push(resource)
++            .push(id);
++        let path = path.path().trim_start_matches('/');
++        let prepared = crate::prepare_request_transport(
++            &self.session.provider().url_for_path(path),
++            self.request_transport.as_ref(),
++        )?;
++        let response = self
++            .session
++            .execute_with(Method::GET, path, headers, None, |request| {
++                prepared.apply(request);
++                request.response_body_limit_bytes = Some(MAX_JSON_RESPONSE_BODY_BYTES);
++            })
++            .await?;
++        super::responses_json::check_json_structure(&response.body)?;
++        let body: Value = serde_json::from_slice(&response.body)
++            .map_err(|_| invalid("Invalid provider history anchor response"))?;
++        let valid = body.get("id").and_then(Value::as_str) == Some(id.as_str())
++            && if resource == "responses" {
++                body.get("status").and_then(Value::as_str) == Some("completed")
++            } else {
++                body.get("object").and_then(Value::as_str) == Some("conversation")
++            };
++        if !valid {
++            return Err(invalid(
++                "Provider history anchor is unconfirmed or mismatched",
++            ));
++        }
++        Ok(())
++    }
++
+     pub fn with_telemetry(
+         self,
+         request: Option<Arc<dyn RequestTelemetry>>,
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 100fabad..793d30a9 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -182,3 +182,5 @@ pub use crate::endpoint::RealtimeHostedMcpToolFilter;
+ pub struct SdkWebsocketTlsSelector(
+     pub fn(&url::Url) -> Option<std::sync::Arc<rustls::ClientConfig>>,
+ );
++
++pub use common::ProviderHistoryInputProjection;
+diff --git a/codex-rs/codex-api/tests/provider_history.rs b/codex-rs/codex-api/tests/provider_history.rs
+new file mode 100644
+index 00000000..bf2ec037
+--- /dev/null
++++ b/codex-rs/codex-api/tests/provider_history.rs
+@@ -0,0 +1,233 @@
++use codex_api::ResponseCreateWsRequest;
++use codex_api::ResponsesApiRequest;
++use codex_api::ResponsesRequestControls;
++use codex_protocol::provider_history::ProviderHistorySelection;
++use serde_json::json;
++
++#[test]
++fn history_selection_projects_one_wire_member_without_changing_storage() {
++    let mut request = ResponsesApiRequest {
++        model: "fixture-model".to_owned().into(),
++        stream: true,
++        service_tier: None,
++        input: Vec::new(),
++        tools: None,
++        tool_choice: Some("auto".into()),
++        request_controls: ResponsesRequestControls::default(),
++        parallel_tool_calls: Some(false),
++        reasoning: None,
++        store: false,
++        stream_options: None,
++        include: Vec::new(),
++        prompt_cache_key: None,
++        text: None,
++        client_metadata: None,
++        access_programs: None,
++    };
++    for (selection, key, value) in [
++        (
++            ProviderHistorySelection::Conversation {
++                id: "conv_external".into(),
++            },
++            "conversation",
++            "conv_external",
++        ),
++        (
++            ProviderHistorySelection::PreviousResponse {
++                id: Some("resp_external".into()),
++            },
++            "previous_response_id",
++            "resp_external",
++        ),
++    ] {
++        request.request_controls.provider_history = Some(selection);
++        for wire in [
++            serde_json::to_value(&request).unwrap(),
++            serde_json::to_value(ResponseCreateWsRequest::from(&request)).unwrap(),
++        ] {
++            assert_eq!(wire[key], value);
++            let other = if key == "conversation" {
++                "previous_response_id"
++            } else {
++                "conversation"
++            };
++            assert!(wire.get(other).is_none());
++            assert_eq!(wire["store"], false);
++            assert!(wire.get("type").is_none());
++            assert!(wire.get("provider_history").is_none());
++        }
++    }
++    request.request_controls.provider_history =
++        Some(ProviderHistorySelection::PreviousResponse { id: None });
++    let wire = serde_json::to_value(&request).unwrap();
++    assert!(wire.get("previous_response_id").is_none());
++    assert!(wire.get("conversation").is_none());
++    assert_eq!(wire["input"], json!([]));
++    assert_eq!(wire["store"], false);
++}
++
++struct AccountAuth(&'static str);
++impl codex_api::AuthProvider for AccountAuth {
++    fn add_auth_headers(&self, headers: &mut http::HeaderMap) {
++        headers.insert(http::header::AUTHORIZATION, self.0.parse().unwrap());
++    }
++}
++
++fn history_client(
++    server: &wiremock::MockServer,
++    account: &'static str,
++) -> codex_api::ResponsesClient<codex_client::ReqwestTransport> {
++    let provider = codex_api::Provider {
++        name: "synthetic".into(),
++        base_url: server.uri(),
++        query_params: None,
++        headers: http::HeaderMap::new(),
++        retry: codex_api::RetryConfig {
++            max_attempts: 1,
++            base_delay: std::time::Duration::from_millis(1),
++            retry_429: false,
++            retry_5xx: false,
++            retry_transport: false,
++        },
++        stream_idle_timeout: std::time::Duration::from_secs(2),
++    };
++    let transport = codex_client::ReqwestTransport::from_http_client(
++        codex_http_client::HttpClientBuilder::new()
++            .build_direct()
++            .unwrap(),
++    );
++    codex_api::ResponsesClient::new(
++        transport,
++        provider,
++        std::sync::Arc::new(AccountAuth(account)),
++    )
++}
++
++#[tokio::test]
++async fn cold_anchor_lookup_uses_current_account_without_generation() {
++    use wiremock::matchers::{header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/responses/resp_anchor"))
++        .and(header("authorization", "Bearer current-account"))
++        .respond_with(
++            ResponseTemplate::new(200)
++                .set_body_json(json!({"id":"resp_anchor","status":"completed"})),
++        )
++        .expect(1)
++        .mount(&server)
++        .await;
++    Mock::given(method("GET"))
++        .and(path("/responses/resp_anchor"))
++        .and(header("authorization", "Bearer wrong-account"))
++        .respond_with(ResponseTemplate::new(403))
++        .expect(1)
++        .mount(&server)
++        .await;
++    let selected = ProviderHistorySelection::PreviousResponse {
++        id: Some("resp_anchor".into()),
++    };
++    history_client(&server, "Bearer current-account")
++        .verify_history_anchor(&selected, Some(true), http::HeaderMap::new())
++        .await
++        .unwrap();
++    assert!(
++        history_client(&server, "Bearer wrong-account")
++            .verify_history_anchor(&selected, Some(true), http::HeaderMap::new())
++            .await
++            .is_err()
++    );
++    let requests = server.received_requests().await.unwrap();
++    assert_eq!(requests.len(), 2);
++    assert!(
++        requests
++            .iter()
++            .all(|request| request.method == http::Method::GET)
++    );
++}
++
++#[tokio::test]
++async fn cold_anchor_lookup_rejects_unstored_and_missing_socket_anchors() {
++    let server = wiremock::MockServer::start().await;
++    let client = history_client(&server, "Bearer current-account");
++    for (id, stored) in [(Some("resp_socket".into()), Some(false)), (None, None)] {
++        assert!(
++            client
++                .verify_history_anchor(
++                    &ProviderHistorySelection::PreviousResponse { id },
++                    stored,
++                    http::HeaderMap::new()
++                )
++                .await
++                .is_err()
++        );
++    }
++    assert!(server.received_requests().await.unwrap().is_empty());
++}
++
++#[tokio::test]
++async fn cold_conversation_lookup_confirms_only_the_exact_subject() {
++    use wiremock::matchers::{method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++    let server = MockServer::start().await;
++    let client = history_client(&server, "Bearer current-account");
++    let selection = ProviderHistorySelection::Conversation {
++        id: "conv_anchor".into(),
++    };
++    for (body, accepted) in [
++        (json!({"id":"conv_anchor","object":"conversation"}), true),
++        (json!({"id":"conv_other","object":"conversation"}), false),
++        (json!({"id":"conv_anchor","object":"response"}), false),
++    ] {
++        let _reply = Mock::given(method("GET"))
++            .and(path("/conversations/conv_anchor"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(body))
++            .expect(1)
++            .mount_as_scoped(&server)
++            .await;
++        assert_eq!(
++            client
++                .verify_history_anchor(&selection, None, http::HeaderMap::new())
++                .await
++                .is_ok(),
++            accepted
++        );
++    }
++    let requests = server.received_requests().await.unwrap();
++    assert_eq!(requests.len(), 3);
++    assert!(
++        requests
++            .iter()
++            .all(|request| request.method == http::Method::GET)
++    );
++}
++
++#[tokio::test]
++async fn cold_response_lookup_rejects_unfinished_anchors() {
++    use wiremock::matchers::{method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++    let server = MockServer::start().await;
++    let client = history_client(&server, "Bearer current-account");
++    let selection = ProviderHistorySelection::PreviousResponse {
++        id: Some("resp_anchor".into()),
++    };
++    for status in ["in_progress", "incomplete"] {
++        let _reply = Mock::given(method("GET"))
++            .and(path("/responses/resp_anchor"))
++            .respond_with(
++                ResponseTemplate::new(200)
++                    .set_body_json(json!({"id":"resp_anchor","status":status})),
++            )
++            .expect(1)
++            .mount_as_scoped(&server)
++            .await;
++        assert!(
++            client
++                .verify_history_anchor(&selection, Some(true), http::HeaderMap::new())
++                .await
++                .is_err()
++        );
++    }
++    assert_eq!(server.received_requests().await.unwrap().len(), 2);
++}
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 4c856bcd..8fa09453 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -732,6 +732,26 @@ impl LocalAgentControl {
+         let membership = self.runtime.admit_start()?;
+         let spawn_started_at = Instant::now();
+         let state = self.runtime.upgrade()?;
++        if options.fork_mode.is_some() {
++            if let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                parent_thread_id,
++                ..
++            })) = session_source.as_ref()
++            {
++                let parent = state.get_thread(*parent_thread_id).await?;
++                if parent
++                    .session
++                    .services
++                    .model_client
++                    .provider_history_selection()
++                    .is_some()
++                {
++                    return Err(CodexErr::InvalidRequest(
++                        "Cannot fork provider-managed history; use a fresh child".into(),
++                    ));
++                }
++            }
++        }
+         let multi_agent_version = state
+             .effective_multi_agent_version_for_spawn(
+                 &InitialHistory::New,
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 6658db68..b6bfd171 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -1891,6 +1891,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+                 ThreadSettingsAppliedEvent {
+                     thread_id: Some(parent_thread_id),
+                     thread_settings: ThreadSettingsSnapshot {
++                        provider_history: None,
+                         request_controls: Default::default(),
+                         invocation_timeout_ms: None,
+                         tool_choice: None,
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 48da6c0c..236b02ee 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -34,6 +34,8 @@ use std::sync::atomic::Ordering;
+ 
+ #[path = "client_tool_metadata.rs"]
+ mod tool_metadata;
++pub(crate) mod provider_history;
++pub(crate) use provider_history::McpRewriteAdmission;
+ 
+ use crate::CodexResponsesHeaders;
+ use crate::tools::ExecutedToolCalls;
+@@ -279,6 +281,7 @@ pub struct ModelClient {
+     sdk_model_http_pool: Option<Arc<codex_http_client::SdkModelHttpPool>>,
+     sdk_websocket_tls_selector: Option<Arc<codex_api::SdkWebsocketTlsSelector>>,
+     restored_history: bool,
++    provider_history: Option<Arc<provider_history::Cursor>>,
+     request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
+     executed_tool_calls: Option<ExecutedToolCalls>,
+     // Resolved once when the session is created, like other session feature flags.
+@@ -314,6 +317,7 @@ pub struct ModelClientSession {
+     /// appends, or continuation requests), and must not send it between different turns.
+     /// An auth ownership change clears it so the new owner gets fresh routing state.
+     turn_state: Arc<OnceLock<String>>,
++    provider_history_rx: Option<oneshot::Receiver<LastResponse>>,
+ }
+ 
+ /// Minted from the native HTTP response collector, never from saved JSON.
+@@ -660,6 +664,7 @@ impl ModelClient {
+             sdk_model_http_pool: None,
+             sdk_websocket_tls_selector: None,
+             restored_history: false,
++            provider_history: None,
+             request_contributors,
+             executed_tool_calls: None,
+             api_key_cyber_access_programs:
+@@ -699,6 +704,88 @@ impl ModelClient {
+         self
+     }
+ 
++    pub(crate) fn with_provider_history(
++        mut self,
++        selection: Option<provider_history::Start>,
++    ) -> Self {
++        self.provider_history = selection.map(|start| Arc::new(provider_history::Cursor::new(start)));
++        self
++    }
++
++    pub(crate) fn attach_provider_history(&self, session: std::sync::Weak<crate::session::session::Session>) {
++        if let Some(cursor) = &self.provider_history { cursor.attach(session); }
++    }
++
++    pub(crate) fn validate_provider_history_replacement(&self, current: &[&ResponseItem], items: &[&ResponseItem]) -> Result<()> {
++        if let Some(cursor) = &self.provider_history {
++            cursor.validate_replacement(current, items)?;
++        }
++        Ok(())
++    }
++
++    pub(crate) fn observe_provider_history_output(&self, item: &ResponseItem) -> Result<()> {
++        if let Some(cursor) = &self.provider_history { cursor.observe_output(item)?; }
++        Ok(())
++    }
++
++    pub(crate) async fn admit_provider_history_local_output(
++        &self,
++        item: &codex_history::ResponseItemEnvelope,
++        retained: Result<provider_history::HistoryBudget>,
++    ) -> Result<()> {
++        if let Some(cursor) = &self.provider_history {
++            let admission = retained.and_then(|budget| cursor.observe_local_output(item, budget));
++            if let Err(error) = admission {
++                cursor.fence_history_exhaustion().await?;
++                return Err(error);
++            }
++        }
++        Ok(())
++    }
++
++    pub(crate) fn provider_history_reference(&self) -> Option<codex_protocol::provider_history::ProviderHistoryReference> {
++        self.provider_history.as_ref().map(|cursor| cursor.snapshot())
++    }
++
++    pub(crate) fn capture_provider_history_input(
++        &self,
++        input: &[ResponseItem],
++        step_store: &codex_extension_api::ExtensionData,
++    ) -> Result<Option<codex_api::ProviderHistoryInputProjection>> {
++        if let Some(cursor) = &self.provider_history {
++            step_store.insert(provider_history::McpRewriteAdmission(Arc::clone(cursor)));
++        }
++        self.provider_history
++            .as_ref()
++            .map(|_| provider_history::canonical_input_projection(input, Vec::new(), 0))
++            .transpose()
++    }
++
++    pub(crate) fn provider_history_selection(
++        &self,
++    ) -> Option<codex_protocol::provider_history::ProviderHistorySelection> {
++        self.provider_history.as_ref().map(|cursor| cursor.selection())
++    }
++
++    fn validate_provider_history_transport(
++        &self,
++        request: &ResponsesApiRequest,
++        websocket: bool,
++    ) -> Result<()> {
++        if !websocket
++            && !request.store
++            && matches!(
++                self.provider_history_selection(),
++                Some(codex_protocol::provider_history::ProviderHistorySelection::PreviousResponse { .. })
++            )
++        {
++            return Err(CodexErr::InvalidRequest(
++                "Previous-response HTTP continuation requires store=true; store=false is limited to the live WebSocket connection".into(),
++            ));
++        }
++        Ok(())
++    }
++
+     pub(crate) fn with_session_context(
+         mut self,
+         prompt_cache_key_override: Option<String>,
+@@ -754,6 +841,7 @@ impl ModelClient {
+             websocket_session,
+             pending_http_response: None,
+             turn_state: Arc::new(OnceLock::new()),
++            provider_history_rx: None,
+         }
+     }
+ 
+@@ -1136,6 +1224,14 @@ impl ModelClient {
+                 })
+             })
+             .transpose()?;
++        if let Some(selection) = self.provider_history_selection() {
++            selection.validate_shape().map_err(CodexErr::InvalidRequest)?;
++            if model_info.use_responses_lite || self.state.provider.info().is_amazon_bedrock() {
++                return Err(CodexErr::InvalidRequest(
++                    "Provider history requires the standard Responses formatter".into(),
++                ));
++            }
++        }
+         controls
+             .validate_profile(model_info)
+             .map_err(CodexErr::InvalidRequest)?;
+@@ -1183,12 +1279,33 @@ impl ModelClient {
+                 Ok(selected)
+             })
+             .transpose()?;
+-        let mut input = prompt.get_formatted_input_for_request(model_info);
+-        if !self.reasoning_effort_override_enabled(model_info) {
+-            // Unsupported models and disabled overrides must also accept saved history.
+-            // Filter only the request copy; persisted history remains unchanged.
+-            input.retain(|item| !matches!(item, ResponseItem::ConfigurationUpdate { .. }));
++        let context_management =
++            controls.context_management_for_model((!prompt_owns_model).then_some(model_info));
++        if self.provider_history.is_some()
++            && context_management.as_ref().is_some_and(|items| {
++                items.iter().any(|item| {
++                    item.get("type").and_then(serde_json::Value::as_str) == Some("compaction")
++                })
++            })
++        {
++            return Err(CodexErr::InvalidRequest(
++                "Provider-side compaction is unavailable for provider-managed history".into(),
++            ));
+         }
++        let mut input = prompt.get_formatted_input_for_request(model_info);
++        let mut wire_input_indices = self.provider_history.as_ref().map(|_| Vec::new());
++        let mut input_index = 0;
++        let allow_reasoning_overrides = self.reasoning_effort_override_enabled(model_info);
++        input.retain(|item| {
++            let index = input_index;
++            input_index += 1;
++            let keep = allow_reasoning_overrides
++                || !matches!(item, ResponseItem::ConfigurationUpdate { .. });
++            if keep && let Some(indices) = &mut wire_input_indices {
++                indices.push(index);
++            }
++            keep
++        });
+         let is_openai = self.state.provider.info().is_openai();
+         // These prompt-only items are rebuilt on every request. Hash their visible payloads
+         // within the thread so retries and resumed sessions preserve their identity.
+@@ -1223,6 +1340,16 @@ impl ModelClient {
+             )));
+             prefix.push(instructions);
+         }
++        let canonical_history_input = wire_input_indices
++            .map(|indices| {
++                provider_history::sampling_input_projection(
++                    prompt.canonical_history_input.as_deref(),
++                    &prompt.input,
++                    indices,
++                    prefix.len(),
++                )
++            })
++            .transpose()?;
+         input.splice(0..0, prefix);
+         filter_provider_response_metadata(&mut input, is_openai);
+         let reasoning = if prompt_owns_model {
+@@ -1339,6 +1466,8 @@ impl ModelClient {
+             }),
+             request_controls: codex_api::ResponsesRequestControls {
+                 hosted_tool_choice,
++                canonical_history_input,
++                provider_history: self.provider_history_selection(),
+                 prompt: prompt_reference,
+                 instructions: hosted_prompt
+                     .filter(|prompt| !prompt.omit_instructions)
+@@ -1351,8 +1480,7 @@ impl ModelClient {
+                     })
+                     .transpose()?,
+                 truncation: controls.truncation.clone().flatten(),
+-                context_management: controls
+-                    .context_management_for_model((!prompt_owns_model).then_some(model_info)),
++                context_management,
+                 extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
+                 max_output_tokens: controls.max_output_tokens.flatten(),
+                 temperature: controls.temperature.flatten(),
+@@ -1810,6 +1938,16 @@ impl ModelClientSession {
+             .is_some_and(|manager| manager.uses_app_managed_model_oauth())
+     }
+ 
++    pub(crate) fn has_provider_history(&self) -> bool { self.client.provider_history.is_some() }
++
++    pub(crate) async fn accept_provider_history(&mut self) -> Result<()> {
++        let Some(cursor) = &self.client.provider_history else { return Ok(()); };
++        let Some(mut receiver) = self.provider_history_rx.take() else { return Ok(()); };
++        let response = receiver.try_recv().map_err(|_| CodexErr::InvalidRequest(
++            "Provider history has no acknowledged completion".into()))?;
++        cursor.accept(response).await
++    }
++
+     pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
+         let source = &self.client.state.session_source;
+         // ThreadSpawn children expose the same attention API as root turns.
+@@ -1978,6 +2116,11 @@ impl ModelClientSession {
+         if !self.client.responses_websocket_enabled() {
+             return Ok(());
+         }
++        if self.client.provider_history.is_some() {
++            return Err(CodexErr::InvalidRequest(
++                "Provider history WebSocket cursor integration is pending".into(),
++            ));
++        }
+         let provider = Arc::clone(&self.client.state.provider);
+         let auth_manager = provider.auth_manager();
+         let mut auth_recovery = auth_manager
+@@ -2276,6 +2419,7 @@ impl ModelClientSession {
+                 responses_metadata,
+                 include_internal,
+             )?;
++            self.client.validate_provider_history_transport(&request, false)?;
+             if let Some(attempt) = prompt
+                 .tool_admission
+                 .as_ref()
+@@ -2314,16 +2458,6 @@ impl ModelClientSession {
+                 prompt.cyber_access_program,
+                 self.client.api_key_cyber_access_programs,
+             )?;
+-            self.client
+-                .prepare_response_items_for_request(&mut request.input);
+-            // Native formatting includes prompt-only instruction rows. Compare
+-            // later custody edits against this exact native-built projection.
+-            let native_input = request.store.then(|| request.input.clone());
+-            if crate::guardian::is_basic_session_source(&self.client.state.session_source) {
+-                crate::guardian::observe_guardian_request(session_telemetry, &request);
+-            }
+-            let request_session_telemetry =
+-                session_telemetry_for_request(session_telemetry, &request);
+             let observation_is_reviewer = is_guardian_reviewer(&responses_headers);
+             options.extra_headers.extend(responses_headers);
+             let interceptors = crate::model_request::prepare(
+@@ -2335,6 +2469,35 @@ impl ModelClientSession {
+                 &mut request.client_metadata,
+                 prompt.tool_admission.clone(),
+             );
++            let mut logical_history_input = None;
++            if let Some(cursor) = &self.client.provider_history {
++                if interceptors.iter().any(|interceptor| interceptor.produces_response()) {
++                    return Err(CodexErr::InvalidRequest("Provider history requires a supported owning Responses transport".into()));
++                }
++                logical_history_input = cursor.prepare(
++                    &mut request, &client_setup, transport.clone(), options.extra_headers.clone(),
++                    prompt.request_controls.request_transport.as_ref().and_then(Option::as_ref),
++                    prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt()),
++                ).await?;
++                client_setup.api_provider.retry.max_attempts = 0;
++                if let Some(attempt) = prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt()) {
++                    attempt.observe_provider_tools(true);
++                    attempt.mark_provider_effect();
++                }
++            }
++            self.client
++                .prepare_response_items_for_request(&mut request.input);
++            // Native formatting includes prompt-only instruction rows. Compare
++            // later custody edits against this exact native-built projection.
++            // A remote history selection cannot certify the hidden provider prefix.
++            let native_input = (request.store && self.client.provider_history.is_none())
++                .then(|| request.input.clone());
++            if crate::guardian::is_basic_session_source(&self.client.state.session_source) {
++                crate::guardian::observe_guardian_request(session_telemetry, &request);
++            }
++            let request_session_telemetry =
++                session_telemetry_for_request(session_telemetry, &request);
++
+             let inference_trace_attempt = inference_trace.start_attempt();
+             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+             if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
+@@ -2343,7 +2506,13 @@ impl ModelClientSession {
+                 }
+                 request.input = input;
+             }
+-            inference_trace_attempt.record_started(&request);
++            if let Some(logical) = logical_history_input {
++                let wire = std::mem::replace(&mut request.input, logical);
++                inference_trace_attempt.record_started(&request);
++                request.input = wire;
++            } else {
++                inference_trace_attempt.record_started(&request);
++            }
+             let request_transport = if prompt.prefer_buffered_response {
+                 codex_extension_api::ModelRequestTransport::HttpJson
+             } else {
+@@ -2438,6 +2607,24 @@ impl ModelClientSession {
+ 
+             match stream_result {
+                 Ok((request_id, interrupt, events, producer_task, producer_stop)) => {
++                    // Retain provider call semantics before SDK policy interceptors
++                    // can replace arguments or clear the provider's item ID.
++                    let events: codex_extension_api::ModelResponseStream =
++                        if let Some(cursor) = &self.client.provider_history {
++                            let cursor = Arc::clone(cursor);
++                            Box::pin(events.map(move |event| {
++                                if let Ok(ResponseEvent::OutputItemDone(item)) = &event {
++                                    cursor.observe_wire_output(item).map_err(|error| {
++                                        codex_api::ApiError::InvalidRequest {
++                                            message: error.to_string(),
++                                        }
++                                    })?;
++                                }
++                                event
++                            }))
++                        } else {
++                            events
++                        };
+                     let (mut stream, response) = map_response_events(
+                         request_id,
+                         crate::model_request::intercept_stream(events, interceptors),
+@@ -2454,8 +2641,13 @@ impl ModelClientSession {
+                     stream.producer_task = producer_task;
+                     stream.producer_stop = producer_stop;
+                     stream.request_observation = request_observation;
+-                    self.pending_http_response =
+-                        coverage.map(|(model, owner)| (model, owner, response));
++                    if self.client.provider_history.is_some() {
++                        self.provider_history_rx = Some(response);
++                        self.pending_http_response = None;
++                    } else {
++                        self.pending_http_response =
++                            coverage.map(|(model, owner)| (model, owner, response));
++                    }
+                     return Ok(stream);
+                 }
+                 Err(ApiError::Transport(unauthorized_transport))
+@@ -2472,6 +2664,7 @@ impl ModelClientSession {
+                         response_debug_context.request_id.as_deref(),
+                         /*output_items*/ &[],
+                     );
++                    if let Some(cursor) = &self.client.provider_history { cursor.reject_pre_stream().await?; }
+                     auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
+                         handle_unauthorized(
+                             unauthorized_transport,
+@@ -2487,6 +2680,11 @@ impl ModelClientSession {
+                     continue;
+                 }
+                 Err(err) => {
++                    if provider_history::definitive_pre_stream_rejection(&err)
++                        && let Some(cursor) = &self.client.provider_history
++                    {
++                        cursor.reject_pre_stream().await?;
++                    }
+                     let response_debug_context =
+                         extract_response_debug_context_from_api_error(&err);
+                     let err = self.client.state.provider.map_api_error(err);
+@@ -2530,6 +2728,9 @@ impl ModelClientSession {
+         inference_trace: &InferenceTraceContext,
+         auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<WebsocketStreamOutcome> {
++        if self.client.provider_history.is_some() {
++            return Err(CodexErr::InvalidRequest("Provider history WebSocket cursor integration is pending".into()));
++        }
+         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
+         let provider = Arc::clone(&self.client.state.provider);
+         loop {
+@@ -2562,6 +2763,7 @@ impl ModelClientSession {
+                 responses_metadata,
+                 include_internal,
+             )?;
++            self.client.validate_provider_history_transport(&request, true)?;
+             if let Some(attempt) = prompt
+                 .tool_admission
+                 .as_ref()
+@@ -2663,7 +2865,11 @@ impl ModelClientSession {
+             if let Some(turn_state) = self.turn_state.get() {
+                 client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
+             }
+-            let continuation = self.prepare_websocket_request(&request);
++            let continuation = if self.client.provider_history.is_some() {
++                None
++            } else {
++                self.prepare_websocket_request(&request)
++            };
+             let (mode, reason) = if continuation.is_some() {
+                 ("incremental", "incremental")
+             } else {
+@@ -2923,6 +3129,10 @@ impl ModelClientSession {
+         service_tier: Option<String>,
+         responses_metadata: &CodexResponsesMetadata,
+     ) -> Result<()> {
++        if self.client.provider_history.is_some() {
++            // Connection-only preconnect without an unowned remote-history write.
++            return Ok(());
++        }
+         // A warmup can transmit the complete prompt before the application's
+         // request owner exists. Keep connection-only preconnect, but let the
+         // ordinary request run the awaited context policy before sending input.
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+new file mode 100644
+index 00000000..32ced8e6
+--- /dev/null
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -0,0 +1,1152 @@
++use super::*;
++use codex_protocol::provider_history::{
++    ProviderHistoryInputBoundary, ProviderHistoryReference, ProviderHistorySelection,
++    ProviderHistoryWindowReceipt,
++};
++use http::HeaderMap;
++use sha2::{Digest, Sha256};
++use std::sync::{OnceLock, Weak};
++
++#[derive(Debug)]
++pub(crate) struct Start {
++    pub selection: ProviderHistorySelection,
++    pub reference: Option<ProviderHistoryReference>,
++}
++
++#[derive(Clone, PartialEq, Eq)]
++struct Scope {
++    generation: Option<u64>,
++    revision: Option<u64>,
++    headers: HeaderMap,
++    effective_url: String,
++}
++
++impl std::fmt::Debug for Scope {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("Scope")
++            .field("generation", &self.generation)
++            .field("revision", &self.revision)
++            .finish_non_exhaustive()
++    }
++}
++
++// Match the existing bounded native original-history replay admission.
++const MAX_HISTORY_ITEMS: usize = 4096;
++const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
++
++#[derive(Debug, Clone)]
++pub(crate) struct HistoryBudget {
++    items: usize,
++    bytes_left: usize,
++}
++
++impl Default for HistoryBudget {
++    fn default() -> Self {
++        Self {
++            items: 0,
++            bytes_left: MAX_HISTORY_BYTES,
++        }
++    }
++}
++
++fn history_limit() -> CodexErr {
++    invalid("Provider-managed history reached the 4096-item or 8 MiB admission limit")
++}
++
++impl std::io::Write for HistoryBudget {
++    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++        self.bytes_left = self.bytes_left.checked_sub(bytes.len()).ok_or_else(|| {
++            std::io::Error::new(std::io::ErrorKind::FileTooLarge, "provider history limit")
++        })?;
++        Ok(bytes.len())
++    }
++
++    fn flush(&mut self) -> std::io::Result<()> {
++        Ok(())
++    }
++}
++
++impl HistoryBudget {
++    pub(crate) fn retained(&self) -> (usize, usize) {
++        (self.items, MAX_HISTORY_BYTES - self.bytes_left)
++    }
++
++    fn from_projection(input: &codex_api::ProviderHistoryInputProjection) -> Result<Self> {
++        Self::check_count(input.retained_item_count)?;
++        Ok(Self {
++            items: input.retained_item_count,
++            bytes_left: MAX_HISTORY_BYTES
++                .checked_sub(input.retained_json_bytes)
++                .ok_or_else(history_limit)?,
++        })
++    }
++
++    pub(crate) fn check_count(count: usize) -> Result<()> {
++        if count > MAX_HISTORY_ITEMS {
++            return Err(history_limit());
++        }
++        Ok(())
++    }
++
++    pub(crate) fn observe(&mut self, value: &impl serde::Serialize) -> Result<()> {
++        self.items = self.items.checked_add(1).ok_or_else(history_limit)?;
++        Self::check_count(self.items)?;
++        // Count borrowed JSON into a capped writer before cloning or hashing it.
++        serde_json::to_writer(self, value).map_err(|_| history_limit())
++    }
++}
++
++fn check_items<'a>(items: impl ExactSizeIterator<Item = &'a ResponseItem>) -> Result<HistoryBudget> {
++    HistoryBudget::check_count(items.len())?;
++    let mut budget = HistoryBudget::default();
++    for item in items {
++        budget.observe(item)?;
++    }
++    Ok(budget)
++}
++
++#[derive(Debug)]
++struct Pending {
++    canonical_input: ProviderHistoryInputBoundary,
++    canonical_tail_sha256: Option<Vec<String>>,
++    input_len: usize,
++    input_sha256: String,
++    output_sha256: Vec<String>,
++    admitted_calls: Vec<Option<ProviderCall>>,
++    wire_calls: Vec<Option<ProviderCall>>,
++    wire_output_sha256: Vec<Option<String>>,
++    mcp_rewrites: Vec<(usize, ProviderCall, ProviderCall)>,
++    attempt: Option<Weak<dyn codex_extension_api::ModelAttemptAdmission>>,
++    stored: bool,
++    wire_budget: HistoryBudget,
++    scope: Scope,
++}
++
++#[derive(Debug)]
++struct State {
++    reference: ProviderHistoryReference,
++    live_scope: Option<Scope>,
++    pending: Option<Pending>,
++    history_budget: Option<HistoryBudget>,
++}
++
++pub(crate) struct McpRewriteAdmission(pub(crate) std::sync::Arc<Cursor>);
++
++#[derive(Debug)]
++pub(crate) struct Cursor {
++    state: StdMutex<State>,
++    session: OnceLock<Weak<crate::session::session::Session>>,
++}
++
++fn invalid(message: &str) -> CodexErr {
++    CodexErr::InvalidRequest(message.into())
++}
++
++fn route(base: &str) -> Result<String> {
++    let mut value = url::Url::parse(base).map_err(|_| invalid("Invalid provider history route"))?;
++    let _ = value.set_username("");
++    let _ = value.set_password(None);
++    value.set_query(None);
++    value.set_fragment(None);
++    Ok(value.to_string().trim_end_matches('/').to_owned())
++}
++
++fn item_digest(item: &ResponseItem) -> Result<[u8; 32]> {
++    HistoryBudget::default().observe(item)?;
++    let mut plain = item.clone();
++    plain.clear_internal_chat_message_metadata_passthrough();
++    let mut results = Vec::new();
++    if let Some(calls) = item
++        .executed_tool_call_metadata()
++        .and_then(|meta| meta.executed_tool_calls.as_ref())
++    {
++        for (index, call) in calls.iter().enumerate() {
++            let value = serde_json::to_value(call)?;
++            if let Some(metadata) = value.get("tool_result_metadata") {
++                results.push(serde_json::json!([
++                    index,
++                    call.name,
++                    call.arguments(),
++                    metadata
++                ]));
++            }
++        }
++    }
++    let mut value = serde_json::json!({"item": plain, "result_metadata": results});
++    value.sort_all_objects();
++    Ok(Sha256::digest(serde_json::to_vec(&value)?).into())
++}
++
++#[derive(Debug, PartialEq, Eq)]
++struct ProviderCall {
++    identity: String,
++    arguments: String,
++}
++
++fn provider_call(item: &ResponseItem) -> Option<ProviderCall> {
++    let (kind, call_id, name, namespace, input) = match item {
++        ResponseItem::FunctionCall {
++            call_id,
++            name,
++            namespace,
++            arguments,
++            ..
++        } => (
++            "function_call",
++            serde_json::json!(call_id),
++            serde_json::json!(name),
++            serde_json::json!(namespace),
++            match serde_json::from_str::<serde_json::Value>(arguments) {
++                Ok(value) => serde_json::json!(["json", value]),
++                Err(_) => serde_json::json!(["raw", arguments]),
++            },
++        ),
++        ResponseItem::CustomToolCall {
++            call_id,
++            name,
++            input,
++            ..
++        } => (
++            "custom_tool_call",
++            serde_json::json!(call_id),
++            serde_json::json!(name),
++            serde_json::Value::Null,
++            serde_json::json!(input),
++        ),
++        ResponseItem::ToolSearchCall {
++            call_id, arguments, ..
++        } => (
++            "tool_search_call",
++            serde_json::json!(call_id),
++            serde_json::Value::Null,
++            serde_json::Value::Null,
++            arguments.clone(),
++        ),
++        _ => return None,
++    };
++    // Search controls retain their existing exact argument requirement.
++    let mut identity = serde_json::json!([
++        kind,
++        call_id,
++        name,
++        namespace,
++        (kind == "tool_search_call").then_some(&input)
++    ]);
++    identity.sort_all_objects();
++    let mut value = input;
++    value.sort_all_objects();
++    Some(ProviderCall {
++        identity: hex(Sha256::digest(
++            serde_json::to_vec(&identity).expect("JSON call identity"),
++        )),
++        arguments: hex(Sha256::digest(
++            serde_json::to_vec(&value).expect("JSON call input"),
++        )),
++    })
++}
++
++fn hex(digest: impl AsRef<[u8]>) -> String {
++    digest
++        .as_ref()
++        .iter()
++        .map(|byte| format!("{byte:02x}"))
++        .collect()
++}
++
++fn input_digest<'a>(items: impl IntoIterator<Item = &'a ResponseItem>) -> Result<String> {
++    let mut digest = Sha256::new();
++    let mut budget = HistoryBudget::default();
++    digest.update(b"sdk-provider-history-input-v1\0");
++    for item in items {
++        budget.observe(item)?;
++        digest.update(item_digest(item)?);
++    }
++    Ok(hex(digest.finalize()))
++}
++
++pub(crate) fn canonical_input_boundary(
++    items: &[ResponseItem],
++) -> Result<ProviderHistoryInputBoundary> {
++    Ok(ProviderHistoryInputBoundary {
++        input_len: items.len(),
++        input_sha256: input_digest(items)?,
++    })
++}
++
++pub(crate) fn canonical_input_projection(
++    items: &[ResponseItem],
++    wire_input_indices: Vec<usize>,
++    prefix_len: usize,
++) -> Result<codex_api::ProviderHistoryInputProjection> {
++    let budget = check_items(items.iter())?;
++    let (retained_item_count, retained_json_bytes) = budget.retained();
++    let hashes = items.iter().map(item_digest).collect::<Result<Vec<_>>>()?;
++    Ok(codex_api::ProviderHistoryInputProjection {
++        retained_item_count,
++        retained_json_bytes,
++        boundary: ProviderHistoryInputBoundary {
++            input_len: items.len(),
++            input_sha256: canonical_prefix_digest(&hashes),
++        },
++        item_sha256: hashes.clone(),
++        item_ids: items
++            .iter()
++            .map(|item| item.id().map(ToString::to_string))
++            .collect(),
++        sampling_item_sha256: hashes,
++        delivered_input_indices: (0..items.len()).collect(),
++        wire_input_indices,
++        prefix_len,
++    })
++}
++
++pub(crate) fn sampling_input_projection(
++    captured: Option<&codex_api::ProviderHistoryInputProjection>,
++    items: &[ResponseItem],
++    wire_input_indices: Vec<usize>,
++    prefix_len: usize,
++) -> Result<codex_api::ProviderHistoryInputProjection> {
++    check_items(items.iter())?;
++    let Some(captured) = captured else {
++        return canonical_input_projection(items, wire_input_indices, prefix_len);
++    };
++    let mut projection = captured.clone();
++    projection.sampling_item_sha256 = items.iter().map(item_digest).collect::<Result<Vec<_>>>()?;
++    projection.wire_input_indices = wire_input_indices;
++    projection.prefix_len = prefix_len;
++    projection.delivered_input_indices.clear();
++    if projection.sampling_item_sha256 == projection.item_sha256 {
++        projection
++            .delivered_input_indices
++            .extend(0..projection.item_sha256.len());
++        return Ok(projection);
++    }
++    let mut delivered = std::collections::HashSet::new();
++    for (item, digest) in items.iter().zip(&projection.sampling_item_sha256) {
++        let id = item.id().map(ToString::to_string);
++        let by_id = id
++            .as_ref()
++            .map(|id| {
++                projection
++                    .item_ids
++                    .iter()
++                    .enumerate()
++                    .filter(|(_, candidate)| candidate.as_ref() == Some(id))
++                    .map(|(index, _)| index)
++                    .collect::<Vec<_>>()
++            })
++            .unwrap_or_default();
++        let index = match by_id.as_slice() {
++            [index] if !delivered.contains(index) => Some(*index),
++            [] => {
++                let matches = projection
++                    .item_sha256
++                    .iter()
++                    .enumerate()
++                    .filter(|(index, candidate)| *candidate == digest && !delivered.contains(index))
++                    .map(|(index, _)| index)
++                    .collect::<Vec<_>>();
++                match matches.as_slice() {
++                    [] => None,
++                    [index] => Some(*index),
++                    _ if item.id().is_none()
++                        && projection
++                            .item_sha256
++                            .iter()
++                            .filter(|candidate| *candidate == digest)
++                            .count()
++                            == projection
++                                .sampling_item_sha256
++                                .iter()
++                                .filter(|candidate| *candidate == digest)
++                                .count() =>
++                    {
++                        Some(matches[0])
++                    }
++                    _ => {
++                        return Err(invalid(
++                            "Provider history cannot associate an ambiguous sampling occurrence",
++                        ));
++                    }
++                }
++            }
++            _ => {
++                return Err(invalid(
++                    "Provider history contains a repeated sampling identity",
++                ));
++            }
++        };
++        if let Some(index) = index {
++            delivered.insert(index);
++        }
++    }
++    projection.delivered_input_indices.extend(delivered);
++    projection.delivered_input_indices.sort_unstable();
++    Ok(projection)
++}
++
++fn canonical_window(window: &ProviderHistoryWindowReceipt) -> Option<ProviderHistoryWindowReceipt> {
++    let boundary = window.canonical_input.as_ref()?;
++    Some(ProviderHistoryWindowReceipt {
++        canonical_input: None,
++        canonical_tail_sha256: None,
++        input_len: boundary.input_len,
++        input_sha256: boundary.input_sha256.clone(),
++        output_sha256: window
++            .canonical_tail_sha256
++            .as_ref()
++            .unwrap_or(&window.output_sha256)
++            .clone(),
++    })
++}
++
++fn unsent_hash_indices(
++    window: &ProviderHistoryWindowReceipt,
++    hashes: &[[u8; 32]],
++) -> Result<Vec<usize>> {
++    let prefix = hashes
++        .get(..window.input_len)
++        .ok_or_else(|| invalid("Provider history lost acknowledged canonical input"))?;
++    let tail = hashes[window.input_len..]
++        .iter()
++        .map(hex)
++        .collect::<Vec<_>>();
++    window
++        .unsent_input_indices(hashes.len(), &canonical_prefix_digest(prefix), &tail)
++        .map_err(CodexErr::InvalidRequest)
++}
++
++fn delivered_boundary(
++    projection: &codex_api::ProviderHistoryInputProjection,
++) -> Result<(ProviderHistoryInputBoundary, Option<Vec<String>>)> {
++    let delivered = projection
++        .delivered_input_indices
++        .iter()
++        .copied()
++        .collect::<std::collections::HashSet<_>>();
++    if delivered.len() != projection.delivered_input_indices.len()
++        || delivered
++            .iter()
++            .any(|index| *index >= projection.item_sha256.len())
++    {
++        return Err(invalid(
++            "Provider history has an invalid delivered occurrence map",
++        ));
++    }
++    let prefix_len = (0..projection.item_sha256.len())
++        .take_while(|index| delivered.contains(index))
++        .count();
++    let tail = (prefix_len < projection.item_sha256.len()).then(|| {
++        projection
++            .item_sha256
++            .iter()
++            .enumerate()
++            .skip(prefix_len)
++            .filter(|(index, _)| delivered.contains(index))
++            .map(|(_, digest)| hex(digest))
++            .collect()
++    });
++    Ok((
++        ProviderHistoryInputBoundary {
++            input_len: prefix_len,
++            input_sha256: canonical_prefix_digest(&projection.item_sha256[..prefix_len]),
++        },
++        tail,
++    ))
++}
++
++fn canonical_prefix_digest(items: &[[u8; 32]]) -> String {
++    let mut digest = Sha256::new();
++    digest.update(b"sdk-provider-history-input-v1\0");
++    for item in items {
++        digest.update(item);
++    }
++    hex(digest.finalize())
++}
++
++pub(crate) fn definitive_pre_stream_rejection(error: &codex_api::ApiError) -> bool {
++    let status = match error {
++        codex_api::ApiError::Api { status, .. }
++        | codex_api::ApiError::Transport(codex_client::TransportError::Http { status, .. }) => {
++            status.as_u16()
++        }
++        _ => return false,
++    };
++    matches!(
++        status,
++        400 | 401 | 403 | 404 | 405 | 410 | 413 | 415 | 422 | 429
++    )
++}
++
++impl Cursor {
++    pub(crate) fn new(start: Start) -> Self {
++        Self {
++            state: StdMutex::new(State {
++                reference: start.reference.unwrap_or(ProviderHistoryReference {
++                    selection: start.selection,
++                    provider_route: String::new(),
++                    window: None,
++                    pending: false,
++                    stored_response: None,
++                }),
++                live_scope: None,
++                pending: None,
++                history_budget: None,
++            }),
++            session: OnceLock::new(),
++        }
++    }
++
++    pub(crate) fn attach(&self, session: Weak<crate::session::session::Session>) {
++        let _ = self.session.set(session);
++    }
++    pub(crate) fn snapshot(&self) -> ProviderHistoryReference {
++        self.state.lock().unwrap().reference.clone()
++    }
++    pub(crate) fn selection(&self) -> ProviderHistorySelection {
++        self.snapshot().selection
++    }
++
++    async fn persist(&self) -> Result<()> {
++        let session = self
++            .session
++            .get()
++            .and_then(Weak::upgrade)
++            .ok_or_else(|| invalid("Provider history has no live Session owner"))?;
++        session
++            .checkpoint_thread_settings()
++            .await
++            .map_err(|error| CodexErr::Fatal(error.to_string()))
++    }
++
++    pub(crate) async fn prepare(
++        &self,
++        request: &mut ResponsesApiRequest,
++        setup: &CurrentClientSetup,
++        transport: ReqwestTransport,
++        headers: HeaderMap,
++        request_transport: Option<&codex_protocol::model_request_transport::RequestTransportOverrides>,
++        attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
++    ) -> Result<Option<Vec<ResponseItem>>> {
++        check_items(request.input.iter())?;
++        let canonical_input = request
++            .request_controls
++            .canonical_history_input
++            .take()
++            .ok_or_else(|| invalid("Provider history has no admitted canonical input"))?;
++        let mut auth_headers = setup.api_provider.headers.clone();
++        setup.api_auth.add_auth_headers(&mut auth_headers);
++        let mut effective_url = setup.api_provider.url_for_path("/responses");
++        let prepared = codex_api::prepare_request_transport(&effective_url, request_transport)
++            .map_err(self_error)?;
++        prepared.apply_parts(&mut effective_url, &mut auth_headers);
++        let scope = Scope {
++            generation: setup.auth_owner_generation,
++            revision: setup.auth_revision,
++            headers: auth_headers,
++            effective_url,
++        };
++        let current_route = route(&setup.api_provider.base_url)?;
++        let (saved, needs_read) = {
++            let state = self.state.lock().unwrap();
++            if state.reference.pending {
++                return Err(invalid(
++                    "Provider history dispatch requires reconciliation before reuse",
++                ));
++            }
++            if !state.reference.provider_route.is_empty()
++                && state.reference.provider_route != current_route
++            {
++                return Err(invalid(
++                    "Provider history belongs to a different provider route",
++                ));
++            }
++            (
++                state.reference.clone(),
++                state.live_scope.as_ref() != Some(&scope),
++            )
++        };
++        let full_len = request.input.len();
++        let full_digest = input_digest(&request.input)?;
++        let unsent = if let Some(window) = &saved.window {
++            let canonical = if let Some(canonical) = canonical_window(window) {
++                if canonical_input.prefix_len + canonical_input.wire_input_indices.len() != full_len
++                    || canonical_input.item_sha256.len() != canonical_input.boundary.input_len
++                    || canonical_input.item_ids.len() != canonical_input.item_sha256.len()
++                    || canonical_input
++                        .wire_input_indices
++                        .iter()
++                        .any(|index| *index >= canonical_input.sampling_item_sha256.len())
++                {
++                    return Err(invalid(
++                        "Provider history has an invalid current input projection",
++                    ));
++                }
++                // Persisted canonical history stays independently bound even when
++                // the approved wire view uses a stable replacement.
++                unsent_hash_indices(&canonical, &canonical_input.item_sha256)?;
++                Some(canonical)
++            } else {
++                None
++            };
++            let unchanged_wire_prefix = request
++                .input
++                .get(..window.input_len)
++                .map(input_digest)
++                .transpose()?
++                .is_some_and(|digest| digest == window.input_sha256);
++            let wire_unsent = (|| -> Result<Vec<usize>> {
++                let prefix = request
++                    .input
++                    .get(..window.input_len)
++                    .ok_or_else(|| invalid("Provider history lost acknowledged input"))?;
++                let tail = request.input[window.input_len..]
++                    .iter()
++                    .map(item_digest)
++                    .map(|digest| digest.map(hex))
++                    .collect::<Result<Vec<_>>>()?;
++                window
++                    .unsent_input_indices(full_len, &input_digest(prefix)?, &tail)
++                    .map_err(CodexErr::InvalidRequest)
++            })();
++            if unchanged_wire_prefix && wire_unsent.is_ok() {
++                Some(wire_unsent?)
++            } else if unchanged_wire_prefix
++                && canonical.is_some()
++                && window.canonical_tail_sha256.is_some()
++            {
++                // The same delivered input can coexist with a locally admitted
++                // MCP output. Prove the input and output projections separately.
++                let mut outputs = canonical.expect("checked canonical receipt");
++                let first = outputs
++                    .output_sha256
++                    .len()
++                    .checked_sub(window.output_sha256.len())
++                    .ok_or_else(|| {
++                        invalid("Provider history has an incomplete canonical output")
++                    })?;
++                outputs.output_sha256 = outputs.output_sha256[first..].to_vec();
++                outputs.input_len = 0;
++                outputs.input_sha256 = canonical_prefix_digest(&[]);
++                let mapped = canonical_input
++                    .wire_input_indices
++                    .iter()
++                    .enumerate()
++                    .map(|(offset, source)| (canonical_input.prefix_len + offset, *source))
++                    .filter(|(wire, _)| *wire >= window.input_len)
++                    .collect::<Vec<_>>();
++                let hashes = mapped
++                    .iter()
++                    .map(|(_, source)| canonical_input.sampling_item_sha256[*source])
++                    .collect::<Vec<_>>();
++                let unsent = unsent_hash_indices(&outputs, &hashes)?;
++                let mut indices =
++                    (window.input_len..canonical_input.prefix_len).collect::<Vec<_>>();
++                indices.extend(unsent.into_iter().map(|index| mapped[index].0));
++                Some(indices)
++            } else if let Some(canonical) = canonical {
++                let unsent =
++                    unsent_hash_indices(&canonical, &canonical_input.sampling_item_sha256)?
++                        .into_iter()
++                        .collect::<std::collections::HashSet<_>>();
++                let mut indices = if unchanged_wire_prefix {
++                    Vec::new()
++                } else {
++                    (0..canonical_input.prefix_len).collect::<Vec<_>>()
++                };
++                indices.extend(
++                    canonical_input
++                        .wire_input_indices
++                        .iter()
++                        .enumerate()
++                        .filter(|(_, index)| unsent.contains(*index))
++                        .map(|(offset, _)| canonical_input.prefix_len + offset),
++                );
++                Some(indices)
++            } else {
++                Some(wire_unsent?)
++            }
++        } else {
++            None
++        };
++        let (delivered_input, delivered_tail) = delivered_boundary(&canonical_input)?;
++        if needs_read
++            && !matches!(
++                saved.selection,
++                ProviderHistorySelection::PreviousResponse { id: None }
++            )
++        {
++            ApiResponsesClient::new(
++                transport,
++                setup.api_provider.clone(),
++                setup.api_auth.clone(),
++            )
++            .with_request_transport(request_transport.cloned())
++            .verify_history_anchor(&saved.selection, saved.stored_response, headers)
++            .await
++            .map_err(|error| self_error(error))?;
++        }
++        {
++            let mut state = self.state.lock().unwrap();
++            if state.reference.pending {
++                return Err(invalid("Provider history already has an active dispatch"));
++            }
++            let history_budget = HistoryBudget::from_projection(&canonical_input)?;
++            state.history_budget = Some(history_budget.clone());
++            state.reference.provider_route = current_route;
++            state.reference.pending = true;
++            state.pending = Some(Pending {
++                canonical_input: delivered_input,
++                canonical_tail_sha256: delivered_tail,
++                input_len: full_len,
++                input_sha256: full_digest,
++                output_sha256: Vec::new(),
++                admitted_calls: Vec::new(),
++                wire_calls: Vec::new(),
++                wire_output_sha256: Vec::new(),
++                mcp_rewrites: Vec::new(),
++                attempt: attempt.as_ref().map(std::sync::Arc::downgrade),
++                stored: request.store,
++                wire_budget: history_budget,
++                scope,
++            });
++        }
++        self.persist().await?;
++        let logical = unsent.map(|indices| {
++            let full = std::mem::take(&mut request.input);
++            request.input = indices
++                .into_iter()
++                .map(|index| full[index].clone())
++                .collect();
++            full
++        });
++        request.request_controls.provider_history = Some(saved.selection);
++        Ok(logical)
++    }
++
++    pub(crate) fn validate_replacement(
++        &self,
++        current: &[&ResponseItem],
++        items: &[&ResponseItem],
++    ) -> Result<()> {
++        check_items(items.iter().copied())?;
++        let state = self.state.lock().unwrap();
++        let refused = || invalid("Cannot replace acknowledged provider history input or output");
++        if state.reference.pending {
++            return Err(refused());
++        }
++        let Some(window) = &state.reference.window else {
++            return Ok(());
++        };
++        let Some(boundary) = &window.canonical_input else {
++            // Older wire-only receipts cannot prove a shorter canonical boundary.
++            // Retaining the entire current projection or appending is still safe.
++            let prefix = items.get(..current.len()).ok_or_else(refused)?;
++            if input_digest(current.iter().copied())? != input_digest(prefix.iter().copied())? {
++                return Err(refused());
++            }
++            return Ok(());
++        };
++        let prefix = items.get(..boundary.input_len).ok_or_else(refused)?;
++        let tail = items[boundary.input_len..]
++            .iter()
++            .map(|item| item_digest(item).map(hex))
++            .collect::<Result<Vec<_>>>()?;
++        let canonical = ProviderHistoryWindowReceipt {
++            input_len: boundary.input_len,
++            input_sha256: boundary.input_sha256.clone(),
++            output_sha256: window
++                .canonical_tail_sha256
++                .as_ref()
++                .unwrap_or(&window.output_sha256)
++                .clone(),
++            canonical_input: None,
++            canonical_tail_sha256: None,
++        };
++        canonical
++            .unsent_input_indices(items.len(), &input_digest(prefix.iter().copied())?, &tail)
++            .map_err(|_| refused())?;
++        Ok(())
++    }
++
++    pub(crate) fn admit_mcp_argument_rewrite(
++        &self,
++        original: &ResponseItem,
++        replacement: &ResponseItem,
++        attempt: &std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>,
++    ) -> std::result::Result<(), String> {
++        let before = provider_call(original).ok_or("Missing original MCP call")?;
++        let after = provider_call(replacement).ok_or("Missing replacement MCP call")?;
++        if before.identity != after.identity || before == after {
++            return Err("MCP argument rewrite changed its call identity".into());
++        }
++        let mut state = self.state.lock().unwrap();
++        let pending = state
++            .pending
++            .as_mut()
++            .ok_or("Missing pending provider dispatch")?;
++        if attempt.cancellation().is_cancelled()
++            || !pending
++                .attempt
++                .as_ref()
++                .is_some_and(|pending| pending.ptr_eq(&std::sync::Arc::downgrade(attempt)))
++        {
++            return Err("MCP argument rewrite has no matching live attempt".into());
++        }
++        let digest = hex(item_digest(original).map_err(|error| error.to_string())?);
++        // Interceptors may defer an overlapping item. Its complete raw identity,
++        // not the most recently polled stream item, locates its occurrence.
++        let mut matches = pending
++            .wire_calls
++            .iter()
++            .enumerate()
++            .filter(|(index, call)| {
++                call.as_ref() == Some(&before)
++                    && pending
++                        .wire_output_sha256
++                        .get(*index)
++                        .and_then(Option::as_ref)
++                        == Some(&digest)
++                    && !pending
++                        .mcp_rewrites
++                        .iter()
++                        .any(|(occurrence, _, _)| occurrence == index)
++            })
++            .map(|(index, _)| index);
++        let index = matches
++            .next()
++            .ok_or("Missing original MCP provider occurrence")?;
++        if matches.next().is_some() {
++            return Err("Ambiguous MCP provider occurrence".into());
++        }
++        pending.mcp_rewrites.push((index, before, after));
++        Ok(())
++    }
++
++    pub(crate) fn observe_wire_output(&self, item: &ResponseItem) -> Result<()> {
++        if let Some(pending) = self.state.lock().unwrap().pending.as_mut() {
++            pending.wire_budget.observe(item)?;
++            pending.wire_calls.push(provider_call(item));
++            pending
++                .wire_output_sha256
++                .push(Some(hex(item_digest(item)?)));
++        }
++        Ok(())
++    }
++
++    pub(crate) fn observe_output(&self, item: &ResponseItem) -> Result<()> {
++        let mut state = self.state.lock().unwrap();
++        state
++            .history_budget
++            .as_mut()
++            .ok_or_else(|| invalid("Provider history has no admitted budget"))?
++            .observe(item)?;
++        let pending = state
++            .pending
++            .as_mut()
++            .ok_or_else(|| invalid("Provider history has no admitted dispatch"))?;
++        // Admission adds IDs; retain the item entering canonical history.
++        pending.output_sha256.push(hex(item_digest(item)?));
++        pending.admitted_calls.push(provider_call(item));
++        Ok(())
++    }
++
++    pub(crate) fn observe_local_output(
++        &self,
++        item: &codex_history::ResponseItemEnvelope,
++        retained: HistoryBudget,
++    ) -> Result<()> {
++        let mut state = self.state.lock().unwrap();
++        let budget = state.history_budget.get_or_insert_with(|| retained.clone());
++        // Actual annotations can consume more than the provider's bare item.
++        budget.items = budget.items.max(retained.items);
++        budget.bytes_left = budget.bytes_left.min(retained.bytes_left);
++        budget.observe(item)
++    }
++
++    pub(crate) async fn fence_history_exhaustion(&self) -> Result<()> {
++        self.state.lock().unwrap().reference.pending = true;
++        self.persist().await
++    }
++
++    pub(crate) async fn accept(&self, response: LastResponse) -> Result<()> {
++        if response.response_id.is_empty() {
++            return Err(invalid(
++                "Provider history requires a completed response identity",
++            ));
++        }
++        {
++            let mut state = self.state.lock().unwrap();
++            if state
++                .pending
++                .as_ref()
++                .is_none_or(|pending| pending.output_sha256.len() != response.items_added.len())
++            {
++                return Err(invalid("Provider history output admission is incomplete"));
++            }
++            let pending = state.pending.as_ref().expect("checked pending admission");
++            let mut rewritten = false;
++            for (index, (admitted, wire)) in pending
++                .admitted_calls
++                .iter()
++                .zip(&pending.wire_calls)
++                .enumerate()
++            {
++                if admitted == wire {
++                    continue;
++                }
++                if !pending
++                    .mcp_rewrites
++                    .iter()
++                    .any(|(occurrence, original, replacement)| {
++                        *occurrence == index
++                            && wire.as_ref() == Some(original)
++                            && admitted.as_ref() == Some(replacement)
++                    })
++                {
++                    return Err(invalid(
++                        "Provider history cannot acknowledge unproven tool arguments",
++                    ));
++                }
++                rewritten = true;
++            }
++            if pending.admitted_calls.len() != pending.wire_calls.len() {
++                return Err(invalid("Provider history output admission is incomplete"));
++            }
++            let wire_output = if rewritten {
++                pending
++                    .wire_output_sha256
++                    .iter()
++                    .cloned()
++                    .collect::<Option<Vec<_>>>()
++                    .filter(|items| items.len() == pending.output_sha256.len())
++                    .ok_or_else(|| {
++                        invalid("Provider history wire output admission is incomplete")
++                    })?
++            } else {
++                Vec::new()
++            };
++            let pending = state
++                .pending
++                .take()
++                .ok_or_else(|| invalid("Provider history has no admitted dispatch"))?;
++            if let ProviderHistorySelection::PreviousResponse { id } =
++                &mut state.reference.selection
++            {
++                *id = Some(response.response_id);
++            }
++            let mut canonical_tail_sha256 = pending.canonical_tail_sha256;
++            if rewritten && canonical_tail_sha256.is_none() {
++                canonical_tail_sha256 = Some(Vec::new());
++            }
++            if let Some(tail) = &mut canonical_tail_sha256 {
++                tail.extend(pending.output_sha256.iter().cloned());
++            }
++            state.reference.window = Some(ProviderHistoryWindowReceipt {
++                canonical_input: Some(pending.canonical_input),
++                canonical_tail_sha256,
++                input_len: pending.input_len,
++                input_sha256: pending.input_sha256,
++                // Keep remote output distinct from the approved local view.
++                output_sha256: if rewritten {
++                    wire_output
++                } else {
++                    pending.output_sha256
++                },
++            });
++            state.reference.stored_response = Some(pending.stored);
++            state.reference.pending = false;
++            state.live_scope = Some(pending.scope);
++        }
++        self.persist().await
++    }
++
++    pub(crate) async fn reject_pre_stream(&self) -> Result<()> {
++        {
++            let mut state = self.state.lock().unwrap();
++            state.pending = None;
++            state.reference.pending = false;
++        }
++        self.persist().await
++    }
++}
++
++fn self_error(error: codex_api::ApiError) -> CodexErr {
++    invalid(&format!(
++        "Provider history anchor validation failed: {error}"
++    ))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn call(kind: &str, input: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({
++            "type": kind, "id": "provider-initial", "name": "effect", "call_id": "call", "arguments": input,
++            "input": input,
++        }))
++        .expect("fixture call")
++    }
++
++    #[test]
++    fn function_arguments_compare_json_values_and_ignore_item_ids() {
++        let first = call("function_call", r#"{"a":1,"b":{"x":2}}"#);
++        let mut same = call("function_call", " { \"b\": {\"x\":2}, \"a\":1 } ");
++        same.set_id(None);
++        assert_eq!(provider_call(&first), provider_call(&same));
++        assert_ne!(
++            provider_call(&first),
++            provider_call(&call("function_call", r#"{"a":2}"#))
++        );
++    }
++
++    #[test]
++    fn malformed_raw_arguments_do_not_equal_a_valid_json_string() {
++        assert_ne!(
++            provider_call(&call("function_call", "text")),
++            provider_call(&call("function_call", r#""text""#))
++        );
++    }
++
++    #[test]
++    fn custom_call_input_keeps_exact_raw_text() {
++        assert_ne!(
++            provider_call(&call("custom_tool_call", "text")),
++            provider_call(&call("custom_tool_call", " text"))
++        );
++    }
++
++    fn input_message(id: &str, text: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({
++            "type":"message", "id":id, "role":"user",
++            "content":[{"type":"input_text","text":text}]
++        }))
++        .unwrap()
++    }
++
++    #[test]
++    fn sampling_append_and_same_identity_replacement_keep_canonical_boundary() {
++        let original = vec![input_message("msg_original", "original")];
++        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
++        for sample in [
++            vec![
++                original[0].clone(),
++                input_message("msg_reference", "reference"),
++            ],
++            vec![input_message("msg_original", "replacement")],
++        ] {
++            let projected =
++                sampling_input_projection(Some(&captured), &sample, (0..sample.len()).collect(), 0)
++                    .unwrap();
++            let (boundary, tail) = delivered_boundary(&projected).unwrap();
++            assert_eq!(boundary, captured.boundary);
++            assert!(tail.is_none());
++            assert_eq!(projected.delivered_input_indices, vec![0]);
++        }
++    }
++
++    #[test]
++    fn sampling_omission_retains_pending_original_between_acknowledged_occurrences() {
++        let original = vec![
++            input_message("msg_a", "a"),
++            input_message("msg_b", "b"),
++            input_message("msg_c", "c"),
++        ];
++        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
++        let sample = vec![original[0].clone(), original[2].clone()];
++        let projected = sampling_input_projection(Some(&captured), &sample, vec![0, 1], 0).unwrap();
++        let (boundary, mut tail) = delivered_boundary(&projected).unwrap();
++        assert_eq!(boundary.input_len, 1);
++        let output = input_message("msg_output", "output");
++        tail.as_mut()
++            .unwrap()
++            .push(hex(item_digest(&output).unwrap()));
++        let window = ProviderHistoryWindowReceipt {
++            canonical_input: Some(boundary),
++            canonical_tail_sha256: tail,
++            input_len: 2,
++            input_sha256: input_digest(&sample).unwrap(),
++            output_sha256: vec![hex(item_digest(&output).unwrap())],
++        };
++        let mut current = original;
++        current.push(output);
++        let hashes = current
++            .iter()
++            .map(item_digest)
++            .collect::<Result<Vec<_>>>()
++            .unwrap();
++        assert_eq!(
++            unsent_hash_indices(&canonical_window(&window).unwrap(), &hashes).unwrap(),
++            vec![1]
++        );
++        current[1] = input_message("msg_b", "still pending and editable");
++        let hashes = current
++            .iter()
++            .map(item_digest)
++            .collect::<Result<Vec<_>>>()
++            .unwrap();
++        assert_eq!(
++            unsent_hash_indices(&canonical_window(&window).unwrap(), &hashes).unwrap(),
++            vec![1]
++        );
++    }
++
++    #[test]
++    fn sampling_cannot_rewrite_acknowledged_input() {
++        let original = vec![input_message("msg_a", "a")];
++        let boundary = canonical_input_boundary(&original).unwrap();
++        let window = ProviderHistoryWindowReceipt {
++            canonical_input: Some(boundary.clone()),
++            canonical_tail_sha256: None,
++            input_len: 1,
++            input_sha256: boundary.input_sha256,
++            output_sha256: vec![],
++        };
++        let changed = vec![input_message("msg_a", "changed")];
++        let hashes = changed
++            .iter()
++            .map(item_digest)
++            .collect::<Result<Vec<_>>>()
++            .unwrap();
++        assert!(unsent_hash_indices(&canonical_window(&window).unwrap(), &hashes).is_err());
++    }
++
++
++    #[test]
++    fn full_idless_group_retains_source_ordinals_after_prefix_insertion_and_reordering() {
++        let same: ResponseItem = serde_json::from_value(
++            serde_json::json!({"type":"item_reference","id":"provider_item"}),
++        )
++        .unwrap();
++        let other = input_message("msg_other", "other");
++        let original = vec![same.clone(), other.clone(), same.clone()];
++        let captured = canonical_input_projection(&original, vec![], 0).unwrap();
++        let sample = vec![
++            input_message("msg_new", "new"),
++            same.clone(),
++            same.clone(),
++            other.clone(),
++        ];
++        let projected =
++            sampling_input_projection(Some(&captured), &sample, vec![0, 1, 2, 3], 0).unwrap();
++        assert_eq!(projected.delivered_input_indices, vec![0, 1, 2]);
++        assert!(sampling_input_projection(Some(&captured), &[same, other], vec![0, 1], 0).is_err());
++    }
++
++    #[test]
++    fn history_budget_bounds_count_and_utf8_json_before_projection() {
++        let mut budget = HistoryBudget::default();
++        for _ in 0..MAX_HISTORY_ITEMS {
++            budget.observe(&1).unwrap();
++        }
++        assert!(budget.observe(&1).is_err());
++        assert!(
++            HistoryBudget::default()
++                .observe(&"é".repeat(MAX_HISTORY_BYTES / 2))
++                .is_err()
++        );
++        assert!(HistoryBudget::default().observe(&"small").is_ok());
++    }
++
++}
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index da5915f7..5a86fcc1 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -44,6 +44,9 @@ pub struct Prompt {
+ 
+     /// Stops new provider requests for this turn, including prompts without tools.
+     pub(crate) sampling_stop: Option<Arc<TurnSamplingStop>>,
++    /// Canonical occurrence data captured before sampling-only callbacks.
++    pub(crate) canonical_history_input: Option<Arc<codex_api::ProviderHistoryInputProjection>>,
++
+     /// Request-scoped host ownership, checked independently of response policies.
+     pub(crate) prepared_request_admission:
+         Option<Arc<dyn codex_extension_api::PreparedRequestAdmission>>,
+@@ -77,6 +80,7 @@ impl Default for Prompt {
+             tool_admission: None,
+             sampling_stop: None,
+             prepared_request_admission: None,
++            canonical_history_input: None,
+             parallel_tool_calls: false,
+             tool_choice: Default::default(),
+             request_controls: Default::default(),
+@@ -185,9 +189,9 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::FunctionCall { .. }
+             | ResponseItem::ToolSearchCall { .. }
+             | ResponseItem::ApplyPatchCall { .. }
+-        | ResponseItem::ComputerCall { .. }
++            | ResponseItem::ComputerCall { .. }
+             | ResponseItem::ApplyPatchCallOutput { .. }
+-        | ResponseItem::ComputerCallOutput { .. }
++            | ResponseItem::ComputerCallOutput { .. }
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index b2f69aea..fc33c1b7 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -111,6 +111,16 @@ pub(crate) async fn run_inline_auto_compact_task(
+     phase: CompactionPhase,
+     cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_reference()
++        .is_some()
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Compaction is unavailable for provider-managed history".into(),
++        ));
++    }
+     let turn_context = &source_step_context.turn;
+     let prompt = turn_context
+         .config
+@@ -180,6 +190,16 @@ async fn run_compact_task_inner(
+     cancellation_token: &CancellationToken,
+     captured_history: Option<(&ContextManager, &codex_extension_api::CompactionInput<'_>)>,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_reference()
++        .is_some()
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Compaction is unavailable for provider-managed history".into(),
++        ));
++    }
+     let turn_context = Arc::clone(&source_step_context.turn);
+     let trigger = compaction_metadata.trigger();
+     let reason = compaction_metadata.reason();
+@@ -694,6 +714,16 @@ async fn publish_compaction_history(
+     world_state: &WorldState,
+     publication: PreparedCompactionHistory<'_>,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_reference()
++        .is_some()
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Compaction is unavailable for provider-managed history".into(),
++        ));
++    }
+     let PreparedCompactionHistory {
+         items: mut new_history,
+         message: summary_text,
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 3b1bdfe9..089aa2fe 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -104,6 +104,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         )),
+         sampling_stop: crate::model_request::turn_sampling_stop(&turn_context.extension_data),
+         prepared_request_admission: None,
++        canonical_history_input: None,
+         parallel_tool_calls: true,
+         tool_choice: Default::default(),
+         base_instructions,
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index 74dcc9a2..abd83501 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -634,6 +634,9 @@ pub struct Config {
+     /// Startup policy supplied by the embedding SDK when restoring managed settings.
+     pub sdk_tool_choice: Option<codex_protocol::config_types::ToolChoice>,
+     pub sdk_request_controls: codex_protocol::model_request_controls::ModelRequestControls,
++    /// Live Session selection, consumed before configuration inheritance.
++    pub sdk_provider_history: Option<codex_protocol::provider_history::ProviderHistorySelection>,
++    pub sdk_provider_history_reference: Option<codex_protocol::provider_history::ProviderHistoryReference>,
+ 
+     /// Model used specifically for review sessions.
+     pub review_model: Option<String>,
+@@ -4301,6 +4304,8 @@ impl Config {
+             service_tier,
+             sdk_tool_choice: None,
+             sdk_request_controls: Default::default(),
++            sdk_provider_history: None,
++            sdk_provider_history_reference: None,
+             review_model,
+             model_context_window: cfg.model_context_window,
+             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 60968dc9..ac4cd0f5 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -181,6 +181,35 @@ impl ModelToolAdmission for StepToolAdmission {
+             .as_ref()
+             .is_some_and(|router| router.admits_response_item(item))
+     }
++    fn admit_mcp_argument_rewrite(
++        &self,
++        original: &ResponseItem,
++        replacement: &ResponseItem,
++    ) -> Result<(), String> {
++        let Some(admission) = self.step.as_ref().and_then(|step| {
++            step.extension_data
++                .get::<crate::client::McpRewriteAdmission>()
++        }) else {
++            return Ok(());
++        };
++        let call = self.router.as_ref().and_then(|router| {
++            router
++                .build_model_tool_call(original.clone())
++                .ok()
++                .flatten()
++                .and_then(|call| router.tool_runtime(&call.tool_name))
++        });
++        if !call.is_some_and(|runtime| {
++            runtime.as_ref().type_id()
++                == std::any::TypeId::of::<crate::tools::handlers::McpHandler>()
++        }) {
++            return Err("Provider history rewrite requires its captured MCP handler".into());
++        }
++        let attempt = self.attempt.as_ref().ok_or("Missing MCP model attempt")?;
++        admission
++            .0
++            .admit_mcp_argument_rewrite(original, replacement, attempt)
++    }
+ }
+ #[cfg(test)]
+ pub(crate) fn tool_admission(
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index cb0334d8..dc17c2f1 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -518,6 +518,16 @@ impl Session {
+         {
+             return Err(invalid("canonical history item IDs must be unique"));
+         }
++        let items = envelopes.iter().map(|row| &row.item).collect::<Vec<_>>();
++        let current = state
++            .history
++            .annotated_items()
++            .iter()
++            .map(|row| &row.item)
++            .collect::<Vec<_>>();
++        self.services
++            .model_client
++            .validate_provider_history_replacement(&current, &items)?;
+         let revision = originals.revision().to_owned();
+         let checkpoint = codex_history::CompactedItem {
+             sdk_originals: Some(originals.clone().into()),
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 50ee8148..38d9ff34 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -691,6 +691,11 @@ impl Session {
+         };
+ 
+         let mut config = config;
++        let provider_history = config.sdk_provider_history.take();
++        let configured_provider_history_reference = config.sdk_provider_history_reference.take();
++        if let Some(selection) = &provider_history {
++            selection.validate_shape().map_err(CodexErr::InvalidRequest)?;
++        }
+         if session_source.is_non_root_agent()
+             && client_mcp_extensions.contains("openai/sdk-child-prompts")
+         {
+@@ -853,6 +858,20 @@ impl Session {
+             }
+             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
+         };
++        let saved_provider_history = configured_provider_history_reference.or_else(|| {
++            persisted_thread_settings.and_then(|settings| settings.provider_history.clone())
++        });
++        let provider_history = match (provider_history, saved_provider_history) {
++            (Some(selection), reference) => {
++                if let Some(saved) = &reference {
++                    saved.validate_rebind(&selection).map_err(CodexErr::InvalidRequest)?;
++                }
++                Some(crate::client::provider_history::Start { selection, reference })
++            }
++            (None, Some(_)) => return Err(CodexErr::InvalidRequest(
++                "Restored provider history requires a current declaration".into())),
++            (None, None) => None,
++        };
+         let persisted_collaboration_mode = match &conversation_history {
+             InitialHistory::Resumed(resumed) => persisted_thread_settings
+                 .map(|settings| &settings.collaboration_mode)
+@@ -970,6 +989,7 @@ impl Session {
+             session_configuration,
+             &environment_selections,
+             config.clone(),
++            provider_history,
+             instructions,
+             installation_id,
+             auth_manager.clone(),
+@@ -2237,10 +2257,12 @@ impl Session {
+     }
+ 
+     pub(crate) async fn thread_settings_snapshot(&self) -> ThreadSettingsSnapshot {
+-        let state = self.state.lock().await;
+-        state
+-            .session_configuration
+-            .thread_settings_snapshot(&state.session_configuration.environments)
++        let mut snapshot = {
++            let state = self.state.lock().await;
++            state.session_configuration.thread_settings_snapshot(&state.session_configuration.environments)
++        };
++        snapshot.provider_history = self.services.model_client.provider_history_reference();
++        snapshot
+     }
+ 
+     pub(crate) async fn restorable_thread_settings(&self) -> CodexThreadSettingsOverrides {
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 7f81e89e..0b178d78 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -320,6 +320,7 @@ impl SessionConfiguration {
+         environment_selections: &[TurnEnvironmentSelection],
+     ) -> ThreadSettingsSnapshot {
+         ThreadSettingsSnapshot {
++            provider_history: None,
+             tool_choice: self.step_settings.tool_choice,
+             invocation_timeout_ms: self.step_settings.invocation_timeout_ms,
+             request_controls: self.step_settings.request_controls.clone(),
+@@ -800,6 +801,7 @@ impl Session {
+         mut session_configuration: SessionConfiguration,
+         environment_selections: &[TurnEnvironmentSelection],
+         config: Arc<Config>,
++        provider_history: Option<crate::client::provider_history::Start>,
+         mut instructions: SessionInstructions,
+         installation_id: String,
+         auth_manager: Arc<AuthManager>,
+@@ -1924,6 +1926,7 @@ impl Session {
+                     extensions.model_request_contributors().to_vec(),
+                 )
+                 .with_sdk_model_http_pool(sdk_model_http_pool)
++                .with_provider_history(provider_history)
+                 .with_sdk_websocket_tls_selector(sdk_websocket_tls_selector)
+                 .with_executed_tool_calls(executed_tool_calls.clone())
+                 .with_restored_history(matches!(
+@@ -1991,6 +1994,7 @@ impl Session {
+                 forked_from_ordinal_exclusive,
+                 next_internal_sub_id: AtomicU64::new(0),
+             });
++            sess.services.model_client.attach_provider_history(Arc::downgrade(&sess));
+             if let Some(startup) = &startup {
+                 let _ = startup.session.set(Arc::clone(&sess));
+             }
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 9faf9f11..4a8b6f8c 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -6646,6 +6646,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+         session_configuration,
+         /*environment_selections*/ &[],
+         Arc::clone(&config),
++        None,
+         SessionInstructions::default(),
+         "11111111-1111-4111-8111-111111111111".to_string(),
+         auth_manager,
+@@ -7211,6 +7212,7 @@ async fn make_session_with_config_and_rx(
+         session_configuration,
+         &default_environments,
+         Arc::clone(&config),
++        None,
+         SessionInstructions::default(),
+         "11111111-1111-4111-8111-111111111111".to_string(),
+         auth_manager,
+@@ -7348,6 +7350,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+         session_configuration,
+         &default_environments,
+         Arc::clone(&config),
++        None,
+         SessionInstructions::default(),
+         "11111111-1111-4111-8111-111111111111".to_string(),
+         auth_manager,
+diff --git a/codex-rs/core/src/session/thread_settings.rs b/codex-rs/core/src/session/thread_settings.rs
+index abc8b35f..2fc0fa0f 100644
+--- a/codex-rs/core/src/session/thread_settings.rs
++++ b/codex-rs/core/src/session/thread_settings.rs
+@@ -122,8 +122,9 @@ pub(super) async fn apply_update(
+ pub(super) async fn emit_applied(
+     session: &Session,
+     submission_id: String,
+-    snapshot: ThreadSettingsSnapshot,
++    mut snapshot: ThreadSettingsSnapshot,
+ ) {
++    snapshot.provider_history = session.services.model_client.provider_history_reference();
+     let msg = EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
+         thread_id: Some(session.thread_id()),
+         thread_settings: snapshot,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index d3838142..850decb0 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -183,6 +183,7 @@ pub(crate) async fn run_turn(
+     cancellation_token: CancellationToken,
+ ) -> CodexResult<Option<String>> {
+     sess.check_agent_profile_admission()?;
++    check_provider_history_budget(&sess, &input).await?;
+ 
+     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
+         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
+@@ -725,6 +726,7 @@ pub(crate) async fn run_turn(
+             sess.record_reasoning_effort_override(step_context.as_ref())
+                 .await;
+ 
++            check_provider_history_budget(&sess, &[] as &[TurnInput]).await?;
+             // Construct the input that we will send to the model.
+             let sampling_request_input: Vec<ResponseItem> = async {
+                 sess.clone_history()
+@@ -882,6 +884,11 @@ pub(crate) async fn run_turn(
+                 }
+ 
+                 let should_roll_over = needs_follow_up
++                    && sess
++                        .services
++                        .model_client
++                        .provider_history_selection()
++                        .is_none()
+                     && (sess.take_new_context_window_request().await || token_limit_reached);
+                 let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
+                 super::token_budget::maybe_record(
+@@ -1115,6 +1122,32 @@ async fn turn_diff_display_roots(step_context: &StepContext) -> Vec<(String, Pat
+     display_roots
+ }
+ 
++// Check the retained window and incoming batch before recording more history.
++// Exhaustion leaves the last acknowledged cursor and canonical originals intact.
++async fn check_provider_history_budget<T: serde::Serialize>(
++    sess: &Session,
++    input: &[T],
++) -> CodexResult<crate::client::provider_history::HistoryBudget> {
++    use crate::client::provider_history::HistoryBudget;
++    let mut budget = HistoryBudget::default();
++    if sess
++        .services
++        .model_client
++        .provider_history_selection()
++        .is_some()
++    {
++        let history = sess.clone_history().await;
++        HistoryBudget::check_count(history.raw_items().len().saturating_add(input.len()))?;
++        for item in history.annotated_items() {
++            budget.observe(item)?;
++        }
++        for item in input {
++            budget.observe(item)?;
++        }
++    }
++    Ok(budget)
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) async fn run_hooks_and_record_inputs(
+     sess: &Arc<Session>,
+@@ -1123,6 +1156,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
+     input: &[TurnInput],
+     persist_context: PersistContext,
+ ) -> CodexResult<bool> {
++    check_provider_history_budget(sess, input).await?;
+     if sess.captured_provider_image_reference_policy()
+         == codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::QualifiedStandardResponses
+     {
+@@ -1666,6 +1700,15 @@ async fn run_pre_sampling_compact(
+     cancellation_token: &CancellationToken,
+     prepared_current_step: Option<Arc<StepContext>>,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_selection()
++        .is_some()
++    {
++        return Ok(());
++    }
++
+     maybe_run_previous_model_inline_compact(
+         sess,
+         turn_context,
+@@ -1826,6 +1869,15 @@ async fn run_post_turn_compaction(
+     cancellation_token: &CancellationToken,
+     native_model_threshold: bool,
+ ) -> CodexResult<()> {
++    if sess
++        .services
++        .model_client
++        .provider_history_selection()
++        .is_some()
++    {
++        return Ok(());
++    }
++
+     let turn_context = &step_context.turn;
+     if turn_context.config.features.enabled(Feature::TokenBudget) {
+         return Ok(());
+@@ -2072,6 +2124,7 @@ pub(crate) fn build_prompt(
+         tool_admission: None,
+         sampling_stop: None,
+         prepared_request_admission: None,
++        canonical_history_input: None,
+         base_instructions,
+         output_schema: turn_context.final_output_json_schema.clone(),
+         output_schema_strict: !crate::guardian::is_basic_session_source(
+@@ -2200,6 +2253,7 @@ async fn run_sampling_request(
+             let prompt_input = if let Some(input) = initial_input.take() {
+                 input
+             } else {
++                check_provider_history_budget(&sess, &[] as &[TurnInput]).await?;
+                 sess.clone_history()
+                     .await
+                     .for_prompt(&step_context.settings.model_info.input_modalities)
+@@ -2213,6 +2267,18 @@ async fn run_sampling_request(
+                 step_context.as_ref(),
+                 base_instructions.clone(),
+             );
++            let mut canonical = sess
++                .services
++                .model_client
++                .capture_provider_history_input(&prompt.input, &step_context.extension_data)?;
++            if let Some(projection) = canonical.as_mut() {
++                let retained = check_provider_history_budget(&sess, &[] as &[TurnInput]).await?;
++                (
++                    projection.retained_item_count,
++                    projection.retained_json_bytes,
++                ) = retained.retained();
++            }
++            prompt.canonical_history_input = canonical.map(Arc::new);
+             prompt.request_controls = step_context.settings.request_controls().clone();
+             if prompt.tool_choice == codex_protocol::config_types::ToolChoice::Required
+                 && tool_choice_reset_applies(&step_context.settings, &turn_context.extension_data)
+@@ -4113,6 +4179,8 @@ async fn drain_in_flight(
+     while let Some(res) = in_flight.next().await {
+         match res {
+             Ok(result) => {
++                let retained = check_provider_history_budget(&sess, &[] as &[TurnInput]).await;
++                sess.services.model_client.admit_provider_history_local_output(&result.envelope, retained).await?;
+                 settled_tools.all_succeeded &= result.succeeded;
+                 settled_tools
+                     .outcomes
+@@ -4535,6 +4603,7 @@ async fn try_run_sampling_request(
+                     }
+ 
+                     assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
++                    sess.services.model_client.observe_provider_history_output(&item)?;
+                     sess.reserve_assistant_message_order(&turn_context, &item)
+                         .await;
+                     if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
+@@ -5183,6 +5252,18 @@ async fn try_run_sampling_request(
+     if timeout_ms.is_some() || model_attempt.is_some() {
+         deadline_cleanup_errors.extend(deadline.retire_tasks().await);
+     }
++    let history_acceptance = if outcome.is_ok()
++        && !deadline.expired()
++        && deadline_cleanup_errors.is_empty()
++        && client_session.has_provider_history()
++    {
++        async {
++            sess.ensure_rollout_durable().await?;
++            client_session.accept_provider_history().await
++        }.await
++    } else {
++        Ok(())
++    };
+     let mut tool_cleanup = if !in_flight.is_empty() {
+         let _tool_blocking_timing_guard = turn_context.turn_timing_state.begin_tool_blocking();
+         let _tool_blocking_span = trace_span!(
+@@ -5269,6 +5350,8 @@ async fn try_run_sampling_request(
+         release_failed_tool_candidates(&sess, &step_context).await;
+     }
+     tool_cleanup?;
++    if history_acceptance.is_err() { release_failed_tool_candidates(&sess, &step_context).await; }
++    history_acceptance?;
+ 
+     // Tool effects have completed. Save their results before any dependent work.
+     sess.ensure_rollout_durable().await?;
+diff --git a/codex-rs/core/tests/provider_history.rs b/codex-rs/core/tests/provider_history.rs
+new file mode 100644
+index 00000000..934feaa8
+--- /dev/null
++++ b/codex-rs/core/tests/provider_history.rs
+@@ -0,0 +1,531 @@
++use anyhow::Result;
++use codex_protocol::ThreadId;
++use codex_rollout::RolloutItem;
++use codex_thread_store::{
++    AppendThreadItemsParams, ArchiveThreadParams, CreateThreadParams, DeleteThreadParams,
++    ListThreadsParams, LoadThreadHistoryParams, LocalThreadStore, LocalThreadStoreConfig,
++    PersistContext, ReadThreadByRolloutPathParams, ReadThreadParams, ResumeThreadParams,
++    StoredThread, StoredThreadHistory, ThreadPage, ThreadStore, ThreadStoreError,
++    ThreadStoreFuture, UpdateThreadMetadataParams,
++};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, OnceLock};
++
++use codex_core::{StartThreadOptions, TurnInputRequest};
++use codex_protocol::dynamic_tools::{
++    DynamicToolCallOutputContentItem, DynamicToolFunctionSpec, DynamicToolResponse, DynamicToolSpec,
++};
++use codex_protocol::protocol::{EventMsg, Op};
++use codex_protocol::provider_history::ProviderHistorySelection;
++use codex_protocol::user_input::UserInput;
++use core_test_support::test_codex::test_codex;
++use core_test_support::{responses, wait_for_event};
++use serde_json::json;
++use wiremock::matchers::{method, path};
++use wiremock::{Mock, ResponseTemplate};
++
++#[tokio::test]
++async fn cold_resume_requires_current_anchor_and_only_sends_new_input() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    Mock::given(method("GET"))
++        .and(path("/v1/responses/resp_before"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "id": "resp_before", "status": "completed"
++        })))
++        .expect(1)
++        .mount(&server)
++        .await;
++    let bodies = ["resp_before", "resp_after"].map(|id| {
++        responses::sse(vec![
++            responses::ev_response_created(id),
++            responses::ev_assistant_message(id, "Done."),
++            responses::ev_completed(id),
++        ])
++    });
++    let next = std::sync::atomic::AtomicUsize::new(0);
++    Mock::given(method("POST"))
++        .and(path("/v1/responses"))
++        .respond_with(move |_: &wiremock::Request| {
++            let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            ResponseTemplate::new(200)
++                .insert_header("content-type", "text/event-stream")
++                .set_body_string(bodies[index].clone())
++        })
++        .expect(2)
++        .mount(&server)
++        .await;
++    let mut builder = test_codex().with_config(|config| {
++        config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse { id: None });
++        config.sdk_request_controls.store = Some(Some(true));
++    });
++    let test = builder.build_with_auto_env(&server).await?;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Before reopen.".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let terminal = wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_) | EventMsg::Error(_))
++    })
++    .await;
++    assert!(
++        matches!(terminal, EventMsg::TurnComplete(_)),
++        "{terminal:?}"
++    );
++    let rollout = test.codex.rollout_path().unwrap();
++    test.codex.submit(Op::Shutdown).await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::ShutdownComplete)
++    })
++    .await;
++    test.thread_manager
++        .remove_thread(&test.session_configured.thread_id)
++        .await;
++    drop(test.codex);
++    for selection in [
++        None,
++        Some(ProviderHistorySelection::PreviousResponse {
++            id: Some("resp_wrong".into()),
++        }),
++    ] {
++        let mut config = test.config.clone();
++        config.sdk_provider_history = selection;
++        let result = test
++            .thread_manager
++            .resume_legacy_thread_from_rollout(
++                config,
++                rollout.clone(),
++                test.thread_manager.auth_manager(),
++                None,
++                Default::default(),
++            )
++            .await;
++        assert!(
++            result.is_err(),
++            "saved data must require the current exact anchor"
++        );
++        assert_eq!(server.received_requests().await.unwrap().len(), 1);
++    }
++    let mut config = test.config.clone();
++    config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
++        id: Some("resp_before".into()),
++    });
++    let resumed = test
++        .thread_manager
++        .resume_legacy_thread_from_rollout(
++            config,
++            rollout,
++            test.thread_manager.auth_manager(),
++            None,
++            Default::default(),
++        )
++        .await?;
++    resumed
++        .thread
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "After reopen.".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let terminal = wait_for_event(&resumed.thread, |event| {
++        matches!(event, EventMsg::TurnComplete(_) | EventMsg::Error(_))
++    })
++    .await;
++    assert!(
++        matches!(terminal, EventMsg::TurnComplete(_)),
++        "{terminal:?}"
++    );
++    let requests = server.received_requests().await.unwrap();
++    let post = requests
++        .iter()
++        .filter(|request| request.method.as_str() == "POST")
++        .collect::<Vec<_>>();
++    assert_eq!(post.len(), 2);
++    let body: serde_json::Value = post[1].body_json()?;
++    assert_eq!(body["previous_response_id"], "resp_before");
++    let input = body["input"].as_array().unwrap();
++    assert_eq!(input.len(), 1, "{body}");
++    assert_eq!(input[0]["role"], "user");
++    assert_eq!(input[0]["content"][0]["text"], "After reopen.");
++    let reference = resumed
++        .thread
++        .thread_settings_snapshot()
++        .await
++        .provider_history
++        .unwrap();
++    assert!(!reference.pending);
++    assert_eq!(
++        reference.selection,
++        ProviderHistorySelection::PreviousResponse {
++            id: Some("resp_after".into())
++        }
++    );
++    resumed.thread.submit(Op::Shutdown).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn response_chain_advances_with_only_unsent_tool_results() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    Mock::given(method("GET"))
++        .and(path("/v1/responses/resp_external"))
++        .respond_with(
++            ResponseTemplate::new(200)
++                .set_body_json(json!({"id":"resp_external","status":"completed"})),
++        )
++        .expect(1)
++        .mount(&server)
++        .await;
++    // This provider owns the preceding calls through previous_response_id;
++    // the ordinary full-history mock requires those calls in every request.
++    let bodies = vec![
++        responses::sse(vec![
++            responses::ev_response_created("resp_one"),
++            responses::ev_function_call("call_one", "gate", "{}"),
++            responses::ev_completed("resp_one"),
++        ]),
++        responses::sse(vec![
++            responses::ev_response_created("resp_two"),
++            responses::ev_function_call("call_two", "gate", "{}"),
++            responses::ev_completed("resp_two"),
++        ]),
++        responses::sse(vec![
++            responses::ev_response_created("resp_three"),
++            responses::ev_assistant_message("answer", "Finished."),
++            responses::ev_completed("resp_three"),
++        ]),
++    ];
++    let next = std::sync::atomic::AtomicUsize::new(0);
++    Mock::given(method("POST"))
++        .and(path("/v1/responses"))
++        .respond_with(move |_: &wiremock::Request| {
++            let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            ResponseTemplate::new(200)
++                .insert_header("content-type", "text/event-stream")
++                .set_body_string(bodies[index].clone())
++        })
++        .expect(3)
++        .mount(&server)
++        .await;
++    let mut builder = test_codex().with_config(|config| {
++        config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
++            id: Some("resp_external".into()),
++        });
++        config.sdk_request_controls.store = Some(Some(true));
++    });
++    let mut test = builder.build_with_auto_env(&server).await?;
++    let thread = test
++        .thread_manager
++        .start_thread(StartThreadOptions {
++            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
++                strict: false,
++                output_schema: None,
++                name: "gate".into(),
++                description: "Host-owned gate".into(),
++                input_schema: json!({"type":"object","properties":{}}),
++                defer_loading: false,
++            })],
++            ..StartThreadOptions::new(test.config.clone())
++        })
++        .await?;
++    test.codex = thread.thread;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Perform two gated operations.".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let mut effects = Vec::new();
++    for expected in ["call_one", "call_two"] {
++        let event = wait_for_event(&test.codex, |event| {
++            matches!(
++                event,
++                EventMsg::DynamicToolCallRequest(_) | EventMsg::Error(_)
++            )
++        })
++        .await;
++        let EventMsg::DynamicToolCallRequest(call) = event else {
++            panic!("Native provider history sampling failed: {event:?}")
++        };
++        assert_eq!(call.call_id, expected);
++        effects.push(call.call_id.clone());
++        test.codex
++            .submit(Op::DynamicToolResponse {
++                id: call.call_id,
++                response: DynamicToolResponse {
++                    content_items: vec![DynamicToolCallOutputContentItem::InputText {
++                        text: expected.into(),
++                    }],
++                    success: true,
++                },
++            })
++            .await?;
++    }
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    assert_eq!(effects, ["call_one", "call_two"]);
++    let requests = server
++        .received_requests()
++        .await
++        .unwrap()
++        .into_iter()
++        .filter(|request| request.method.as_str() == "POST")
++        .map(|request| request.body_json::<serde_json::Value>().unwrap())
++        .collect::<Vec<_>>();
++    assert_eq!(requests.len(), 3);
++    for (index, anchor) in ["resp_external", "resp_one", "resp_two"].iter().enumerate() {
++        assert_eq!(requests[index]["previous_response_id"], *anchor);
++        assert_eq!(requests[index]["store"], true);
++    }
++    for (index, call) in [(1, "call_one"), (2, "call_two")] {
++        let body = &requests[index];
++        let input = body["input"].as_array().unwrap();
++        assert_eq!(
++            input.len(),
++            1,
++            "only the unsent result belongs on the wire: {body}"
++        );
++        assert_eq!(input[0]["type"], "function_call_output");
++        assert_eq!(input[0]["call_id"], call);
++    }
++    let reference = test
++        .codex
++        .thread_settings_snapshot()
++        .await
++        .provider_history
++        .unwrap();
++    assert_eq!(
++        reference.selection,
++        ProviderHistorySelection::PreviousResponse {
++            id: Some("resp_three".into())
++        }
++    );
++    assert!(!reference.pending);
++    test.codex.submit(Op::Shutdown).await?;
++    Ok(())
++}
++
++struct RejectAcceptedCheckpoint {
++    inner: OnceLock<LocalThreadStore>,
++    rejected: AtomicBool,
++}
++
++impl ThreadStore for RejectAcceptedCheckpoint {
++    fn as_any(&self) -> &dyn std::any::Any {
++        self
++    }
++    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
++        self.inner.get().unwrap().create_thread(params)
++    }
++    fn resume_thread(
++        &self,
++        params: ResumeThreadParams,
++    ) -> ThreadStoreFuture<'_, Arc<Vec<RolloutItem>>> {
++        self.inner.get().unwrap().resume_thread(params)
++    }
++    fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
++        let acknowledged = params.items.iter().any(|item| {
++            let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = item else {
++                return false;
++            };
++            event
++                .thread_settings
++                .provider_history
++                .as_ref()
++                .is_some_and(|reference| {
++                    !reference.pending
++                        && reference.selection
++                            == (ProviderHistorySelection::PreviousResponse {
++                                id: Some("resp_accepted".into()),
++                            })
++                })
++        });
++        if acknowledged {
++            self.rejected.store(true, Ordering::SeqCst);
++            return Box::pin(async {
++                Err(ThreadStoreError::Internal {
++                    message: "synthetic accepted-checkpoint failure".into(),
++                })
++            });
++        }
++        self.inner.get().unwrap().append_items(params)
++    }
++    fn persist_thread(
++        &self,
++        thread_id: ThreadId,
++        context: PersistContext,
++    ) -> ThreadStoreFuture<'_, ()> {
++        self.inner.get().unwrap().persist_thread(thread_id, context)
++    }
++    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        self.inner.get().unwrap().flush_thread(thread_id)
++    }
++    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        self.inner.get().unwrap().shutdown_thread(thread_id)
++    }
++    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        self.inner.get().unwrap().discard_thread(thread_id)
++    }
++    fn load_history(
++        &self,
++        params: LoadThreadHistoryParams,
++    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
++        self.inner.get().unwrap().load_history(params)
++    }
++    fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
++        self.inner.get().unwrap().read_thread(params)
++    }
++    fn read_thread_by_rollout_path(
++        &self,
++        params: ReadThreadByRolloutPathParams,
++    ) -> ThreadStoreFuture<'_, StoredThread> {
++        ThreadStore::read_thread_by_rollout_path(self.inner.get().unwrap(), params)
++    }
++    fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
++        self.inner.get().unwrap().list_threads(params)
++    }
++    fn update_thread_metadata(
++        &self,
++        params: UpdateThreadMetadataParams,
++    ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
++        self.inner.get().unwrap().update_thread_metadata(params)
++    }
++    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
++        self.inner.get().unwrap().archive_thread(params)
++    }
++    fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
++        self.inner.get().unwrap().unarchive_thread(params)
++    }
++    fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
++        self.inner.get().unwrap().delete_thread(params)
++    }
++}
++
++#[tokio::test]
++async fn accepted_response_journal_failure_blocks_live_and_cold_replay() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    responses::mount_sse_once(
++        &server,
++        responses::sse(vec![
++            responses::ev_response_created("resp_accepted"),
++            responses::ev_assistant_message("accepted-answer", "Accepted."),
++            responses::ev_completed("resp_accepted"),
++        ]),
++    )
++    .await;
++    let store = Arc::new(RejectAcceptedCheckpoint {
++        inner: OnceLock::new(),
++        rejected: AtomicBool::new(false),
++    });
++    let configured_store = store.clone();
++    let mut builder = test_codex()
++        .with_config(move |config| {
++            config.sdk_provider_history =
++                Some(ProviderHistorySelection::PreviousResponse { id: None });
++            config.sdk_request_controls.store = Some(Some(true));
++            assert!(
++                configured_store
++                    .inner
++                    .set(LocalThreadStore::new(
++                        LocalThreadStoreConfig::from_config(config),
++                        None
++                    ))
++                    .is_ok()
++            );
++        })
++        .with_thread_store(store.clone());
++    let test = builder.build_with_auto_env(&server).await?;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "One accepted response.".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let terminal = wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    assert!(
++        matches!(&terminal, EventMsg::TurnComplete(done) if done.error.is_some()),
++        "{terminal:?}"
++    );
++    assert!(store.rejected.load(Ordering::SeqCst));
++    let rollout = ThreadStore::read_thread(
++        store.inner.get().unwrap(),
++        ReadThreadParams {
++            thread_id: test.session_configured.thread_id,
++            include_archived: false,
++            include_history: false,
++        },
++    )
++    .await?
++    .rollout_path
++    .unwrap();
++    let live = test
++        .codex
++        .thread_settings_snapshot()
++        .await
++        .provider_history
++        .unwrap();
++    assert_eq!(
++        live.selection,
++        ProviderHistorySelection::PreviousResponse {
++            id: Some("resp_accepted".into())
++        }
++    );
++    assert!(
++        !live.pending,
++        "the live advance precedes the failed journal commit"
++    );
++    if test
++        .codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Never redispatch.".into(),
++            text_elements: vec![],
++        }]))
++        .await
++        .is_ok()
++    {
++        let terminal = wait_for_event(&test.codex, |event| {
++            matches!(event, EventMsg::TurnComplete(_))
++        })
++        .await;
++        assert!(
++            matches!(&terminal, EventMsg::TurnComplete(done) if done.error.is_some()),
++            "{terminal:?}"
++        );
++    }
++    assert_eq!(server.received_requests().await.unwrap().len(), 1);
++    test.codex.submit(Op::Shutdown).await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::ShutdownComplete)
++    })
++    .await;
++    test.thread_manager
++        .remove_thread(&test.session_configured.thread_id)
++        .await;
++    drop(test.codex);
++    let mut config = test.config.clone();
++    config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
++        id: Some("resp_accepted".into()),
++    });
++    let result = test
++        .thread_manager
++        .resume_legacy_thread_from_rollout(
++            config,
++            rollout,
++            test.thread_manager.auth_manager(),
++            None,
++            Default::default(),
++        )
++        .await;
++    let Err(error) = result else {
++        panic!("cold replay must require reconciliation after the failed journal commit")
++    };
++    assert!(error.to_string().contains("reconcil"), "{error}");
++    assert_eq!(server.received_requests().await.unwrap().len(), 1);
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/settings_constraints.rs b/codex-rs/core/tests/suite/settings_constraints.rs
+index 36cb86a8..5202e11b 100644
+--- a/codex-rs/core/tests/suite/settings_constraints.rs
++++ b/codex-rs/core/tests/suite/settings_constraints.rs
+@@ -186,6 +186,7 @@ async fn protected_model_settings_use_the_proposed_permissions(
+     assert!(response.requests().is_empty());
+ 
+     let expected = ThreadSettingsSnapshot {
++        provider_history: None,
+         tool_choice: None,
+         model: PROTECTED_MODEL.to_string(),
+         collaboration_mode: initial.collaboration_mode.with_updates(
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 6583b8e0..31528e7b 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -427,6 +427,15 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+     }
+     /// Whether the exact selected runtime accepts this model item's payload kind.
+     fn admits(&self, item: &ResponseItem) -> bool;
++    /// Record an SDK-admitted MCP argument policy against this exact request.
++    /// Ordinary admissions carry no provider-history receipt.
++    fn admit_mcp_argument_rewrite(
++        &self,
++        _original: &ResponseItem,
++        _replacement: &ResponseItem,
++    ) -> Result<(), String> {
++        Ok(())
++    }
+ }
+ 
+ /// Measurement can settle during joined cleanup after executable reply authority expires.
+diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
+index 2b354ad5..d2dcea72 100644
+--- a/codex-rs/protocol/src/lib.rs
++++ b/codex-rs/protocol/src/lib.rs
+@@ -28,6 +28,7 @@ mod environment;
+ pub mod error;
+ pub mod exec_output;
+ pub mod items;
++pub mod provider_history;
+ mod legacy_events;
+ pub mod local_media;
+ pub mod mcp;
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 93b45fe5..ed821f8d 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2983,6 +2983,9 @@ pub struct ThreadSettingsAppliedEvent {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ pub struct ThreadSettingsSnapshot {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub provider_history: Option<crate::provider_history::ProviderHistoryReference>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[ts(optional)]
+     pub tool_choice: Option<crate::config_types::ToolChoice>,
+diff --git a/codex-rs/protocol/src/provider_history.rs b/codex-rs/protocol/src/provider_history.rs
+new file mode 100644
+index 00000000..d71f6fdb
+--- /dev/null
++++ b/codex-rs/protocol/src/provider_history.rs
+@@ -0,0 +1,131 @@
++//! Session-scoped provider history data; live provider authority stays external.
++
++use schemars::JsonSchema;
++use serde::Deserialize;
++use serde::Serialize;
++use ts_rs::TS;
++
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
++pub enum ProviderHistorySelection {
++    Conversation {
++        id: String,
++    },
++    PreviousResponse {
++        /// An omitted initial ID for a new automatic response chain.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        id: Option<String>,
++    },
++}
++
++impl ProviderHistorySelection {
++    pub fn validate_shape(&self) -> Result<(), String> {
++        let id = match self {
++            Self::Conversation { id } => Some(id),
++            Self::PreviousResponse { id } => id.as_ref(),
++        };
++        if id.is_some_and(|id| id.trim().is_empty()) {
++            return Err("Empty provider history ID".into());
++        }
++        Ok(())
++    }
++}
++
++/// Canonical input before trusted request-only rows are inserted.
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ProviderHistoryInputBoundary {
++    pub input_len: usize,
++    pub input_sha256: String,
++}
++
++/// Data-only occurrence receipt, without live provider or callback authority.
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ProviderHistoryWindowReceipt {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub canonical_input: Option<ProviderHistoryInputBoundary>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub canonical_tail_sha256: Option<Vec<String>>,
++    pub input_len: usize,
++    pub input_sha256: String,
++    pub output_sha256: Vec<String>,
++}
++
++impl ProviderHistoryWindowReceipt {
++    /// Input occurrences outside the acknowledged prefix and ordered response output.
++    pub fn unsent_input_indices(
++        &self,
++        current_input_len: usize,
++        current_prefix_sha256: &str,
++        tail_sha256: &[String],
++    ) -> Result<Vec<usize>, String> {
++        let valid_digest = |digest: &str| {
++            digest.len() == 64
++                && digest
++                    .bytes()
++                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
++        };
++        if !valid_digest(&self.input_sha256)
++            || self
++                .output_sha256
++                .iter()
++                .any(|digest| !valid_digest(digest))
++            || tail_sha256.iter().any(|digest| !valid_digest(digest))
++            || current_input_len.checked_sub(self.input_len) != Some(tail_sha256.len())
++            || self.input_sha256 != current_prefix_sha256
++        {
++            return Err("Provider history no longer matches its acknowledged input".into());
++        }
++        let acknowledged = self
++            .output_sha256
++            .iter()
++            .map(String::as_str)
++            .collect::<std::collections::HashSet<_>>();
++        let mut next_output = 0;
++        let mut unsent = Vec::new();
++        for (index, digest) in tail_sha256.iter().enumerate() {
++            if self.output_sha256.get(next_output) == Some(digest) {
++                next_output += 1;
++            } else if acknowledged.contains(digest.as_str()) {
++                return Err(
++                    "Provider history contains reordered or repeated acknowledged output".into(),
++                );
++            } else {
++                unsent.push(self.input_len + index);
++            }
++        }
++        if next_output != self.output_sha256.len() {
++            return Err("Provider history is missing acknowledged output".into());
++        }
++        Ok(unsent)
++    }
++}
++
++/// Portable reference data; only a current declaration supplies provider authority.
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct ProviderHistoryReference {
++    pub selection: ProviderHistorySelection,
++    pub provider_route: String,
++    pub window: Option<ProviderHistoryWindowReceipt>,
++    pub pending: bool,
++    pub stored_response: Option<bool>,
++}
++
++impl ProviderHistoryReference {
++    pub fn validate_rebind(&self, current: &ProviderHistorySelection) -> Result<(), String> {
++        self.selection.validate_shape()?;
++        current.validate_shape()?;
++        if self.pending {
++            return Err("Provider history dispatch requires reconciliation before reuse".into());
++        }
++        if &self.selection != current {
++            return Err(
++                "Restored provider history requires its exact current anchor declaration".into(),
++            );
++        }
++        Ok(())
++    }
++}
+diff --git a/codex-rs/protocol/tests/provider_history.rs b/codex-rs/protocol/tests/provider_history.rs
+new file mode 100644
+index 00000000..7c049077
+--- /dev/null
++++ b/codex-rs/protocol/tests/provider_history.rs
+@@ -0,0 +1,95 @@
++use codex_protocol::provider_history::ProviderHistorySelection;
++use serde_json::json;
++
++#[test]
++fn selection_preserves_opaque_ids_and_rejects_conflicting_shapes() {
++    let selected: ProviderHistorySelection = serde_json::from_value(json!({
++        "type": "conversation", "id": "custom-provider-conversation"
++    }))
++    .unwrap();
++    selected.validate_shape().unwrap();
++    assert_eq!(
++        serde_json::to_value(selected).unwrap(),
++        json!({"type": "conversation", "id": "custom-provider-conversation"})
++    );
++    assert!(
++        serde_json::from_value::<ProviderHistorySelection>(json!({
++            "type": "conversation", "id": "conv_current", "previous_response_id": "resp_other"
++        }))
++        .is_err()
++    );
++    assert!(
++        ProviderHistorySelection::PreviousResponse {
++            id: Some(" \t".into())
++        }
++        .validate_shape()
++        .is_err()
++    );
++    serde_json::from_value::<ProviderHistorySelection>(json!({"type":"previous_response"}))
++        .unwrap()
++        .validate_shape()
++        .unwrap();
++}
++
++#[test]
++fn acknowledged_occurrences_preserve_interleaved_unsent_tool_results() {
++    use codex_protocol::provider_history::ProviderHistoryWindowReceipt;
++
++    let digest = |value: &str| value.repeat(32);
++    let prefix = digest("00");
++    let call_a = digest("11");
++    let call_b = digest("22");
++    let result_a = digest("33");
++    let result_b = digest("44");
++    let user = digest("55");
++    let receipt = ProviderHistoryWindowReceipt {
++        canonical_input: None,
++        canonical_tail_sha256: None,
++        input_len: 2,
++        input_sha256: prefix.clone(),
++        output_sha256: vec![call_a.clone(), call_b.clone()],
++    };
++    let receipt: ProviderHistoryWindowReceipt =
++        serde_json::from_value(serde_json::to_value(receipt).unwrap()).unwrap();
++    assert_eq!(
++        receipt
++            .unsent_input_indices(7, &prefix, &[call_a, result_a, call_b, result_b, user])
++            .unwrap(),
++        vec![3, 5, 6]
++    );
++}
++
++#[test]
++fn acknowledged_occurrences_reject_rewrites_missing_and_repeated_outputs() {
++    use codex_protocol::provider_history::ProviderHistoryWindowReceipt;
++
++    let digest = |value: &str| value.repeat(32);
++    let prefix = digest("00");
++    let a = digest("11");
++    let b = digest("22");
++    let receipt = ProviderHistoryWindowReceipt {
++        canonical_input: None,
++        canonical_tail_sha256: None,
++        input_len: 1,
++        input_sha256: prefix.clone(),
++        output_sha256: vec![a.clone(), b.clone()],
++    };
++    for tail in [
++        vec![a.clone()],
++        vec![b.clone(), a.clone()],
++        vec![a.clone(), b.clone(), b.clone()],
++    ] {
++        assert!(
++            receipt
++                .unsent_input_indices(1 + tail.len(), &prefix, &tail)
++                .is_err()
++        );
++    }
++    assert!(
++        receipt
++            .unsent_input_indices(3, &digest("ff"), &[a.clone(), b.clone()])
++            .is_err()
++    );
++    assert!(receipt.unsent_input_indices(0, &prefix, &[]).is_err());
++    assert!(receipt.unsent_input_indices(4, &prefix, &[a, b]).is_err());
++}
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index 5cf8e552..9a222460 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -766,6 +766,7 @@ mod tests {
+             ThreadSettingsAppliedEvent {
+                 thread_id: None,
+                 thread_settings: ThreadSettingsSnapshot {
++                    provider_history: None,
+                     invocation_timeout_ms: None,
+                     request_controls: Default::default(),
+                     tool_choice: None,
+diff --git a/codex-rs/thread-store/src/thread_metadata_sync.rs b/codex-rs/thread-store/src/thread_metadata_sync.rs
+index 329bb7cd..2928986b 100644
+--- a/codex-rs/thread-store/src/thread_metadata_sync.rs
++++ b/codex-rs/thread-store/src/thread_metadata_sync.rs
+@@ -743,6 +743,7 @@ mod tests {
+             ThreadSettingsAppliedEvent {
+                 thread_id: None,
+                 thread_settings: ThreadSettingsSnapshot {
++                    provider_history: None,
+                     request_controls: Default::default(),
+                     tool_choice: None,
+                     disabled_plugin_ids: Vec::new(),
