@@ -112,6 +112,7 @@ from ._managed_workspace import (
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _audio_json, _check_audio_json
 from ._model_retry import _is_model_abort, _ModelFailure, _normalized_error, _resolve_retry
+from ._native_agent_config import _configure_child_roles as _configure_child_roles
 from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._opening import _capture_opening_agent as _capture_opening_agent
 from ._opening_compatibility import (
@@ -3411,29 +3412,6 @@ async def _opening_provider_config(
             "supports_standalone_web_search": standalone_web_search,
         },
     }
-
-
-def _configure_child_roles(
-    config: dict[str, Any], home: TemporaryDirectory[str], native_agents: NativeAgents[Any]
-) -> None:
-    for role in native_agents.additional_roles:
-        role_path = Path(home.name) / ("role-" + role.name + ".toml")
-        role_fields = {"developer_instructions": role.instructions}
-        if role.model is not None:
-            role_fields["model"] = role.model
-        if role.model_settings and "reasoning_effort" in role.model_settings:
-            role_fields["model_reasoning_effort"] = role.model_settings["reasoning_effort"]
-        role_path.write_text(
-            "".join(
-                key + " = " + json.dumps(value, ensure_ascii=False) + "\n"
-                for key, value in role_fields.items()
-            ),
-            encoding="utf-8",
-        )
-        config["agents." + role.name] = {
-            "description": role.description,
-            "config_file": str(role_path),
-        }
 
 
 def _private_default_opening_candidates(
