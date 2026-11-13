@@ -1,0 +1,94 @@
+diff --git a/codex-rs/core/src/session/turn_suspension.rs b/codex-rs/core/src/session/turn_suspension.rs
+index e38ae9086247cbdbb1a13f992f75f501509dd23d..0355502a3c8f940893a032e6a809ee819588b5b3 100644
+--- a/codex-rs/core/src/session/turn_suspension.rs
++++ b/codex-rs/core/src/session/turn_suspension.rs
+@@ -7,6 +7,7 @@ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::turn_input::SuspendTurnOutcome;
+ use std::sync::Arc;
++use std::sync::atomic::Ordering;
+ use std::time::Duration;
+ use tracing::warn;
+ 
+@@ -69,33 +70,47 @@ pub(super) async fn suspend_turn_and_shutdown(
+     let turn_id = task.turn_context.sub_id.clone();
+     // Normal shutdown records a terminal turn event, preventing another worker from
+     // recovering this turn under its original ID. Cancel the task without that event.
+-    task.turn_context
++    let completion = task
++        .turn_context
+         .extension_data
+-        .get_or_init(codex_extension_api::HeldToolCompletionResults::default)
+-        .suspending
+-        .store(true, std::sync::atomic::Ordering::Release);
++        .get_or_init(codex_extension_api::HeldToolCompletionResults::default);
++    completion.suspending.store(true, Ordering::Release);
++    let join_suspension = completion.pending_suspension_join.load(Ordering::Acquire);
+     task.cancellation_token.cancel();
+     task.turn_context
+         .turn_metadata_state
+         .cancel_git_enrichment_task();
+     let mut task_handle = task.handle.detach();
+-    match tokio::time::timeout(
+-        Duration::from_millis(crate::tasks::GRACEFULL_INTERRUPTION_TIMEOUT_MS),
+-        &mut task_handle,
+-    )
+-    .await
+-    {
+-        Ok(Ok(())) => {}
+-        Ok(Err(error)) => {
+-            warn!(thread_id = %session.thread_id, %error, "suspended turn task exited abnormally");
++    if join_suspension {
++        // A portable capture cannot let the interruption timer discard its results.
++        // The caller still needs a closed-writer receipt if the task exits abnormally.
++        match task_handle.await {
++            Ok(()) => completion
++                .pending_suspension_join
++                .store(false, Ordering::Release),
++            Err(error) => {
++                warn!(thread_id = %session.thread_id, %error, "suspended turn task exited abnormally");
++            }
+         }
+-        Err(_) => {
+-            warn!(
+-                thread_id = %session.thread_id,
+-                "suspended turn task did not stop gracefully; aborting it"
+-            );
+-            task_handle.abort();
+-            let _ = task_handle.await;
++    } else {
++        match tokio::time::timeout(
++            Duration::from_millis(crate::tasks::GRACEFULL_INTERRUPTION_TIMEOUT_MS),
++            &mut task_handle,
++        )
++        .await
++        {
++            Ok(Ok(())) => {}
++            Ok(Err(error)) => {
++                warn!(thread_id = %session.thread_id, %error, "suspended turn task exited abnormally");
++            }
++            Err(_) => {
++                warn!(
++                    thread_id = %session.thread_id,
++                    "suspended turn task did not stop gracefully; aborting it"
++                );
++                task_handle.abort();
++                let _ = task_handle.await;
++            }
+         }
+     }
+     // Pending accepted input and interactive waiters live only in this process. Handoff
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index ab16693bfe51da7bb3e872aaadef5a0ad31be50f..2df46b306cb4a8c257393f57cb25819bf3a996d2 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -197,6 +197,9 @@ pub struct RecoveredToolCompletionCandidates {
+ pub struct HeldToolCompletionResults {
+     pub outputs: std::sync::Mutex<Vec<(codex_history::ResponseItemEnvelope, bool)>>,
+     pub suspending: std::sync::atomic::AtomicBool,
++    /// The portable checkpoint writer requires a joined result drain. Core clears
++    /// this after the exact task joins successfully.
++    pub pending_suspension_join: std::sync::atomic::AtomicBool,
+ }
+ 
+ pub use codex_protocol::agent_profile::AgentProfileReceipt;
