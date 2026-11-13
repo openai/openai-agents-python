@@ -810,6 +810,16 @@ class _FunctionIdentity:
     tool: FunctionTool[Any, Any, Any] | None = field(default=None, repr=False)
 
 
+def _realtime_tool_wire_name(name: str, namespace: str | None) -> str:
+    # Match Core tools/src/code_mode.rs::code_mode_name_for_tool_name,
+    # also used by extension-api's Realtime catalog projection.
+    if namespace is None or namespace in ("", "functions"):
+        return name
+    if namespace.endswith("_") or name.startswith("_"):
+        return namespace + name
+    return namespace + "__" + name
+
+
 @dataclass
 class _FunctionCall:
     response_id: str

@@ -16290,15 +16290,17 @@ class Session(Generic[ContextT, OutputT]):
                 and isinstance(realtime_source, dict)
                 and isinstance(realtime_name, str)
             ):
+                from .realtime import _realtime_tool_wire_name
+
                 automatic_names = frozenset(
-                    function.name
+                    _realtime_tool_wire_name(function.name, function.namespace)
                     for candidate in catalog.tools
                     for function in (
                         candidate.function
                         if isinstance(candidate, _CapturedApproval)
                         else candidate,
                     )
-                    if isinstance(function, _CapturedFunction) and function._ref.namespace is None
+                    if isinstance(function, _CapturedFunction)
                 )
                 await self._realtime._wait_function_order(
                     realtime_source, realtime_name, automatic_names

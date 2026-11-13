@@ -266,3 +266,65 @@ async def test_failed_first_callback_releases_the_next_ordered_automatic_sibling
         assert second["item"]["output"] == "SECOND_ACCEPTED"
         assert order == ["first", "second"]
         assert "PRIVATE_FAILURE" not in repr(peer.frames)
+
+
+@pytest.mark.parametrize(
+    ("namespace", "leaf", "wire_name"),
+    [
+        ("box", "lookup", "box__lookup"),
+        ("box_", "lookup", "box_lookup"),
+        ("box", "_lookup", "box_lookup"),
+        ("functions", "lookup", "lookup"),
+    ],
+)
+async def test_mixed_automatic_namespaced_sibling_keeps_provider_source_order(
+    realtime_peer: RealtimePeer, namespace: str, leaf: str, wire_name: str
+) -> None:
+    peer = realtime_peer
+    entered, release = asyncio.Event(), asyncio.Event()
+    order = []
+
+    @function_tool
+    async def step(key: str) -> str:
+        order.append(key)
+        if key == "first":
+            entered.set()
+            await release.wait()
+        return key
+
+    @function_tool(name=leaf, namespace=namespace)
+    async def namespaced() -> str:
+        order.append("namespaced")
+        return "namespaced"
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-mixed-order", supports_websockets=False
+        ) as provider,
+        Agent(
+            instructions="Keep source order.", tools=[step, namespaced], provider=provider
+        ).session(max_function_concurrency=1) as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")),
+    ):
+        try:
+            initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+            assert wire_name in {tool["name"] for tool in initial["session"]["tools"]}
+            await peer.functions(
+                [
+                    ("step", {"key": "first"}, "first"),
+                    ("step", {"key": "second"}, "second"),
+                    (wire_name, {}, "namespaced"),
+                ],
+                response_id="mixed-order",
+            )
+            await entered.wait()
+            release.set()
+            for call_id in ("first", "second", "namespaced"):
+                output = await peer.frame(
+                    lambda frame, call_id=call_id: frame.get("item", {}).get("call_id") == call_id
+                )
+                assert output["item"]["output"] == call_id
+            assert order == ["first", "second", "namespaced"]
+        finally:
+            release.set()
