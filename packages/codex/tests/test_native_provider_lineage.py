@@ -12,7 +12,9 @@ from tests.native_fixtures import ResponsesFixture, assistant_output, function_c
 
 
 @asynccontextmanager
-async def history_peer(rejection=None, *, routing=None, allow_changed_route=None):
+async def history_peer(
+    rejection=None, *, routing=None, allow_changed_route=None, client_max_size=1024**2
+):
     model = ResponsesFixture()
     reads = []
     wire = []
@@ -47,7 +49,7 @@ async def history_peer(rejection=None, *, routing=None, allow_changed_route=None
             else {"id": identity, "object": "conversation"}
         )
 
-    app = web.Application(middlewares=[record_wire])
+    app = web.Application(middlewares=[record_wire], client_max_size=client_max_size)
     rejected = False
 
     async def submit(request):

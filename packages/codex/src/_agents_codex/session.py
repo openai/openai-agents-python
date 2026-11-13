@@ -59,6 +59,7 @@ from ._agent_profiles import (
     _check_handoff_tool_names,
     _python_tool_slot,
 )
+from ._agent_tool import _ConfiguredAgentTool
 from ._callback_execution import (
     _call_callback as _call_callback,
     _call_callback_body as _call_callback_body,
@@ -1333,6 +1334,14 @@ _CallbackState = _Submission | _ChildCallbacks
 _InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]
 
 
+@dataclass(eq=False)
+class _ConfiguredChild:
+    owner: _CallbackState
+    session: Session[Any, Any]
+    admitted: Callable[[], bool]
+    active: bool = True
+
+
 def _native_callback_cancelled(state: _CallbackState) -> bool:
     invocation = _invocation.get()
     owner = None
@@ -1378,6 +1387,15 @@ class _BeforeStep(Protocol[_SelectionContextT_contra]):
     ): ...
 
 
+@dataclass(frozen=True)
+class _ConfiguredOpening:
+    agent: Agent[Any, Any]
+    environment: Environment[Any] | None
+    writable_roots: tuple[str, ...] | None
+    admitted: Callable[[], bool]
+    executor_tools: tuple[str, ...]
+
+
 @dataclass
 class _Invocation:
     session: object
@@ -1386,6 +1404,7 @@ class _Invocation:
     realtime_adapter: object | None = field(default=None, repr=False)
     # Keep enclosing guards live even in tasks copied from this context.
     parent: _Invocation | None = field(default_factory=lambda: _invocation.get(), repr=False)
+    configured_opening: _ConfiguredOpening | None = field(default=None, repr=False)
 
 
 _invocation: ContextVar[_Invocation | None] = ContextVar("native_agent_invocation", default=None)
@@ -3767,6 +3786,33 @@ def _capture_opening_model(
     return None, _capture_model_override(model)
 
 
+def _configure_session_features(
+    config: dict[str, Any],
+    *,
+    uses_siwc: bool,
+    programmatic_tool_calling: bool,
+    model: str | None,
+    verify_current_default: bool,
+    codex_login: CodexLogin | None,
+) -> None:
+    from . import telemetry
+
+    if telemetry._engine_options is not None:
+        config.update(json.loads(telemetry._engine_options))
+    if uses_siwc:
+        config["features.unbounded_connection_retries"] = False
+    if programmatic_tool_calling:
+        config["features.code_mode_host"] = {
+            "enabled": True,
+            "disable_in_process_fallback": True,
+        }
+    if model is not None and not verify_current_default:
+        config["model"] = model
+    if codex_login is not None:
+        # Apps require an explicit MCP registration with its own credentials.
+        config["features.apps"] = False
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -4290,8 +4336,27 @@ class Session(Generic[ContextT, OutputT]):
                     ),
                 }
             _configure_storage_runtime(runtime, storage, resume, goals)
+            inherited_writable_roots = None
+            inherited_executor_tools: tuple[str, ...] | None = None
             if executor is not None:
                 native_environment = cast(dict[str, Any], executor._to_native())
+                invocation = _invocation.get()
+                configured_opening = (
+                    invocation.configured_opening if invocation is not None else None
+                )
+                if (
+                    invocation is not None
+                    and configured_opening is not None
+                    and configured_opening.agent is policy_agent
+                    and configured_opening.environment is executor
+                ):
+                    invocation.configured_opening = None
+                    if not invocation.active or not configured_opening.admitted():
+                        raise InteractionExpiredError("Configured parent invocation is expired")
+                    inherited_writable_roots = configured_opening.writable_roots
+                    inherited_executor_tools = configured_opening.executor_tools
+                    if inherited_writable_roots is not None:
+                        native_environment["writable_roots"] = list(inherited_writable_roots)
                 native_environment["local_mcp"] = has_host_mcp
                 runtime["environment"] = native_environment
                 runtime["sandbox_mode"] = "read-only"
@@ -4401,22 +4466,14 @@ class Session(Generic[ContextT, OutputT]):
                     programmatic_tool_calling=programmatic_tool_calling,
                 )
 
-                from . import telemetry
-
-                if telemetry._engine_options is not None:
-                    config.update(json.loads(telemetry._engine_options))
-                if uses_siwc:
-                    config["features.unbounded_connection_retries"] = False
-                if programmatic_tool_calling:
-                    config["features.code_mode_host"] = {
-                        "enabled": True,
-                        "disable_in_process_fallback": True,
-                    }
-                if model is not None and not verify_current_default:
-                    config["model"] = model
-                if codex_login is not None:
-                    # Apps require an explicit MCP registration with its own credentials.
-                    config["features.apps"] = False
+                _configure_session_features(
+                    config,
+                    uses_siwc=uses_siwc,
+                    programmatic_tool_calling=programmatic_tool_calling,
+                    model=model,
+                    verify_current_default=verify_current_default,
+                    codex_login=codex_login,
+                )
                 _configure_native_agents(
                     runtime,
                     config,
@@ -4568,7 +4625,12 @@ class Session(Generic[ContextT, OutputT]):
                             else []
                         )
                         + (
-                            [{"name": name, "namespace": "functions"} for name in executor.tools]
+                            [
+                                {"name": name, "namespace": "functions"}
+                                for name in executor.tools
+                                if inherited_executor_tools is None
+                                or name in inherited_executor_tools
+                            ]
                             if executor is not None
                             else []
                         )
@@ -4801,7 +4863,9 @@ class Session(Generic[ContextT, OutputT]):
                 session._catalog_bindings[(None, catalog.generation)] = agent.tools
                 session._executor = executor
                 session._project_guidance = project_guidance
-                if executor is not None and executor.writable_roots is not None:
+                if inherited_writable_roots is not None:
+                    session._writable_roots = inherited_writable_roots
+                elif executor is not None and executor.writable_roots is not None:
                     session._writable_roots = _writable_roots(executor.writable_roots)
                 session._bind_native_agents(native_agents)
                 session._storage = storage
@@ -5271,6 +5335,8 @@ class Session(Generic[ContextT, OutputT]):
         self._restored_turn: Turn[OutputT] | None = None
         self._staged_restore_checkpoint: SessionState | None = None
         self._child_callbacks: dict[tuple[str, str, str], _ChildCallbacks] = {}
+        self._configured_children: list[_ConfiguredChild] = []
+        self._configured_environment_source: tuple[Environment[Any], object] | None = None
         self._child_admissions: set[asyncio.Task[Turn[str]]] = set()
         self._graph_interrupts: set[asyncio.Task[None]] = set()
         self._root_interrupts: set[asyncio.Task[None]] = set()
@@ -5290,6 +5356,7 @@ class Session(Generic[ContextT, OutputT]):
         self._history_context_retired = False
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
+        self._fail_unhandled_configured_children = False
         self._close_task: asyncio.Task[None] | None = None
         self._stored_close_action: Any | None = None
         self._scope_close_task: asyncio.Task[None] | None = None
@@ -6240,6 +6307,10 @@ class Session(Generic[ContextT, OutputT]):
             raise TypeError("respond requires a live request.reply(value)")
         request = reply._request
         if request._session() is not self:
+            child = self._configured_reply_child(request._session())
+            if child is not None:
+                await child.session.respond(reply)
+                return
             raise InteractionExpiredError("Reply belongs to a different Session")
         if isinstance(request, UrlRequest):
             if reply._value is _URL_ACCEPT:
@@ -6269,7 +6340,54 @@ class Session(Generic[ContextT, OutputT]):
             seen.add(request._invocation)
             requests.append(request)
         requests.extend(cast("Iterator[Interaction]", self._pending_questions()))
+        requests.extend(await self._configured_requests())
         return tuple(requests)
+
+    def _configured_child_active(self, child: _ConfiguredChild) -> bool:
+        return (
+            child.active
+            and not child.session._closing
+            and not child.session._closed
+            and child.admitted()
+        )
+
+    def _configured_reply_child(self, target: Session[Any, Any] | None) -> _ConfiguredChild | None:
+        if target is None:
+            return None
+        for child in tuple(self._configured_children):
+            if self._configured_child_active(child) and (
+                target is child.session or child.session._configured_reply_child(target) is not None
+            ):
+                return child
+        return None
+
+    def _tool_sandbox_source(self) -> object | None:
+        borrowed = self._configured_environment_source
+        if borrowed is not None and self._executor is borrowed[0]:
+            return borrowed[1]
+        return self._environment_lease.source if self._environment_lease is not None else None
+
+    async def _configured_requests(self, turn: Turn[Any] | None = None) -> list[Interaction]:
+        requests: list[Interaction] = []
+        for child in tuple(self._configured_children):
+            owner = child.owner
+            if turn is not None and (
+                owner.handle is None
+                or owner.handle.submission_id != turn.submission_id
+                and not (isinstance(owner, _ChildCallbacks) and owner.root_turn_id == turn.turn_id)
+            ):
+                continue
+            if not self._configured_child_active(child):
+                continue
+            try:
+                captured = await child.session.pending_interactions()
+            except Exception:
+                if not self._configured_child_active(child):
+                    continue
+                raise
+            if self._configured_child_active(child):
+                requests.extend(captured)
+        return requests
 
     def _pending_questions(self) -> Iterator[_NativeQuestion]:
         for state in (self._active, *self._child_callbacks.values()):
@@ -6303,6 +6421,7 @@ class Session(Generic[ContextT, OutputT]):
     async def _interactions(self) -> AsyncIterator[Interaction]:
         seen: set[int] = set()
         seen_questions: set[int] = set()
+        seen_configured: set[tuple[str, int]] = set()
         while True:
             self._check_loop()
             self._check_callback_operation("read interactions from its own Session")
@@ -6318,10 +6437,25 @@ class Session(Generic[ContextT, OutputT]):
                 if pending is not None:
                     seen_questions.add(pending)
                     yield cast(Interaction, questions[pending])
-                elif self._observations.closed:
-                    return
                 else:
-                    await signal.wait()
+                    configured = {
+                        (
+                            item.session_id,
+                            item._invocation if isinstance(item, ActionRequested) else id(item),
+                        ): item
+                        for item in await self._configured_requests()
+                    }
+                    seen_configured.intersection_update(configured)
+                    pending_child = next(
+                        (key for key in configured if key not in seen_configured), None
+                    )
+                    if pending_child is not None:
+                        seen_configured.add(pending_child)
+                        yield configured[pending_child]
+                    elif self._observations.closed:
+                        return
+                    else:
+                        await signal.wait()
 
     async def _wait_url_completion(self, question: ElicitationRequest, timeout: float) -> None:
         self._check_loop()
@@ -7573,7 +7707,7 @@ class Session(Generic[ContextT, OutputT]):
             object.__setattr__(
                 context,
                 "_sandbox_source",
-                self._environment_lease.source if self._environment_lease is not None else None,
+                self._tool_sandbox_source(),
             )
             object.__setattr__(context, "_usage_reporter", self._tool_usage_reporter(state, admit))
 
@@ -7613,9 +7747,7 @@ class Session(Generic[ContextT, OutputT]):
                     object.__setattr__(
                         context,
                         "_sandbox_source",
-                        self._environment_lease.source
-                        if self._environment_lease is not None
-                        else None,
+                        self._tool_sandbox_source(),
                     )
                     object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
                 elif not isinstance(decision, Allow):
@@ -10199,6 +10331,7 @@ class Session(Generic[ContextT, OutputT]):
                         for question in question_owner.questions.values()
                         if question.submission_id == owner_id
                     )
+                requests.extend(await self._configured_requests(submission))
                 if requests:
                     if any(owner.stopping or owner.failure.done() for owner in owners):
                         return await self._wait(submission)
@@ -15627,6 +15760,149 @@ class Session(Generic[ContextT, OutputT]):
             scope.active = False
             _invocation.reset(token)
 
+    async def _invoke_configured_agent(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        declaration: _ConfiguredAgentTool,
+        context: ToolContext[Any],
+        input: str,
+    ) -> str:
+        request = json.dumps(message)
+
+        def admitted() -> bool:
+            return self._admit_tool(state, request)
+
+        if not admitted():
+            raise InteractionExpiredError("Configured parent invocation is expired")
+        invocation = _invocation.get()
+        if invocation is None or invocation.session is not self:
+            raise InteractionExpiredError("Configured parent invocation is expired")
+        selected_tools = message.get("_sdk_builtin_tools")
+        if selected_tools is not None and not isinstance(selected_tools, list):
+            raise NativeError("Configured child has invalid issuing tool selection")
+        selected_refs = {
+            ToolRef(ref["name"], ref.get("namespace") or "functions")
+            for ref in selected_tools or ()
+        }
+        executor_tools = (
+            tuple(
+                name
+                for name in context._environment.tools
+                if ToolRef(name, "functions") in selected_refs
+                or (
+                    name == "exec_command"
+                    and ToolRef("shell_command", "functions") in selected_refs
+                )
+            )
+            if context._environment is not None
+            else ()
+        )
+        previous_opening = invocation.configured_opening
+        invocation.configured_opening = _ConfiguredOpening(
+            declaration.agent,
+            context._environment,
+            self._writable_roots,
+            admitted,
+            executor_tools,
+        )
+        handler = self._interaction_handler
+
+        async def answer(event: Interaction) -> ActionReply[Any]:
+            if not admitted():
+                raise InteractionExpiredError("Configured parent invocation is expired")
+            assert handler is not None
+            result = await _call_callback(handler, admitted, event)
+            if not admitted():
+                raise InteractionExpiredError("Configured parent invocation is expired")
+            return cast(ActionReply[Any], result)
+
+        session: Session[Any, Any] | None = None
+        try:
+            async with declaration.agent.session(
+                context=context.context,
+                environment=context._environment,
+                on_interaction=answer if handler is not None else None,
+            ) as child_session:
+                session = child_session
+                if not admitted():
+                    raise InteractionExpiredError("Configured parent invocation is expired")
+                if context._environment is not None and context._sandbox_source is not None:
+                    child_session._configured_environment_source = (
+                        context._environment,
+                        context._sandbox_source,
+                    )
+                child = _ConfiguredChild(state, child_session, admitted)
+                self._configured_children.append(child)
+                relay: asyncio.Task[None] | None = None
+                try:
+                    turn = await child_session.submit(input)
+
+                    async def relay_requests() -> None:
+                        async for _event in child_session.interactions():
+                            if not self._configured_child_active(child):
+                                return
+                            if handler is None and (
+                                self._fail_unhandled_questions
+                                or self._fail_unhandled_configured_children
+                            ):
+                                owner = state
+                                root = self._active
+                                if (
+                                    isinstance(state, _ChildCallbacks)
+                                    and root is not None
+                                    and root.handle is not None
+                                    and state.root_turn_id == root.handle.turn_id
+                                ):
+                                    owner = root
+                                if not owner.failure.done():
+                                    owner.failure.set_result(
+                                        InteractionRequired(
+                                            "Configured child requires "
+                                            "on_interaction or Agent.session()"
+                                        )
+                                    )
+                                self._observations.notify()
+                                return
+                            self._observations.notify()
+
+                    relay = _create_task(relay_requests())
+                    result = await turn.get_result()
+                    if not self._configured_child_active(child):
+                        raise InteractionExpiredError("Configured parent invocation is expired")
+                    if declaration.extractor is not None:
+                        output = await _call_callback(declaration.extractor, admitted, result)
+                        if not isinstance(output, str):
+                            raise TypeError("custom_output_extractor must return a string")
+                        return output
+                    return (
+                        result.final_output
+                        if isinstance(result.final_output, str)
+                        else _TypeAdapter(Any).dump_json(result.final_output).decode()
+                    )
+                finally:
+                    child.active = False
+                    self._configured_children.remove(child)
+                    self._observations.notify()
+                    if relay is not None:
+                        cancel_once(relay)
+
+                        async def retire_relay() -> None:
+                            with suppress(asyncio.CancelledError):
+                                await relay
+
+                        await _join(_create_task(retire_relay()))
+
+        finally:
+            invocation.configured_opening = previous_opening
+            if session is not None:
+                session._configured_environment_source = None
+                closed = session._close_task
+                if closed is not None and closed.done() and not closed.cancelled():
+                    failure = closed.exception()
+                    if failure is not None:
+                        state.retain_cleanup_error(failure)
+
     def _admit_tool(self, state: _CallbackState, request: str) -> bool:
         """Recheck authority before the invocation starts another Python step."""
         if (
@@ -15892,11 +16168,7 @@ class Session(Generic[ContextT, OutputT]):
                     call=call,
                 )
                 object.__setattr__(tool_context, "_environment", self._executor)
-                object.__setattr__(
-                    tool_context,
-                    "_sandbox_source",
-                    self._environment_lease.source if self._environment_lease is not None else None,
-                )
+                object.__setattr__(tool_context, "_sandbox_source", self._tool_sandbox_source())
                 object.__setattr__(
                     tool_context,
                     "_usage_reporter",
@@ -15963,7 +16235,7 @@ class Session(Generic[ContextT, OutputT]):
                 object.__setattr__(
                     context,
                     "_sandbox_source",
-                    self._environment_lease.source if self._environment_lease is not None else None,
+                    self._tool_sandbox_source(),
                 )
             if context is not None and context._usage_reporter is None:
                 object.__setattr__(
@@ -15971,6 +16243,20 @@ class Session(Generic[ContextT, OutputT]):
                     "_usage_reporter",
                     self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
                 )
+            if context is not None:
+                configured = entry.configured_agent
+                if configured is not None:
+                    object.__setattr__(
+                        context,
+                        "_configured_agent_invoker",
+                        partial(
+                            self._invoke_configured_agent,
+                            state,
+                            message,
+                            configured,
+                            context,
+                        ),
+                    )
             args: tuple[ToolContext[ContextT | None], ...] = ()
             parameter = entry.context_parameter
             if parameter is not None:

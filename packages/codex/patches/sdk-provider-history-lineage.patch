@@ -11,16 +11,18 @@ index b6bf3d5b..43acb833 100644
                  tool_choice: None,
                  disabled_plugin_ids: Vec::new(),
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index d3212088..a2983ece 100644
+index d3212088..06aca9aa 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
-@@ -282,12 +282,29 @@ impl Serialize for ResponsesApiTools {
+@@ -282,12 +282,31 @@ impl Serialize for ResponsesApiTools {
      }
  }
  
 +/// Request-local canonical hashes and their unchanged wire occurrence map.
 +#[derive(Debug, Clone, PartialEq)]
 +pub struct ProviderHistoryInputProjection {
++    pub retained_item_count: usize,
++    pub retained_json_bytes: usize,
 +    pub boundary: codex_protocol::provider_history::ProviderHistoryInputBoundary,
 +    pub item_sha256: Vec<[u8; 32]>,
 +    pub item_ids: Vec<Option<String>>,
@@ -44,7 +46,7 @@ index d3212088..a2983ece 100644
      #[serde(skip_serializing_if = "Option::is_none")]
      pub prompt: Option<codex_protocol::model_request_controls::HostedPromptReference>,
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -315,6 +332,29 @@ pub struct ResponsesRequestControls {
+@@ -315,6 +334,29 @@ pub struct ResponsesRequestControls {
      pub prompt_cache_options: Option<PromptCacheOptions>,
  }
  
@@ -403,6 +405,37 @@ index 00000000..bf2ec037
 +    }
 +    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 +}
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 4c856bcd..8fa09453 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -732,6 +732,26 @@ impl LocalAgentControl {
+         let membership = self.runtime.admit_start()?;
+         let spawn_started_at = Instant::now();
+         let state = self.runtime.upgrade()?;
++        if options.fork_mode.is_some() {
++            if let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                parent_thread_id,
++                ..
++            })) = session_source.as_ref()
++            {
++                let parent = state.get_thread(*parent_thread_id).await?;
++                if parent
++                    .session
++                    .services
++                    .model_client
++                    .provider_history_selection()
++                    .is_some()
++                {
++                    return Err(CodexErr::InvalidRequest(
++                        "Cannot fork provider-managed history; use a fresh child".into(),
++                    ));
++                }
++            }
++        }
+         let multi_agent_version = state
+             .effective_multi_agent_version_for_spawn(
+                 &InitialHistory::New,
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
 index 6658db68..b6bfd171 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
@@ -416,7 +449,7 @@ index 6658db68..b6bfd171 100644
                          invocation_timeout_ms: None,
                          tool_choice: None,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 48da6c0c..e664ffb6 100644
+index 48da6c0c..236b02ee 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -34,6 +34,8 @@ use std::sync::atomic::Ordering;
@@ -452,7 +485,7 @@ index 48da6c0c..e664ffb6 100644
              request_contributors,
              executed_tool_calls: None,
              api_key_cyber_access_programs:
-@@ -699,6 +704,73 @@ impl ModelClient {
+@@ -699,6 +704,88 @@ impl ModelClient {
          self
      }
  
@@ -477,6 +510,21 @@ index 48da6c0c..e664ffb6 100644
 +
 +    pub(crate) fn observe_provider_history_output(&self, item: &ResponseItem) -> Result<()> {
 +        if let Some(cursor) = &self.provider_history { cursor.observe_output(item)?; }
++        Ok(())
++    }
++
++    pub(crate) async fn admit_provider_history_local_output(
++        &self,
++        item: &codex_history::ResponseItemEnvelope,
++        retained: Result<provider_history::HistoryBudget>,
++    ) -> Result<()> {
++        if let Some(cursor) = &self.provider_history {
++            let admission = retained.and_then(|budget| cursor.observe_local_output(item, budget));
++            if let Err(error) = admission {
++                cursor.fence_history_exhaustion().await?;
++                return Err(error);
++            }
++        }
 +        Ok(())
 +    }
 +
@@ -526,7 +574,7 @@ index 48da6c0c..e664ffb6 100644
      pub(crate) fn with_session_context(
          mut self,
          prompt_cache_key_override: Option<String>,
-@@ -754,6 +826,7 @@ impl ModelClient {
+@@ -754,6 +841,7 @@ impl ModelClient {
              websocket_session,
              pending_http_response: None,
              turn_state: Arc::new(OnceLock::new()),
@@ -534,7 +582,7 @@ index 48da6c0c..e664ffb6 100644
          }
      }
  
-@@ -1136,6 +1209,14 @@ impl ModelClient {
+@@ -1136,6 +1224,14 @@ impl ModelClient {
                  })
              })
              .transpose()?;
@@ -549,7 +597,7 @@ index 48da6c0c..e664ffb6 100644
          controls
              .validate_profile(model_info)
              .map_err(CodexErr::InvalidRequest)?;
-@@ -1183,12 +1264,33 @@ impl ModelClient {
+@@ -1183,12 +1279,33 @@ impl ModelClient {
                  Ok(selected)
              })
              .transpose()?;
@@ -588,7 +636,7 @@ index 48da6c0c..e664ffb6 100644
          let is_openai = self.state.provider.info().is_openai();
          // These prompt-only items are rebuilt on every request. Hash their visible payloads
          // within the thread so retries and resumed sessions preserve their identity.
-@@ -1223,6 +1325,16 @@ impl ModelClient {
+@@ -1223,6 +1340,16 @@ impl ModelClient {
              )));
              prefix.push(instructions);
          }
@@ -605,7 +653,7 @@ index 48da6c0c..e664ffb6 100644
          input.splice(0..0, prefix);
          filter_provider_response_metadata(&mut input, is_openai);
          let reasoning = if prompt_owns_model {
-@@ -1339,6 +1451,8 @@ impl ModelClient {
+@@ -1339,6 +1466,8 @@ impl ModelClient {
              }),
              request_controls: codex_api::ResponsesRequestControls {
                  hosted_tool_choice,
@@ -614,7 +662,7 @@ index 48da6c0c..e664ffb6 100644
                  prompt: prompt_reference,
                  instructions: hosted_prompt
                      .filter(|prompt| !prompt.omit_instructions)
-@@ -1351,8 +1465,7 @@ impl ModelClient {
+@@ -1351,8 +1480,7 @@ impl ModelClient {
                      })
                      .transpose()?,
                  truncation: controls.truncation.clone().flatten(),
@@ -624,7 +672,7 @@ index 48da6c0c..e664ffb6 100644
                  extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
                  max_output_tokens: controls.max_output_tokens.flatten(),
                  temperature: controls.temperature.flatten(),
-@@ -1810,6 +1923,16 @@ impl ModelClientSession {
+@@ -1810,6 +1938,16 @@ impl ModelClientSession {
              .is_some_and(|manager| manager.uses_app_managed_model_oauth())
      }
  
@@ -641,7 +689,7 @@ index 48da6c0c..e664ffb6 100644
      pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
          let source = &self.client.state.session_source;
          // ThreadSpawn children expose the same attention API as root turns.
-@@ -1978,6 +2101,11 @@ impl ModelClientSession {
+@@ -1978,6 +2116,11 @@ impl ModelClientSession {
          if !self.client.responses_websocket_enabled() {
              return Ok(());
          }
@@ -653,7 +701,7 @@ index 48da6c0c..e664ffb6 100644
          let provider = Arc::clone(&self.client.state.provider);
          let auth_manager = provider.auth_manager();
          let mut auth_recovery = auth_manager
-@@ -2276,6 +2404,7 @@ impl ModelClientSession {
+@@ -2276,6 +2419,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -661,7 +709,7 @@ index 48da6c0c..e664ffb6 100644
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2314,16 +2443,6 @@ impl ModelClientSession {
+@@ -2314,16 +2458,6 @@ impl ModelClientSession {
                  prompt.cyber_access_program,
                  self.client.api_key_cyber_access_programs,
              )?;
@@ -678,7 +726,7 @@ index 48da6c0c..e664ffb6 100644
              let observation_is_reviewer = is_guardian_reviewer(&responses_headers);
              options.extra_headers.extend(responses_headers);
              let interceptors = crate::model_request::prepare(
-@@ -2335,6 +2454,35 @@ impl ModelClientSession {
+@@ -2335,6 +2469,35 @@ impl ModelClientSession {
                  &mut request.client_metadata,
                  prompt.tool_admission.clone(),
              );
@@ -714,7 +762,7 @@ index 48da6c0c..e664ffb6 100644
              let inference_trace_attempt = inference_trace.start_attempt();
              inference_trace_attempt.add_request_headers(&mut options.extra_headers);
              if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
-@@ -2343,7 +2491,13 @@ impl ModelClientSession {
+@@ -2343,7 +2506,13 @@ impl ModelClientSession {
                  }
                  request.input = input;
              }
@@ -729,7 +777,7 @@ index 48da6c0c..e664ffb6 100644
              let request_transport = if prompt.prefer_buffered_response {
                  codex_extension_api::ModelRequestTransport::HttpJson
              } else {
-@@ -2438,6 +2592,19 @@ impl ModelClientSession {
+@@ -2438,6 +2607,24 @@ impl ModelClientSession {
  
              match stream_result {
                  Ok((request_id, interrupt, events, producer_task, producer_stop)) => {
@@ -738,10 +786,15 @@ index 48da6c0c..e664ffb6 100644
 +                    let events: codex_extension_api::ModelResponseStream =
 +                        if let Some(cursor) = &self.client.provider_history {
 +                            let cursor = Arc::clone(cursor);
-+                            Box::pin(events.inspect(move |event| {
-+                                if let Ok(ResponseEvent::OutputItemDone(item)) = event {
-+                                    cursor.observe_wire_output(item);
++                            Box::pin(events.map(move |event| {
++                                if let Ok(ResponseEvent::OutputItemDone(item)) = &event {
++                                    cursor.observe_wire_output(item).map_err(|error| {
++                                        codex_api::ApiError::InvalidRequest {
++                                            message: error.to_string(),
++                                        }
++                                    })?;
 +                                }
++                                event
 +                            }))
 +                        } else {
 +                            events
@@ -749,7 +802,7 @@ index 48da6c0c..e664ffb6 100644
                      let (mut stream, response) = map_response_events(
                          request_id,
                          crate::model_request::intercept_stream(events, interceptors),
-@@ -2454,8 +2621,13 @@ impl ModelClientSession {
+@@ -2454,8 +2641,13 @@ impl ModelClientSession {
                      stream.producer_task = producer_task;
                      stream.producer_stop = producer_stop;
                      stream.request_observation = request_observation;
@@ -765,7 +818,7 @@ index 48da6c0c..e664ffb6 100644
                      return Ok(stream);
                  }
                  Err(ApiError::Transport(unauthorized_transport))
-@@ -2472,6 +2644,7 @@ impl ModelClientSession {
+@@ -2472,6 +2664,7 @@ impl ModelClientSession {
                          response_debug_context.request_id.as_deref(),
                          /*output_items*/ &[],
                      );
@@ -773,7 +826,7 @@ index 48da6c0c..e664ffb6 100644
                      auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
                          handle_unauthorized(
                              unauthorized_transport,
-@@ -2487,6 +2660,11 @@ impl ModelClientSession {
+@@ -2487,6 +2680,11 @@ impl ModelClientSession {
                      continue;
                  }
                  Err(err) => {
@@ -785,7 +838,7 @@ index 48da6c0c..e664ffb6 100644
                      let response_debug_context =
                          extract_response_debug_context_from_api_error(&err);
                      let err = self.client.state.provider.map_api_error(err);
-@@ -2530,6 +2708,9 @@ impl ModelClientSession {
+@@ -2530,6 +2728,9 @@ impl ModelClientSession {
          inference_trace: &InferenceTraceContext,
          auth_recovery: &mut RequestAuthRecovery,
      ) -> Result<WebsocketStreamOutcome> {
@@ -795,7 +848,7 @@ index 48da6c0c..e664ffb6 100644
          let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
          let provider = Arc::clone(&self.client.state.provider);
          loop {
-@@ -2562,6 +2743,7 @@ impl ModelClientSession {
+@@ -2562,6 +2763,7 @@ impl ModelClientSession {
                  responses_metadata,
                  include_internal,
              )?;
@@ -803,7 +856,7 @@ index 48da6c0c..e664ffb6 100644
              if let Some(attempt) = prompt
                  .tool_admission
                  .as_ref()
-@@ -2663,7 +2845,11 @@ impl ModelClientSession {
+@@ -2663,7 +2865,11 @@ impl ModelClientSession {
              if let Some(turn_state) = self.turn_state.get() {
                  client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
              }
@@ -816,7 +869,7 @@ index 48da6c0c..e664ffb6 100644
              let (mode, reason) = if continuation.is_some() {
                  ("incremental", "incremental")
              } else {
-@@ -2923,6 +3109,10 @@ impl ModelClientSession {
+@@ -2923,6 +3129,10 @@ impl ModelClientSession {
          service_tier: Option<String>,
          responses_metadata: &CodexResponsesMetadata,
      ) -> Result<()> {
@@ -829,10 +882,10 @@ index 48da6c0c..e664ffb6 100644
          // ordinary request run the awaited context policy before sending input.
 diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
 new file mode 100644
-index 00000000..b4a6e8d6
+index 00000000..32ced8e6
 --- /dev/null
 +++ b/codex-rs/core/src/client/provider_history.rs
-@@ -0,0 +1,1023 @@
+@@ -0,0 +1,1152 @@
 +use super::*;
 +use codex_protocol::provider_history::{
 +    ProviderHistoryInputBoundary, ProviderHistoryReference, ProviderHistorySelection,
@@ -865,6 +918,81 @@ index 00000000..b4a6e8d6
 +    }
 +}
 +
++// Match the existing bounded native original-history replay admission.
++const MAX_HISTORY_ITEMS: usize = 4096;
++const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
++
++#[derive(Debug, Clone)]
++pub(crate) struct HistoryBudget {
++    items: usize,
++    bytes_left: usize,
++}
++
++impl Default for HistoryBudget {
++    fn default() -> Self {
++        Self {
++            items: 0,
++            bytes_left: MAX_HISTORY_BYTES,
++        }
++    }
++}
++
++fn history_limit() -> CodexErr {
++    invalid("Provider-managed history reached the 4096-item or 8 MiB admission limit")
++}
++
++impl std::io::Write for HistoryBudget {
++    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++        self.bytes_left = self.bytes_left.checked_sub(bytes.len()).ok_or_else(|| {
++            std::io::Error::new(std::io::ErrorKind::FileTooLarge, "provider history limit")
++        })?;
++        Ok(bytes.len())
++    }
++
++    fn flush(&mut self) -> std::io::Result<()> {
++        Ok(())
++    }
++}
++
++impl HistoryBudget {
++    pub(crate) fn retained(&self) -> (usize, usize) {
++        (self.items, MAX_HISTORY_BYTES - self.bytes_left)
++    }
++
++    fn from_projection(input: &codex_api::ProviderHistoryInputProjection) -> Result<Self> {
++        Self::check_count(input.retained_item_count)?;
++        Ok(Self {
++            items: input.retained_item_count,
++            bytes_left: MAX_HISTORY_BYTES
++                .checked_sub(input.retained_json_bytes)
++                .ok_or_else(history_limit)?,
++        })
++    }
++
++    pub(crate) fn check_count(count: usize) -> Result<()> {
++        if count > MAX_HISTORY_ITEMS {
++            return Err(history_limit());
++        }
++        Ok(())
++    }
++
++    pub(crate) fn observe(&mut self, value: &impl serde::Serialize) -> Result<()> {
++        self.items = self.items.checked_add(1).ok_or_else(history_limit)?;
++        Self::check_count(self.items)?;
++        // Count borrowed JSON into a capped writer before cloning or hashing it.
++        serde_json::to_writer(self, value).map_err(|_| history_limit())
++    }
++}
++
++fn check_items<'a>(items: impl ExactSizeIterator<Item = &'a ResponseItem>) -> Result<HistoryBudget> {
++    HistoryBudget::check_count(items.len())?;
++    let mut budget = HistoryBudget::default();
++    for item in items {
++        budget.observe(item)?;
++    }
++    Ok(budget)
++}
++
 +#[derive(Debug)]
 +struct Pending {
 +    canonical_input: ProviderHistoryInputBoundary,
@@ -878,6 +1006,7 @@ index 00000000..b4a6e8d6
 +    mcp_rewrites: Vec<(usize, ProviderCall, ProviderCall)>,
 +    attempt: Option<Weak<dyn codex_extension_api::ModelAttemptAdmission>>,
 +    stored: bool,
++    wire_budget: HistoryBudget,
 +    scope: Scope,
 +}
 +
@@ -886,6 +1015,7 @@ index 00000000..b4a6e8d6
 +    reference: ProviderHistoryReference,
 +    live_scope: Option<Scope>,
 +    pending: Option<Pending>,
++    history_budget: Option<HistoryBudget>,
 +}
 +
 +pub(crate) struct McpRewriteAdmission(pub(crate) std::sync::Arc<Cursor>);
@@ -910,6 +1040,7 @@ index 00000000..b4a6e8d6
 +}
 +
 +fn item_digest(item: &ResponseItem) -> Result<[u8; 32]> {
++    HistoryBudget::default().observe(item)?;
 +    let mut plain = item.clone();
 +    plain.clear_internal_chat_message_metadata_passthrough();
 +    let mut results = Vec::new();
@@ -1012,8 +1143,10 @@ index 00000000..b4a6e8d6
 +
 +fn input_digest<'a>(items: impl IntoIterator<Item = &'a ResponseItem>) -> Result<String> {
 +    let mut digest = Sha256::new();
++    let mut budget = HistoryBudget::default();
 +    digest.update(b"sdk-provider-history-input-v1\0");
 +    for item in items {
++        budget.observe(item)?;
 +        digest.update(item_digest(item)?);
 +    }
 +    Ok(hex(digest.finalize()))
@@ -1033,8 +1166,12 @@ index 00000000..b4a6e8d6
 +    wire_input_indices: Vec<usize>,
 +    prefix_len: usize,
 +) -> Result<codex_api::ProviderHistoryInputProjection> {
++    let budget = check_items(items.iter())?;
++    let (retained_item_count, retained_json_bytes) = budget.retained();
 +    let hashes = items.iter().map(item_digest).collect::<Result<Vec<_>>>()?;
 +    Ok(codex_api::ProviderHistoryInputProjection {
++        retained_item_count,
++        retained_json_bytes,
 +        boundary: ProviderHistoryInputBoundary {
 +            input_len: items.len(),
 +            input_sha256: canonical_prefix_digest(&hashes),
@@ -1057,6 +1194,7 @@ index 00000000..b4a6e8d6
 +    wire_input_indices: Vec<usize>,
 +    prefix_len: usize,
 +) -> Result<codex_api::ProviderHistoryInputProjection> {
++    check_items(items.iter())?;
 +    let Some(captured) = captured else {
 +        return canonical_input_projection(items, wire_input_indices, prefix_len);
 +    };
@@ -1241,6 +1379,7 @@ index 00000000..b4a6e8d6
 +                }),
 +                live_scope: None,
 +                pending: None,
++                history_budget: None,
 +            }),
 +            session: OnceLock::new(),
 +        }
@@ -1277,6 +1416,7 @@ index 00000000..b4a6e8d6
 +        request_transport: Option<&codex_protocol::model_request_transport::RequestTransportOverrides>,
 +        attempt: Option<std::sync::Arc<dyn codex_extension_api::ModelAttemptAdmission>>,
 +    ) -> Result<Option<Vec<ResponseItem>>> {
++        check_items(request.input.iter())?;
 +        let canonical_input = request
 +            .request_controls
 +            .canonical_history_input
@@ -1439,6 +1579,8 @@ index 00000000..b4a6e8d6
 +            if state.reference.pending {
 +                return Err(invalid("Provider history already has an active dispatch"));
 +            }
++            let history_budget = HistoryBudget::from_projection(&canonical_input)?;
++            state.history_budget = Some(history_budget.clone());
 +            state.reference.provider_route = current_route;
 +            state.reference.pending = true;
 +            state.pending = Some(Pending {
@@ -1453,6 +1595,7 @@ index 00000000..b4a6e8d6
 +                mcp_rewrites: Vec::new(),
 +                attempt: attempt.as_ref().map(std::sync::Arc::downgrade),
 +                stored: request.store,
++                wire_budget: history_budget,
 +                scope,
 +            });
 +        }
@@ -1474,6 +1617,7 @@ index 00000000..b4a6e8d6
 +        current: &[&ResponseItem],
 +        items: &[&ResponseItem],
 +    ) -> Result<()> {
++        check_items(items.iter().copied())?;
 +        let state = self.state.lock().unwrap();
 +        let refused = || invalid("Cannot replace acknowledged provider history input or output");
 +        if state.reference.pending {
@@ -1567,27 +1711,50 @@ index 00000000..b4a6e8d6
 +        Ok(())
 +    }
 +
-+    pub(crate) fn observe_wire_output(&self, item: &ResponseItem) {
++    pub(crate) fn observe_wire_output(&self, item: &ResponseItem) -> Result<()> {
 +        if let Some(pending) = self.state.lock().unwrap().pending.as_mut() {
++            pending.wire_budget.observe(item)?;
 +            pending.wire_calls.push(provider_call(item));
 +            pending
 +                .wire_output_sha256
-+                .push(item_digest(item).ok().map(hex));
++                .push(Some(hex(item_digest(item)?)));
 +        }
++        Ok(())
 +    }
 +
 +    pub(crate) fn observe_output(&self, item: &ResponseItem) -> Result<()> {
-+        let digest = hex(item_digest(item)?);
 +        let mut state = self.state.lock().unwrap();
++        state
++            .history_budget
++            .as_mut()
++            .ok_or_else(|| invalid("Provider history has no admitted budget"))?
++            .observe(item)?;
 +        let pending = state
 +            .pending
 +            .as_mut()
 +            .ok_or_else(|| invalid("Provider history has no admitted dispatch"))?;
-+        // Native output admission assigns missing item IDs. Keep the exact item
-+        // entering history, rather than its earlier unannotated transport copy.
-+        pending.output_sha256.push(digest);
++        // Admission adds IDs; retain the item entering canonical history.
++        pending.output_sha256.push(hex(item_digest(item)?));
 +        pending.admitted_calls.push(provider_call(item));
 +        Ok(())
++    }
++
++    pub(crate) fn observe_local_output(
++        &self,
++        item: &codex_history::ResponseItemEnvelope,
++        retained: HistoryBudget,
++    ) -> Result<()> {
++        let mut state = self.state.lock().unwrap();
++        let budget = state.history_budget.get_or_insert_with(|| retained.clone());
++        // Actual annotations can consume more than the provider's bare item.
++        budget.items = budget.items.max(retained.items);
++        budget.bytes_left = budget.bytes_left.min(retained.bytes_left);
++        budget.observe(item)
++    }
++
++    pub(crate) async fn fence_history_exhaustion(&self) -> Result<()> {
++        self.state.lock().unwrap().reference.pending = true;
++        self.persist().await
 +    }
 +
 +    pub(crate) async fn accept(&self, response: LastResponse) -> Result<()> {
@@ -1853,6 +2020,21 @@ index 00000000..b4a6e8d6
 +            sampling_input_projection(Some(&captured), &sample, vec![0, 1, 2, 3], 0).unwrap();
 +        assert_eq!(projected.delivered_input_indices, vec![0, 1, 2]);
 +        assert!(sampling_input_projection(Some(&captured), &[same, other], vec![0, 1], 0).is_err());
++    }
++
++    #[test]
++    fn history_budget_bounds_count_and_utf8_json_before_projection() {
++        let mut budget = HistoryBudget::default();
++        for _ in 0..MAX_HISTORY_ITEMS {
++            budget.observe(&1).unwrap();
++        }
++        assert!(budget.observe(&1).is_err());
++        assert!(
++            HistoryBudget::default()
++                .observe(&"é".repeat(MAX_HISTORY_BYTES / 2))
++                .is_err()
++        );
++        assert!(HistoryBudget::default().observe(&"small").is_ok());
 +    }
 +
 +}
@@ -2183,10 +2365,26 @@ index abc8b35f..2fc0fa0f 100644
          thread_id: Some(session.thread_id()),
          thread_settings: snapshot,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index d3838142..13297026 100644
+index d3838142..850decb0 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -882,6 +882,11 @@ pub(crate) async fn run_turn(
+@@ -183,6 +183,7 @@ pub(crate) async fn run_turn(
+     cancellation_token: CancellationToken,
+ ) -> CodexResult<Option<String>> {
+     sess.check_agent_profile_admission()?;
++    check_provider_history_budget(&sess, &input).await?;
+ 
+     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
+         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
+@@ -725,6 +726,7 @@ pub(crate) async fn run_turn(
+             sess.record_reasoning_effort_override(step_context.as_ref())
+                 .await;
+ 
++            check_provider_history_budget(&sess, &[] as &[TurnInput]).await?;
+             // Construct the input that we will send to the model.
+             let sampling_request_input: Vec<ResponseItem> = async {
+                 sess.clone_history()
+@@ -882,6 +884,11 @@ pub(crate) async fn run_turn(
                  }
  
                  let should_roll_over = needs_follow_up
@@ -2198,7 +2396,48 @@ index d3838142..13297026 100644
                      && (sess.take_new_context_window_request().await || token_limit_reached);
                  let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                  super::token_budget::maybe_record(
-@@ -1666,6 +1671,15 @@ async fn run_pre_sampling_compact(
+@@ -1115,6 +1122,32 @@ async fn turn_diff_display_roots(step_context: &StepContext) -> Vec<(String, Pat
+     display_roots
+ }
+ 
++// Check the retained window and incoming batch before recording more history.
++// Exhaustion leaves the last acknowledged cursor and canonical originals intact.
++async fn check_provider_history_budget<T: serde::Serialize>(
++    sess: &Session,
++    input: &[T],
++) -> CodexResult<crate::client::provider_history::HistoryBudget> {
++    use crate::client::provider_history::HistoryBudget;
++    let mut budget = HistoryBudget::default();
++    if sess
++        .services
++        .model_client
++        .provider_history_selection()
++        .is_some()
++    {
++        let history = sess.clone_history().await;
++        HistoryBudget::check_count(history.raw_items().len().saturating_add(input.len()))?;
++        for item in history.annotated_items() {
++            budget.observe(item)?;
++        }
++        for item in input {
++            budget.observe(item)?;
++        }
++    }
++    Ok(budget)
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) async fn run_hooks_and_record_inputs(
+     sess: &Arc<Session>,
+@@ -1123,6 +1156,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
+     input: &[TurnInput],
+     persist_context: PersistContext,
+ ) -> CodexResult<bool> {
++    check_provider_history_budget(sess, input).await?;
+     if sess.captured_provider_image_reference_policy()
+         == codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::QualifiedStandardResponses
+     {
+@@ -1666,6 +1700,15 @@ async fn run_pre_sampling_compact(
      cancellation_token: &CancellationToken,
      prepared_current_step: Option<Arc<StepContext>>,
  ) -> CodexResult<()> {
@@ -2214,7 +2453,7 @@ index d3838142..13297026 100644
      maybe_run_previous_model_inline_compact(
          sess,
          turn_context,
-@@ -1826,6 +1840,15 @@ async fn run_post_turn_compaction(
+@@ -1826,6 +1869,15 @@ async fn run_post_turn_compaction(
      cancellation_token: &CancellationToken,
      native_model_threshold: bool,
  ) -> CodexResult<()> {
@@ -2230,7 +2469,7 @@ index d3838142..13297026 100644
      let turn_context = &step_context.turn;
      if turn_context.config.features.enabled(Feature::TokenBudget) {
          return Ok(());
-@@ -2072,6 +2095,7 @@ pub(crate) fn build_prompt(
+@@ -2072,6 +2124,7 @@ pub(crate) fn build_prompt(
          tool_admission: None,
          sampling_stop: None,
          prepared_request_admission: None,
@@ -2238,19 +2477,43 @@ index d3838142..13297026 100644
          base_instructions,
          output_schema: turn_context.final_output_json_schema.clone(),
          output_schema_strict: !crate::guardian::is_basic_session_source(
-@@ -2213,6 +2237,11 @@ async fn run_sampling_request(
+@@ -2200,6 +2253,7 @@ async fn run_sampling_request(
+             let prompt_input = if let Some(input) = initial_input.take() {
+                 input
+             } else {
++                check_provider_history_budget(&sess, &[] as &[TurnInput]).await?;
+                 sess.clone_history()
+                     .await
+                     .for_prompt(&step_context.settings.model_info.input_modalities)
+@@ -2213,6 +2267,18 @@ async fn run_sampling_request(
                  step_context.as_ref(),
                  base_instructions.clone(),
              );
-+            prompt.canonical_history_input = sess
++            let mut canonical = sess
 +                .services
 +                .model_client
-+                .capture_provider_history_input(&prompt.input, &step_context.extension_data)?
-+                .map(Arc::new);
++                .capture_provider_history_input(&prompt.input, &step_context.extension_data)?;
++            if let Some(projection) = canonical.as_mut() {
++                let retained = check_provider_history_budget(&sess, &[] as &[TurnInput]).await?;
++                (
++                    projection.retained_item_count,
++                    projection.retained_json_bytes,
++                ) = retained.retained();
++            }
++            prompt.canonical_history_input = canonical.map(Arc::new);
              prompt.request_controls = step_context.settings.request_controls().clone();
              if prompt.tool_choice == codex_protocol::config_types::ToolChoice::Required
                  && tool_choice_reset_applies(&step_context.settings, &turn_context.extension_data)
-@@ -4535,6 +4564,7 @@ async fn try_run_sampling_request(
+@@ -4113,6 +4179,8 @@ async fn drain_in_flight(
+     while let Some(res) = in_flight.next().await {
+         match res {
+             Ok(result) => {
++                let retained = check_provider_history_budget(&sess, &[] as &[TurnInput]).await;
++                sess.services.model_client.admit_provider_history_local_output(&result.envelope, retained).await?;
+                 settled_tools.all_succeeded &= result.succeeded;
+                 settled_tools
+                     .outcomes
+@@ -4535,6 +4603,7 @@ async fn try_run_sampling_request(
                      }
  
                      assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
@@ -2258,7 +2521,7 @@ index d3838142..13297026 100644
                      sess.reserve_assistant_message_order(&turn_context, &item)
                          .await;
                      if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
-@@ -5183,6 +5213,18 @@ async fn try_run_sampling_request(
+@@ -5183,6 +5252,18 @@ async fn try_run_sampling_request(
      if timeout_ms.is_some() || model_attempt.is_some() {
          deadline_cleanup_errors.extend(deadline.retire_tasks().await);
      }
@@ -2277,7 +2540,7 @@ index d3838142..13297026 100644
      let mut tool_cleanup = if !in_flight.is_empty() {
          let _tool_blocking_timing_guard = turn_context.turn_timing_state.begin_tool_blocking();
          let _tool_blocking_span = trace_span!(
-@@ -5269,6 +5311,8 @@ async fn try_run_sampling_request(
+@@ -5269,6 +5350,8 @@ async fn try_run_sampling_request(
          release_failed_tool_candidates(&sess, &step_context).await;
      }
      tool_cleanup?;
