@@ -30,6 +30,25 @@ fn model_override(history: &[RolloutItem], turn: &str) -> Option<String> {
         .flatten()
 }
 
+fn model_settings_override(
+    history: &[RolloutItem],
+    turn: &str,
+) -> Option<codex_protocol::model_request_controls::RunModelSettingsOverride> {
+    history
+        .iter()
+        .rev()
+        .find_map(|row| match row {
+            RolloutItem::TurnContext(context) if context.turn_id.as_deref() == Some(turn) => Some(
+                context
+                    .sdk_model_settings_override
+                    .as_ref()
+                    .map(|settings| settings.for_persistence()),
+            ),
+            _ => None,
+        })
+        .flatten()
+}
+
 #[derive(Debug)]
 pub(crate) enum UnsupportedManualState {
     CodeState,
@@ -130,8 +149,11 @@ impl ToolOutcomes {
                     ResponseItem::CustomToolCallOutput {
                         call_id, output, ..
                     } => (Some(call_id.as_str()), output.success),
-                    ResponseItem::ApplyPatchCallOutput { call_id, status, .. } => (
-                        Some(call_id.as_str()), Some(*status == codex_protocol::models::ApplyPatchStatus::Completed)
+                    ResponseItem::ApplyPatchCallOutput {
+                        call_id, status, ..
+                    } => (
+                        Some(call_id.as_str()),
+                        Some(*status == codex_protocol::models::ApplyPatchStatus::Completed),
                     ),
                     ResponseItem::ToolSearchOutput {
                         call_id,
@@ -258,9 +280,11 @@ impl ToolOutcomes {
 
 pub(crate) struct Frame {
     tool_outcomes: Option<ToolOutcomes>,
+    pub(crate) raise_on_unknown_tool: bool,
     fresh: Option<crate::python_tools::FreshTerminalReceipts>,
     terminal_calls: HashSet<String>,
     batch_completion: bool,
+    staged_input: Vec<ResponseItem>,
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
@@ -278,7 +302,8 @@ pub(crate) struct Frame {
 
 fn manual_call_id(item: &ResponseItem) -> Option<&String> {
     match item {
-        ResponseItem::FunctionCall { call_id, .. } | ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id),
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id),
         ResponseItem::ShellCall {
             provider_fields, ..
         } => crate::local_reconciliation::shell_call_id(provider_fields),
@@ -303,7 +328,9 @@ pub(crate) fn validate_for_opening(
         return Ok(frame);
     };
     let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
-    let pending = state["native_continuation"]["pending_manual"]
+    let continuation = &state["native_continuation"];
+    let staged_retry = continuation["staged_retry"].as_bool() == Some(true);
+    let pending = continuation["pending_manual"]
         .as_array()
         .context("Missing pending manual calls")?;
     let ids = pending
@@ -315,7 +342,7 @@ pub(crate) fn validate_for_opening(
         })
         .collect::<Result<HashSet<_>>>()?;
     ensure!(
-        !ids.is_empty() && ids.len() == pending.len(),
+        (!ids.is_empty() || staged_retry) && ids.len() == pending.len(),
         "Invalid pending call identities"
     );
     let mut current = None;
@@ -399,11 +426,15 @@ pub(crate) fn validate_for_opening(
         found.len() == ids.len(),
         "Pending source does not cover every call"
     );
-    let source = source.context("Missing pending Agent source")?;
+    let (active, graph) = current.as_ref().context("Missing pending Agent source")?;
+    let source = if staged_retry && ids.is_empty() {
+        // A settled retry has no pending calls. The captured active profile owns it.
+        active.clone()
+    } else {
+        source.context("Missing pending Agent source")?
+    };
     ensure!(
-        current
-            .as_ref()
-            .is_some_and(|(receipt, _)| receipt == &source),
+        active == &source && *graph == opening.fingerprint,
         "Pending calls differ from the active Agent source"
     );
     opening.validate_pending_source(&source)?;
@@ -520,7 +551,7 @@ fn validate_frame(
         .as_object()
         .context("Missing native manual continuation")?;
     ensure!(
-        (6..=9).contains(&frame.len())
+        (6..=12).contains(&frame.len())
             && frame.keys().all(|key| matches!(
                 key.as_str(),
                 "turn_id"
@@ -531,7 +562,10 @@ fn validate_frame(
                     | "pending_manual"
                     | "output_schema"
                     | "model_override"
+                    | "model_settings_override"
                     | "tool_outcomes"
+                    | "pending_input"
+                    | "staged_retry"
             ))
             && frame.get("output_schema").is_none_or(Value::is_object),
         "Invalid native continuation fields"
@@ -557,9 +591,13 @@ fn validate_frame(
     let pending = frame["pending_manual"]
         .as_array()
         .context("Invalid pending manual list")?;
+    let staged_retry = frame
+        .get("staged_retry")
+        .map_or(Some(false), Value::as_bool)
+        .context("Invalid staged retry status")?;
     ensure!(
-        !pending.is_empty(),
-        "Manual continuation has no pending action"
+        pending.is_empty() == staged_retry && (!staged_retry || !order.is_empty()),
+        "Manual continuation has no pending action or settled staged retry"
     );
     let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
     let restored_override: Option<String> =
@@ -571,18 +609,37 @@ fn validate_frame(
             && restored_override == model_override(&history, &turn),
         "Manual continuation changed its admitted model override"
     );
+    let restored_settings: Option<
+        codex_protocol::model_request_controls::RunModelSettingsOverride,
+    > = serde_json::from_value(
+        frame
+            .get("model_settings_override")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )?;
+    ensure!(
+        restored_settings == model_settings_override(&history, &turn),
+        "Manual continuation changed its admitted model settings override"
+    );
 
-    let mut retained_manual: HashSet<&str> = pending.iter()
-        .filter_map(|value| value["call_id"].as_str()).collect();
+    let mut retained_manual: HashSet<&str> = pending
+        .iter()
+        .filter_map(|value| value["call_id"].as_str())
+        .collect();
     // A sibling may still be pending after this exact typed result was accepted.
     // The canonical ownership and final partition checks remain independent.
-    retained_manual.extend(accepted.iter().filter_map(|(id, envelope)| {
-        match &envelope.item {
-            ResponseItem::ApplyPatchCallOutput { call_id, .. }
-                if call_id == id && envelope.item.turn_id() == Some(turn.as_str()) => Some(id.as_str()),
-            _ => None,
-        }
-    }));
+    retained_manual.extend(
+        accepted
+            .iter()
+            .filter_map(|(id, envelope)| match &envelope.item {
+                ResponseItem::ApplyPatchCallOutput { call_id, .. }
+                    if call_id == id && envelope.item.turn_id() == Some(turn.as_str()) =>
+                {
+                    Some(id.as_str())
+                }
+                _ => None,
+            }),
+    );
     ensure!(
         portable_manual_actions(&history, &retained_manual, |call| {
             accepted.get(call).is_some_and(|envelope| {
@@ -685,7 +742,12 @@ fn validate_frame(
                 }
                 if matches!(
                     raw["type"].as_str(),
-                    Some("function_call_output" | "custom_tool_call_output" | "shell_call_output" | "apply_patch_call_output")
+                    Some(
+                        "function_call_output"
+                            | "custom_tool_call_output"
+                            | "shell_call_output"
+                            | "apply_patch_call_output"
+                    )
                 ) {
                     let call = raw["call_id"]
                         .as_str()
@@ -834,10 +896,12 @@ fn validate_frame(
         if patch {
             if let Some(effective) = value["effective_arguments"].as_str() {
                 let effective: Value = serde_json::from_str(effective)?;
-                ensure!(effective["type"] == saved["type"]
-                    && effective["call_id"] == saved["call_id"]
-                    && effective["operation"] == saved["operation"],
-                    "Pending application patch action differs from accepted history");
+                ensure!(
+                    effective["type"] == saved["type"]
+                        && effective["call_id"] == saved["call_id"]
+                        && effective["operation"] == saved["operation"],
+                    "Pending application patch action differs from accepted history"
+                );
             }
         }
         let slot = specs
@@ -915,13 +979,38 @@ fn validate_frame(
         }
         None => ToolOutcomes::capture(&history, source_id, &turn)?,
     };
+    let mut staged_input = Vec::new();
+    if let Some(items) = frame.get("pending_input") {
+        for item in items.as_array().context("Staged input must be an array")? {
+            ensure!(
+                item.get("call_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| !seen_calls.contains(id)),
+                "Staged input cannot reuse a call from the saved turn"
+            );
+            let item: ResponseItem = serde_json::from_value(item.clone())
+                .map_err(|_| anyhow::anyhow!("Staged input is not a supported Responses item"))?;
+            ensure!(
+                !matches!(item, ResponseItem::Other),
+                "Staged input is not a supported Responses item"
+            );
+            crate::checkpoint::validate_external_response_item(&item)?;
+            staged_input.push(item);
+        }
+    }
     Ok(Frame {
+        raise_on_unknown_tool: codex_extension_api::ToolNotFoundBehavior::from_turn_history(
+            &history, &turn,
+        )
+        .map_err(anyhow::Error::msg)?
+        .is_some(),
         profile_source: None,
         handoffs,
         tool_outcomes,
         fresh: None,
         terminal_calls: HashSet::new(),
         batch_completion: false,
+        staged_input,
         turn,
         pending: admitted,
         order,
@@ -933,19 +1022,33 @@ fn validate_frame(
     })
 }
 
-pub(crate) fn manual_request(item: &ResponseItem) -> Result<(codex_tools::ToolName, String, Value)> {
+pub(crate) fn manual_request(
+    item: &ResponseItem,
+) -> Result<(codex_tools::ToolName, String, Value)> {
     match item {
-        ResponseItem::FunctionCall { name, namespace, arguments, call_id, .. } => Ok((
-            codex_tools::ToolName::new(namespace.clone(), name), call_id.clone(),
+        ResponseItem::FunctionCall {
+            name,
+            namespace,
+            arguments,
+            call_id,
+            ..
+        } => Ok((
+            codex_tools::ToolName::new(namespace.clone(), name),
+            call_id.clone(),
             serde_json::from_str(arguments)?,
         )),
         ResponseItem::ApplyPatchCall { call_id, .. } => Ok((
-            codex_tools::ToolName::new(None, "apply_patch"), call_id.clone(),
+            codex_tools::ToolName::new(None, "apply_patch"),
+            call_id.clone(),
             serde_json::to_value(item)?,
         )),
-        ResponseItem::ShellCall { provider_fields, .. } => Ok((
+        ResponseItem::ShellCall {
+            provider_fields, ..
+        } => Ok((
             codex_tools::ToolName::new(None, "shell"),
-            crate::local_reconciliation::shell_call_id(provider_fields).context("Pending Shell lacks identity")?.clone(),
+            crate::local_reconciliation::shell_call_id(provider_fields)
+                .context("Pending Shell lacks identity")?
+                .clone(),
             serde_json::to_value(item)?,
         )),
         _ => anyhow::bail!("Manual continuation requires an admitted application tool"),
@@ -1205,28 +1308,54 @@ impl Frame {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> Result<Value> {
-        let mut value = self.state.clone();
-        value["native_continuation"]["accepted_replies"] = encode_accepted_replies(&self.accepted)?;
+    fn continuation_snapshot(&self, staged_retry: bool) -> Result<Value> {
+        let mut value = self.state["native_continuation"].clone();
+        value["accepted_replies"] = encode_accepted_replies(&self.accepted)?;
         if let Some(outcomes) = &self.tool_outcomes {
-            value["native_continuation"]["tool_outcomes"] = serde_json::to_value(outcomes)?;
+            value["tool_outcomes"] = serde_json::to_value(outcomes)?;
         }
-        value["native_continuation"]["pending_manual"]
+        let pending = value["pending_manual"]
             .as_array_mut()
-            .context("Missing pending manual calls")?
-            .retain(|call| {
-                call["call_id"]
-                    .as_str()
-                    .is_some_and(|id| !self.accepted.contains_key(id))
-            });
+            .context("Missing pending manual calls")?;
+        pending.retain(|call| {
+            call["call_id"]
+                .as_str()
+                .is_some_and(|id| !self.accepted.contains_key(id))
+        });
         ensure!(
-            value["native_continuation"]["pending_manual"]
-                .as_array()
-                .is_some_and(|pending| !pending.is_empty()),
-            "No pending manual replies remain"
+            pending.is_empty() == staged_retry,
+            "Manual checkpoint boundary changed"
         );
+        if staged_retry {
+            value["staged_retry"] = Value::Bool(true);
+        }
         Ok(value)
     }
+}
+
+struct StagedRetry {
+    turn: String,
+    continuation: Value,
+    batch: codex_extension_api::StagedInputBatch,
+}
+
+pub(crate) fn staged_retry(
+    thread: &crate::engine::ThreadState,
+    checkpoint: &Value,
+) -> Option<Value> {
+    let retry = thread.thread.thread_extension_data().get::<StagedRetry>()?;
+    if !retry.batch.is_pending() {
+        return None;
+    }
+    let last_turn = checkpoint["history"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|record| {
+            record["type"] == "event_msg" && record["payload"]["type"] == "task_started"
+        })?["payload"]["turn_id"]
+        .as_str()?;
+    (last_turn == retry.turn.as_str()).then(|| retry.continuation.clone())
 }
 
 pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Result<()> {
@@ -1304,6 +1433,11 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
         .map_or(tools.tool_batch_completion_enabled, |catalog| {
             catalog.tool_batch_completion
         });
+    ensure!(
+        frame.staged_input.is_empty()
+            || (!frame.batch_completion && frame.terminal_calls.is_empty()),
+        "Staged input requires a model continuation after the manual replies"
+    );
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
     let admitted_override = model_override(&history, &frame.turn);
     let model = admitted_override.as_deref().or_else(|| {
@@ -1461,6 +1595,11 @@ pub(crate) async fn continue_if_ready(
     };
     recovery_options["model_override"] =
         frame.state["native_continuation"]["model_override"].clone();
+    recovery_options["model_settings_override"] =
+        frame.state["native_continuation"]["model_settings_override"].clone();
+    if frame.raise_on_unknown_tool {
+        recovery_options["raise_on_unknown_tool"] = Value::Bool(true);
+    }
     recovery_options["trace"] = serde_json::json!(trace);
     recovery_options["observation_submission_id"] = serde_json::json!(observation_submission_id);
     if let Some(source) = operation_declaration_source {
@@ -1474,6 +1613,21 @@ pub(crate) async fn continue_if_ready(
         .reset_tool_choice
         .flatten()
         == Some(true);
+    let staged_input = if frame.staged_input.is_empty() {
+        None
+    } else {
+        let continuation = frame.continuation_snapshot(true)?;
+        let batch = codex_extension_api::StagedInputBatch::new(
+            frame.turn.clone(),
+            std::mem::take(&mut frame.staged_input),
+        );
+        thread.thread.thread_extension_data().insert(StagedRetry {
+            turn: frame.turn.clone(),
+            continuation,
+            batch: batch.clone(),
+        });
+        Some(batch)
+    };
     let terminal = match frame.tool_outcomes.take() {
         Some(outcomes)
             if frame.fresh.is_some() || !held_outputs.is_empty() || reset_tool_choice =>
@@ -1493,6 +1647,7 @@ pub(crate) async fn continue_if_ready(
         frame.seen.into_iter().collect(),
         recovery_options,
         terminal,
+        staged_input,
     )
     .await?;
     ensure!(
@@ -1647,7 +1802,7 @@ pub(crate) async fn capture(
         } else {
             3
         });
-        snapshot["native_continuation"] = frame.snapshot()?["native_continuation"].clone();
+        snapshot["native_continuation"] = frame.continuation_snapshot(false)?;
         frame.sealed = true;
         frame.receivers.clear();
         return Ok(Some(snapshot));
@@ -1901,7 +2056,9 @@ pub(crate) async fn capture(
                         ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_ref(),
                         ResponseItem::CustomToolCallOutput { call_id, .. }
                         | ResponseItem::ApplyPatchCallOutput { call_id, .. } => Some(call_id),
-                        ResponseItem::ShellCallOutput { provider_fields, .. } => crate::local_reconciliation::shell_call_id(provider_fields),
+                        ResponseItem::ShellCallOutput {
+                            provider_fields, ..
+                        } => crate::local_reconciliation::shell_call_id(provider_fields),
                         _ => None,
                     };
                     if call_id.is_some_and(|id| order.contains(id)) {
@@ -1913,6 +2070,7 @@ pub(crate) async fn capture(
         })
         .collect();
     let admitted_override = model_override(&history, &turn);
+    let admitted_settings = model_settings_override(&history, &turn);
     snapshot["history"] = serde_json::to_value(history)?;
     snapshot["native_continuation"] = serde_json::json!({
         "turn_id":turn,"seen_call_ids":calls.iter().map(|(id,_)|id).collect::<Vec<_>>(),
@@ -1920,6 +2078,10 @@ pub(crate) async fn capture(
     });
     if let Some(name) = admitted_override {
         snapshot["native_continuation"]["model_override"] = Value::String(name);
+    }
+    if let Some(settings) = admitted_settings {
+        snapshot["native_continuation"]["model_settings_override"] =
+            serde_json::to_value(settings)?;
     }
     if let Some(outcomes) = tool_outcomes {
         snapshot["native_continuation"]["tool_outcomes"] = serde_json::to_value(outcomes)?;

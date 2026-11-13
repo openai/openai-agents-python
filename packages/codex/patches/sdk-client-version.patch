@@ -1,0 +1,49 @@
+diff --git a/codex-rs/login/src/auth/default_client.rs b/codex-rs/login/src/auth/default_client.rs
+index 28a952ea2d7affef05648affdc74f275efcf9680..ec12c4b7d7625accc495a04c81d52fbd6ae189f4 100644
+--- a/codex-rs/login/src/auth/default_client.rs
++++ b/codex-rs/login/src/auth/default_client.rs
+@@ -19,6 +19,7 @@ use http::HeaderValue;
+ use http::header::USER_AGENT;
+ use std::sync::LazyLock;
+ use std::sync::Mutex;
++use std::sync::OnceLock;
+ use std::sync::RwLock;
+ 
+ use crate::outbound_proxy::AuthRouteConfig;
+@@ -52,6 +53,7 @@ pub struct Originator {
+     pub header_value: HeaderValue,
+ }
+ static ORIGINATOR: LazyLock<RwLock<Option<Originator>>> = LazyLock::new(|| RwLock::new(None));
++static CLIENT_VERSION: OnceLock<String> = OnceLock::new();
+ static ROUTE_AWARE_CLIENT_BUILD_PERMIT: tokio::sync::Semaphore =
+     tokio::sync::Semaphore::const_new(1);
+ 
+@@ -97,6 +99,16 @@ pub fn set_default_originator(value: String) -> Result<(), SetOriginatorError> {
+     Ok(())
+ }
+ 
++/// Set the embedding client's version before constructing any HTTP clients.
++pub fn set_default_client_version(value: String) -> Result<(), SetOriginatorError> {
++    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
++        return Err(SetOriginatorError::InvalidHeaderValue);
++    }
++    CLIENT_VERSION
++        .set(value)
++        .map_err(|_| SetOriginatorError::AlreadyInitialized)
++}
++
+ pub fn originator() -> Originator {
+     if let Ok(guard) = ORIGINATOR.read()
+         && let Some(originator) = guard.as_ref()
+@@ -153,7 +165,10 @@ pub fn get_codex_user_agent() -> String {
+     // OS discovery can spawn subprocesses on Linux. Reuse it across requests,
+     // while continuing to read the mutable originator and suffix below.
+     static OS_INFO: LazyLock<os_info::Info> = LazyLock::new(os_info::get);
+-    let build_version = env!("CARGO_PKG_VERSION");
++    let build_version = CLIENT_VERSION
++        .get()
++        .map(String::as_str)
++        .unwrap_or(env!("CARGO_PKG_VERSION"));
+     let os_info = &*OS_INFO;
+     let originator = originator();
+     let prefix = format!(

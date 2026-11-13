@@ -46,6 +46,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
 
+use crate::tool_callers::ToolDeclarations;
+
 struct Entry {
     name: ToolName,
     spec: ToolSpec,
@@ -58,7 +60,7 @@ struct Entry {
 pub(crate) struct Generation {
     pub(crate) id: u64,
     entries: Vec<Entry>,
-    specs: Vec<DynamicToolSpec>,
+    specs: ToolDeclarations,
 }
 
 /// Immutable per-profile declarations captured before Core advertises a step.
@@ -919,9 +921,9 @@ pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
 
 // Return the actual model parameter schemas before the caller elects to publish
 // a candidate. Names, policy, and generation remain the live thread's authority.
-pub fn model_parameters(specs: Vec<DynamicToolSpec>) -> Result<Value> {
-    validate_slots(&specs)?;
-    let parameters = functions(&specs)
+pub fn model_parameters(specs: &[DynamicToolSpec]) -> Result<Value> {
+    validate_slots(specs)?;
+    let parameters = functions(specs)
         .into_iter()
         .map(|(_, tool)| dynamic_tool_to_responses_api_tool(&tool).map(|tool| tool.parameters))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1394,7 +1396,7 @@ impl PythonTools {
 
     pub(crate) fn profile_catalog(
         &self,
-        specs: Vec<DynamicToolSpec>,
+        specs: ToolDeclarations,
         manual_slots: &[usize],
         terminal_slots: &[usize],
         input_error_slots: &[usize],
@@ -1415,7 +1417,7 @@ impl PythonTools {
 
     pub(crate) fn voice_profile_catalog(
         &self,
-        specs: Vec<DynamicToolSpec>,
+        specs: ToolDeclarations,
         manual_slots: &[usize],
         terminal_slots: &[usize],
         input_error_slots: &[usize],
@@ -1435,7 +1437,7 @@ impl PythonTools {
 
     fn allocate_profile_catalog(
         &self,
-        specs: Vec<DynamicToolSpec>,
+        specs: ToolDeclarations,
         manual_slots: &[usize],
         terminal_slots: &[usize],
         input_error_slots: &[usize],
@@ -2121,7 +2123,7 @@ impl PythonTools {
     }
     pub fn install(
         startup: &mut StartThreadOptions,
-        specs: Vec<DynamicToolSpec>,
+        specs: ToolDeclarations,
         transform_context: bool,
         before_compact: bool,
         before_complete: bool,
@@ -2142,7 +2144,7 @@ impl PythonTools {
 
     pub fn install_manual(
         startup: &mut StartThreadOptions,
-        specs: Vec<DynamicToolSpec>,
+        specs: ToolDeclarations,
         manual_slots: &[usize],
         transform_context: bool,
         before_compact: bool,
@@ -2217,7 +2219,7 @@ impl PythonTools {
             current: RwLock::new(Arc::new(Generation {
                 id: 0,
                 entries: Vec::new(),
-                specs: Vec::new(),
+                specs: ToolDeclarations::default(),
             })),
             generation_high_water: AtomicU64::new(0),
             profile_catalogs: RwLock::new(HashMap::new()),
@@ -2462,14 +2464,14 @@ impl PythonTools {
         Ok(item)
     }
 
-    fn prepare(&self, id: u64, specs: Vec<DynamicToolSpec>) -> Result<Generation> {
-        self.prepare_catalog(id, specs, Some(self.policy.as_ref()))
+    fn prepare(&self, id: u64, specs: impl Into<ToolDeclarations>) -> Result<Generation> {
+        self.prepare_catalog(id, specs.into(), Some(self.policy.as_ref()))
     }
 
     fn prepare_catalog(
         &self,
         id: u64,
-        specs: Vec<DynamicToolSpec>,
+        specs: ToolDeclarations,
         policy: Option<&ToolPolicy>,
     ) -> Result<Generation> {
         validate_declarations(&specs)?;
@@ -3298,7 +3300,7 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
     ) -> Result<u64> {
-        self.replace_with_defaults(thread, id, specs, manual_slots, None, None, &[], &[])
+        self.replace_with_defaults(thread, id, specs.into(), manual_slots, None, None, &[], &[])
             .await
     }
 
@@ -3306,7 +3308,7 @@ impl PythonTools {
         &self,
         thread: &CodexThread,
         id: u64,
-        specs: Vec<DynamicToolSpec>,
+        specs: ToolDeclarations,
         manual_slots: &[usize],
         default_slots: Option<&[usize]>,
         profile_update: Option<&crate::agent_profiles::ProfileToolUpdate>,
@@ -3781,7 +3783,9 @@ impl PythonTools {
         {
             return false;
         }
-        let Ok(Some(item)) = self.response_receipt(&grant.key, response.clone()) else { return false; };
+        let Ok(Some(item)) = self.response_receipt(&grant.key, response.clone()) else {
+            return false;
+        };
         let mut pending = self.pending.lock().expect("Python replies poisoned");
         if !pending.get(&grant.key).is_some_and(|call| {
             call.invocation == grant.invocation
@@ -3812,7 +3816,13 @@ impl PythonTools {
                 .and_then(|owner| owner.upgrade())
             {
                 if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
-                    frame.record(&grant.key, grant.invocation, generation.clone(), &receipt, item);
+                    frame.record(
+                        &grant.key,
+                        grant.invocation,
+                        generation.clone(),
+                        &receipt,
+                        item,
+                    );
                 }
             }
         }
@@ -3928,7 +3938,11 @@ impl PythonTools {
         Ok(true)
     }
 
-    pub(crate) fn record_approved_result(&self, key: &PendingKey, response: &DynamicToolResponse) -> Result<()> {
+    pub(crate) fn record_approved_result(
+        &self,
+        key: &PendingKey,
+        response: &DynamicToolResponse,
+    ) -> Result<()> {
         let Some(generation) = self.resolve_generation(key.reply.generation) else {
             return Ok(());
         };
@@ -3942,8 +3956,12 @@ impl PythonTools {
         let Some((invocation, payload)) = captured else {
             return Ok(());
         };
-        let owner = self.manual_restore.lock().expect("Manual restore poisoned")
-            .as_ref().and_then(|owner| owner.upgrade());
+        let owner = self
+            .manual_restore
+            .lock()
+            .expect("Manual restore poisoned")
+            .as_ref()
+            .and_then(|owner| owner.upgrade());
         if let Some(owner) = owner {
             let item = Self::response_receipt_from_payload(key, response.clone(), payload)?;
             if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
@@ -3992,7 +4010,8 @@ impl PythonTools {
             .iter()
             .position(|entry| {
                 entry.manual
-                    && entry.name.clone().with_default_namespace() == name.clone().with_default_namespace()
+                    && entry.name.clone().with_default_namespace()
+                        == name.clone().with_default_namespace()
                     && (matches!(entry.spec, ToolSpec::ApplyPatch {}) == patch)
                     && (matches!(entry.spec, ToolSpec::ApplicationShell { .. }) == shell)
             })
@@ -4009,6 +4028,7 @@ impl PythonTools {
             model,
             true,
             profile.as_ref(),
+            None,
             None,
             None,
         )
@@ -4348,7 +4368,7 @@ impl PythonTools {
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
             thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
-            media, None,
+            media, None, None,
         )
     }
 
@@ -4367,6 +4387,7 @@ impl PythonTools {
         profile: Option<&codex_extension_api::AgentProfileReceipt>,
         media: Option<NativeMediaContext>,
         realtime_tool_call: Option<Value>,
+        builtin_tools: Option<&HashSet<ToolName>>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         let entry = &generation.entries[slot];
         let key = PendingKey {
@@ -4410,6 +4431,7 @@ impl PythonTools {
                 "_sdk_invocation": invocation, "_sdk_manual": entry.manual,
                 "_sdk_code_origin": code_origin, "_sdk_model": model,
                 "_sdk_realtime_tool_call": realtime_tool_call,
+                "_sdk_builtin_tools": builtin_tools,
                 "_sdk_realtime_tool_name": codex_extension_api::realtime_tool_wire_name(&entry.name),
                 "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
@@ -5871,6 +5893,7 @@ impl PythonContributor {
         slots: &[usize],
         profile: Option<codex_extension_api::AgentProfileReceipt>,
         accepted: Option<AcceptedToolCalls>,
+        builtin_tools: Option<Arc<codex_extension_api::FinalStepBuiltinTools>>,
     ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         slots
             .iter()
@@ -5885,6 +5908,7 @@ impl PythonContributor {
                     decision_selection: decision_selection.clone(),
                     managed_calls: self.managed_calls.clone(),
                     accepted: accepted.clone(),
+                    builtin_tools: builtin_tools.clone(),
                     thread: thread.level_id().to_string(),
                     tools: tools.clone(),
                     generation: generation.clone(),
@@ -5984,9 +6008,10 @@ impl ToolContributor for PythonContributor {
         });
         let allows = |name: &ToolName| voice || tools.policy.allows(name);
         let mut declarations = Vec::new();
-        for ((_, raw), entry) in functions(&generation.specs)
+        for (slot, ((_, raw), entry)) in functions(&generation.specs)
             .into_iter()
             .zip(&generation.entries)
+            .enumerate()
         {
             let defaults = if crate::agent_profiles::is_handoff_callback(
                 input.thread_store,
@@ -5999,6 +6024,10 @@ impl ToolContributor for PythonContributor {
             };
             if !allows(&entry.name)
                 || entry.exposure == ToolExposure::Deferred
+                || generation
+                    .specs
+                    .caller_limits(slot)
+                    .is_some_and(|callers| !callers.contains(codex_tools::ToolExposures::DIRECT))
                 || defaults.as_ref().is_some_and(|defaults| {
                     !defaults.iter().any(|name| {
                         name.clone().with_default_namespace()
@@ -6276,6 +6305,7 @@ impl ToolContributor for PythonContributor {
             &slots,
             None,
             None,
+            None,
         )
     }
 
@@ -6340,6 +6370,7 @@ impl ToolContributor for PythonContributor {
             &snapshot.slots,
             profile,
             Some(snapshot.accepted.clone()),
+            Some(step.get_or_init(codex_extension_api::FinalStepBuiltinTools::default)),
         )
     }
 
@@ -6497,6 +6528,16 @@ impl ToolContributor for PythonContributor {
                     request["msg"]["initial_input"] = json!(records);
                 }
             }
+            if step.get::<codex_extension_api::StagedInputPreparation>()
+                .is_some_and(|preparation| preparation.is_for(turn.level_id()))
+            {
+                request["msg"]["staged_input_preparation"] = json!(true);
+            }
+            if let Some(staged) = turn.get::<codex_extension_api::SelectedStagedInput>()
+                && let Some(items) = staged.0.items_for(turn.level_id())
+            {
+                request["msg"]["staged_input"] = json!(items);
+            }
             if let Some(profile) = profile {
                 request["msg"]["profile_id"] = json!(profile.profile_id);
                 request["msg"]["profile_epoch"] = json!(profile.epoch);
@@ -6552,6 +6593,7 @@ impl ToolContributor for PythonContributor {
 struct PythonExecutor {
     decision_selection: Option<Arc<crate::agent_profiles::DecisionHandoffSelection>>,
     accepted: Option<AcceptedToolCalls>,
+    builtin_tools: Option<Arc<codex_extension_api::FinalStepBuiltinTools>>,
     managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     thread: String,
     tools: Arc<PythonTools>,
@@ -6560,6 +6602,15 @@ struct PythonExecutor {
     slot: usize,
     use_deferred_specs: bool,
     code_mode_enabled: bool,
+}
+
+impl PythonExecutor {
+    fn explicitly_allows_code(&self) -> bool {
+        self.generation
+            .specs
+            .caller_limits(self.slot)
+            .is_some_and(|callers| callers.contains(codex_tools::ToolExposures::CODE_MODE))
+    }
 }
 
 impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
@@ -6583,16 +6634,21 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
         self.generation.entries[self.slot].spec.clone()
     }
 
+    fn allowed_callers(&self) -> Option<codex_tools::ToolExposures> {
+        self.generation.specs.caller_limits(self.slot)
+    }
+
     fn exposure(&self) -> ToolExposure {
         let exposure = self.generation.entries[self.slot].exposure;
-        let custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_));
-        if custom && exposure == ToolExposure::Direct {
+        let model_only_custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_))
+            && !self.explicitly_allows_code();
+        if model_only_custom && exposure == ToolExposure::Direct {
             return ToolExposure::DirectModelOnly;
         }
         match (
             exposure,
             self.use_deferred_specs,
-            self.code_mode_enabled && !custom,
+            self.code_mode_enabled && !model_only_custom,
         ) {
             (ToolExposure::Deferred, true, false) => ToolExposure::DeferredModelOnly,
             (ToolExposure::Deferred, false, false) => ToolExposure::DirectModelOnly,
@@ -6634,7 +6690,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
             let declaration = &self.generation.specs[self.slot];
             let (arguments, argument_error) = match (declaration, &call.payload) {
                 (DynamicToolSpec::Custom(custom), ToolPayload::Custom { input })
-                    if call.source == ToolCallSource::Direct =>
+                    if call.source == ToolCallSource::Direct
+                        || (matches!(&call.source, ToolCallSource::CodeMode { .. })
+                            && self.explicitly_allows_code()) =>
                 {
                     (json!({ (&custom.input_field): input }), None)
                 }
@@ -6693,6 +6751,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     profile: call.provider_reference_profile,
                 }),
                 call.conversation_history.realtime_tool_call().cloned(),
+                self.builtin_tools
+                    .as_ref()
+                    .and_then(|receipt| receipt.names()),
             );
             let (key, invocation, receiver) = match pending {
                 Ok(pending) => pending,
@@ -7729,7 +7790,7 @@ pub(crate) mod managed_tests {
                 *tools.current.write().unwrap() = Arc::new(Generation {
                     id: 0,
                     entries: Vec::new(),
-                    specs: Vec::new(),
+                    specs: ToolDeclarations::default(),
                 });
                 let step = ExtensionData::new("opening-step");
                 let policy = if with_profile {
@@ -8858,7 +8919,7 @@ pub(crate) mod managed_tests {
             payload.as_object_mut().unwrap().remove("native_continuation");
             let restored = checkpoint::restore(
                 &restored_engine, serde_json::from_value(payload).unwrap(),
-                restored_options, Some(restored_specs), None,
+                restored_options, Some(restored_specs.into()), None,
             ).await.unwrap();
             *restored.manual.lock().unwrap() = Some(frame);
             let resumed = restored.current().unwrap();
@@ -9370,7 +9431,7 @@ pub(crate) mod managed_tests {
             current: RwLock::new(Arc::new(Generation {
                 id: 0,
                 entries: vec![],
-                specs: vec![],
+                specs: ToolDeclarations::default(),
             })),
             generation_high_water: AtomicU64::new(0),
             profile_catalogs: RwLock::new(HashMap::new()),
@@ -9513,6 +9574,7 @@ pub(crate) mod managed_tests {
             managed_calls: None,
             profile: None,
             accepted: None,
+            builtin_tools: None,
             thread: "owner".into(),
             generation: tools.snapshot(),
             tools,
@@ -10099,7 +10161,7 @@ pub(crate) mod managed_tests {
         assert!(narrowed.default_names(Some(&[2])).is_err());
         assert!(narrowed.default_names(Some(&[0, 0])).is_err());
         let declared = tools
-            .profile_catalog(specs, &[], &[], &[], None, [false; 6], false)
+            .profile_catalog(specs.into(), &[], &[], &[], None, [false; 6], false)
             .unwrap();
         let thread = ExtensionData::new("source");
         thread.insert(Arc::try_unwrap(tools).ok().expect("exclusive fixture"));
@@ -10188,7 +10250,7 @@ pub(crate) mod managed_tests {
         );
         let a = parent
             .profile_catalog(
-                vec![DynamicToolSpec::Function(function("a"))],
+                vec![DynamicToolSpec::Function(function("a"))].into(),
                 &[],
                 &[],
                 &[],
@@ -10199,7 +10261,7 @@ pub(crate) mod managed_tests {
             .unwrap();
         let b = parent
             .profile_catalog(
-                vec![DynamicToolSpec::Function(function("b"))],
+                vec![DynamicToolSpec::Function(function("b"))].into(),
                 &[],
                 &[],
                 &[],
@@ -10278,7 +10340,7 @@ pub(crate) mod managed_tests {
         );
         let a = parent
             .profile_catalog(
-                vec![DynamicToolSpec::Function(function("a"))],
+                vec![DynamicToolSpec::Function(function("a"))].into(),
                 &[],
                 &[],
                 &[],

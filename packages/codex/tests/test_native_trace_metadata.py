@@ -7,20 +7,24 @@ import copy
 import os
 import subprocess
 import sys
+from dataclasses import replace
+
+import pytest
 
 from agents import Agent, function_tool, telemetry
 from agents.testing import ScriptedResponses, text, tool_call
 
 
-def test_native_root_metadata_ownership(tmp_path):
+@pytest.mark.parametrize("case", ["native_case", "agent_harness_case"])
+def test_native_root_metadata_ownership(tmp_path, case):
     env = dict(os.environ, CODEX_HOME=str(tmp_path / "home"))
     env.pop("OPENAI_API_KEY", None)
     result = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import asyncio; from tests.test_native_trace_metadata import native_case; "
-            "asyncio.run(native_case())",
+            f"import asyncio; from tests.test_native_trace_metadata import {case}; "
+            f"asyncio.run({case}())",
         ],
         env=env,
         text=True,
@@ -137,3 +141,122 @@ async def native_case():
         assert (await telemetry.force_flush()).status == "success"
     finally:
         await telemetry.shutdown(timeout_ms=1000)
+
+
+async def agent_harness_case():
+    events: list[telemetry.TraceLifecycleEvent] = []
+
+    class Recorder:
+        def on_trace_event(self, event: telemetry.TraceLifecycleEvent) -> None:
+            events.append(event)
+
+    await telemetry.configure(processors=[Recorder()])
+    observed = []
+
+    @function_tool
+    async def read_harness() -> str:
+        """Read the native run's trace routing metadata."""
+        context = telemetry.current_context()
+        assert context is not None
+        observed.append(context.trace_metadata)
+        return "read"
+
+    script = [
+        event
+        for index in range(5)
+        for event in (
+            [tool_call("read_harness", {}, call_id=f"read-harness-{index}")],
+            [text("done")],
+        )
+    ]
+    script.append([text("fast")])
+    try:
+        async with ScriptedResponses(*script) as peer:
+            unregistered_provider = peer.provider
+            os.environ["OPENAI_AGENT_HARNESS_ID"] = "  from-env  "
+            provider = replace(peer.provider, agent_harness_id="  from-provider  ")
+            agent = Agent(
+                instructions="Read the metadata.",
+                model="gpt-5.5",
+                provider=provider,
+                tools=[read_harness],
+            )
+
+            assert (await agent.run("Read.")).final_output == "done"
+            assert (
+                await agent.run(
+                    "Read.",
+                    trace_options={"metadata": {"agent_harness_id": None, "caller": True}},
+                )
+            ).final_output == "done"
+
+            telemetry.set_default_agent_harness_id("  from-default  ")
+            assert telemetry.get_default_agent_harness_id() == "from-default"
+            default_provider = replace(peer.provider, agent_harness_id=None)
+            telemetry.set_default_agent_harness_id(None)
+            assert telemetry.get_default_agent_harness_id() == "from-env"
+            assert (await agent.run("Read.", provider=default_provider)).final_output == "done"
+            assert (await agent.run("Read.", provider=unregistered_provider)).final_output == "done"
+
+            with telemetry.trace("owned", options={"metadata": {"caller": "ambient"}}):
+                async with agent.session() as session:
+                    assert (
+                        await (await session.submit("Read.")).get_result()
+                    ).final_output == "done"
+            fast = Agent(
+                instructions="Answer.",
+                model="gpt-5.5",
+                provider=replace(unregistered_provider, agent_harness_id="from-fast-path"),
+            )
+            assert (await fast.run("Read.")).final_output == "fast"
+
+        with telemetry.trace(
+            "routing.root",
+            options={"metadata": {"agent_harness_id": "root-route", "root-only": True}},
+        ):
+            with telemetry.span(
+                "routing.override", options={"metadata": {"agent_harness_id": "span-route"}}
+            ):
+                pass
+            with telemetry.span("routing.sibling"):
+                pass
+
+        assert observed == [
+            {"agent_harness_id": "from-provider"},
+            {"agent_harness_id": None, "caller": True},
+            {"agent_harness_id": "from-default"},
+            {"agent_harness_id": "from-env"},
+            {"caller": "ambient"},
+        ]
+
+        assert (await telemetry.force_flush()).status == "success"
+        ended = [event for event in events if event["lifecycle"] == "end"]
+        routing_key = "sdk.metadata.agent_harness_id"
+        provider_trace = next(
+            event["trace_id"]
+            for event in ended
+            if event["name"] == "operation"
+            and event["attributes"].get(routing_key) == "from-provider"
+        )
+        for name in ("callback", "model_client.stream_responses_api"):
+            assert any(
+                event["trace_id"] == provider_trace
+                and event["name"] == name
+                and event["attributes"].get(routing_key) == "from-provider"
+                for event in ended
+            ), f"Native span {name} did not inherit the harness routing ID"
+        assert any(
+            event["name"] == "operation"
+            and event["attributes"].get(routing_key) == "from-fast-path"
+            for event in ended
+        )
+        routed = {
+            event["name"]: event["attributes"]
+            for event in ended
+            if event["name"] in ("routing.override", "routing.sibling")
+        }
+        assert routed["routing.override"][routing_key] == "span-route"
+        assert routed["routing.sibling"][routing_key] == "root-route"
+        assert "sdk.metadata.root-only" not in routed["routing.sibling"]
+    finally:
+        await telemetry.shutdown()

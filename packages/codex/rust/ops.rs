@@ -5,7 +5,7 @@ use codex_core::context::{
     ContextualUserFragment, InternalContextSource, InternalModelContextFragment,
 };
 use codex_core_api::{AbsolutePathBuf, CodexThread, WithTurnExtensionData};
-use codex_extension_api::ExtensionDataInit;
+use codex_extension_api::{ExtensionDataInit, ToolNotFoundBehavior};
 use codex_protocol::config_types::{
     ApprovalsReviewer, CollaborationMode, Personality, ReasoningSummary, ToolChoice,
     WindowsSandboxLevel,
@@ -423,6 +423,8 @@ pub fn model_settings(params: Value) -> Result<ThreadSettingsOverrides> {
 pub struct StartOptions {
     turn_trigger: Option<String>,
     model_override: Option<String>,
+    model_settings_override:
+        Option<codex_protocol::model_request_controls::RunModelSettingsOverride>,
     final_output_json_schema: Option<Value>,
     service_tier: Option<String>,
     parent_turn_id: Option<String>,
@@ -472,6 +474,8 @@ impl Default for Mode {
 
 params!(TurnParams {
     input: Value,
+    #[serde(default)]
+    raise_on_unknown_tool: bool,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     observation_submission_id: Option<String>,
     client_id: Option<String>,
@@ -562,6 +566,19 @@ pub async fn submit_replaceable_with_attempts(
     let mut p: TurnParams = decode(value)?;
     if let Some(model) = p.start.model_override.as_deref() {
         if let Err(error) = state.engine.validate_model(model).await {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
+    }
+    if let Some(settings) = &p.start.model_settings_override {
+        let mut controls = model_settings(serde_json::to_value(settings)?)?;
+        controls.model = p.start.model_override.clone();
+        if let Err(error) = state
+            .engine
+            .validate_request_controls(&state.thread, &controls)
+            .await
+        {
             return Ok(json!({"status": "not_submitted", "reason": {
                 "type": "model_override_refused", "message": error.to_string()
             }}));
@@ -848,7 +865,10 @@ pub(crate) async fn interrupt_managed_root(
 }
 
 params!(RecoveryOptions {
+    #[serde(default)]
+    raise_on_unknown_tool: bool,
     model_override: Option<String>,
+    model_settings_override: Option<codex_protocol::model_request_controls::RunModelSettingsOverride>,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     trace: Option<W3cTraceContext>,
     observation_submission_id: Option<String>,
@@ -862,6 +882,7 @@ pub async fn recover_prepared(
     original_call_ids: Vec<String>,
     value: Value,
     terminal: Option<crate::python_tools::RecoveredToolCompletionSeed>,
+    staged_input: Option<codex_extension_api::StagedInputBatch>,
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
     if let Some(model) = p.model_override.as_deref() {
@@ -871,8 +892,26 @@ pub async fn recover_prepared(
             }}));
         }
     }
+    if let Some(settings) = &p.model_settings_override {
+        let mut controls = model_settings(serde_json::to_value(settings)?)?;
+        controls.model = p.model_override.clone();
+        if let Err(error) = state
+            .engine
+            .validate_request_controls(&state.thread, &controls)
+            .await
+        {
+            return Ok(json!({"status": "not_submitted", "reason": {
+                "type": "model_override_refused", "message": error.to_string()
+            }}));
+        }
+    }
     let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;
+    init.insert(if p.raise_on_unknown_tool {
+        ToolNotFoundBehavior::RaiseError
+    } else {
+        ToolNotFoundBehavior::ReturnErrorToModel
+    });
     if let Some(submission) = p.observation_submission_id {
         state
             .request_metadata
@@ -882,6 +921,9 @@ pub async fn recover_prepared(
         p.operation_declaration_source,
     ));
     crate::recovery_guard::Seed::attach(&mut init, &turn_id, original_call_ids);
+    if let Some(staged) = staged_input {
+        init.insert(staged);
+    }
     if let Some(terminal) = terminal {
         terminal.attach(&mut init);
     }
@@ -894,6 +936,7 @@ pub async fn recover_prepared(
                 trace: p.trace,
                 cyber_access_program: None,
                 model_override: p.model_override,
+                model_settings_override: p.model_settings_override,
                 final_output_json_schema: p.output_schema.map(Value::Object),
             },
             init,
@@ -939,11 +982,28 @@ async fn start_with_params<'a>(
             Some(init) => init,
             None => thread.config_snapshot().await.turn_extension_init,
         };
+        if p.raise_on_unknown_tool {
+            ensure!(
+                matches!(p.mode, Mode::StartIfIdle | Mode::ContinueIfIdle),
+                "Unknown-tool handling requires a new managed turn"
+            );
+        }
+        if !matches!(p.mode, Mode::Steer) {
+            init.insert(if p.raise_on_unknown_tool {
+                ToolNotFoundBehavior::RaiseError
+            } else {
+                ToolNotFoundBehavior::ReturnErrorToModel
+            });
+        }
         init.insert(crate::agent_profiles::OperationDeclarationSource(
             p.operation_declaration_source,
         ));
         Some(init)
     } else {
+        ensure!(
+            !p.raise_on_unknown_tool,
+            "Unknown-tool handling requires a managed Session"
+        );
         ensure!(
             p.operation_declaration_source.is_none(),
             "Operation declaration provenance requires a managed Session"
@@ -1121,7 +1181,7 @@ params!(RecoverParams {
     #[serde(default, with = "StartOptions")]
     start_options: TurnStartOptions
 });
-params!(RecoverIdleParams { turn_id: String, model_override: Option<String>, #[serde(default, alias = "settings", with = "ThreadSettings")] thread_settings: ThreadSettingsOverrides, trace: Option<W3cTraceContext>, cyber_access_program: Option<CyberAccessProgram>, final_output_json_schema: Option<Value> });
+params!(RecoverIdleParams { turn_id: String, model_override: Option<String>, model_settings_override: Option<codex_protocol::model_request_controls::RunModelSettingsOverride>, #[serde(default, alias = "settings", with = "ThreadSettings")] thread_settings: ThreadSettingsOverrides, trace: Option<W3cTraceContext>, cyber_access_program: Option<CyberAccessProgram>, final_output_json_schema: Option<Value> });
 params!(CommunicationParams {
     communication: InterAgentCommunication,
     #[serde(default, with = "StartOptions")]
@@ -1258,6 +1318,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                         trace: p.trace,
                         cyber_access_program: p.cyber_access_program,
                         model_override: p.model_override,
+                        model_settings_override: p.model_settings_override,
                         final_output_json_schema: p.final_output_json_schema,
                     })
                     .await?,

@@ -30,6 +30,7 @@ from .manual import _CapturedManual as _CapturedManual
 from .realtime_result import BackgroundResult as BackgroundResult
 
 if TYPE_CHECKING:
+    from ._agent_tool import _ConfiguredAgentTool
     from ._function_tools import (
         FunctionTool,
         ToolContext,
@@ -443,6 +444,18 @@ class ToolSearchResult:
         object.__setattr__(self, "tool_refs", refs)
 
 
+ToolCaller = Literal["direct", "code"]
+ToolNotFoundBehavior = Literal["return_error_to_model", "raise_error"]
+
+
+def _capture_tool_not_found_behavior(value: ToolNotFoundBehavior | None) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, str) or value not in ("return_error_to_model", "raise_error"):
+        raise ValueError("tool_not_found_behavior must be 'return_error_to_model' or 'raise_error'")
+    return value == "raise_error"
+
+
 @dataclass(frozen=True)
 class ToolCallInfo:
     """Observed identity, never authority to execute or answer a tool call.
@@ -688,6 +701,7 @@ class _CapturedFunction:
 
     _allow_run_error_formatter: bool = field(default=False, repr=False)
     _reparse_error_arguments: bool = field(default=False, repr=False)
+    configured_agent: _ConfiguredAgentTool | None = field(default=None, repr=False)
 
     @property
     def _requires_live_manual_session(self) -> bool:

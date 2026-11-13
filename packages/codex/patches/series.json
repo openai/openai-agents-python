@@ -891,7 +891,59 @@
     {
       "path": "sdk-native-custom-string-tools.patch",
       "sha256": "cb1835cce8e8926674ac438a8b6713ec71053c73db1270dd88ee27d763c3322f"
+    },
+    {
+      "path": "sdk-independent-websocket-base.patch",
+      "sha256": "b29ef217c5eb88d94fc48bb6d6ef2b06c458e6ab6df5ca5cdbfd9e94bb52385a"
+    },
+    {
+      "path": "sdk-staged-manual-continuation-input.patch",
+      "sha256": "9954e733d95ce8fac27fb8fbac4286067149eec4191363c09428ffaa00be64d4"
+    },
+    {
+      "path": "sdk-function-tool-callers.patch",
+      "sha256": "21594792346cd2fa805d34ae09d55737c9b8a7f1d3e55c733c4748edbeeafb7d"
+    },
+    {
+      "path": "sdk-request-transport-overrides.patch",
+      "sha256": "75adf85dded181bed0b7d305f84a62fc9833aeadf4458bc2cb1202a09eab3fdc"
+    },
+    {
+      "path": "sdk-run-model-settings-override.patch",
+      "sha256": "849b156deac04874666679f7ee72cc0e8b8fa078f0897cebe5bdaf1b05748b09"
+    },
+    {
+      "path": "sdk-request-transport-persistence.patch",
+      "sha256": "f8e67bc2384ebccf6875d5cdafd96ce79b3aaec9be3b7d7237431fe665b5b3b3"
+    },
+    {
+      "path": "sdk-request-transport-startup-warmup.patch",
+      "sha256": "a7409b913c6d9fc3a8e9aae391dede4d31c273b11f6492ceb03c21817444c2ab"
+    },
+    {
+      "path": "sdk-agent-profile-request-transport.patch",
+      "sha256": "8ebc06c4e9b3dadbabf9dc68595d141a83602f0a425e1095e909f2ad4869f193"
+    },
+    {
+      "path": "sdk-unknown-direct-tool-policy.patch",
+      "sha256": "708d7a5b452a6c2dcc799c5c64057888b64a302812272b522a2ecf4fad45fa06"
+    },
+    {
+      "path": "sdk-agent-harness-span-metadata.patch",
+      "sha256": "edac1f3bc0818c8454af005f8393dc583a5e579c625dab7f93489067ffaec9d7"
+    },
+    {
+      "path": "sdk-final-step-builtin-tools.patch",
+      "sha256": "e01c2fd4518cb72b33b4d440454baf0042160546d4d66958914c6478e6d4b94a"
+    },
+    {
+      "path": "sdk-client-version.patch",
+      "sha256": "1fae03966cd574d2522aea5e036fc4fdd02bba45716952cf7991cae32ec642b1"
+    },
+    {
+      "path": "sdk-provider-history-lineage.patch",
+      "sha256": "6080a8a7da76718c431a73a53136244af8e87d8108d79314e054d066db30ace6"
     }
   ],
-  "result_tree": "c4f7bda5e22fa172767cca2219b79505a1823d8e"
+  "result_tree": "bae0ede6894150d4f5d7b5e786e81ad7b48cf5dd"
 }

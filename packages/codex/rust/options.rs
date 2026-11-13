@@ -11,6 +11,7 @@ use codex_extension_api::{
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::{SessionSource, ThreadHistoryMode, ThreadSource, W3cTraceContext};
+use codex_protocol::provider_history::ProviderHistorySelection;
 use codex_protocol::{ThreadId, ToolName};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
@@ -52,6 +53,8 @@ impl ThreadInstructionsProvider for ThreadInstructions {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThreadOptions {
+    #[serde(rename = "_provider_history")]
+    provider_history: Option<ProviderHistorySelection>,
     // Set only by private one-shot constructors, never by JSON options.
     #[serde(skip)]
     pub(crate) private_http: bool,
@@ -71,6 +74,9 @@ pub struct ThreadOptions {
     pub(crate) application_instructions: Option<String>,
     #[serde(rename = "_agent_profiles")]
     pub(crate) agent_profiles: Option<crate::agent_profiles::OpeningProfiles>,
+    #[serde(rename = "_sdk_request_transport")]
+    sdk_request_transport:
+        Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
     #[serde(rename = "_sdk_instruction_files")]
     pub(crate) sdk_instruction_files: Option<Vec<crate::application_instructions::InstructionFile>>,
     #[serde(rename = "_manual_tool_slots")]
@@ -265,7 +271,7 @@ impl ThreadOptions {
         }
         let runtime = merged(base_runtime, self.runtime)?;
         let source = merged(base_config, self.config)?;
-        let configuration = match initial_config {
+        let mut configuration = match initial_config {
             Some(initial)
                 if serde_json::from_str::<Value>(&source)?
                     == serde_json::from_str::<Value>(base_config)?
@@ -275,10 +281,22 @@ impl ThreadOptions {
             }
             _ => config::load(&source, &runtime, Some(cloud)).await?.0,
         };
+        if let Some(transport) = self.sdk_request_transport {
+            let controls = codex_protocol::model_request_controls::ModelRequestControls {
+                request_transport: Some(Some(transport)),
+                ..Default::default()
+            };
+            controls.validate_shape().map_err(anyhow::Error::msg)?;
+            configuration.sdk_request_controls.apply_patch(&controls);
+        }
         let instructions = Arc::new(ThreadInstructions(
             RwLock::new(self.instructions),
             self.share_instructions_with_subagents,
         ));
+        if let Some(selection) = &self.provider_history {
+            selection.validate_shape().map_err(anyhow::Error::msg)?;
+        }
+        configuration.sdk_provider_history = self.provider_history;
         let mut options = StartThreadOptions::new(configuration);
         options
             .thread_extension_init

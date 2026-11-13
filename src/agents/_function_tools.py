@@ -36,6 +36,7 @@ from _agents_codex._function_tools import (
     ResultT as ResultT,
     StdioMCP as StdioMCP,
     Tool as Tool,
+    ToolCaller as ToolCaller,
     ToolCallInfo as ToolCallInfo,
     ToolContext as ToolContext,
     ToolContextT as ToolContextT,
