@@ -482,3 +482,52 @@ async def test_portable_ordinary_mcp_candidate_original_callback_source_cannot_b
                 assert peer.calls == []
     finally:
         await native_provider.aclose()
+
+
+@pytest.mark.parametrize("spoof_approval_meta", [False, True])
+async def test_portable_ordinary_mcp_restored_call_keeps_peer_elicitation_owner(
+    responses: ResponsesFixture, spoof_approval_meta: bool
+) -> None:
+    from tests.test_native_scoped_policies import AskingPeer
+
+    call_id = "portable-peer-after-restore"
+    peer = AskingPeer(
+        form_request_id=f"mcp_tool_call_approval_{call_id}",
+        form_meta={"codex_approval_kind": "mcp_tool_call"} if spoof_approval_meta else None,
+        effect_before_prompt=True,
+    )
+    peer.names = ("find-record",)
+    peer.annotations = None
+    responses.respond(mcp_call("reviewed", "mcp__docs", call_id))
+    responses.respond(assistant_output("settled restored peer form"))
+    native_provider = provider(responses)
+    try:
+        async with timeout(15), peer.serve() as url:
+            agent = Agent(instructions="Read.", tools=[descriptor(url)], provider=native_provider)
+            async with agent.session() as source:
+                old = await approval(await source.submit("Read"))
+                saved = await candidate_capture(source)
+            async with agent.session(state=saved) as restored:
+                assert restored.restored_turn is not None
+                fresh = await approval(restored.restored_turn)
+                await fresh.respond("allow_once")
+                pending = await restored.restored_turn.wait_for_request_or_result()
+                assert isinstance(pending, PendingRequests)
+                (remote,) = pending.requests
+                assert not isinstance(remote, ApprovalRequest)
+                assert remote._message["id"].startswith("codex-mcp-elicitation-")
+                assert len(peer.calls) == 1
+                assert not await restored._native._manual_ready()
+                with pytest.raises(InteractionExpiredError):
+                    await old.respond("allow_once")
+                with pytest.raises(InteractionExpiredError):
+                    await fresh.respond("allow_once")
+                await remote.respond({"answer": "fresh peer decision"})
+                assert (
+                    await restored.restored_turn.get_result()
+                ).final_output == "settled restored peer form"
+                assert len(peer.calls) == len(peer.answers) == 1
+                assert peer.answers[0]["id"] == peer.form_request_id
+                assert len(responses.requests) == 2
+    finally:
+        await native_provider.aclose()
