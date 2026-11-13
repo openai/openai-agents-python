@@ -188,7 +188,10 @@ def test_release_checks_gate_collection_without_rebuilding() -> None:
             else:
                 assert "if" not in step
     tests = yaml.load(TESTS_WORKFLOW.read_text(), Loader=yaml.BaseLoader)
-    assert set(tests["on"]["push"]["branches"]) == {"main", "feat/codex-harness", "ci/hillclimb/*"}
+    assert set(tests["on"]["push"]["branches"]) == {
+        "ci/hillclimb/python-warm-seed-16",
+        "ci/hillclimb/python-warm-consumer-16",
+    }
 
 
 def test_release_checks_reject_stale_lockfile(tmp_path: Path) -> None:

@@ -66,7 +66,7 @@ def test_native_producer_uses_only_verified_products_across_runs() -> None:
 
 
 def _condition(expression: str, values: dict[str, str]) -> bool:
-    expression = expression.removeprefix("${{ ").removesuffix(" }}")
+    expression = expression.removeprefix("${{ ").removesuffix(" }}").replace("\n", " ")
     expression = re.sub(
         r"(?:github|inputs|steps|env|needs)\.[a-zA-Z0-9_.-]+",
         lambda match: repr(values[match[0]]),
@@ -76,7 +76,12 @@ def _condition(expression: str, values: dict[str, str]) -> bool:
     return bool(
         eval(
             expression.replace("&&", " and ").replace("||", " or ").replace("!cancelled()", "True"),
-            {"__builtins__": {}, "startsWith": str.startswith},
+            {
+                "__builtins__": {},
+                "startsWith": str.startswith,
+                "fromJSON": json.loads,
+                "toJSON": json.dumps,
+            },
         )
     )
 
@@ -483,7 +488,9 @@ def test_native_publication_is_a_global_barrier() -> None:
     assert not any("qualification/" in step.get("run", "") for step in steps)
     assert not any("import agents" in step.get("run", "") for step in steps)
     publication = next(step for step in steps if step.get("id") == "snapshot")
-    assert publication["with"]["name"].startswith("native-snapshot-")
+    assert publication["with"]["name"] == "${{ steps.native-inputs.outputs.artifact_name }}"
+    native_inputs = next(step for step in steps if step.get("id") == "native-inputs")
+    assert "artifact_name=native-snapshot-" in native_inputs["run"]
     qualification = yaml.load(
         (ROOT / ".github/workflows/codex-python-qualify.yml").read_text(), Loader=yaml.BaseLoader
     )["jobs"]["build"]["steps"]
@@ -510,6 +517,8 @@ def test_native_publication_is_a_global_barrier() -> None:
         ("merge_group", "feat/codex-harness", "true", True, False),
         ("push", "feat/codex-harness", "true", False, True),
         ("push", "ci/hillclimb/probe", "true", False, True),
+        ("push", "ci/hillclimb/python-warm-seed-16", "true", False, True),
+        ("push", "ci/hillclimb/python-warm-consumer-16", "true", False, True),
         ("push", "feat/codex-harness", "false", False, False),
         ("pull_request", "feat/codex-harness", "false", False, False),
         ("pull_request", "main", "true", False, False),
@@ -526,6 +535,14 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
     ]
     values = {
         "inputs.native_only": False,
+        "needs.changes.outputs.warm": "false",
+        "needs.changes.outputs.windows": "true",
+        "needs.changes.result": "success",
+        "needs.produce-linux.result": "success",
+        "needs.produce-linux-arm64.result": "success",
+        "needs.produce-macos.result": "success",
+        "needs.produce-windows.result": "success",
+        "github.ref_name": branch,
         "needs.changes.outputs.code": code,
         "github.event_name": event,
         "github.ref": f"refs/heads/{branch}",
@@ -544,11 +561,26 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
         job = jobs[name]
         assert (produced and _condition(job["if"], values)) is runs
         assert job["uses"] == "./.github/workflows/codex-python-qualify.yml"
-        assert job["with"] == {
+        expected = {
+            **(
+                {
+                    "native_source_run": (
+                        "${{ needs.changes.outputs.warm == 'true' && "
+                        "needs.changes.outputs.native_source_run || '' }}"
+                    ),
+                    "native_artifacts": (
+                        "${{ needs.changes.outputs.warm == 'true' && "
+                        "needs.changes.outputs.native_artifacts || '{}' }}"
+                    ),
+                }
+                if name == "native-linux-arm64"
+                else {}
+            ),
             **producer["with"],
             "artifact_id": "${{ needs.produce-linux-arm64.outputs.artifact_id }}",
             "artifact_digest": "${{ needs.produce-linux-arm64.outputs.artifact_digest }}",
         }
+        assert job["with"] == expected
     assert set(jobs["native-linux-arm64-pr"]["needs"]) == {"changes", "produce-linux-arm64"}
     assert set(jobs["native-linux-arm64"]["needs"]) == {
         "changes",
@@ -572,9 +604,17 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
         ("true", "false", "success", "skipped", "skipped", False, False),
     ],
 )
-@pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
+@pytest.mark.parametrize(
+    ("event", "branch"),
+    [
+        ("push", "feat/codex-harness"),
+        ("workflow_dispatch", "feat/codex-harness"),
+        ("push", "ci/hillclimb/python-warm-seed-16"),
+    ],
+)
 def test_global_publication_failure_blocks_every_sdk_entry(
     event: str,
+    branch: str,
     code: str,
     windows: str,
     linux_result: str,
@@ -589,6 +629,9 @@ def test_global_publication_failure_blocks_every_sdk_entry(
     values = {
         "inputs.native_only": False,
         "github.event_name": event,
+        "github.ref_name": branch,
+        "needs.changes.outputs.warm": "false",
+        "needs.produce-linux-arm64.result": "success",
         "needs.changes.result": "success",
         "needs.changes.outputs.code": code,
         "needs.changes.outputs.windows": windows,
@@ -614,6 +657,9 @@ def test_review_entries_tolerate_only_windows_publication_failure(
     ]
     values = {
         "github.event_name": event,
+        "github.ref_name": "feat/codex-harness",
+        "needs.changes.outputs.warm": "false",
+        "needs.produce-linux-arm64.result": "success",
         "inputs.native_only": False,
         "needs.changes.result": "success",
         "needs.changes.outputs.code": "true",
@@ -895,7 +941,11 @@ def test_native_only_push_routes_through_the_existing_global_pipeline() -> None:
     assert "!github.event.deleted" in caller["jobs"]["native-only"]["if"]
     assert "concurrency" not in caller
     suite = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
-    assert "pull_request" in suite["on"]
+    assert suite["on"]["push"]["branches"] == [
+        "ci/hillclimb/python-warm-seed-16",
+        "ci/hillclimb/python-warm-consumer-16",
+    ]
+    assert set(suite["on"]) == {"push", "workflow_call"}
     assert suite["on"]["workflow_call"]["inputs"]["native_only"]["default"] == "false"
     for name, job in suite["jobs"].items():
         if name not in {
@@ -909,9 +959,15 @@ def test_native_only_push_routes_through_the_existing_global_pipeline() -> None:
             "native-linux-arm64",
             "native-linux-arm64-pr",
         }:
-            assert "!inputs.native_only" in job["if"], name
+            if name in {"native-macos-sandbox", "tests-windows"}:
+                parent = job["needs"]
+                assert "!inputs.native_only" in suite["jobs"][parent]["if"]
+                assert job["if"] == "${{ always() && needs." + parent + ".result != 'skipped' }}"
+            else:
+                assert "!inputs.native_only" in job["if"], name
     changes = suite["jobs"]["changes"]
-    assert changes["if"] == "github.event_name != 'push' || !github.event.deleted"
+    assert "github.repository == 'openai/openai-agents-python'" in changes["if"]
+    assert "!github.event.deleted" in changes["if"]
     checkout = changes["steps"][0]
     assert "ref" not in checkout["with"]  # PR Tests retains its event merge checkout.
     windows = next(step for step in changes["steps"] if step.get("id") == "release-windows")
@@ -927,6 +983,39 @@ def test_native_only_push_routes_through_the_existing_global_pipeline() -> None:
         ("example/fork", "push", "ci/native-bundle/seed", False, False, True),
         ("openai/openai-agents-python", "push", "feature", True, False, False),
         ("example/fork", "push", "feature", False, False, True),
+        (
+            "openai/openai-agents-python",
+            "push",
+            "ci/hillclimb/python-warm-seed-16",
+            False,
+            False,
+            True,
+        ),
+        (
+            "openai/openai-agents-python",
+            "push",
+            "ci/hillclimb/python-warm-consumer-16",
+            False,
+            False,
+            True,
+        ),
+        (
+            "openai/openai-agents-python",
+            "push",
+            "ci/hillclimb/python-warm-consumer-16",
+            True,
+            False,
+            False,
+        ),
+        ("example/fork", "push", "ci/hillclimb/python-warm-consumer-16", False, False, False),
+        (
+            "openai/openai-agents-python",
+            "workflow_dispatch",
+            "ci/hillclimb/python-warm-consumer-16",
+            False,
+            False,
+            False,
+        ),
         ("openai/openai-agents-python", "push", "main", False, False, True),
         ("openai/openai-agents-python", "push", "main", True, False, False),
         ("openai/openai-agents-python", "push", "feat/codex-harness", False, False, True),
@@ -944,6 +1033,7 @@ def test_push_routing_excludes_deletion_and_foreign_repositories(
         "github.repository": repository,
         "github.event_name": event,
         "github.ref_name": branch,
+        "github.ref": "refs/heads/" + branch,
         "github.event.repository.default_branch": "main",
         "github.event.deleted": deleted,
     }
@@ -951,7 +1041,14 @@ def test_push_routing_excludes_deletion_and_foreign_repositories(
         fnmatchcase(branch, pattern) for pattern in caller["on"]["push"]["branches"]
     )
     assert (triggered and _condition(caller["jobs"]["native-only"]["if"], values)) is native_push
-    assert _condition(suite["jobs"]["changes"]["if"], values) is tests
+    # This snapshot exposes only the two literal benchmark push routes.
+    expected = (
+        repository == "openai/openai-agents-python"
+        and event == "push"
+        and not deleted
+        and branch in {"ci/hillclimb/python-warm-seed-16", "ci/hillclimb/python-warm-consumer-16"}
+    )
+    assert _condition(suite["jobs"]["changes"]["if"], values) is expected
 
 
 @pytest.mark.parametrize("runner", ["ubuntu-24.04", "windows-latest", "macos-latest"])
@@ -1071,6 +1168,9 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         conditions = {
             "inputs.native_only": False,
             "github.event_name": "workflow_dispatch",
+            "github.ref_name": "feat/codex-harness",
+            "needs.changes.outputs.warm": "false",
+            "needs.produce-linux-arm64.result": "skipped",
             "needs.changes.result": "success",
             "needs.changes.outputs.code": "true",
             "needs.changes.outputs.windows": "true",
@@ -1080,3 +1180,105 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         }
         for name in ("native-linux", "native-windows", "native-macos"):
             assert not _condition(suite["jobs"][name]["if"], conditions)
+
+
+@pytest.mark.parametrize(
+    ("branch", "warm", "arm_result", "allowed"),
+    [
+        ("ci/hillclimb/python-warm-seed-16", "false", "success", True),
+        ("ci/hillclimb/python-warm-seed-16", "false", "failure", False),
+        ("ci/hillclimb/python-warm-seed-16", "false", "skipped", False),
+        ("ci/hillclimb/python-warm-consumer-16", "true", "skipped", True),
+    ],
+)
+def test_literal_benchmark_cold_barrier_and_verified_warm_replay(
+    branch: str, warm: str, arm_result: str, allowed: bool
+) -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    result = "skipped" if warm == "true" else "success"
+    values = {
+        "inputs.native_only": False,
+        "github.event_name": "push",
+        "github.ref_name": branch,
+        "github.ref": "refs/heads/" + branch,
+        "github.base_ref": "",
+        "github.event.merge_group.base_ref": "",
+        "needs.changes.result": "success",
+        "needs.changes.outputs.code": "true",
+        "needs.changes.outputs.windows": "true",
+        "needs.changes.outputs.warm": warm,
+        "needs.produce-linux.result": result,
+        "needs.produce-macos.result": result,
+        "needs.produce-windows.result": result,
+        "needs.produce-linux-arm64.result": arm_result,
+    }
+    for platform in ("linux", "linux-arm64", "windows", "macos"):
+        assert _condition(jobs["produce-" + platform]["if"], values) is (warm != "true")
+    for name in (
+        "lint",
+        "build-docs",
+        "native-linux",
+        "native-linux-arm64",
+        "native-windows",
+        "native-macos",
+        "native-macos-sandbox-shards",
+        "tests-windows-shards",
+    ):
+        assert _condition(jobs[name]["if"], values) is allowed, name
+    selector = next(step for step in jobs["changes"]["steps"] if step.get("id") == "native-source")
+    assert (
+        "github.ref_name == 'ci/hillclimb/python-warm-consumer-16'"
+        in selector["env"]["WARM_SNAPSHOT_REPLAY"]
+    )
+    assert "run['head_branch'] != 'ci/hillclimb/python-warm-seed-16'" in selector["run"]
+    assert (
+        "Approved warm replay requires a completed verified four-platform seed" in selector["run"]
+    )
+    assert "warm=true" in selector["run"]
+
+
+@pytest.mark.parametrize("branch", ["python-warm-seed-16", "python-warm-consumer-16"])
+def test_benchmark_guard_rejects_matching_tag_names(branch: str) -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    values = {
+        "github.repository": "openai/openai-agents-python",
+        "github.event_name": "push",
+        "github.event.deleted": False,
+        "github.ref": "refs/tags/ci/hillclimb/" + branch,
+    }
+    assert not _condition(jobs["changes"]["if"], values)
+
+
+@pytest.mark.parametrize("branch", ["python-warm-seed-16", "python-warm-consumer-16"])
+@pytest.mark.parametrize(
+    ("runner", "source_run", "expected"),
+    [
+        ("macos-latest", "", "macos-26-xlarge"),
+        ("macos-latest", "123", "macos-15"),
+        ("ubuntu-24.04-arm", "", {"group": "codex-runners", "labels": "codex-linux-arm64"}),
+        ("windows-latest", "", {"group": "codex-runners", "labels": "codex-windows-x64-xl"}),
+    ],
+)
+def test_exact_benchmark_native_runner_routes(
+    branch: str, runner: str, source_run: str, expected: object
+) -> None:
+    values = {
+        "github.repository": "openai/openai-agents-python",
+        "github.event_name": "push",
+        "github.ref_name": "ci/hillclimb/" + branch,
+        "github.event.pull_request.head.repo.full_name": "",
+        "github.event.pull_request.stack.base.ref": "",
+        "github.base_ref": "",
+        "inputs.runner": runner,
+        "inputs.native_source_run": source_run,
+    }
+    expression = _native_job()["runs-on"].removeprefix("${{ ").removesuffix(" }}")
+    assert _condition(expression + " == " + repr(expected), values)
+    qualifier = yaml.load(
+        (ROOT / ".github/workflows/codex-python-qualify.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    assert "'\"macos-15\"'" in qualifier["jobs"]["build"]["runs-on"]

@@ -50,18 +50,18 @@ jobs:
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' &&
-          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) &&
+          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')) &&
           '{"group":"codex-runners","labels":"codex-linux-arm64"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
           (inputs.native_source_run == '' &&
            ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
              (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness') ||
-            (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')))) &&
+            (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')))) &&
            '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
            '{"group":"codex-runners","labels":"codex-windows-x64"}') ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' &&
           (inputs.native_source_run != '' && '"macos-15"' ||
-           (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10'))) &&
+           (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16'))) &&
            '"macos-26-xlarge"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
       ) }}
@@ -139,7 +139,7 @@ jobs:
         env:
           ARM_CARGO_BUILD_JOBS: >-
             ${{ github.repository == 'openai/openai-agents-python' && inputs.native_source_run == '' &&
-              github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) && '14' || '3' }}
+              github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')) && '14' || '3' }}
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
@@ -280,7 +280,7 @@ jobs:
         if: >-
           runner.os == 'Windows' && inputs.native_source_run == '' &&
           !(github.repository == 'openai/openai-agents-python' &&
-          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')))
+          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')))
         run: |
           python -I -S - <<'PYTHON'
           import os
@@ -330,7 +330,7 @@ jobs:
               os.environ.get("RUNNER_OS") == "Windows"
               and os.environ.get("GITHUB_REPOSITORY") == "openai/openai-agents-python"
               and os.environ.get("GITHUB_EVENT_NAME") == "push"
-              and os.environ.get("GITHUB_REF_NAME") in {"feat/codex-harness", "ci/hillclimb/python-warm-seed-10", "ci/hillclimb/python-warm-consumer-10"}
+              and os.environ.get("GITHUB_REF_NAME") in {"feat/codex-harness", "ci/hillclimb/python-warm-seed-16", "ci/hillclimb/python-warm-consumer-16"}
           ):
               subprocess.run(
                   ["cargo", "test", "--release", "--locked", *options,
@@ -554,7 +554,7 @@ jobs:
     if: >-
       inputs.runner == 'windows-latest' && inputs.native_source_run == '' &&
       github.repository == 'openai/openai-agents-python' &&
-      github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10'))
+      github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || (github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16'))
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
     defaults:

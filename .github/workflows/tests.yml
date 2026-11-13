@@ -1,23 +1,17 @@
 name: Tests
 
+# Temporary benchmark only; no canonical, PR, or manual workflow coverage claim.
 on:
   push:
     branches:
-      - main
-      - feat/codex-harness
-      - 'ci/hillclimb/*'
-  pull_request:
-    # All PRs, including stacked PRs
-  merge_group:
-    types: [checks_requested]
+      - ci/hillclimb/python-warm-seed-16
+      - ci/hillclimb/python-warm-consumer-16
   workflow_call:
     inputs:
       native_only:
         type: boolean
         required: false
         default: false
-  workflow_dispatch:
-  # Use GitHub's Re-run failed jobs action to retry this run.
 
 concurrency:
   # Keep explicit retries and trusted native producers out of the PR cancellation group.
@@ -40,7 +34,10 @@ env:
 
 jobs:
   changes:
-    if: github.event_name != 'push' || !github.event.deleted
+    if: >-
+      github.repository == 'openai/openai-agents-python' && github.event_name == 'push' &&
+      !github.event.deleted && (github.ref == 'refs/heads/ci/hillclimb/python-warm-seed-16' ||
+      github.ref == 'refs/heads/ci/hillclimb/python-warm-consumer-16')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -179,8 +176,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_BRANCH: >-
-            ${{ (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10') &&
-            'ci/hillclimb/python-warm-seed-10' || ((github.event.pull_request.stack.base.ref || github.base_ref ||
+            ${{ (github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16') &&
+            'ci/hillclimb/python-warm-seed-16' || ((github.event.pull_request.stack.base.ref || github.base_ref ||
             steps.producer-identity.outputs.base_ref || github.ref_name) == 'feat/codex-harness' ||
              startsWith(github.ref_name, 'ci/hillclimb/')) &&
             'feat/codex-harness' || github.event.repository.default_branch }}
@@ -189,8 +186,8 @@ jobs:
           CURRENT_HEAD_REF: ${{ github.head_ref || github.ref_name }}
           CURRENT_BASE_REF: ${{ github.base_ref || steps.producer-identity.outputs.base_ref || '' }}
           REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
-          REQUIRE_ARM64: ${{ github.event_name == 'push' && (github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10') }}
-          WARM_SNAPSHOT_REPLAY: ${{ github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref_name == 'ci/hillclimb/python-warm-consumer-10' }}
+          REQUIRE_ARM64: ${{ github.event_name == 'push' && (github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16') }}
+          WARM_SNAPSHOT_REPLAY: ${{ github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref_name == 'ci/hillclimb/python-warm-consumer-16' }}
         run: |
           python -I -S - <<'PYTHON'
           import json
@@ -210,7 +207,7 @@ jobs:
           warm_replay = (os.environ.get('WARM_SNAPSHOT_REPLAY') == 'true'
                          and repo == 'openai/openai-agents-python'
                          and os.environ['GITHUB_EVENT_NAME'] == 'push'
-                         and os.environ.get('GITHUB_REF_NAME') == 'ci/hillclimb/python-warm-consumer-10')
+                         and os.environ.get('GITHUB_REF_NAME') == 'ci/hillclimb/python-warm-consumer-16')
           api = os.environ['GITHUB_API_URL'] + '/repos/' + repo + '/actions'
           headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
           download_archive = runpy.run_path('.github/scripts/download-native-snapshot.py')['download_archive']
@@ -279,7 +276,7 @@ jobs:
                       return False
               source = run['head_sha']
               if warm_replay:
-                  if not canonical_source or run['head_branch'] != 'ci/hillclimb/python-warm-seed-10':
+                  if not canonical_source or run['head_branch'] != 'ci/hillclimb/python-warm-seed-16':
                       return False
                   original_tree = subprocess.check_output(['git', 'rev-parse', source + '^{tree}'], text=True).strip()
                   current_tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
@@ -571,7 +568,7 @@ jobs:
       !cancelled() &&
       ((needs.changes.outputs.warm == 'true' && needs.changes.result == 'success' && needs.changes.outputs.code == 'true') ||
       ((github.event_name == 'push' && needs.changes.outputs.code == 'true' && needs.produce-linux-arm64.result == 'success' && needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' && (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success' || needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped')) &&
-      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')) || needs.produce-linux-arm64.result == 'success')))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
       native_source_run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || '' }}
@@ -593,7 +590,7 @@ jobs:
       (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
       (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))) &&
-      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')) || needs.produce-linux-arm64.result == 'success')))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
       native_source_run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || '' }}
@@ -612,7 +609,7 @@ jobs:
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
       ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped')) && needs.changes.outputs.windows == 'true') &&
-      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')) || needs.produce-linux-arm64.result == 'success')))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
       native_source_run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || '' }}
@@ -632,7 +629,7 @@ jobs:
       (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
       (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))) &&
-      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')) || needs.produce-linux-arm64.result == 'success')))
     uses: ./.github/workflows/codex-python-qualify.yml
     with:
       native_source_run: ${{ needs.changes.outputs.warm == 'true' && needs.changes.outputs.native_source_run || '' }}
@@ -656,7 +653,7 @@ jobs:
       (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
       (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))) &&
-      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')) || needs.produce-linux-arm64.result == 'success')))
     env:
       UV_NO_SYNC: "1"
       PYTHONPATH: src:packages/codex/src
@@ -1131,7 +1128,7 @@ jobs:
       (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
       (needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))) &&
-      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-10' || github.ref_name == 'ci/hillclimb/python-warm-consumer-10')) || needs.produce-linux-arm64.result == 'success')))
+      (!(github.event_name == 'push' && !inputs.native_only && needs.changes.outputs.code == 'true' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-warm-seed-16' || github.ref_name == 'ci/hillclimb/python-warm-consumer-16')) || needs.produce-linux-arm64.result == 'success')))
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     env:

@@ -815,7 +815,10 @@ def test_default_branch_code_push_requests_windows_without_a_release(
 
 def test_windows_jobs_follow_the_selected_native_producer() -> None:
     workflow = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
-    assert "workflow_dispatch" in workflow["on"]
+    assert workflow["on"]["push"]["branches"] == [
+        "ci/hillclimb/python-warm-seed-16",
+        "ci/hillclimb/python-warm-consumer-16",
+    ]
     jobs = workflow["jobs"]
     producer = jobs["produce-windows"]
     assert producer["needs"] == "changes"
@@ -1284,7 +1287,10 @@ def test_native_build_selection(
     native_workflow_path = ".github/workflows/codex-python.yml"
     native_workflow_text = (ROOT / native_workflow_path).read_text()
     workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
-    assert "workflow_dispatch" in workflow["on"]
+    assert workflow["on"]["push"]["branches"] == [
+        "ci/hillclimb/python-warm-seed-16",
+        "ci/hillclimb/python-warm-consumer-16",
+    ]
     changes = workflow["jobs"]["changes"]
     selection = next(step for step in changes["steps"] if step.get("id") == "native-source")
     assert selection["env"]["REQUIRE_WINDOWS"] == "${{ steps.release-windows.outputs.run }}"
@@ -1702,7 +1708,7 @@ def test_native_build_selection(
         else "success",
     }
     if warm_replay and scenario != "wrong_branch":
-        source["head_branch"] = "ci/hillclimb/python-warm-seed-10"
+        source["head_branch"] = "ci/hillclimb/python-warm-seed-16"
     source["referenced_workflows"] = [
         {
             "path": f"{repository}/{path}@{donor}",
@@ -2354,8 +2360,8 @@ def test_native_build_selection(
         monkeypatch.setenv("WARM_SNAPSHOT_REPLAY", "true")
         monkeypatch.setenv("REQUIRE_ARM64", "true")
         monkeypatch.setenv("REQUIRE_WINDOWS", "true")
-        monkeypatch.setenv("GITHUB_REF_NAME", "ci/hillclimb/python-warm-consumer-10")
-        monkeypatch.setenv("SOURCE_BRANCH", "ci/hillclimb/python-warm-seed-10")
+        monkeypatch.setenv("GITHUB_REF_NAME", "ci/hillclimb/python-warm-consumer-16")
+        monkeypatch.setenv("SOURCE_BRANCH", "ci/hillclimb/python-warm-seed-16")
         if scenario != "reuse":
             with pytest.raises(SystemExit, match="Approved warm replay requires"):
                 exec(compile(script, workflow_path, "exec"), {})
