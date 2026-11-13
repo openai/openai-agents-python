@@ -8,10 +8,10 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .._function_tools import FunctionTool, Tool
+from .._function_tools import Tool
 from .._public import preserve_module_identity as _preserve_module_identity
 from ..observation import EventGap, OutputTextDelta
-from ..session import Session, _split_tools
+from ..session import Session
 from ..tools import ToolRef
 from ..turn import Turn
 
@@ -93,23 +93,7 @@ class NativeSessionVoiceWorkflow:
 
         tools = self._tools
         if tools:
-            self._session._check_open()
-            source = self._session._effective_agent()
-            current, _, _ = _split_tools(
-                tools,
-                source.programmatic_tool_calling,
-                available=self._session._bindings,
-                ceiling=source.tools,
-                environment=self._session._executor,
-                native_agents=self._session._native_agents,
-                handoffs=self._session._effective_handoffs(),
-            )
-            # Resolve only after the original selector passes exact source checks.
-            # Submission still rejects a binding superseded by a racing mutation.
-            bindings = {tool.ref: tool for tool in current}
-            tools = tuple(
-                bindings[tool.ref] if isinstance(tool, FunctionTool) else tool for tool in tools
-            )
+            tools = self._session._select_voice_tools(tools)
 
         # Reserve before awaiting admission. A passive wait retains the exact Turn if
         # cancellation races with submit returning its locally issued handle.

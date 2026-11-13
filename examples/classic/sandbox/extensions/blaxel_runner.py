@@ -1,30 +1,33 @@
 """
 Blaxel-backed sandbox example for manual validation.
 
+The separate-environment instructions in sandbox/README.md have been keeping this
+example on MCP v1 because the locked MCP v2 environment has been incompatible.
+
 This example mirrors the other cloud extension runners. It supports:
 - Standard agent run (non-streaming and streaming).
 - PTY interactive session demo (agent-driven).
 - Blaxel Drive mount demo (persistent storage).
 
 Prerequisites:
-  uv sync --extra classic-blaxel
+  # Separate MCP v1 environment: examples/classic/sandbox/README.md#cloud-backend-examples
   export OPENAI_API_KEY=...
   export BL_API_KEY=...
   export BL_WORKSPACE=...
 
 Run:
   # Basic agent run
-  uv run python examples/classic/sandbox/extensions/blaxel_runner.py --stream
+  python examples/classic/sandbox/extensions/blaxel_runner.py --stream
 
   # With a specific image and region
-  uv run python examples/classic/sandbox/extensions/blaxel_runner.py \\
+  python examples/classic/sandbox/extensions/blaxel_runner.py \\
       --image blaxel/py-app --region us-pdx-1 --stream
 
   # PTY terminal demo (agent-driven interactive Python session)
-  uv run python examples/classic/sandbox/extensions/blaxel_runner.py --demo pty
+  python examples/classic/sandbox/extensions/blaxel_runner.py --demo pty
 
   # Drive mount demo (requires an existing drive, defaults region to us-was-1)
-  uv run python examples/classic/sandbox/extensions/blaxel_runner.py \\
+  python examples/classic/sandbox/extensions/blaxel_runner.py \\
       --demo drive --drive-name my-drive
 """
 

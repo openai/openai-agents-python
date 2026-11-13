@@ -1,13 +1,10 @@
 # Sandbox resume
 
-This example shows a small sandbox resume flow with `AGENTS.md` mounted in the sandbox and loaded into the agent instructions. It runs in two
-steps: first it builds the app and smoke tests it, then it serializes the
-sandbox session state, resumes the sandbox, and adds pytest coverage.
+The [sandbox setup guide](../../README.md) covers source installation, model credentials, and the Unix-local isolation limits. These tutorials also import `rich`; use `uv run --with rich` in place of `uv run` in the commands below when the environment does not install it.
 
-By default the agent builds a tiny warehouse-robot status API, smoke-tests it, then resumes the same sandbox to add tests. The sandbox workspace starts with
-one instruction file:
+This example runs two tasks in the same sandbox workspace: build and smoke-test a warehouse-robot status API, then resume the workspace and add pytest coverage.
 
-- `AGENTS.md` with instructions to build FastAPI apps, use type hints and Pydantic, install dependencies with `uv`, run Python commands through `uv run python`, and test locally before finishing.
+The script mounts `AGENTS.md` and also uses its content as agent instructions. Those instructions call for FastAPI, type hints, Pydantic, dependency installation with `uv`, and local testing.
 
 Run the example from the repository root:
 
@@ -15,7 +12,7 @@ Run the example from the repository root:
 uv run python examples/classic/sandbox/tutorials/sandbox_resume/main.py
 ```
 
-This demo exits after the scripted resume flow so the serialized session state and resume step stay easy to follow.
+Both runs happen in one process. The script serializes and deserializes sandbox state in memory, carries forward the conversation with `result.to_input_list()`, and resumes the workspace for the second task. It deletes both sessions on exit; it does not save a checkpoint file or retain the generated application for later use. Inspect the streamed tool events and final answers for the build and test results.
 
 You can override the model or prompt:
 
@@ -23,8 +20,7 @@ You can override the model or prompt:
 uv run python examples/classic/sandbox/tutorials/sandbox_resume/main.py --model gpt-5.6-sol --question "Build a FastAPI service that exposes a warehouse robot's maintenance status."
 ```
 
-To run the same flow in Docker, build the shared tutorial image once and pass
-`--docker`:
+To run the same flow in Docker, build the shared tutorial image once and pass `--docker`:
 
 ```bash
 docker build --tag sandbox-tutorials:latest examples/classic/sandbox/tutorials

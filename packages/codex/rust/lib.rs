@@ -2453,8 +2453,13 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_model_producer(request_id)))
     }
 
-    #[pyo3(signature = (request_id, *, chat_stream=false))]
-    fn _start_model_producer_stream(&self, request_id: u64, chat_stream: bool) -> PyResult<bool> {
+    #[pyo3(signature = (request_id, *, chat_stream=false, upstream_request_id=None))]
+    fn _start_model_producer_stream(
+        &self,
+        request_id: u64,
+        chat_stream: bool,
+        upstream_request_id: Option<String>,
+    ) -> PyResult<bool> {
         let Some(inner) = self.live()? else {
             return Ok(false);
         };
@@ -2465,7 +2470,12 @@ impl NativeThread {
         Ok(store
             .get::<python_tools::PythonTools>()
             .is_some_and(|tools| {
-                tools.start_model_producer_stream(request_id, observe_raw, chat_stream)
+                tools.start_model_producer_stream(
+                    request_id,
+                    observe_raw,
+                    chat_stream,
+                    upstream_request_id,
+                )
             }))
     }
 

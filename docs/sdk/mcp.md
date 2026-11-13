@@ -2,33 +2,47 @@
 
 Use Model Context Protocol (MCP) servers to expose external tools to an agent. Codex manages the connection and dispatches calls; the selected server executes the operation with its own permissions.
 
-[Install the SDK](installation.md) and [configure the provider](configuration.md#provider-connection) first. Examples with `await` belong inside an async application.
+[Install the SDK](installation.md) and [configure the provider](models.md#provider-connection) first. Examples with `await` belong inside an async application.
 
 ## Connect an HTTP server
 
-Use `HttpMCP` for Streamable HTTP. The declaration selects the server's raw tool names. For this HTTP example, set `DOCS_MCP_URL` and `DOCS_MCP_TOKEN` for your server, which must provide `search`:
+Use `HttpMCP` for Streamable HTTP. You need a running server with a tool named `search`. Set `DOCS_MCP_URL` to its endpoint and `DOCS_MCP_TOKEN` to its bearer token, then save this script as `mcp_search.py`:
 
 ```python
+import asyncio
 import os
 
 from agents import Agent, HttpMCP
 
-agent = Agent(
-    instructions="Answer using the documentation search tool.",
-    tools=[
-        HttpMCP(
-            name="docs",
-            url=os.environ["DOCS_MCP_URL"],
-            tools=("search",),
-            bearer_token=os.environ["DOCS_MCP_TOKEN"],
-        )
-    ],
-)
+
+async def main() -> None:
+    agent = Agent(
+        instructions="Answer using the documentation search tool.",
+        tools=[
+            HttpMCP(
+                name="docs",
+                url=os.environ["DOCS_MCP_URL"],
+                tools=("search",),
+                bearer_token=os.environ["DOCS_MCP_TOKEN"],
+            )
+        ],
+    )
+    result = await agent.run("Find the installation requirements.")
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
+
+Run `python mcp_search.py` with your model credentials configured. The SDK connects when the selected tool is prepared for use. The model can call `search`, then return an answer using your server's results. `agent.run()` closes the Session and connection when the run ends. If your server requires interactive approval, add an [interaction handler](#configure-mcp-approval).
+
+To try MCP without providing an existing server, run the [local catalog recipe](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/README.md#connect-mcp-servers-and-inspect-transport-retries). It starts its own stdio server.
+
 
 Read the token in application code and pass its value as `bearer_token`. The declaration keeps that value. Restore uses the application's current declarations and credentials.
 
-The custom `headers` and explicit `env` options below are intended for a forthcoming preview. The `0.24.0-alpha.7` wheel does not include them.
+The custom `headers` and explicit `env` options below require a [matching development build](installation.md#use-development-branch-examples). The `0.24.0-alpha.7` wheel does not include them.
 
 Pass custom HTTP fields through `headers`, for example `headers={"X-Region": "eu"}`. The declaration captures a copy of the map and rejects duplicate names regardless of case. If you supply an `Authorization` header, omit `bearer_token` so the declaration has one source of authorization. `HostedVerificationMCP` also accepts custom headers; `ChatGPTAppsMCP` keeps its fixed authentication fields.
 
@@ -51,7 +65,7 @@ server = StdioMCP(
 )
 ```
 
-Include `server` in the Agent's `tools` list. By default, `location="host"` starts the server on the application host. Set `location="environment"` to start it through the Session's selected executor, either `Environment.local()` or a remote `Environment`. A connected Environment can host stdio MCP servers even when `Environment.tools` is empty.
+Include `server` in the Agent's `tools` list. By default, `location="host"` starts the server on the application host. Set `location="environment"` to start the server through the Session's selected executor, either `Environment.local()` or a remote `Environment`. A connected Environment can host stdio MCP servers even when `Environment.tools` is empty.
 
 Codex manages the process and its standard input and output connection until the Session closes. Supply a trusted command because the process uses the selected machine's permissions. Tool selection and approval do not sandbox server startup.
 
@@ -66,36 +80,15 @@ Configure the server's process environment as follows:
 
 Restore uses the application's current server declarations and Environment.
 
-## Reuse an application-owned MCP client
+## Select and discover tools
 
-If your application already owns a Classic `MCPServer` connection, use `agents.migration.mcp` to select its tools for a native Agent. Install the [Classic extra](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md#install-the-classic-extra) with a [matching development build](installation.md#preview-availability).
+Include each MCP declaration in the opening Agent or Session `tools` list. Use `server.tool(raw_name)` to select one of its raw tool names for a turn or step. See [select individual tools](tools.md#select-individual-tools) for a Python and MCP example.
 
-The alpha.7 wheel can reject valid adapter results with `ValueError: Tool result failed validation`. On alpha.7, keep the existing client on Classic or connect directly with [`HttpMCP`](#connect-an-http-server) or [`StdioMCP`](#start-a-stdio-server).
-
-In this async fragment, `client` is a connected `agents.classic.mcp.MCPServer` that offers `search`. Use your application context for `app_context`.
-
-```python
-from agents import Agent
-from agents.migration.mcp import MCPNamespace, select_mcp_tools
-
-selected = await select_mcp_tools(
-    MCPNamespace(name="docs", server=client),
-    context=app_context,
-    tool_names=["search"],
-)
-agent = Agent(instructions="Search the documentation before answering.", tools=selected)
-result = await agent.run("Find the installation requirements.", context=app_context)
-```
-
-Pass the same context object during selection and execution. Your application opens and closes the client; native Session cleanup leaves it open. Keep its authentication scope stable while the selected tools are in use. A new selection refreshes supported client caches for future bindings.
-
-Selection retains the client's filters. A callable classic filter also needs `filter_context=(run_context, classic_agent)` with the matching classic run context and Agent. Omitted `tool_names` selects all tools that pass the filter; an empty list selects none. A requested tool that is missing or filtered out fails selection.
-
-Use `approval=` for a per-call native `ToolContext` policy that returns `Allow()` or `Deny(reason)`. The adapter rejects classic approval requirements, tool guardrails, metadata/result hooks, and custom error policies rather than silently dropping them. Keep workflows that need those contracts on classic until you port their policies. Direct `HttpMCP` and `StdioMCP` declarations above remain the starting point for new integrations.
+Set `defer_loading=True` on the declaration to offer its selected schemas through native tool search on compatible models. Other models receive the schemas directly. Discovery does not delay the selected server's connection or startup. See [tool schema discovery](tools.md#discover-tool-schemas) for the common selection rules.
 
 ## Configure MCP approval
 
-MCP selection and approval are separate. The default `approval_mode="native"` keeps Codex's native approval rules, which can require interaction when a tool lacks annotations or can make changes. Answer supported live requests through `session.interactions()` or a [one-shot handler](approvals.md#handle-native-approvals-and-forms). A run without a handler can raise `InteractionRequired` when a native decision is needed. A successful read-only tool does not prove that a write tool can run without interaction.
+Selecting a tool makes it available to the model; approval decides whether a requested call can run. The default `approval_mode="native"` keeps Codex's native approval rules, which can require interaction when a tool lacks annotations or can make changes. Answer supported live requests through `session.interactions()` or a [one-shot handler](approvals.md#handle-native-approvals-and-forms). A run without a handler can raise `InteractionRequired` when a native decision is needed. A successful read-only tool does not prove that a write tool can run without interaction.
 
 To explicitly approve calls to selected tools, use `approval_mode="preapproved"`. This fragment reuses the `HttpMCP` import above:
 
@@ -125,58 +118,6 @@ An MCP server cannot ask your interaction handler for forms or approvals during 
 Codex normalizes the tool namespaces the model sees. Conflicting names fail before the model can use the tools.
 
 For lists that mix context-aware Python tools and MCP declarations, MyPy may need an explicit `list[Tool[Application]]` or `Agent[Application, Answer]` annotation.
-
-## Service-specific integrations
-
-`HostedVerificationMCP` and `ChatGPTAppsMCP` are SDK declarations for applications that already have separately provisioned access to the selected service. The declarations do not establish general service availability, enroll a user or provide credentials. Use them only with the service access, account and keys provisioned for your application.
-
-Both reserve the `codex_apps` server name. Ordinary `HttpMCP` declarations cannot use that alias to activate verification. Each Session has one fixed registration. To replace the service or its credentials, open a fresh Session. You can still narrow the registration's captured tools with `registration.tool(raw_name)`.
-
-### Register a trusted verification service
-
-Use `HostedVerificationMCP` for your application's trusted verification service. The host owns enrollment and signing keys; the service must verify and consume each challenge. This declaration requires `VERIFICATION_MCP_URL` and `VERIFICATION_MCP_TOKEN` for an already provisioned service that exposes a raw tool named `search`:
-
-```python
-import os
-
-from agents import Agent, HostedVerificationMCP
-
-registration = HostedVerificationMCP(
-    url=os.environ["VERIFICATION_MCP_URL"],
-    bearer_token=os.environ["VERIFICATION_MCP_TOKEN"],
-    tools=("search",),
-)
-agent = Agent(instructions="Use the registered service.", tools=[registration])
-```
-
-Opening the Session with this declaration admits `VerificationRequest`. Supply an application-owned signer through the [verification handler](approvals.md#answer-a-verification-challenge). An ordinary MCP server cannot activate that signer. This registration does not initiate personal ChatGPT connector authorization.
-
-### Connect personal ChatGPT Apps
-
-Use `ChatGPTAppsMCP` only when your application already has permission to use a first-party ChatGPT access token and its exact account. These credentials are separate from the model provider's API key or Codex login. The SDK fixes the server name and first-party endpoint; the declaration accepts neither a replacement URL nor `bearer_token`.
-
-This declaration requires `CHATGPT_APPS_ACCESS_TOKEN` and `CHATGPT_APPS_ACCOUNT_ID` from your provisioned access. Replace `calendar_search` with a raw tool name available to that account:
-
-```python
-import os
-
-from agents import Agent, ChatGPTAppsMCP
-
-registration = ChatGPTAppsMCP(
-    access_token=os.environ["CHATGPT_APPS_ACCESS_TOKEN"],
-    account_id=os.environ["CHATGPT_APPS_ACCOUNT_ID"],
-    tools=("calendar_search",),
-)
-agent = Agent(instructions="Use the selected personal Apps tool.", tools=[registration])
-```
-
-The SDK does not read a stored login, refresh this token or open a browser. If a connector requires OAuth, your application handles the [live URL request](approvals.md#handle-native-approvals-and-forms); the browser must use the same ChatGPT identity. The backend checks the requested scopes and actual grants before reporting completion. Completion does not automatically replay the original tool call or sign a subsequent verification challenge. Handle those later actions separately.
-
-## Select and discover tools
-
-Include each MCP declaration in the opening Agent or Session `tools` list. Use `server.tool(raw_name)` to select one of its raw tool names for a turn or step. See [select individual tools](tools.md#select-individual-tools) for a Python and MCP example.
-
-Set `defer_loading=True` on the declaration to offer its selected schemas through native tool search on compatible models. Other models receive the schemas directly. Discovery does not delay the selected server's connection or startup. See [tool schema discovery](tools.md#discover-tool-schemas) for the common selection rules.
 
 ## Replace and restore MCP connections
 
@@ -263,3 +204,76 @@ Checkpoints store no transform callbacks. Restore uses the current Agent's decla
 ## Observe MCP calls
 
 Read `ToolStarted` and `ToolFinished` from `session.events()` to observe call identity and completion status. These passive records omit arguments and results. An MCP start can precede approval and execution, and cancellation can leave a call without a finish record. See [tool notifications](tools.md#tool-notifications) for buffer limits and event consumption.
+
+## Reuse an application-owned MCP client
+
+If your application already owns a Classic `MCPServer` connection, use `agents.migration.mcp` to select its tools for a native Agent. Install the [Classic extra](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md#install-the-classic-extra) with a [matching development build](installation.md#use-development-branch-examples).
+
+The alpha.7 wheel can reject valid adapter results with `ValueError: Tool result failed validation`. On alpha.7, keep the existing client on Classic or connect directly with [`HttpMCP`](#connect-an-http-server) or [`StdioMCP`](#start-a-stdio-server).
+
+This fragment belongs inside your async application. It assumes that `client` is a connected `agents.classic.mcp.MCPServer` that offers `search`. Use your application context for `app_context`.
+
+```python
+from agents import Agent
+from agents.migration.mcp import MCPNamespace, select_mcp_tools
+
+selected = await select_mcp_tools(
+    MCPNamespace(name="docs", server=client),
+    context=app_context,
+    tool_names=["search"],
+)
+agent = Agent(instructions="Search the documentation before answering.", tools=selected)
+result = await agent.run("Find the installation requirements.", context=app_context)
+```
+
+Pass the same context object during selection and execution. Your application opens and closes the client; native Session cleanup leaves it open. Keep its authentication scope stable while the selected tools are in use. A new selection refreshes supported client caches for future bindings.
+
+Selection retains the client's filters. A callable classic filter also needs `filter_context=(run_context, classic_agent)` with the matching classic run context and Agent. Omitted `tool_names` selects all tools that pass the filter; an empty list selects none. A requested tool that is missing or filtered out fails selection.
+
+Use `approval=` for a per-call native `ToolContext` policy that returns `Allow()` or `Deny(reason)`. The adapter rejects classic approval requirements, tool guardrails, metadata/result hooks, and custom error policies rather than silently dropping them. Keep workflows that need those contracts on classic until you port their policies. Direct `HttpMCP` and `StdioMCP` declarations above remain the starting point for new integrations.
+
+## Service-specific integrations
+
+`HostedVerificationMCP` and `ChatGPTAppsMCP` are SDK declarations for applications that already have separately provisioned access to the selected service. The declarations do not establish general service availability, enroll a user or provide credentials. Use them only with the service access, account and keys provisioned for your application.
+
+Both reserve the `codex_apps` server name. Ordinary `HttpMCP` declarations cannot use that alias to activate verification. Each Session has one fixed registration. To replace the service or its credentials, open a fresh Session. You can still narrow the registration's captured tools with `registration.tool(raw_name)`.
+
+### Register a trusted verification service
+
+Use `HostedVerificationMCP` for your application's trusted verification service. The host owns enrollment and signing keys; the service must verify and consume each challenge. This declaration requires `VERIFICATION_MCP_URL` and `VERIFICATION_MCP_TOKEN` for an already provisioned service that exposes a raw tool named `search`:
+
+```python
+import os
+
+from agents import Agent, HostedVerificationMCP
+
+registration = HostedVerificationMCP(
+    url=os.environ["VERIFICATION_MCP_URL"],
+    bearer_token=os.environ["VERIFICATION_MCP_TOKEN"],
+    tools=("search",),
+)
+agent = Agent(instructions="Use the registered service.", tools=[registration])
+```
+
+Opening the Session with this declaration admits `VerificationRequest`. Supply an application-owned signer through the [verification handler](approvals.md#answer-a-verification-challenge). An ordinary MCP server cannot activate that signer. This registration does not initiate personal ChatGPT connector authorization.
+
+### Connect personal ChatGPT Apps
+
+Use `ChatGPTAppsMCP` only when your application already has permission to use a first-party ChatGPT access token and its exact account. These credentials are separate from the model provider's API key or Codex login. The SDK fixes the server name and first-party endpoint; the declaration accepts neither a replacement URL nor `bearer_token`.
+
+This declaration requires `CHATGPT_APPS_ACCESS_TOKEN` and `CHATGPT_APPS_ACCOUNT_ID` from your provisioned access. Replace `calendar_search` with a raw tool name available to that account:
+
+```python
+import os
+
+from agents import Agent, ChatGPTAppsMCP
+
+registration = ChatGPTAppsMCP(
+    access_token=os.environ["CHATGPT_APPS_ACCESS_TOKEN"],
+    account_id=os.environ["CHATGPT_APPS_ACCOUNT_ID"],
+    tools=("calendar_search",),
+)
+agent = Agent(instructions="Use the selected personal Apps tool.", tools=[registration])
+```
+
+The SDK does not read a stored login, refresh this token or open a browser. If a connector requires OAuth, your application handles the [live URL request](approvals.md#handle-native-approvals-and-forms); the browser must use the same ChatGPT identity. The backend checks the requested scopes and actual grants before reporting completion. Completion does not automatically replay the original tool call or sign a subsequent verification challenge. Handle those later actions separately.

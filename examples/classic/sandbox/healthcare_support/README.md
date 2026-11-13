@@ -1,39 +1,10 @@
 # Healthcare support
 
-This example shows how to build a healthcare support workflow with Agents SDK using both standard agents and a sandbox agent. The scenario is intentionally synthetic and generic: a patient asks a billing or coverage question, the workflow checks local records, inspects policy documents in an isolated sandbox workspace, writes support artifacts, and optionally routes one ambiguous case to a human reviewer.
-
-## What this example demonstrates
-
-- **Standard agent orchestration** with a top-level support orchestrator and a benefits subagent.
-- **Sandbox agents** with a mounted workspace, shell commands, a generated output folder, and runtime-selected sandbox config.
-- **Sandbox capabilities** including `Shell`, `Filesystem`, and lazy-loaded `Skills`.
-- **Human-in-the-loop approvals** using an approval-gated queue-routing tool.
-- **Persistent memory** with `SQLiteSession`, shared across scenario runs.
-- **Structured outputs** for each specialist agent and the final case resolution.
-- **Tracing** so you can inspect every model call and tool call in the OpenAI trace viewer.
-- **CLI-first workflow** that can be run scenario by scenario from the repository checkout.
-
-## Architecture
-
-The workflow has two execution modes working together:
-
-1. A **standard orchestrator agent** runs in the normal Agents SDK loop, calls the benefits subagent first, then calls a sandbox agent tool, and decides whether to request a human handoff.
-2. A **sandbox policy agent** runs behind `agents.classic.sandbox`, reads the mounted case files and policy documents, uses shell commands plus a lazily loaded skill, writes markdown artifacts into `output/`, and returns a structured policy summary.
-
-The local fixture data lives in `data/scenarios/*.json` and `data/fixtures/*.json`. The sandbox policy library lives in `policies/*.md`. Generated artifacts are copied to `.cache/healthcare_support/output/<scenario_id>/`.
-
-## Scenarios
-
-The built-in scenarios increase in complexity:
-
-- `eligibility_verification_basic` checks a straightforward benefits question.
-- `referral_status_check` adds a referral lookup.
-- `blue_cross_pt_benefits` shows a follow-up turn that benefits from the shared SQLite memory.
-- `prior_auth_confusion_ct` focuses on prior-authorization and intake-routing confusion.
-- `billing_coverage_clarification` combines benefits lookup with sandbox policy search and document generation.
-- `messy_ambiguous_knee_case` triggers the human approval flow before queueing a handoff.
+This demo answers synthetic healthcare billing and coverage questions. A Classic orchestrator checks local records, asks a sandbox agent to read policy documents and write support artifacts, and can request a simulated human handoff.
 
 ## Run the CLI demo
+
+Complete [sandbox setup](../README.md), including Classic source installation and `OPENAI_API_KEY`. This demo uses Unix-local execution: commands run as host processes, with no OS-level confinement on Linux. Use trusted synthetic inputs in a trusted development environment or provide external isolation.
 
 From the repository root:
 
@@ -50,11 +21,39 @@ uv run python examples/classic/sandbox/healthcare_support/main.py --scenario mes
 uv run python examples/classic/sandbox/healthcare_support/main.py --reset-memory
 ```
 
-For unattended runs, set `EXAMPLES_INTERACTIVE_MODE=auto` to auto-answer prompts:
+`--reset-memory` deletes the shared `.cache/healthcare_support/sessions.db` database before starting another scenario. It clears history for all demo scenarios.
+
+For unattended runs, set `EXAMPLES_INTERACTIVE_MODE=auto` to auto-answer prompts, including approval of the simulated human handoff:
 
 ```bash
 EXAMPLES_INTERACTIVE_MODE=auto uv run python examples/classic/sandbox/healthcare_support/main.py --scenario messy_ambiguous_knee_case
 ```
+
+After a run, the terminal prints a trace URL, the patient-facing response, internal summary, next step, artifact paths, and memory recap. The next scenario reuses the shared SQLite history unless you reset it.
+
+## Scenarios
+
+The built-in scenarios increase in complexity:
+
+- `eligibility_verification_basic` checks a straightforward benefits question.
+- `referral_status_check` adds a referral lookup.
+- `blue_cross_pt_benefits` shows a follow-up turn that benefits from the shared SQLite memory.
+- `prior_auth_confusion_ct` focuses on prior-authorization and intake-routing confusion.
+- `billing_coverage_clarification` combines benefits lookup with sandbox policy search and document generation.
+- `messy_ambiguous_knee_case` triggers the human approval flow before queueing a handoff.
+
+<a id="what-this-example-demonstrates"></a>
+
+## Architecture
+
+The workflow combines two agents:
+
+1. A standard orchestrator runs in Classic Runner, calls the benefits subagent, asks the sandbox policy agent for evidence, and decides whether to request a human handoff.
+2. A sandbox policy agent uses `agents.classic.sandbox` to read mounted case files and policies. Its `Shell`, `Filesystem`, and lazy-loaded `Skills` capabilities support policy search and Markdown artifact creation. It returns a structured policy summary to the orchestrator.
+
+The orchestrator returns a structured case resolution. A shared `SQLiteSession` preserves history across scenario runs, and SDK tracing records the model and tool calls.
+
+Fixture paths below are relative to this example directory: `data/scenarios/*.json`, `data/fixtures/*.json`, and `policies/*.md`. Generated artifacts are copied to `.cache/healthcare_support/output/<scenario_id>/` under the repository root.
 
 ## Files to read first
 

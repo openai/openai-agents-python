@@ -15,6 +15,6 @@ The release page contains the versioned downloads, checksums, and release notes.
 
 ## Machine-readable topic index
 
-[topics.json](topics.json) lists package metadata and task aliases for coding agents. File paths are relative to this SDK guide's directory. `release` identifies the published tag; `published_release` links to its downloads and release notes. `published_guide` links to the corrected setup and quickstart for that release. The original release tag remains unchanged.
+[topics.json](topics.json) lists package metadata and task aliases for coding agents. File paths are relative to this SDK guide's directory. `package_version` and `release` identify the version targeted by these source files; check `status` before treating that version as published. `published_release` links to the available release's downloads and notes, and `published_guide` links to its corrected setup and quickstart. The original release tag remains unchanged.
 
 `source_ref` identifies the development branch. Fetch the index and linked files from one pinned commit to keep them consistent. Contributor build instructions are in [CONTRIBUTING.md](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md).

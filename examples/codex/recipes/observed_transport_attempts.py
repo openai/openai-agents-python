@@ -1,16 +1,15 @@
-"""Caller-owned HTTP transport observation around a borrowed Responses client.
+"""Count HTTP transport entries around a borrowed Responses client.
 
-From the matching source build, the command has been running without credentials:
-    python -m examples.codex.recipes.observed_transport_attempts
+Run `python -m examples.codex.recipes.observed_transport_attempts` from the
+matching source checkout with its SDK installed. Install the openai, httpx,
+and aiohttp dependencies from the contributor environment.
 
-One native model invocation has been receiving a synthetic 503 then 200 through
-the borrowed client's retry loop. The caller has been counting transport entries
-before awaiting a send, separately from peer receipt and completed model usage.
-Entry has not been proving a socket write, provider receipt, success, or billing.
-These process-local counts have not been covering other clients, native internal
-requests, child clients, remote-service retries, or work before observation.
-The caller has been owning installation, retention, and trusted attribution.
-"""
+A loopback peer returns HTTP 503, then HTTP 200, without live credentials.
+The borrowed client retries once. The caller counts transport entries before
+each send, separately from peer receipts and completed model responses.
+Entry does not prove a socket write, service receipt, success, or billing.
+The counts cover only this transport and exclude other clients, native internal
+requests, child clients, remote retries, and work before observation."""
 
 from __future__ import annotations
 

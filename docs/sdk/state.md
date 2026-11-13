@@ -27,13 +27,7 @@ The storage choices have these limits:
 
 In `0.24.0-alpha.7` or later, `LocalStorage` rejects `programmatic_tool_calling=True` before opening work. Nested code-mode tool calls do not yet have the durable intent and result receipts needed for safe local recovery. Use a nonpersistent Session for code mode, or check the limits for [eligible settled portable checkpoints](#check-manual-checkpoint-support).
 
-`CustomStorage` supports root Sessions with automatic Python tools in `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md). It rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
-
-A custom-store reopen with unresolved root calls raises `LocalRecoveryRequired` before Core starts. Inspect `error.calls`, `error.turns`, and `error.items`; the SDK reads this metadata under the canonical writer lease. This works even when the process stopped before application code recorded the native call IDs. Verify the external outcome, then use `CustomStorage.reconcile()` with those IDs and a truthful result. Keep local-profile `reconciled_calls` separate from custom-store reconciliation.
-
-In `0.24.0-alpha.7` or later, if reconciliation fails or is cancelled, use `get_cleanup(error)` to retain any remaining storage cleanup owner. Check for `None` before calling `await cleanup.aclose()`. Retry cleanup through this owner if release fails again. Cleanup releases the original lease without repeating reconciliation or running the tool. A release failure can follow a recorded result; do not repeat reconciliation to retry release. See [retry incomplete cleanup](sessions.md#retry-incomplete-cleanup).
-
-For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage). Storage does not guarantee exactly-once external actions.
+`CustomStorage` supports root Sessions with automatic Python tools in `0.24.0-alpha.7` or later. See [application-owned storage](#store-history-in-an-application-backend) for supported configurations and recovery.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).
 
@@ -112,6 +106,18 @@ Supply one matching confirmation per unresolved call. Use `outcome="not_applied"
 
 The SDK rejects later reuse of a reconciled call ID. A new call ID can still request the same business effect. Deduplicate effects and publication with a durable application key that identifies the operation across calls and process restarts.
 
+## Store history in an application backend
+
+`CustomStorage` supports root Sessions with automatic Python tools in `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md). It rejects standalone native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
+
+Import `CustomStorage` and `SessionStore` from `agents`. Set `storage = CustomStorage(backend)` with an application backend implementing `SessionStore`, then open with `agent.session(storage=storage)`. Retain `session.id` and reopen with the same backend and `resume=saved_id`. The [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage) provides a persistent SQLite adapter and a two-process walkthrough.
+
+A custom-store reopen with unresolved root calls raises `LocalRecoveryRequired` before the native runtime starts. Inspect `error.calls`, `error.turns`, and `error.items`; the SDK reads this metadata under the canonical writer lease. This works even when the process stopped before application code recorded the native call IDs. Verify the external outcome, then use `CustomStorage.reconcile()` with those IDs and a truthful result. Keep local-profile `reconciled_calls` separate from custom-store reconciliation.
+
+In `0.24.0-alpha.7` or later, if reconciliation fails or is cancelled, use `get_cleanup(error)` to retain any remaining storage cleanup owner. Check for `None` before calling `await cleanup.aclose()`. Retry cleanup through this owner if release fails again. Cleanup releases the original lease without repeating reconciliation or running the tool. A release failure can follow a recorded result; do not repeat reconciliation to retry release. See [retry incomplete cleanup](sessions.md#retry-incomplete-cleanup).
+
+For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage). Storage does not guarantee exactly-once external actions.
+
 ## Save and restore a portable checkpoint
 
 Restore a portable checkpoint with an SDK pinned to the same Codex revision that saved it. The SDK rejects a different revision for both idle checkpoints and pending manual continuations, even when it recognizes the checkpoint JSON format. Keep the matching SDK wheel available for saved conversations you need to resume. Changing the checkpoint's `codex_revision` field does not migrate its contents.
@@ -132,7 +138,7 @@ async with agent.session(state=state) as restored:
 
 ### Check checkpoint compatibility
 
-Treat `SessionState` JSON as opaque data for this SDK and language. The current reader retains envelope versions 2 through 7 and rejects unknown versions. Versions 2 and 3 retain legacy idle and manual state; versions 4 and 5 add the output contract; versions 6 and 7 also retain settled CodeMode state. Each format still has its own restore requirements. SDK envelope versions and native checkpoint codec versions are separate. Do not edit the version or `codex_revision` to bypass validation.
+Treat `SessionState` JSON as opaque data for this SDK and language. The alpha.7 reader supports envelope versions 2 through 7. Matching development builds also support versions 8 and 9 for pending manual checkpoints with [request or token budgets](observability.md#limit-a-runs-model-requests-and-usage). Unknown versions are rejected. Recognizing a format does not guarantee that a checkpoint meets the restore requirements. The SDK envelope version and the native checkpoint codec version describe different formats. Changing either version or `codex_revision` does not migrate a checkpoint.
 
 The [checkpoint capture provenance](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/packages/codex/tests/fixtures/checkpoint_upgrades) records real idle, settled-manual, and CodeMode captures from a preview source snapshot and its matching native wheel. Retained captures qualify later candidates by replaying accepted history and checking current restore refusals. They do not establish a stable-release upgrade, coverage of every historical preview, cross-language conversion, downgrade support, or arbitrary native-revision portability. Keep the producer SDK available until your candidate passes the relevant continuation tests.
 
@@ -283,11 +289,34 @@ To check whether the Session is ready to save, use `checkpoint_status(kind="idle
 
 Capability support does not prove readiness. A readiness check reserves nothing, and `save_state()` and `suspend()` check again.
 
+## Inspect recorded items and turns
+
+`session.items()` reads recorded conversation items, and `session.turns()` reads recorded turn outcomes. Use these views to inspect accepted activity without creating live Turn handles.
+
+Both history methods return async iterators over a snapshot. They have no pagination arguments:
+
+```python
+async for item in session.items():
+    print(item)
+async for recorded_turn in session.turns():
+    print(recorded_turn)
+```
+
+Pass `subagent_id=child_id` to read a descendant's recorded items or turns, including restored outcomes. These reads do not start native work or create live `Turn` objects.
+
+In `0.24.0-alpha.7` or later, [inspect response attempts](streaming.md#inspect-response-attempts) to interpret retained provider status and counters, and correlate them with live request observations. Provider completion and SDK acceptance are separate outcomes.
+
 ## Compact conversation context
 
 While the Session is idle, use `await session.compact()` to ask Codex to compact its conversation context. The call returns `None` after native work finishes. Codex generates the summary and replaces the history. The Agent's output schema does not apply to this summary.
 
 Cancelling the call stops its native work and waits for cleanup. Closing the Session waits for the same cleanup. Submission, tool replacement, and checkpoint operations cannot run during compaction. Cancellation does not undo history changes that Codex has already committed.
+
+### Inspect recorded compaction
+
+`ContextCompacted` from `agents.observation` reports explicit or native automatic compaction, with native item and turn IDs. The pinned history format retains the summary, completed turn, and replacement history, but not the observation's compaction item ID.
+
+Use `session.items()` to read recorded summary messages and `session.turns()` to read the completed compaction turn.
 
 ### Supply a trusted summary
 
@@ -323,11 +352,17 @@ Async callbacks run on the Session loop; sync callbacks run in a worker. Cancell
 
 ## Read and edit original history
 
-Matching [source builds](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source) have been providing `session.history_snapshot()` and `session.transact_history()`. The `0.24.0-alpha.7` wheel has not been including these methods. Both methods have been requiring an idle Session with current application bindings.
+Matching [source builds](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source) provide `session.history_snapshot()` and `session.transact_history()` to read and edit original history records. The `0.24.0-alpha.7` wheel does not include these methods. Both require an idle Session with current application bindings. To reduce model input without editing original records, use [compaction](#compact-conversation-context).
 
-`history_snapshot()` has been returning a `CanonicalHistorySnapshot` from `agents.history`, with `revision`, `total`, and a tuple of original JSON object records in `items`. `limit=N` has been selecting the latest N records. `limit=0` has been returning an empty tuple with the full revision and count. The revision and total have been covering all original records, including omitted prefixes and audit-only records. Unknown fields and missing IDs have been remaining unchanged.
+`history_snapshot()` returns a `CanonicalHistorySnapshot` from `agents.history`:
 
-The following complete script has been replacing history with one user message, appending an application note, checking a stale revision, and restoring accepted state. After installing the matching source build, applications have been running it with `python edit_history.py`. The script has been using a synthetic credential and making no model requests.
+- `items` contains the original JSON object records as a tuple. `limit=N` selects the latest N records; `limit=0` returns no records.
+- `revision` identifies the complete original history, including records omitted by `limit`.
+- `total` counts all original records, including records kept only for auditing.
+
+The read preserves unknown fields and leaves missing IDs absent.
+
+Save the following complete script as `edit_history.py`, then run `python edit_history.py` with the matching source build. It replaces history with one user message, appends an application note, verifies rejection of a stale revision, and checks that save and restore preserve accepted history. It uses a synthetic credential and makes no model requests. Expected output: `History replacement, append, revision check, and restore passed.`
 
 ```python
 import asyncio
@@ -376,30 +411,19 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`transact_history()` has been checking `expected_revision` before committing one prefix-and-suffix replacement. `keep=snapshot.total` with a positive total has been appending records while preserving current model context. `keep=0` has been replacing all original history and model context, including when `items=()` clears both. Other prefixes have been retaining only model projections from the selected original records. Ambiguous partial edits across a compaction summary have been failing before commit. A stale revision has been leaving accepted history unchanged; applications have been reading a fresh snapshot and reconsidering the edit before retrying.
+`transact_history()` checks `expected_revision` before keeping the first `keep` original records and replacing the rest with `items`:
 
-Original history, current model input, and the audit record have been serving separate purposes. `model_context()` has been reading current model input, which can contain a compaction summary instead of originals. `items()` and `turns()` have been projecting recorded activity. Original-history transactions have been preserving raw storage audit records rather than erasing earlier activity. Unknown imported record types, including the application note above, have been serving only as audit data without adding model input or executing work. Native validation has been rejecting malformed executable records and invalid tool-call/result pairs.
+| Selection | Effect |
+| --- | --- |
+| `keep=snapshot.total`, when the total is positive | Append records and preserve current model context. |
+| `keep=0` | Replace all original history and model context. With `items=()`, clear both. |
+| Another prefix | Rebuild model context from only the retained original records and the supplied new records. |
 
-Acknowledged history replacements have been surviving native save and restore. A transaction with uncertain persistence has been retiring the Session and requiring closure and restore before further work. Child graphs, goals, background work, and unresolved tool effects have been requiring their dedicated lifecycle operations before history edits. Limited reads have been copying only selected records; durable reopen has still been loading full stored history.
+The runtime rejects ambiguous partial edits across a compaction summary before committing. A stale revision leaves accepted history unchanged. Read a fresh snapshot and reconsider the edit before retrying.
 
-## Inspect recorded items and turns
+`model_context()` reads current model input, which can contain a compaction summary in place of original messages. `items()` and `turns()` return supported views of recorded activity. Original-history transactions preserve the raw storage audit record, so replacing conversation history does not erase the record of earlier activity. Unknown imported record types, including the application note above, remain audit data: they neither add model input nor execute work. Native validation rejects malformed executable records and invalid tool-call and result pairs.
 
-`ContextCompacted` from `agents.observation` reports explicit or native automatic compaction, with native item and turn IDs. The pinned history format retains the summary, completed turn, and replacement history, but not the observation's compaction item ID.
-
-Use `session.items()` to read recorded summary messages and `session.turns()` to read the completed compaction turn.
-
-Both history methods return async iterators over a snapshot. They have no pagination arguments:
-
-```python
-async for item in session.items():
-    print(item)
-async for recorded_turn in session.turns():
-    print(recorded_turn)
-```
-
-Pass `subagent_id=child_id` to read a descendant's recorded items or turns, including restored outcomes. These reads do not start native work or create live `Turn` objects.
-
-In `0.24.0-alpha.7` or later, [inspect response attempts](sessions.md#inspect-response-attempts) to interpret retained provider status and counters, and correlate them with live request observations. Provider completion and SDK acceptance are separate outcomes.
+Acknowledged history replacements survive native save and restore. If the runtime cannot confirm persistence, it retires the Session; close and restore the Session before further work. Settle child graphs, goals, background work, and unresolved tool effects through their dedicated lifecycle operations before editing history. A limited snapshot copies only the selected records, but reopening durable storage still loads its full history.
 
 ## Fork a conversation
 

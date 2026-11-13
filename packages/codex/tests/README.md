@@ -4,7 +4,9 @@ The current SDK installs as `openai-agents` and imports as `agents`. Codex owns 
 
 ## Run native behavior tests
 
-Run these checks from the repository root. Before running native tests, [build from source](../MAINTAINING.md#build-from-this-source) or [install a qualified native wheel](../MAINTAINING.md#use-a-qualified-wheel-for-python-edits) that matches the checkout. A previously built `codex_agents._native` file is not a substitute. Tests import the binding normally and do not register an old binary under a new module name.
+Run these checks from the repository root with the editable SDK and development dependencies installed. For a source build, install the [native build requirements](../MAINTAINING.md#install-build-requirements), then run `make sync`. To reuse an existing native build, follow [the qualified-wheel setup](../MAINTAINING.md#use-a-qualified-wheel-for-python-edits) with an artifact that matches the checkout. `make build` alone creates a wheel in `dist/`; it does not prepare the test environment.
+
+A previously built `codex_agents._native` file is not a substitute. Tests import the binding normally and do not register an old binary under a new module name.
 
 Run a focused public behavior check:
 

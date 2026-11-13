@@ -73,7 +73,6 @@ def callback_session(root):
     session._opening_agent = profiles[0].declaration
     session._decisions_provider = profiles[0].declaration.decisions
     session._profile_current = ("agent_0", 0)
-    session._repair_transport_settings = None
     return session
 
 
@@ -343,6 +342,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
     session._model_api_key = "synthetic-profile-key"
     session._codex_login_binding = None
     session._repair_session = None
+    session._repair_transport_settings = None
     session._repair_turns = []
     session._repair_items = []
     session._repair_receipts_incomplete = False
@@ -433,8 +433,8 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
         ):
             assert model_override is None
             assert model_settings_override is None
-            assert retry_policy_override is state.retry_policy_override
-            assert raise_on_unknown_tool is state.raise_on_unknown_tool
+            assert retry_policy_override is None
+            assert raise_on_unknown_tool is False
             assert run_usage is state.run_usage
             correction_inputs.append(json.loads(input[0]["text"]))
             return Attempt()

@@ -945,8 +945,8 @@
       "sha256": "6080a8a7da76718c431a73a53136244af8e87d8108d79314e054d066db30ace6"
     },
     {
-      "path": "sdk-agent-profile-persisted-readback.patch",
-      "sha256": "73737d1542783582b0341ed6b99929b7c07ac7f5ae87778bfb79044165767dd1"
+      "path": "sdk-agent-profile-durable-transport-comparison.patch",
+      "sha256": "331ceb875035ae10cdd6c23ab34c43642b4978da51137ad1c0998cb28b024ab0"
     }
   ],
   "result_tree": "eb449dd7230a2585cf56b79bbf6bf9f0aea36e4d"

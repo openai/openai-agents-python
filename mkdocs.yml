@@ -33,26 +33,29 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
 nav:
   - Get started:
-      - Installation: installation.md
       - Quickstart: index.md
+      - Installation: installation.md
       - Core concepts: concepts.md
       - Choose how to run your agent: choosing.md
-  - Build:
-      - Task recipes: recipes.md
+      - Releases and documentation: versions.md
+  - Build an agent:
+      - Models and authentication: models.md
       - Tools: tools.md
-      - Guardrails: guardrails.md
       - MCP servers: mcp.md
-      - Conversations and streaming: sessions.md
+      - Structured output: outputs.md
+      - Conversations: sessions.md
+      - Streaming and events: streaming.md
       - Save and restore state: state.md
-      - Configuration: configuration.md
-      - Custom Responses endpoints: providers.md
+      - Configure agent behavior: configuration.md
+      - Task recipes: recipes.md
   - Control work:
+      - Guardrails: guardrails.md
       - Command execution: execution.md
       - Approvals and manual results: approvals.md
       - Delegate work: delegation.md
   - Test and operate:
       - Testing: testing.md
+      - Check custom endpoints: providers.md
       - Usage and tracing: observability.md
       - Troubleshooting: troubleshooting.md
-      - Releases and documentation: versions.md
   - API reference: reference.md

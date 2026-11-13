@@ -1,4 +1,9 @@
-"""Require a saved report before accepting the agent's final answer."""
+"""Require a saved report before accepting the agent's final answer.
+
+Run `python -m examples.codex.completion` from the repository root with
+the matching SDK and OPENAI_API_KEY. It prints the answer and saved report,
+then removes the temporary report. Live requests can incur charges.
+"""
 
 from dataclasses import dataclass
 from pathlib import Path

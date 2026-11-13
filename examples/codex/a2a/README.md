@@ -1,20 +1,50 @@
 # A2A integration
 
-The optional `agents.a2a` package connects native Agents SDK applications to independently hosted agents. It supports `a2a-sdk==1.3.0`, A2A 1.0 JSON-RPC, bounded text/JSON, and task-producing services. Install the matching SDK preview with its `a2a` extra. Server applications also install `a2a-sdk[http-server]==1.3.0` and an ASGI server.
+The optional `agents.a2a` package connects native Agents SDK applications to independently hosted agents. It supports `a2a-sdk==1.3.0`, A2A 1.0 JSON-RPC, bounded text/JSON, and task-producing services. This guide follows the current source checkout, including its newer Session configuration and recovery controls. For the released client and server recipe, use the [alpha.7 guide](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.7/examples/codex/a2a/README.md) with the matching preview wheel. Server applications also need `a2a-sdk[http-server]==1.3.0` and an ASGI server.
+
+## Before you start
+
+Use the [source-build setup](../../../CONTRIBUTING.md) for this development-branch integration, with the SDK and example files from the same revision. Activate that Python environment and run commands from the repository root. Install the client dependency:
+
+```sh
+python -m pip install 'a2a-sdk==1.3.0'
+```
+
+To compose a server, install the HTTP dependencies too:
+
+```sh
+python -m pip install 'a2a-sdk[http-server]==1.3.0'
+```
+
+The client calls an existing authenticated specialist. `server.py` provides a `create_app` factory for your host application; running that file alone does not start a server. Supply the host infrastructure described in [Expose a native Agent](#expose-a-native-agent) before serving it.
+
+Choose a task:
+
+- [Call an existing specialist](#call-a-specialist): runnable client with host-supplied endpoints and token.
+- [Expose a native Agent](#expose-a-native-agent): application factory requiring your authentication, store, and Agent configuration.
+- [Defer work to a remote task](#defer-work-to-a-remote-task): integration with an application journal.
+- [Verify recovery locally](#verify-registry-and-restart-recovery-locally): synthetic contributor tests.
 
 ## Call a specialist
 
 `client.py` discovers one host-configured Agent Card, admits only its exact configured JSON-RPC interface, and then acquires a bearer token. Use HTTPS for remote services. For local development, HTTP works on `localhost`, `127.0.0.1`, and `[::1]`.
 
-    export A2A_BEARER_TOKEN='your host-issued token'
-    python examples/codex/a2a/client.py \
-      --card-url https://specialist.example/.well-known/agent-card.json \
-      --rpc-url https://specialist.example/rpc \
-      --question 'Summarize the synthetic task'
+Set `A2A_BEARER_TOKEN` through trusted host configuration, then replace both URLs with your specialist's configured endpoints:
+
+```sh
+python examples/codex/a2a/client.py \
+  --card-url https://specialist.example/.well-known/agent-card.json \
+  --rpc-url https://specialist.example/rpc \
+  --question 'Summarize the synthetic task'
+```
+
+The client prints the single text artifact named `Validated result` when the task completes. It polls up to 60 times, waiting one second between unfinished observations. An observation timeout closes the client connection and leaves remote work running. The host must handle input-required, authentication-required, failed, or cancelled tasks; this client reports those states as errors.
 
 The application owns its registry and chooses the endpoint. A model may select a registered name through a normal FunctionTool; the host resolves that name to trusted configuration. Cards describe capabilities. They cannot select routes, credentials or permission grants. Discovery is anonymous in this profile. Redirects, alternate advertised routes and remote tenant selection are unsupported. Ordinary `import agents` does not require A2A dependencies.
 
 `connect_a2a` yields the official client. The host owns result interpretation and remote error handling. `A2ALimits` provides defensive message, response, checkpoint, progress and timeout bounds; these values are adapter defaults, not platform quotas. Configuration parameters accept their typed objects or equivalent dictionaries. In a native function callback, pass `ctx.trace_context` as `connect_a2a(..., parent_trace=ctx.trace_context)`. Only validated `traceparent` and `tracestate` headers cross this boundary. The adapter adopts no ambient tracing provider and stores no live carrier in task checkpoints.
+
+### Defer work to a remote task
 
 For work that must survive the calling worker, register `A2AJobProvider` with existing `DeferredTools` and an application `JobJournal`. The provider's `encode` converts current typed arguments into a bounded text/JSON Message. Its `project` validates completed Task artifacts into bounded application output. Register with `require_reconciliation=False`: generic A2A cannot reconcile a lost creation acknowledgment.
 
@@ -35,17 +65,23 @@ Apply the policy at these existing boundaries:
 
 These hooks let the application enforce its own policy; the SDK does not supply that policy automatically. Keep the checks bound to the current tenant, principal, endpoint and job. For example, admit a closed set of expected result codes and map them to host-owned output instead of copying arbitrary peer text.
 
+### Handle uncertain outcomes and follow-up input
+
 Known receipts support observation without creating another task. Lost create, input or cancellation acknowledgments remain unknown; neither protocol message IDs nor another connection make a replay safe. The host owns reconciliation and scheduling. Business input requires one data-object proposal with a nonempty string `challenge` and a positive whole-number `generation`. Unsupported proposals retain the acknowledged receipt as unknown and cannot reserve or send an answer. `auth-required` remains separate from business approval. A host-approved `A2AInputReply` must match the current remote task, context, challenge and generation. The host must validate domain answers before reserving them.
 
 ## Expose a native Agent
 
 `server.py` composes `NativeA2AExecutor` with official routes and an application-provided `NativeA2AStore`. The host supplies authentication middleware and a `ServerCallContextBuilder` that includes the authenticated user and the incoming `a2a-version` header in `state['headers']`. The host factory receives the trusted principal/task/context binding and current official `ServerCallContext`. It returns current `NativeA2AAgent` configuration and application context. Filter incoming trace headers from that call context and supply the resulting `parent_trace`; a fresh worker supplies a fresh parent. It must not reconstruct authority from peer metadata or checkpoint contents.
 
+### Configure each native Session
+
 With the current source build, set `NativeA2AAgent.environment` to a current `Environment` or an `EnvironmentSource` managed async context manager. The host factory runs again for every execution and resume. Return a fresh managed context manager each time. The current host configuration supplies executor tools, write and network policy, and existing Environment approval or result callbacks. Peer input and checkpoint metadata supply none of that authority. Restore still requires a matching saved executor policy.
 
 The adapter retains ownership of Session state, cancellation, and publication. The factory has no general Session or Turn options bag. Root `before_step` and `prepare_request` callbacks and portable checkpoints with an active `RunBudget` are unsupported by this adapter profile. Use direct Agent or Session calls when those controls are required.
 
 Data parts must preserve JSON values exactly. The executor fails a task if encoding its result or approval proposal would round a number. The job provider rejects such replies before reserving an action. Use strings for large integer identifiers that must retain every digit.
+
+### Handle task lifetime and continuation
 
 Each A2A task owns one native Session. Reusing a conversation context ID does not combine Sessions. Core owns model requests, tools and accepted history. Tool progress is passive; successful final artifacts follow validated `get_result()` and joined Session cleanup. Disconnecting an SSE observer leaves remote work running. Explicit CancelTask joins owned native work and reports settled state; it does not roll back completed external effects.
 
@@ -63,18 +99,20 @@ A save can succeed before its acknowledgment fails. Retain the desired snapshot 
 
 This contract supports publication recovery. It does not make separate host databases transactional or supply distributed leases, production authentication, artifact retention, a scheduler or a storage implementation.
 
-## Trusted registry and receiver restart reference
+<a id="trusted-registry-and-receiver-restart-reference"></a>
 
-The source-build [wire recovery tests](../../../packages/codex/tests/test_a2a_wire_recovery.py) have been combining a host-owned specialist registry, caller-owned credentials, a persistent SQLite task store, and an application effect receipt. The `test_official_wire_fault_recovers_retained_result_in_fresh_process` cases have been selecting only `approved-specialist` through `connect_a2a`, rejecting an unknown name before acquiring credentials, and recording one synthetic order receipt through a native function tool.
+## Verify registry and restart recovery locally
 
-With the [source-build test prerequisites](../../../CONTRIBUTING.md), the focused command from the checkout root has been exercising all three publication faults without an API key:
+The [wire recovery tests](../../../packages/codex/tests/test_a2a_wire_recovery.py) combine a host-owned specialist registry, caller-owned credentials, a persistent SQLite task store, and an application effect receipt. The `test_official_wire_fault_recovers_retained_result_in_fresh_process` cases select only `approved-specialist` through `connect_a2a`, reject unknown names before acquiring credentials, and record one synthetic order receipt through a native function tool.
+
+With the [source-build test prerequisites](../../../CONTRIBUTING.md), run all three publication faults and the cancellation case from the repository root without an API key:
 
 ```sh
 uv run pytest packages/codex/tests/test_a2a_wire_recovery.py -k 'official_wire_fault or cancel_after_handler_restart'
 ```
 
-After stopping the original receiver and official handler, each recovery case has been starting a fresh process against the saved store, republishing the committed snapshot with zero Agent factory calls, and checking the same single effect receipt. The receipt insertion itself has been serving as the synthetic business action. A real downstream operation has been requiring its own atomic receipt or idempotency contract; task publication recovery has not been establishing exactly-once delivery after an uncertain mutation acknowledgment.
+Each recovery case stops the original receiver and official handler, then starts a fresh process against the saved store. It republishes the committed snapshot with zero Agent factory calls and checks the same single effect receipt. The receipt insertion is the synthetic business action. A real downstream operation needs its own atomic receipt or idempotency contract. Task publication recovery does not establish exactly-once delivery after an uncertain mutation acknowledgment.
 
-The existing `test_cancel_after_handler_restart_retires_waiting_checkpoint` case has been covering cancellation separately. The [provider tests](../../../packages/codex/tests/test_a2a_provider.py), especially `test_lost_creation_acknowledgment_stays_unknown_after_restart`, have been retaining unknown creation outcomes without replay. The host has been owning reconciliation against an authoritative business receipt, scheduling, current authorization, and storage. These local fixtures have been demonstrating supervised worker replacement with the previous owner stopped; they have not been demonstrating production authentication, distributed leases, power-loss recovery, or subscription reconnection.
+`test_cancel_after_handler_restart_retires_waiting_checkpoint` covers cancellation separately. The [provider tests](../../../packages/codex/tests/test_a2a_provider.py), especially `test_lost_creation_acknowledgment_stays_unknown_after_restart`, retain unknown creation outcomes without replay. The host owns reconciliation against an authoritative business receipt, scheduling, current authorization, and storage. These fixtures stop the previous owner before replacing its worker. They do not test production authentication, distributed leases, power-loss recovery, or subscription reconnection.
 
-`test_host_reconciles_lost_create_from_authorized_application_receipt` has been exercising that host reconciliation. The receiver has been committing the effect and its task ID before the create acknowledgment disappears. The host has been verifying the receipt against the current specialist, endpoint, caller, operation, and generation. A fresh connection has then been using `GetTask` for the verified ID. An absent receipt or a changed binding has been leaving the outcome unknown without a new create.
+`test_host_reconciles_lost_create_from_authorized_application_receipt` checks host reconciliation. The receiver commits the effect and its task ID before the create acknowledgment disappears. The host verifies the receipt against the current specialist, endpoint, caller, operation, and generation. A fresh connection then uses `GetTask` for the verified ID. An absent receipt or a changed binding leaves the outcome unknown without a new create.

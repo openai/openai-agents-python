@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agents import Agent, ToolRef, WebSearch, function_tool
+from agents import Agent, LocalStorage, ToolRef, WebSearch, function_tool
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call
@@ -50,14 +50,14 @@ async def test_operation_tool_choice_replaces_hosted_default(choice, expected):
             ]
 
 
-@pytest.mark.parametrize("capture", ["save_state", "fork"])
+@pytest.mark.parametrize("capture", ["save_state", "fork", "local_storage"])
 @pytest.mark.parametrize(
     ("source_transport", "restored_transport"),
     [(True, True), (False, False), (True, False)],
     ids=["rebound", "unset", "removed"],
 )
 async def test_handoff_profile_rebinds_transport_without_persisting_it(
-    monkeypatch, capture, source_transport, restored_transport
+    monkeypatch, tmp_path, capture, source_transport, restored_transport
 ):
     routes: list[tuple[str | None, str | None]] = []
     original = WebSocketPeer.handle
@@ -98,28 +98,42 @@ async def test_handoff_profile_rebinds_transport_without_persisting_it(
 
         server.respond(function_call("transfer_to_worker", {}, "handoff"))
         server.respond(assistant_output("worker answer"))
-        async with graph("SYNTHETIC_SOURCE", source_transport).session() as source:
+        storage = LocalStorage(tmp_path / "sessions") if capture == "local_storage" else None
+        async with graph("SYNTHETIC_SOURCE", source_transport).session(storage=storage) as source:
             turn = await source.submit("Start.")
             assert (await turn.get_result()).final_output == "worker answer"
-            state = await getattr(source, capture)()
+            session_id = source.id
+            state = await getattr(source, capture)() if storage is None else None
         assert routes == [
             ("SYNTHETIC_SOURCE_ROOT_HEADER", "SYNTHETIC_SOURCE_ROOT_QUERY"),
             ("SYNTHETIC_SOURCE_WORKER_HEADER", "SYNTHETIC_SOURCE_WORKER_QUERY")
             if source_transport
             else (None, None),
         ]
-        encoded = state.to_json()
+        if storage is None:
+            encoded = state.to_json()
+        else:
+            encoded = "".join(path.read_text() for path in storage.path.rglob("*.jsonl"))
+            assert encoded
         assert "SYNTHETIC_SOURCE" not in encoded
 
         server.respond(assistant_output("restored worker answer"))
         async with graph("SYNTHETIC_DESTINATION", restored_transport).session(
-            state=SessionState.from_json(encoded)
+            state=SessionState.from_json(encoded) if storage is None else None,
+            storage=storage,
+            resume=session_id if storage is not None else None,
         ) as restored:
             result = await (await restored.submit("Continue.")).get_result()
             assert result.final_output == "restored worker answer"
-            assert "SYNTHETIC_DESTINATION" not in (await restored.save_state()).to_json()
+            if storage is None:
+                assert "SYNTHETIC_DESTINATION" not in (await restored.save_state()).to_json()
         assert routes[-1] == (
             ("SYNTHETIC_DESTINATION_WORKER_HEADER", "SYNTHETIC_DESTINATION_WORKER_QUERY")
             if restored_transport
             else (None, None)
         )
+        if storage is not None:
+            persisted = "".join(path.read_text() for path in storage.path.rglob("*.jsonl"))
+            assert persisted
+            assert "SYNTHETIC_SOURCE" not in persisted
+            assert "SYNTHETIC_DESTINATION" not in persisted

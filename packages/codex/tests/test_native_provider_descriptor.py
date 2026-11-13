@@ -17,7 +17,7 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
     from agents import Agent, NativeProvider
     provider = NativeProvider(
         base_url="https://example.invalid/v1", api_key="synthetic", supports_websockets=False,
-        response_mode=sys.argv[1],
+        response_mode=sys.argv[1], agent_harness_id="synthetic-harness",
     )
     expected = {
         "base_url": "https://example.invalid/v1",
@@ -36,7 +36,7 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "stream_idle_timeout_ms": None,
         "websocket_connect_timeout_ms": None,
         "websocket_base_url": None,
-        "agent_harness_id": None,
+        "agent_harness_id": "synthetic-harness",
     }
     assert [field.name for field in fields(provider)] == list(expected)
     assert asdict(provider) == expected

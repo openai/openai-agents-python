@@ -119,6 +119,8 @@ class RetryPolicyContext:
     previous_response_id: str | None = None
     conversation_id: str | None = None
     usage: TokenUsage | None = None
+    stream: bool | None = field(default=None, kw_only=True)
+    """Whether the failed request selected a streaming transport, when known."""
 
 
 RetryPolicy = Callable[[RetryPolicyContext], bool | RetryDecision | Awaitable[bool | RetryDecision]]

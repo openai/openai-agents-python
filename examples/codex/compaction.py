@@ -1,4 +1,9 @@
-"""Carry application-owned task state across automatic or manual compaction."""
+"""Carry application-owned task state across automatic or manual compaction.
+
+Run `python -m examples.codex.compaction` from the repository root with
+the matching SDK and OPENAI_API_KEY. The callback supplies the task summary
+before the agent drafts the update. Live requests can incur charges.
+"""
 
 import asyncio
 from dataclasses import dataclass

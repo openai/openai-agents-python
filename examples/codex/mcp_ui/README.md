@@ -17,16 +17,14 @@ npm --prefix examples/codex/mcp_ui run build
 NO_PROXY=127.0.0.1,localhost uv run --no-sync python -m examples.codex.mcp_ui.server --port 8081
 ```
 
-Open [the counter](http://127.0.0.1:8081) and click **Open counter**. The page shows `Counter opened.`, tool input `{"amount":1}`, a result with count `1`, and status `Complete`. The iframe shows count `1`. Click **Increment** inside the iframe to show count `2`. Restart the server to open another counter.
+Open [the counter](http://127.0.0.1:8081) and click **Open counter**. The page shows `Counter opened.`, tool input `{"amount":1}`, a result with count `1`, and status `Complete`. The iframe shows count `1`. Click **Increment** inside the iframe to show count `2`. Restart the server to open another counter. Press Ctrl+C in the server terminal when you finish. Shutdown closes the native Session and app connection; the in-memory count does not survive a restart.
 
 ## Check the browser flow
 
 Install the pinned Playwright browser once, then run the test from the repository root:
 
 ```sh
-cd examples/codex/mcp_ui
-npx playwright install chromium
-cd ../../..
+npm --prefix examples/codex/mcp_ui exec -- playwright install chromium
 OPENAI_AGENTS_BROWSER_TESTS=1 NO_PROXY=127.0.0.1,localhost uv run --no-sync python -m pytest packages/codex/tests/test_mcp_ui_browser.py -q
 ```
 

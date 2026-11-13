@@ -8,8 +8,6 @@ Install the SDK preview from a Python wheel, which includes the Python package a
 
 The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides. Use [the guides for your installed release](versions.md): development-branch guides can change between releases.
 
-For the current [v0-to-native migration guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md), including classic, use the [matching-source build and installation](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source). The current [migration tutorial](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/migration/README.md) is validated with its matching source build; that validation does not establish full compatibility with the alpha.7 wheels below. Keep the built SDK, examples, and guides on the same source commit.
-
 ## Requirements
 
 Use standard CPython 3.10 through 3.14 on one of these platforms:
@@ -74,7 +72,7 @@ Check the installed version and native module:
 python -c "from importlib.metadata import version; import agents._native; print(version('openai-agents'))"
 ```
 
-Expect `0.24.0-alpha.7` or its equivalent Python packaging spelling, `0.24.0a7`. Continue with [the quickstart for that release](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md) to set your API key and run your first agent.
+Expect `0.24.0-alpha.7` or its equivalent Python packaging spelling, `0.24.0a7`. Continue with [Run your first agent](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md#run-your-first-agent) in the matching quickstart to set your API key and run the example.
 
 ## Examples and upgrades
 
@@ -90,7 +88,13 @@ You do not need to build the SDK to run examples from that release.
 
 In the alpha.7 source archive, native examples live under `examples/codex/`. Run their module commands from the repository root, which contains the `examples` package.
 
-Development-branch examples can require APIs added after a release. Keep the example files and installed build on the same version. To run unreleased examples, follow the [contributor setup](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) to build the matching source.
+### Use development-branch examples
+
+Development-branch examples can require APIs added after a release. Keep the example files and installed build on the same version. To run unreleased examples, follow the [source-build instructions](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source).
+
+The current [v0-to-native migration guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md) and [migration tutorial](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/migration/README.md) also use a matching source build. Their validation does not establish full compatibility with the alpha.7 wheels above. Keep the SDK, examples, and guides on the same source commit.
+
+### Upgrade an installed preview
 
 To upgrade, download a newer compatible preview wheel and install it in the same environment with `python -m pip install --upgrade` followed by the wheel's path. Read that release's notes for changes before upgrading.
 

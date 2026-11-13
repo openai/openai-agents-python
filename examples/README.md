@@ -1,6 +1,8 @@
 # SDK examples
 
-- [Codex examples](codex/README.md): Current SDK workflows and setup.
-- [Classic examples](classic/README.md): Established Python runtime workflows using `agents.classic`.
+Start with the [native greeting example](codex/README.md#run-a-python-tool) to call one Python tool. To run without model credentials, use the [scripted typed-tools example](codex/README.md#run-without-model-credentials).
 
-Run examples from the repository root with the matching SDK installed. See [Classic setup](../CLASSIC.md) for Classic dependencies.
+- [Native examples](codex/README.md) group tasks by tools, state and data, applications, observability, and executors.
+- [Classic examples](classic/README.md) use the retained Python runtime through `agents.classic`.
+
+Install the [SDK preview wheel](../docs/sdk/installation.md) and use example files from the same release. Run examples from the repository root with that Python environment active. Each example states any extra requirements. See [Classic setup](../CLASSIC.md) for classic dependencies.

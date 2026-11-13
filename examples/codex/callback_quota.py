@@ -1,4 +1,9 @@
-"""Scoped function callback recipe: one caller-owned quota per run."""
+"""Scoped function callback recipe: one caller-owned quota per run.
+
+Run `python -m examples.codex.callback_quota` from the repository root with
+the matching SDK and OPENAI_API_KEY. The application permits at most
+two lookup callbacks in this run. Requests can incur charges.
+"""
 
 from __future__ import annotations
 

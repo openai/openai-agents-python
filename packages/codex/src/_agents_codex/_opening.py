@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
-from typing import cast
+from dataclasses import dataclass, replace
+from typing import Generic, cast
 
 from ._function_tools import Tool
 from .agent import (
@@ -15,7 +15,26 @@ from .agent import (
     OutputT,
     _copy_model_settings,
 )
+from .completion import _BeforeComplete
 from .schema import OutputSpec
+
+
+@dataclass(frozen=True)
+class _OpeningContributions(Generic[ContextT]):
+    """Selected typed defaults before the canonical Agent capture."""
+
+    tools: Sequence[Tool[ContextT]] | None
+    before_complete: _BeforeComplete[ContextT] | None
+
+
+def _select_opening_contributions(
+    agent: Agent[ContextT, OutputT],
+) -> _OpeningContributions[ContextT]:
+    """Select defaults without binding callbacks or acquiring resources."""
+    return _OpeningContributions(
+        tools=agent.tools if getattr(agent, "_hosted_tools_provided", True) else None,
+        before_complete=agent.before_complete,
+    )
 
 
 def _capture_opening_agent(
@@ -45,6 +64,7 @@ def _capture_opening_agent(
             else original_retry.policy,
         )
     captured_settings.update(overrides)
+    contributions = _select_opening_contributions(agent)
     return Agent[ContextT, OutputT](
         instructions=cast(
             str,
@@ -53,9 +73,7 @@ def _capture_opening_agent(
         hosted_prompt=agent.hosted_prompt,
         realtime=agent.realtime,
         name=agent.name,
-        tools=(agent.tools if getattr(agent, "_hosted_tools_provided", True) else None)
-        if tool_selection is None
-        else tool_selection,
+        tools=contributions.tools if tool_selection is None else tool_selection,
         handoffs=agent.handoffs,
         model=agent.model if model is None else model,
         model_settings=captured_settings,
@@ -66,7 +84,7 @@ def _capture_opening_agent(
         transform_context=agent.transform_context,
         before_compact=agent.before_compact,
         compaction=agent.compaction,
-        before_complete=agent.before_complete,
+        before_complete=contributions.before_complete,
         tool_batch_completion=agent.tool_batch_completion,
         input_guardrails=agent.input_guardrails,
         output_guardrails=agent.output_guardrails,

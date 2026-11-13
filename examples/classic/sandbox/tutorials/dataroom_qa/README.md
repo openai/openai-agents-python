@@ -1,5 +1,7 @@
 # Dataroom Q&A
 
+The [sandbox setup guide](../../README.md) covers source installation, model credentials, and the Unix-local isolation limits. These tutorials also import `rich`; use `uv run --with rich` in place of `uv run` in the commands below when the environment does not install it.
+
 ## Goal
 
 Answer grounded financial questions over a synthetic 10-K packet.
@@ -19,10 +21,9 @@ uv run python examples/classic/sandbox/tutorials/data/dataroom/setup.py
 uv run python examples/classic/sandbox/tutorials/dataroom_qa/main.py
 ```
 
-After the initial answer, the demo keeps the sandbox session open for Rich-rendered follow-up prompts. Pass `--no-interactive` for a one-shot run.
+After the initial answer, the demo keeps the sandbox session open for follow-up prompts. Press **Ctrl-D** or **Ctrl-C** at a follow-up prompt to finish. Pass `--no-interactive` for a one-shot run.
 
-To run the same manifest in Docker, build the shared tutorial image once and pass
-`--docker`:
+To run the same manifest in Docker, build the shared tutorial image once and pass `--docker`:
 
 ```bash
 docker build --tag sandbox-tutorials:latest examples/classic/sandbox/tutorials

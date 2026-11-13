@@ -22,7 +22,7 @@ This directory owns the Python implementation, Rust source, native build inputs,
 
 Use a current patch release of CPython 3.10–3.14, `uv`, Git and Make. Install Rust 1.95.0 and make `cargo` and `rustc` available. The native build selects that toolchain by default. Install the system tools for your platform before building:
 
-- **Linux:** A C/C++ compiler toolchain with Clang, CMake, `pkg-config`, Protocol Buffers (`protoc`) and OpenSSL development headers. Ubuntu CI installs `clang cmake pkg-config protobuf-compiler libssl-dev`.
+- **Linux:** A C/C++ compiler toolchain with Clang, CMake, `pkg-config`, Protocol Buffers (`protoc`), and OpenSSL development headers.
 - **macOS:** Xcode Command Line Tools for the compiler/linker, plus CMake, `pkgconf`, Protocol Buffers and OpenSSL. CI installs these packages with `brew install cmake pkgconf protobuf openssl@3`.
 - **Windows:** MSVC C++ Build Tools and the Windows SDK for the compiler/linker, plus Protocol Buffers (`protoc`). The prepared Windows CI runner already has the compiler tools; the setup action adds `protoc` with Chocolatey.
 

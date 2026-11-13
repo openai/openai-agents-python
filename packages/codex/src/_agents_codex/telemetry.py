@@ -1087,8 +1087,8 @@ def _capture(
         captured = None
         native = None
         fallback_data = None
-        trace_options = None
-        metadata: Mapping[str, Any] | None = None
+        metadata: Mapping[str, Any] | None
+        trace_options = metadata = None
         context = current_context()
         handle = context._handle if context else fallback
         # Automatic routing is a policy default and does not select ancestry.
