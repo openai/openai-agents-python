@@ -1,0 +1,56 @@
+diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
+index 7845ccbbbb73e0dce9760fd9ced9eea427205667..5a0ca2ef639460425510d765fe7307acaa2708ab 100644
+--- a/codex-rs/thread-store/src/in_memory.rs
++++ b/codex-rs/thread-store/src/in_memory.rs
+@@ -419,6 +419,19 @@ mod tests {
+             .await
+             .expect("create thread");
+ 
++        let read_params = ReadThreadParams {
++            thread_id,
++            include_archived: false,
++            include_history: true,
++        };
++        let history_before = store
++            .read_thread(read_params.clone())
++            .await
++            .expect("read original history")
++            .history
++            .expect("history requested");
++        assert!(!history_before.items.is_empty());
++
+         let updated = ThreadStore::update_thread_metadata(
+             &store,
+             UpdateThreadMetadataParams {
+@@ -435,6 +448,18 @@ mod tests {
+         let updated = updated.expect("in-memory store returns updated thread");
+         assert_eq!(updated.thread_id, thread_id);
+         assert_eq!(updated.name.as_deref(), Some("renamed"));
++        assert!(updated.history.is_none());
++
++        let history_after = store
++            .read_thread(read_params)
++            .await
++            .expect("read history after metadata update")
++            .history
++            .expect("history requested");
++        assert_eq!(
++            serde_json::to_value(&history_after.items).expect("serialize history after update"),
++            serde_json::to_value(&history_before.items).expect("serialize original history"),
++        );
+     }
+ 
+     fn create_thread_params(
+@@ -1110,11 +1135,10 @@ fn stored_thread_from_state(
+         .created_threads
+         .get(&thread_id)
+         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+-    let history_items = state.histories.get(&thread_id).cloned().unwrap_or_default();
+     let history = include_history.then(|| StoredThreadHistory {
+         revision: None,
+         thread_id,
+-        items: history_items.clone(),
++        items: state.histories.get(&thread_id).cloned().unwrap_or_default(),
+     });
+     let name = state.names.get(&thread_id).cloned().flatten();
+     let metadata = state.metadata_updates.get(&thread_id);
