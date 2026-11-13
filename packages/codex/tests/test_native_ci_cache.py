@@ -76,7 +76,7 @@ def _condition(expression: str, values: dict[str, str]) -> bool:
     return bool(
         eval(
             expression.replace("&&", " and ").replace("||", " or ").replace("!cancelled()", "True"),
-            {"__builtins__": {}},
+            {"__builtins__": {}, "startsWith": str.startswith},
         )
     )
 
@@ -445,6 +445,7 @@ def test_native_macos_rejects_deferred_executable_symbols(
 @pytest.mark.parametrize("runner", ["ubuntu-24.04", "ubuntu-24.04-arm"])
 def test_native_reuse_never_forces_cache_warming(donor: str, event: str, runner: str) -> None:
     values = {
+        "github.ref_name": "feat/codex-harness",
         "inputs.native_source_run": donor,
         "github.event_name": event,
         "inputs.runner": runner,
@@ -509,6 +510,7 @@ def test_native_publication_is_a_global_barrier() -> None:
         ("pull_request", "feat/codex-harness", "true", True, False),
         ("merge_group", "feat/codex-harness", "true", True, False),
         ("push", "feat/codex-harness", "true", False, True),
+        ("push", "ci/hillclimb/probe", "true", False, True),
         ("push", "feat/codex-harness", "false", False, False),
         ("pull_request", "feat/codex-harness", "false", False, False),
         ("pull_request", "main", "true", False, False),
@@ -1070,6 +1072,7 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         conditions = {
             "inputs.native_only": False,
             "github.event_name": "workflow_dispatch",
+            "github.ref_name": "feat/codex-harness",
             "needs.changes.result": "success",
             "needs.changes.outputs.code": "true",
             "needs.changes.outputs.windows": "true",
@@ -1079,3 +1082,31 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
         }
         for name in ("native-linux", "native-windows", "native-macos"):
             assert not _condition(suite["jobs"][name]["if"], conditions)
+
+
+@pytest.mark.parametrize(
+    "runner", ["windows-latest", "macos-latest", "ubuntu-24.04", "ubuntu-24.04-arm"]
+)
+@pytest.mark.parametrize(
+    "ref", ["ci/hillclimb/python-current-06", "feat/codex-harness", "ci/hillclimb/other"]
+)
+@pytest.mark.parametrize("donor", ["", "123"])
+@pytest.mark.parametrize("event", ["push", "pull_request"])
+def test_optional_dependency_publication_skips_only_the_exact_windows_trial(
+    runner: str, ref: str, donor: str, event: str
+) -> None:
+    values = {
+        "inputs.runner": runner,
+        "github.ref_name": ref,
+        "inputs.native_source_run": donor,
+        "github.event_name": event,
+    }
+    expected = (
+        event == "push"
+        and not donor
+        and runner != "ubuntu-24.04-arm"
+        and not (runner == "windows-latest" and ref == "ci/hillclimb/python-current-06")
+    )
+    for step in _steps():
+        if step.get("name") in {"Prepare Rust dependency cache", "Publish Rust dependencies"}:
+            assert _condition(step["if"], values) is expected

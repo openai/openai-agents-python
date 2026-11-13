@@ -47,6 +47,11 @@ MODEL = next(
 )
 
 
+_POSIX_EXECUTOR = pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"), reason="requires a Linux or macOS strict executor"
+)
+
+
 @asynccontextmanager
 async def peer():
     fixture = ResponsesFixture()
@@ -317,16 +322,16 @@ async def test_configured_child_has_been_retaining_effective_wss_root_receipts(
 @pytest.mark.parametrize(
     "selection",
     [
-        "operation",
-        "before_step",
-        "environment",
-        "partial",
-        "forced",
+        pytest.param("operation", marks=_POSIX_EXECUTOR),
+        pytest.param("before_step", marks=_POSIX_EXECUTOR),
+        pytest.param("environment", marks=_POSIX_EXECUTOR),
+        pytest.param("partial", marks=_POSIX_EXECUTOR),
+        pytest.param("forced", marks=_POSIX_EXECUTOR),
         "callback_alias",
         "legacy",
-        "default",
-        "search",
-        "search_narrow",
+        pytest.param("default", marks=_POSIX_EXECUTOR),
+        pytest.param("search", marks=_POSIX_EXECUTOR),
+        pytest.param("search_narrow", marks=_POSIX_EXECUTOR),
         "search_alias",
     ],
 )
