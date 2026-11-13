@@ -318,3 +318,102 @@ async def test_sandbox_capability_keeps_strict_windows_executor_rejection(
         assert client.events == ["create", "start", "disconnect", "close", "delete"]
     finally:
         await native.aclose()
+
+
+@pytest.mark.parametrize("destination", ["capability", "agent"])
+async def test_native_cancel_does_not_enter_next_composed_context_callback(
+    tmp_path, monkeypatch, responses, destination
+):
+    import asyncio
+
+    from agents import TurnStoppedError
+    from tests._asyncio import timeout
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    effects = []
+
+    class First(SandboxCapability):
+        name = "first"
+
+        async def transform_context(self, request):
+            effects.append("first")
+            entered.set()
+            await release.wait()
+            return request.items
+
+    class Second(SandboxCapability):
+        name = "second"
+
+        async def transform_context(self, request):
+            effects.append("late-capability")
+            return request.items
+
+    async def original(request):
+        effects.append("late-agent")
+        return request.items
+
+    native = provider(responses)
+    client = Client([])
+    try:
+        async with timeout(25), ExecutorPeer(tmp_path / "executor").serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+
+            @asynccontextmanager
+            async def connect(sandbox):
+                yield Environment(
+                    url=peer.url,
+                    headers={"Authorization": "Bearer " + peer.token},
+                    cwd=str(peer.root),
+                    write_policy="legacy" if sys.platform == "win32" else "strict",
+                )
+                await peer.wait_disconnected()
+
+            source = sandbox_environment(
+                client,
+                manifest=Manifest(root=str(peer.root)),
+                options=Options(),
+                connect=connect,
+                capabilities=[First(), Second()] if destination == "capability" else [First()],
+            )
+            agent = Agent(
+                instructions="Answer.",
+                provider=native,
+                transform_context=original if destination == "agent" else None,
+            )
+            async with agent.session(environment=source) as session:
+                delayed = []
+                monkeypatch.setattr(
+                    session,
+                    "_cancel_native_callback",
+                    lambda receipt, **kwargs: delayed.append(receipt),
+                )
+                turn = await session.submit("Cancel before the next transform.")
+                try:
+                    await entered.wait()
+                    owners = [
+                        owner for owner in session._active.callbacks.values() if owner is not None
+                    ]
+                    assert owners
+                    interrupted = asyncio.ensure_future(
+                        session._native._interrupt_session(turn.turn_id)
+                    )
+                    for _ in range(500):
+                        if any(
+                            owner.native._python_callback_cancelled(json.dumps(owner.receipt))
+                            for owner in owners
+                        ):
+                            break
+                        await asyncio.sleep(0.01)
+                    else:
+                        pytest.fail("Native callback receipt did not retire")
+                finally:
+                    release.set()
+                await interrupted
+                with pytest.raises(TurnStoppedError):
+                    await turn.get_result()
+            assert effects == ["first"]
+            assert not responses.requests
+        assert client.events == ["create", "start", "close", "delete"]
+    finally:
+        release.set()
+        await native.aclose()

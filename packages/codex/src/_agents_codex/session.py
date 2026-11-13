@@ -62,7 +62,6 @@ from ._agent_profiles import (
 )
 from ._agent_tool import _ConfiguredAgentTool
 from ._callback_execution import (
-    _call_application_callback as _call_application_callback,
     _call_callback as _call_callback,
     _call_callback_body as _call_callback_body,
     _call_callback_entered as _call_callback_entered,
@@ -2387,6 +2386,33 @@ def _bind_sandbox_opening_tools(
     return catalog, declared.python, mcp_names
 
 
+@dataclass(frozen=True)
+class _SandboxContextTransforms:
+    callbacks: tuple[Callable[..., Any], ...]
+
+    async def __call__(self, request: ModelRequestContext[Any]) -> Sequence[dict[str, Any]]:
+        raise NativeError("Composed sandbox callbacks require live native admission")
+
+    def bind(
+        self, active: Callable[[], bool]
+    ) -> Callable[[ModelRequestContext[Any]], Awaitable[Sequence[dict[str, Any]]]]:
+        async def transform(request: ModelRequestContext[Any]) -> Sequence[dict[str, Any]]:
+            items = request.items
+            for callback in self.callbacks:
+                if not active():
+                    return items
+                changed = await _call_callback(callback, active, replace(request, items=items))
+                # The outer context owner discards retired projections. Never enter
+                # another application callback while that native owner is stale.
+                if not active():
+                    return items
+                if changed is not None:
+                    items = tuple(changed)
+            return items
+
+        return transform
+
+
 def _apply_sandbox_contributions(
     agent: Agent[Any, Any],
     lease: _EnvironmentLease | None,
@@ -2414,21 +2440,11 @@ def _apply_sandbox_contributions(
         *((original_transform,) if original_transform is not None else ()),
     )
 
-    async def transform(request: ModelRequestContext[Any]) -> Sequence[dict[str, Any]]:
-        items = request.items
-        for callback in transforms:
-            changed = await _call_application_callback(
-                callback, (replace(request, items=items),), {}
-            )
-            if changed is not None:
-                items = tuple(changed)
-        return items
-
     object.__setattr__(
         agent, "model_settings", MappingProxyType(contributions.settings(agent.model_settings))
     )
     if capability_transforms:
-        object.__setattr__(agent, "transform_context", transform)
+        object.__setattr__(agent, "transform_context", _SandboxContextTransforms(transforms))
     tools = (*agent.tools, *contributions.tools)
     if agent.tool_name_collision_policy == "warn":
         tools, _ = _resolve_tool_name_collisions(tools, ())
@@ -13800,10 +13816,12 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _transform_context_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
         def prepare(
-            _active: Callable[[], bool],
+            active: Callable[[], bool],
         ) -> tuple[Callable[..., Any], ModelRequestContext[ContextT]]:
             declaration = self._agent_for_message(message)
             callback = declaration.transform_context
+            if isinstance(callback, _SandboxContextTransforms):
+                callback = callback.bind(active)
             source = declaration.hosted_prompt
             enabled = message.get("hosted_prompt") is True
             if source is not None and not enabled and message.get("purpose") == "compaction":

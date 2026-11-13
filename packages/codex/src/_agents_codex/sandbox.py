@@ -57,6 +57,7 @@ from agents.classic.sandbox.workspace_paths import (
 # Optional provider owners initialize before their shared resource types.
 # isort: split
 from _agents_shared.apply_diff import apply_diff
+from _agents_shared.blocking_workspace_io import run_blocking_workspace_io
 from _agents_shared.retry import BackoffStrategy, retry_async
 from _agents_shared.sandbox_limits import SandboxArchiveLimits, SandboxConcurrencyLimits
 from _agents_shared.sandbox_session_state import SandboxSessionState
@@ -424,7 +425,6 @@ class DockerGateway:
     tools: tuple[ExecutorToolName, ...] = ()
 
     def __post_init__(self) -> None:
-
         from agents.classic.sandbox.sandboxes.docker import DockerSandboxClient
 
         if not isinstance(self.client, DockerSandboxClient):
@@ -451,9 +451,7 @@ class DockerGateway:
             raise ValueError("DockerGateway requires fresh creation by its current SDK client")
 
     async def _preflight(self) -> tuple[Any, str, str]:
-
         from agents.classic.sandbox.sandboxes.docker import DockerSandboxClient
-        from agents.classic.sandbox.util.blocking_io import run_blocking_workspace_io
 
         if not isinstance(self.client, DockerSandboxClient):
             raise TypeError("DockerGateway requires its current Docker client")
@@ -489,7 +487,6 @@ class DockerGateway:
             DockerSandboxSession,
             DockerSandboxSessionState,
         )
-        from agents.classic.sandbox.util.blocking_io import run_blocking_workspace_io
 
         api, socket, daemon = await self._preflight()
         inner = _borrowed_manifest_owner(resource)

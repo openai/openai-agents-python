@@ -265,6 +265,9 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     "agents.classic.sandbox.entries.mounts",
                     "agents.classic.sandbox.manifest",
                     "agents.classic.sandbox.remote_mount_policy",
+                    # DockerGateway checks concrete provisioning/lease identities.
+                    # Native Core still owns command dispatch and model execution.
+                    "agents.classic.sandbox.sandboxes.docker",
                     "agents.classic.sandbox.session.sandbox_client",
                     "agents.classic.sandbox.session.sandbox_session",
                     "agents.classic.sandbox.session.events",

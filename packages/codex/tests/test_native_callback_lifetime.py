@@ -295,3 +295,102 @@ async def test_retained_callback_failure_releases_forwarded_owners(kind, cancell
     gc.collect()
     assert original.__traceback__ is not None
     assert [ref() is None for ref in refs] == [True, True, True, True]
+
+
+@pytest.mark.parametrize("destination", ["capability", "agent"])
+@pytest.mark.parametrize("kind", ["async", "sync", "factory"])
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_composed_context_keeps_native_admission_before_cancel_delivery(
+    destination, kind, revoke
+):
+    from _agents_codex._managed_workspace import _SANDBOX_CAPABILITIES_ATTRIBUTE
+    from _agents_codex.sandbox import SandboxCapability, _SandboxContributions
+    from _agents_codex.session import _apply_sandbox_contributions
+    from agents import Agent
+
+    session, state, released = callback_owner()
+    session._closing = False
+    session._context = None
+    session._context_transform_purpose = "turn"
+    session._id = "thread"
+    entered, release = asyncio.Event(), asyncio.Event()
+    revoked = False
+    effects, replies = [], []
+    session._native._python_callback_cancelled = lambda raw: revoked
+    session._native._reply_context = lambda *args: replies.append(args[1])
+
+    class First(SandboxCapability):
+        name = "first"
+
+        async def transform_context(self, request):
+            effects.append("first")
+            entered.set()
+            await release.wait()
+            return request.items
+
+    async def asynchronous(request):
+        effects.append("late")
+        return request.items
+
+    def synchronous(request):
+        effects.append("late")
+        return request.items
+
+    def factory(request):
+        return asynchronous(request)
+
+    late = {"async": asynchronous, "sync": synchronous, "factory": factory}[kind]
+
+    class Second(SandboxCapability):
+        name = "second"
+
+        async def transform_context(self, request):
+            return None
+
+    second = Second()
+    second.transform_context = late
+    agent = Agent(
+        instructions="Answer.", transform_context=late if destination == "agent" else None
+    )
+    capabilities = (First(), second) if destination == "capability" else (First(),)
+    source = SimpleNamespace(
+        **{_SANDBOX_CAPABILITIES_ATTRIBUTE: _SandboxContributions((), capabilities)}
+    )
+    _apply_sandbox_contributions(
+        agent, SimpleNamespace(source=source), has_graph=False, manual_restore=False
+    )
+    session._agent_for_message = lambda message: agent
+    message = {
+        "step_id": 7,
+        "thread": "thread",
+        "instance": None,
+        "turn_id": "root",
+        "items": [],
+        "model": "fixture",
+        "purpose": "turn",
+    }
+    owner = {"kind": "context", "invocation": "composed-context"}
+    task = session._start_native_callback(
+        state, session._transform_context_body(state, message), owner
+    )
+    try:
+        async with timeout(5):
+            gate = asyncio.create_task(entered.wait())
+            await asyncio.wait((gate, task), return_when=asyncio.FIRST_COMPLETED)
+            if task.done() and state.failure.done():
+                raise state.failure.result()
+            await gate
+            revoked = revoke  # Native retirement precedes Python's cancellation notification.
+            assert not state.stopping and not state.failure.done()
+            release.set()
+            await task
+            await asyncio.sleep(0)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert effects == (["first"] if revoke else ["first", "late"])
+    assert replies == ([None] if revoke else ["[]"])
+    assert released == [owner]
+    assert not state.failure.done() and state.cleanup_error is None
