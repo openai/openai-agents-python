@@ -2977,6 +2977,28 @@ def _restore_operation_tools(
     return slots, refs, selected_mcp, declared
 
 
+def _handoff_restore_targets(profile: _AgentProfile) -> Iterator[str]:
+    yield from profile.handoffs.values()
+    for decision in profile.decision_handoffs.values():
+        yield from decision["targets"]
+
+
+def _prepared_handoff_can_reach(
+    destination: str, pending: list[str], profiles: Mapping[str, _ProfileRuntime]
+) -> bool:
+    # Saved history cannot prove that a caller removed no earlier preparation.
+    # Use the current graph to rule out a filtered return to the opening Agent.
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == destination:
+            return True
+        if current not in visited:
+            visited.add(current)
+            pending.extend(_handoff_restore_targets(profiles[current].profile))
+    return False
+
+
 def _restore_profile_sources(
     native: Any,
     profiles: Mapping[str, _ProfileRuntime],
@@ -2994,10 +3016,15 @@ def _restore_profile_sources(
     )
     if not isinstance(source, dict) or source.get("profile_id") not in profiles:
         raise ValueError("Checkpoint has no admitted native Agent profile")
-    if source["profile_id"] != roster[0]["id"] and any(
-        runtime.profile.declaration.prepare_handoff_input is not None
-        and (runtime.profile.handoffs or runtime.profile.decision_handoffs)
+    prepared_targets = [
+        target
         for runtime in profiles.values()
+        if runtime.profile.declaration.prepare_handoff_input is not None
+        for target in _handoff_restore_targets(runtime.profile)
+    ]
+    if prepared_targets and (
+        source["profile_id"] != roster[0]["id"]
+        or _prepared_handoff_can_reach(source["profile_id"], prepared_targets, profiles)
     ):
         saved._require_authenticated_handoff_restore()
     origin, receipt = _restore_operation_origin(native, profiles, roster, saved, context)

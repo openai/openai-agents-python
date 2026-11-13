@@ -180,3 +180,81 @@ async def test_unrelated_configured_child_keeps_ordinary_unverified_root_capture
             result = await (await restored.submit("Continue.")).get_result()
             assert result.final_output == "parent restored"
     assert len(responses.requests) == 4
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+async def test_filtered_handoff_returning_to_root_requires_current_authority(responses, trusted):
+    from hashlib import sha256
+
+    responses.respond(function_call("transfer_to_destination", {}, "source-handoff"))
+    responses.respond(function_call("transfer_to_source", {}, "return-handoff"))
+    responses.respond(assistant_output("returned"))
+    responses.respond(assistant_output("cold follow-up"))
+    retained = "accepted return context"
+
+    def prepare(value: HandoffInput[None]) -> HandoffInput[None]:
+        return replace(
+            value,
+            input=(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": retained}],
+                },
+            ),
+            previous=(),
+            generated=(),
+        )
+
+    async with NativeProvider(
+        base_url=responses.url,
+        api_key="synthetic-cyclic-handoff",
+        supports_websockets=False,
+    ) as provider:
+        destination = Agent(
+            name="destination",
+            instructions="Return to source.",
+            handoffs=[lambda: source],
+            prepare_handoff_input=prepare,
+        )
+        source = Agent(
+            name="source",
+            instructions="Transfer to destination.",
+            model="gpt-5.5",
+            provider=provider,
+            handoffs=[destination],
+        )
+        async with source.session() as session:
+            result = await (await session.submit("private canonical source context")).get_result()
+            assert result.final_output == "returned"
+            assert await session.get_active_agent() is source
+            saved = await session.save_state()
+        raw = saved.to_json()
+        if trusted:
+            state = SessionState.from_json(raw, expected_sha256=sha256(raw.encode()).hexdigest())
+            async with source.session(state=state) as restored:
+                result = await (await restored.submit("Continue.")).get_result()
+                assert result.final_output == "cold follow-up"
+            request = json.dumps(responses.requests[3]["input"])
+            assert retained in request and "private canonical source context" not in request
+            return
+        state = SessionState.from_json(raw)
+        count = 0
+        for row in state.history:
+            metadata = row.get("metadata") or {}
+            profile = metadata.get("sdk_agent_profile") or {}
+            if "presentation" in profile:
+                del profile["presentation"]
+                count += 1
+            metadata.pop("sdk_agent_handoff", None)
+        assert count
+        try:
+            async with source.session(state=SessionState.from_json(state.to_json())) as restored:
+                await (await restored.submit("Continue.")).get_result()
+        except ValueError as error:
+            assert "requires authenticated state" in str(error)
+            assert len(responses.requests) == 3
+        else:
+            request = json.dumps(responses.requests[3]["input"])
+            assert "private canonical source context" not in request
+            pytest.fail("An unsigned return to the root bypassed current graph authority")
