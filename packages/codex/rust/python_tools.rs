@@ -1013,9 +1013,12 @@ impl PythonTools {
             "cancelled" => callback.cancelled.load(Ordering::Acquire),
             "release" | "release_failed" => {
                 let released = callback.release();
-                // Restored approval waiters have no live PendingReply drop guard.
+                // Restored callback waiters have no live PendingReply drop guard.
                 // The accepted receipt is recorded before physical callback release.
-                if call.reentry && call.approval_request.is_some() && call.sender.is_closed() {
+                if call.reentry
+                    && (call.approval_request.is_some() || call.continuation.is_some())
+                    && call.sender.is_closed()
+                {
                     pending.remove(&key);
                 }
                 released
