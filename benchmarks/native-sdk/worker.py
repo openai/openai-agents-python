@@ -118,6 +118,7 @@ async def exercise(
     default_host=False,
     control_base_url=None,
     native_provider_mode="caller-owned",
+    native_request_transport=None,
 ):
     control_base_url = control_base_url or base_url
     owner_cpu_before = time.process_time_ns()
@@ -127,6 +128,8 @@ async def exercise(
         adapter_options["transport"] = "websocket"
     if default_host:
         adapter_options["default_host"] = True
+    if native_request_transport is not None:
+        adapter_options["request_transport"] = native_request_transport
     if native_provider_mode == "omitted":
         adapter_options["provider_mode"] = "omitted"
     construction_start = time.perf_counter_ns()
@@ -430,6 +433,7 @@ def main():
     parser.add_argument("--default-host-setup", type=Path)
     parser.add_argument("--peer-http-mode", choices=("h1", "dual"), default="h1")
     parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
+    parser.add_argument("--native-request-transport", choices=["auto", "http", "websocket"])
     parser.add_argument(
         "--native-provider-mode",
         choices=["caller-owned", "omitted"],
@@ -446,6 +450,10 @@ def main():
     args = parser.parse_args()
     if args.peer_http_mode == "dual" and not args.default_host_setup:
         parser.error("Dual HTTP peer requires default-host TLS setup")
+    if args.native_request_transport is not None and (
+        args.engine != "v1" or not args.default_host_setup or args.native_provider_mode != "omitted"
+    ):
+        parser.error("Request transport requires native omitted Provider default-host calls")
     if args.native_provider_mode == "omitted" and (
         args.engine != "v1" or not args.default_host_setup
     ):
@@ -541,6 +549,7 @@ def main():
         else None,
         "native_transport": args.native_transport if args.engine == "v1" else None,
         "native_provider_mode": args.native_provider_mode if args.engine == "v1" else None,
+        "native_request_transport": args.native_request_transport if args.engine == "v1" else None,
         "full_owner_scope": None if args.import_only else "adapter-lifetime",
         "wire_transport": None
         if args.import_only
@@ -623,6 +632,7 @@ def main():
                         default_host=bool(setup),
                         control_base_url=control_base_url,
                         native_provider_mode=args.native_provider_mode,
+                        native_request_transport=args.native_request_transport,
                     )
                 )
             )
