@@ -15978,7 +15978,11 @@ class Session(Generic[ContextT, OutputT]):
                 raise InteractionExpiredError("Configured parent invocation is expired")
             return cast(ActionReply[Any], result)
 
-        restored_child_json = self._native._configured_continuation(request)
+        restored_child_json = (
+            self._native._configured_continuation(request)
+            if isinstance(state, _Submission) and state.restored_pending
+            else None
+        )
         restored_child = None
         if restored_child_json is not None:
             captured = json.loads(restored_child_json)
