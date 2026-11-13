@@ -771,7 +771,12 @@ class _NativeInterception:
                         replacement = json.loads(json.dumps(value.arguments, allow_nan=False))
                         if not isinstance(replacement, dict):
                             return
-                        decision = {"action": "replace", "value": replacement}
+                        decision = {
+                            "action": "replace_mcp_arguments"
+                            if call.route == "direct"
+                            else "replace",
+                            "value": replacement,
+                        }
                         effective_arguments = replacement
                         effective = replace(
                             call,
