@@ -1,13 +1,14 @@
+# Diagnostic only: alternate macOS 26 XL coverage; three unchanged source-test shards.
 name: Historical warm Python replay
 'on':
   push:
     branches:
-    - ci/hillclimb/python-warm-historical-13
+    - ci/hillclimb/python-warm-macos26xl-14
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: python-warm-historical-13-${{ github.ref }}
+  group: python-warm-macos26xl-14-${{ github.ref }}
   cancel-in-progress: true
 env:
   UV_FROZEN: '1'
@@ -15,7 +16,7 @@ env:
   CARGO_INCREMENTAL: '0'
 jobs:
   changes:
-    if: github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-warm-historical-13'
+    if: github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-warm-macos26xl-14'
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.native-source.outputs.code }}
@@ -331,7 +332,7 @@ jobs:
   native-macos-sandbox-shards:
     if: ${{ !cancelled() && needs.changes.result == 'success' }}
     needs: changes
-    runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
+    runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-26-xlarge' || 'macos-latest' }}
     name: macOS sandbox shard (${{ matrix.shard }})
     timeout-minutes: 100
     strategy:
