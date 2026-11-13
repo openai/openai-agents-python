@@ -324,6 +324,9 @@ class _MCP(Generic[ContextT_contra]):
     their own presentation. CodeMode keeps its native direct/code exposure.
     This never changes acquisition timing or admits a deselected leaf.
 
+    tool_name_overrides maps raw peer names to model-visible names for ordinary
+    servers. Session still invokes the original raw names on the peer.
+
     before receives MCPCallContext and the native input. Return Allow,
     ReplaceArguments or StopTurn. approval sees the effective NativeToolCall;
     False denies locally. before has a 30-second deadline, independent of
@@ -393,6 +396,7 @@ class _MCP(Generic[ContextT_contra]):
     ) = field(default=None, repr=False)
 
     _name_tools: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    tool_name_overrides: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.cache_tools_list is not None and type(self.cache_tools_list) is not bool:
@@ -462,6 +466,16 @@ class _MCP(Generic[ContextT_contra]):
         object.__setattr__(self, "tools", names)
         if self._name_tools is None or not set(names).issubset(self._name_tools):
             object.__setattr__(self, "_name_tools", names)
+        if self.tool_name_overrides is not None:
+            if not isinstance(self.tool_name_overrides, Mapping):
+                raise TypeError("MCP tool_name_overrides must be a mapping of strings")
+            overrides = dict(self.tool_name_overrides)
+            if overrides and self.name == "codex_apps":
+                raise ValueError("MCP tool_name_overrides requires an ordinary server")
+            for raw, public_name in overrides.items():
+                _launch_text(raw, "raw tool name override")
+                _launch_text(public_name, "public tool name override")
+            object.__setattr__(self, "tool_name_overrides", _McpValues(overrides))
         _tool_names((self,))
 
     @property
@@ -512,8 +526,15 @@ class _MCP(Generic[ContextT_contra]):
         }
         if self.cache_tools_list is not None:
             config["sdk_cache_tools_list"] = self.cache_tools_list
-        if self.approval_mode == "preapproved":
-            config["tools"] = {name: {"approval_mode": "approve"} for name in self.tools}
+        tool_settings = {
+            name: {"approval_mode": "approve"}
+            for name in self.tools
+            if self.approval_mode == "preapproved"
+        }
+        for raw, public_name in (self.tool_name_overrides or {}).items():
+            tool_settings.setdefault(raw, {})["name_override"] = public_name
+        if tool_settings or self.approval_mode == "preapproved":
+            config["tools"] = tool_settings
         return config
 
 
@@ -834,7 +855,12 @@ def _tool_names(servers: tuple[_MCP[Any], ...]) -> list[dict[str, str]]:
                 raise ValueError("MCP names have a native concatenation collision")
             bases[key] = server.name
     names = _project_tool_names(
-        [(server.name, server._name_tools or server.tools) for server in servers]
+        [(server.name, server._name_tools or server.tools) for server in servers],
+        overrides={
+            server.name: server.tool_name_overrides
+            for server in servers
+            if server.tool_name_overrides
+        },
     )
     projected = [names[server.name, raw] for server in servers for raw in server.tools]
     owners: dict[str, str] = {}

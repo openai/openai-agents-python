@@ -955,7 +955,11 @@
     {
       "path": "sdk-recovered-batch-origin-tests.patch",
       "sha256": "51798c6b4c28ece8c868be4994f2401a99f0aae2e9c9f83fc96cdd4a42741bbe"
+    },
+    {
+      "path": "sdk-mcp-tool-name-overrides.patch",
+      "sha256": "45bf8a7b350479d551b41fc06a4ee38bd81c9faee0497d004fe99e2a1bdcebe3"
     }
   ],
-  "result_tree": "6e65af7c248e20ac862ac0a82690ff7c0f4b46e4"
+  "result_tree": "d37ac561aaa17b55fd0cdd7967e96a12916f1996"
 }

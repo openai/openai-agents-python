@@ -272,8 +272,10 @@ def _capture_tool(
 ) -> _SelectedMCPTool[ContextT]:
     raw_name = tool.name
     schema = tool_input_schema(tool)
-    if not isinstance(schema, dict) or schema.get("type") != "object":
+    if not isinstance(schema, dict) or schema.get("type", "object") != "object":
         raise ValueError("Selected MCP tools require an object input schema")
+    if "type" not in schema:
+        schema = {"properties": {}, **schema, "type": "object"}
     description = "" if tool.description is None else tool.description
     _launch_text(description, "tool description", allow_empty=True)
     schema_json = json.dumps(schema, allow_nan=False)

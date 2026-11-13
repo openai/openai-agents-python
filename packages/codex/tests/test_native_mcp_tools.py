@@ -853,6 +853,60 @@ async def test_native_collision_names_survive_raw_step_narrowing(
 
 
 @pytest.mark.asyncio
+async def test_native_mcp_name_overrides_keep_raw_dispatch_when_narrowed(
+    responses: ResponsesFixture,
+) -> None:
+    raw_names = ("source/first", "source/second", "source/read")
+    peer = Peer(names=raw_names)
+    aliases = dict.fromkeys(raw_names[:2], "lookup") | {raw_names[2]: "public_read"}
+    observed: list[tuple[str, str, str]] = []
+
+    def before(request: MCPCallContext[Any], call: Any) -> Allow:
+        observed.append((request.server_name, request.tool_name, call.name))
+        return Allow()
+
+    async with timeout(30), peer.serve() as url:
+        descriptor = HttpMCP(
+            name="docs",
+            url=url,
+            tools=raw_names,
+            tool_name_overrides=aliases,
+            approval_mode="preapproved",
+            before=before,
+        )
+        aliases[raw_names[2]] = "unowned_mutation"
+        first, second, direct = (descriptor.tool(name) for name in raw_names)
+        assert first.name != second.name
+        assert all(ref.name.startswith("lookup_") for ref in (first, second))
+        assert (direct.namespace, direct.name) == ("mcp__docs", "public_read")
+        responses.respond(mcp_call(direct.name, direct.namespace, "direct"))
+        responses.respond(assistant_output("ready"))
+        responses.respond(mcp_call(second.name, second.namespace, "narrowed"))
+        responses.respond(assistant_output("done"))
+
+        async with Agent(
+            instructions="Read the selected tool.",
+            tools=[descriptor],
+            provider=provider(responses),
+        ).session() as session:
+            assert (await (await session.submit("read")).get_result()).final_output == "ready"
+            turn = await session.submit(
+                "read second",
+                tools=[second],
+                before_step=lambda turn, step_index: [second],
+            )
+            assert (await turn.get_result()).final_output == "done"
+
+    assert [call["name"] for call in peer.calls] == [raw_names[2], raw_names[1]]
+    assert observed == [
+        ("docs", raw_names[2], "public_read"),
+        ("docs", raw_names[1], second.name),
+    ]
+    assert (direct.namespace, direct.name) in declarations(responses.requests[0])
+    assert list(declarations(responses.requests[2])) == [(second.namespace, second.name)]
+
+
+@pytest.mark.asyncio
 async def test_partial_mcp_declaration_resolves_against_peer_collision_catalog(
     responses: ResponsesFixture,
 ) -> None:

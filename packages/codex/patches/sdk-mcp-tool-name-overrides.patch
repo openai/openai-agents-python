@@ -1,0 +1,196 @@
+diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
+index 13520338..9bc2ef3a 100644
+--- a/codex-rs/codex-mcp/src/connection_manager.rs
++++ b/codex-rs/codex-mcp/src/connection_manager.rs
+@@ -172,6 +172,7 @@ struct McpServerView {
+     cache_tools_list: bool,
+     metadata: McpServerMetadata,
+     tool_filter: ToolFilter,
++    tool_name_overrides: HashMap<String, String>,
+     tool_timeout: Option<Duration>,
+     catalog_item_limit: usize,
+ }
+@@ -410,6 +411,16 @@ impl McpConnectionSet {
+                 default_protocol_mode
+             };
+             let configured_tool_filter = ToolFilter::from_config(&configured_config);
++            let configured_tool_name_overrides = configured_config
++                .tools
++                .iter()
++                .filter_map(|(raw, settings)| {
++                    settings
++                        .name_override
++                        .as_ref()
++                        .map(|name| (raw.clone(), name.clone()))
++                })
++                .collect();
+             let startup_timeout = configured_config
+                 .startup_timeout_sec
+                 .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
+@@ -591,6 +602,7 @@ impl McpConnectionSet {
+                             cache_tools_list: configured_config.sdk_cache_tools_list.unwrap_or(true),
+                             metadata,
+                             tool_filter: configured_tool_filter,
++                            tool_name_overrides: configured_tool_name_overrides,
+                             tool_timeout: configured_tool_timeout,
+                             catalog_item_limit,
+                         },
+@@ -734,6 +746,7 @@ impl McpConnectionSet {
+                             cache_tools_list: configured_config.sdk_cache_tools_list.unwrap_or(true),
+                     metadata,
+                     tool_filter: configured_tool_filter,
++                    tool_name_overrides: configured_tool_name_overrides,
+                     tool_timeout: configured_tool_timeout,
+                     catalog_item_limit,
+                 },
+diff --git a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
+index e9fba162..de699d72 100644
+--- a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
++++ b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
+@@ -182,6 +182,16 @@ impl McpConnectionSet {
+         &self,
+         tools: impl IntoIterator<Item = ToolInfo>,
+     ) -> Vec<ToolInfo> {
++        let tools = tools.into_iter().map(|mut tool| {
++            if let Some(name) = self
++                .servers
++                .get(&tool.server_name)
++                .and_then(|view| view.tool_name_overrides.get(tool.tool.name.as_ref()))
++            {
++                tool.callable_name.clone_from(name);
++            }
++            tool
++        });
+         normalize_tools_for_model_with_prefix(
+             tools,
+             self.prefix_mcp_tool_names,
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+index ca17bce6..4ddf5036 100644
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -135,6 +135,7 @@ impl McpConnectionSet {
+             name,
+             McpServerView {
+                 tool_filter: ToolFilter::default(),
++                tool_name_overrides: HashMap::new(),
+                 protocol_mode: crate::McpProtocolMode::Legacy,
+                 startup_readiness: Default::default(),
+                 connection: Arc::new(McpServerConnection {
+@@ -5168,6 +5169,7 @@ async fn manager_with_reusable_ready_server(
+     manager.servers.insert(
+         "docs".to_string(),
+         McpServerView {
++            tool_name_overrides: HashMap::new(),
+             protocol_mode: crate::McpProtocolMode::Legacy,
+             startup_readiness: Default::default(),
+             connection: Arc::new(McpServerConnection {
+@@ -5596,6 +5598,7 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
+     previous.servers.insert(
+         "docs".to_string(),
+         McpServerView {
++            tool_name_overrides: HashMap::new(),
+             protocol_mode: crate::McpProtocolMode::Legacy,
+             startup_readiness: Default::default(),
+             connection: Arc::new(McpServerConnection {
+diff --git a/codex-rs/config/src/mcp_types.rs b/codex-rs/config/src/mcp_types.rs
+index 87960299..9f161e7a 100644
+--- a/codex-rs/config/src/mcp_types.rs
++++ b/codex-rs/config/src/mcp_types.rs
+@@ -78,6 +78,10 @@ impl fmt::Display for McpServerDisabledReason {
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+ #[schemars(deny_unknown_fields)]
+ pub struct McpServerToolConfig {
++    /// Model-visible name override, preserving the original MCP invocation identity.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub name_override: Option<String>,
++
+     /// Approval mode for this tool.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub approval_mode: Option<AppToolApproval>,
+diff --git a/codex-rs/config/src/mcp_types_tests.rs b/codex-rs/config/src/mcp_types_tests.rs
+index c4171a45..3bfd635b 100644
+--- a/codex-rs/config/src/mcp_types_tests.rs
++++ b/codex-rs/config/src/mcp_types_tests.rs
+@@ -560,6 +560,7 @@ fn deserialize_server_config_with_default_tool_approval_mode() {
+             [tools.search]
+             approval_mode = "prompt"
+             output_token_limit = 30000
++            name_override = "public_search"
+         "#,
+     )
+     .expect("should deserialize default tool approval mode");
+@@ -571,6 +572,7 @@ fn deserialize_server_config_with_default_tool_approval_mode() {
+     assert_eq!(
+         cfg.tools.get("search"),
+         Some(&McpServerToolConfig {
++            name_override: Some("public_search".to_string()),
+             approval_mode: Some(AppToolApproval::Prompt),
+             output_token_limit: std::num::NonZeroUsize::new(30_000),
+         })
+@@ -579,6 +581,7 @@ fn deserialize_server_config_with_default_tool_approval_mode() {
+     let serialized = toml::to_string(&cfg).expect("should serialize MCP config");
+     assert!(serialized.contains("default_tools_approval_mode = \"approve\""));
+     assert!(serialized.contains("output_token_limit = 30000"));
++    assert!(serialized.contains("name_override = \"public_search\""));
+
+     let round_tripped: McpServerConfig =
+         toml::from_str(&serialized).expect("should deserialize serialized MCP config");
+diff --git a/codex-rs/core-plugins/src/manager_tests.rs b/codex-rs/core-plugins/src/manager_tests.rs
+index 44b43433..668396cd 100644
+--- a/codex-rs/core-plugins/src/manager_tests.rs
++++ b/codex-rs/core-plugins/src/manager_tests.rs
+@@ -1171,6 +1171,7 @@ output_token_limit = 12000
+     assert_eq!(
+         server.tools.get("search"),
+         Some(&McpServerToolConfig {
++            name_override: None,
+             approval_mode: Some(AppToolApproval::Approve),
+             output_token_limit: std::num::NonZeroUsize::new(8_000),
+         })
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index ccd6aed1..7e5458ef 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -2496,6 +2496,10 @@
+           ],
+           "description": "Approval mode for this tool."
+         },
++        "name_override": {
++          "description": "Model-visible name override, preserving the original MCP invocation identity.",
++          "type": "string"
++        },
+         "output_token_limit": {
+           "description": "Token budget for this tool's output, before the standard 20% serialization allowance.",
+           "format": "uint",
+diff --git a/codex-rs/core/src/config/edit_tests.rs b/codex-rs/core/src/config/edit_tests.rs
+index 305a112b..eceb566d 100644
+--- a/codex-rs/core/src/config/edit_tests.rs
++++ b/codex-rs/core/src/config/edit_tests.rs
+@@ -1228,6 +1228,7 @@ fn blocking_replace_mcp_servers_serializes_tool_approval_overrides(output_token_
+             tools: HashMap::from([(
+                 "search".to_string(),
+                 McpServerToolConfig {
++                    name_override: None,
+                     approval_mode: Some(AppToolApproval::Approve),
+                     output_token_limit: std::num::NonZeroUsize::new(output_token_limit),
+                 },
+diff --git a/codex-rs/ext/mcp/tests/plugin_mcp.rs b/codex-rs/ext/mcp/tests/plugin_mcp.rs
+index f3bf0c57..40d2191c 100644
+--- a/codex-rs/ext/mcp/tests/plugin_mcp.rs
++++ b/codex-rs/ext/mcp/tests/plugin_mcp.rs
+@@ -344,6 +344,7 @@ default_tools_approval_mode = "auto"
+                 (
+                     "read".to_string(),
+                     McpServerToolConfig {
++                        name_override: None,
+                         approval_mode: Some(AppToolApproval::Prompt),
+                         output_token_limit: std::num::NonZeroUsize::new(8_000),
+                     },
+@@ -351,6 +352,7 @@ default_tools_approval_mode = "auto"
+                 (
+                     "deploy".to_string(),
+                     McpServerToolConfig {
++                        name_override: None,
+                         approval_mode: Some(AppToolApproval::Prompt),
+                         output_token_limit: std::num::NonZeroUsize::new(4_000),
+                     },
