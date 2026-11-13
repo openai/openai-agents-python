@@ -810,10 +810,21 @@ class _FunctionIdentity:
     tool: FunctionTool[Any, Any, Any] | None = field(default=None, repr=False)
 
 
+def _realtime_tool_wire_name(name: str, namespace: str | None) -> str:
+    # Match Core tools/src/code_mode.rs::code_mode_name_for_tool_name,
+    # also used by extension-api's Realtime catalog projection.
+    if namespace is None or namespace in ("", "functions"):
+        return name
+    if namespace.endswith("_") or name.startswith("_"):
+        return namespace + name
+    return namespace + "__" + name
+
+
 @dataclass
 class _FunctionCall:
     response_id: str
     names: dict[str, str]
+    automatic_order: dict[str, asyncio.Event] | None = None
     submission: asyncio.Task[Turn[None]] | None = None
     task: asyncio.Task[None] | None = None
     cancellation: asyncio.Task[None] | None = None
@@ -1194,6 +1205,44 @@ class RealtimeSession:
             output=output,
             run_context=self._event_context(captured.source_profile),
         )
+
+    async def _wait_function_order(
+        self, source: Any, wire_name: str, automatic_names: frozenset[str]
+    ) -> None:
+        # Order only admitted automatic siblings. Manual replies and the media
+        # reader remain independent of this callback-task wait.
+        if not isinstance(source, dict) or source.get("generation") != self._generation:
+            return
+        call_id = source.get("provider_call_id")
+        if not isinstance(call_id, str):
+            return
+        captured = self._function_names.get(call_id)
+        owned = self._functions.get(call_id)
+        if (
+            captured is None
+            or owned is None
+            or owned.retired
+            or captured.name != wire_name
+            or captured.item_id != source.get("provider_item_id")
+            or captured.response_id != source.get("provider_response_id")
+        ):
+            return
+        if owned.automatic_order is None:
+            owned.automatic_order = {
+                sibling: asyncio.Event()
+                for sibling, name in owned.names.items()
+                if name in automatic_names
+            }
+            for sibling, settled in owned.automatic_order.items():
+                if sibling in self._finished_functions:
+                    settled.set()
+        if call_id not in owned.automatic_order:
+            return
+        for sibling, settled in owned.automatic_order.items():
+            if sibling == call_id:
+                return
+            # Rejected approvals can settle before their earlier siblings.
+            await settled.wait()
 
     def _tool_body_started(
         self, source: Any, wire_name: str, tool: FunctionTool[Any, Any, Any]
@@ -3555,6 +3604,11 @@ class RealtimeSession:
                 call_id, "completed" if value["succeeded"] else "failed", value.get("output")
             )
             self._finished_functions.add(call_id)
+            owned = self._functions.get(call_id)
+            if owned is not None and owned.automatic_order is not None:
+                settled = owned.automatic_order.get(call_id)
+                if settled is not None:
+                    settled.set()
             if call_id not in self._functions and call_id not in self._pending_functions:
                 self._finish_request(call_id)
             self._emit(
