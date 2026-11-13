@@ -1424,7 +1424,7 @@
         "declarations": [
           "@dataclass(frozen=True, slots=True)\nclass RetryBackoffSettings:\n    initial_delay_ms: float = 250\n    max_delay_ms: float = 2000\n    multiplier: float = 2\n    jitter: bool = True\n\n    def to_json_dict(self) -> dict[str, Any]:\n        pass",
           "@dataclass(frozen=True, slots=True)\nclass NormalizedError:\n    message: str = ''\n    status_code: int | None = None\n    error_code: str | None = None\n    request_id: str | None = None\n    retry_after_ms: float | None = None\n    is_abort: bool = False\n    is_network_error: bool = False\n    is_timeout: bool = False",
-          "@dataclass(frozen=True, slots=True)\nclass RetryAdvice:\n    suggested: bool | None = None\n    retry_after_ms: float | None = None\n    replay_safety: Literal['safe', 'unsafe', 'unknown'] = 'unknown'\n    reason: str | None = None\n    response_started: bool | None = None",
+          "@dataclass(frozen=True, slots=True)\nclass RetryAdvice:\n    suggested: bool | None = None\n    retry_after_ms: float | None = None\n    replay_safety: Literal['safe', 'unsafe', 'unknown'] = 'unknown'\n    reason: str | None = None\n    response_started: bool | None = None\n    normalized: Mapping[str, object] | None = field(default=None, hash=False)",
           "@dataclass(frozen=True, slots=True)\nclass RetryDecision:\n    retry: bool\n    delay_ms: float | None = None\n    reason: str | None = None\n    approve_unsafe_replay: bool = False\n    _veto: Literal['hard', 'provider_unsafe'] | None = field(default=None, repr=False, compare=False)",
           "@dataclass(frozen=True, slots=True)\nclass RetryPolicyContext:\n    attempt_id: str\n    attempt: int\n    request_attempt: int\n    max_retries: int\n    model: str\n    thread_id: str\n    turn_id: str\n    transport: str\n    normalized: NormalizedError\n    error: BaseException | None = field(default=None, repr=False)\n    provider_advice: RetryAdvice | None = None\n    response_started: bool = False\n    retry_unsafe_output: bool = False\n    local_effects: bool = False\n    stateful: bool = False\n    previous_response_id: str | None = None\n    conversation_id: str | None = None\n    usage: TokenUsage | None = None\n    stream: bool | None = field(default=None, kw_only=True)",
           "RetryPolicy = Callable[[RetryPolicyContext], bool | RetryDecision | Awaitable[bool | RetryDecision]]",
@@ -1443,7 +1443,7 @@
           "retry_policies": "retry_policies"
         },
         "imports": [
-          "from collections.abc import Awaitable, Callable, Iterable",
+          "from collections.abc import Awaitable, Callable, Iterable, Mapping",
           "from dataclasses import dataclass, field",
           "from typing import Any, Literal",
           "from .usage import TokenUsage"
