@@ -1411,7 +1411,12 @@ pub(crate) async fn configure(
         let generation = catalog.generation.id;
         let mut data = ExtensionDataInit::new();
         data.insert(codex_extension_api::AgentProfileOutputStrict(
-            descriptor.model.request_controls.output_schema_strict.unwrap_or(true),
+            prepared
+                .declaration
+                .model
+                .request_controls
+                .output_schema_strict
+                .unwrap_or(true),
         ));
         insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
