@@ -30,6 +30,7 @@ from agents import (
 )
 from agents.classic import tool_input_guardrail
 from agents.classic.mcp import MCPServerStreamableHttp, create_static_tool_filter
+from agents.classic.mcp._compat import MCP_V2, tool_input_schema
 from agents.migration.mcp import MCPNamespace, select_mcp_tools
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -272,6 +273,41 @@ async def test_selected_mcp_projects_peer_identity(name: str) -> None:
         assert ref.name.isascii()
         assert [tool.name for tool in await client.list_tools()] == [name]
         assert not peer.calls
+
+
+async def test_selected_mcp_defaults_missing_object_schema_type(
+    responses: ResponsesFixture,
+) -> None:
+    class ApplicationClient(MCPServerStreamableHttp):
+        async def list_tools(self, run_context=None, agent=None):
+            listed = await super().list_tools(run_context, agent)
+            field_name = "input_schema" if MCP_V2 else "inputSchema"
+            return [tool.model_copy(update={field_name: {}}) for tool in listed]
+
+    peer = Peer(names=("search",))
+    call = function_call("search", {"key": "43"}, "empty-schema")
+    call["item"]["namespace"] = "catalog"
+    responses.respond(call)
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(15),
+        peer.serve() as url,
+        ApplicationClient(params={"url": url}) as client,
+    ):
+        selected = await select_mcp_tools(MCPNamespace("catalog", client), context=None)
+        async with Agent(
+            instructions="Use the selected borrowed tool.",
+            provider=provider(responses),
+            tools=selected,
+        ).session() as session:
+            assert (await (await session.submit("Read")).get_result()).final_output == "done"
+        listing = await client.list_tools()
+        assert tool_input_schema(listing[0]) == {}
+
+    parameters = declarations(responses.requests[0])["catalog", "search"]["parameters"]
+    assert parameters["type"] == "object"
+    assert parameters["properties"] == {}
+    assert peer.calls == [{"name": "search", "arguments": {"key": "43"}}]
 
 
 @pytest.mark.parametrize(

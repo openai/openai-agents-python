@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from ._public import preserve_module_identity as _preserve_module_identity
 
@@ -14,11 +14,15 @@ def _project_name(raw: str) -> str:
 
 
 def _project_tool_names(
-    servers: Sequence[tuple[str, Sequence[str]]], *, prefix: bool = True
+    servers: Sequence[tuple[str, Sequence[str]]],
+    *,
+    prefix: bool = True,
+    overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[tuple[str, str], dict[str, str]]:
     # Keep this synchronous projection aligned with codex-mcp/src/tools.rs.
     # Declarations and ToolRefs remain inert; Core owns actual peer dispatch.
     candidates: list[dict[str, str]] = []
+    aliases_by_server = overrides or {}
     for server, tools in servers:
         for raw in (server, *tools):
             if not isinstance(raw, str) or not raw or "\0" in raw:
@@ -43,15 +47,17 @@ def _project_tool_names(
         namespace = project(server) or "_"
         if prefix and not namespace.startswith("mcp__"):
             namespace = "mcp__" + namespace
+        aliases = aliases_by_server.get(server, {})
         for raw in tools:
+            public_name = aliases.get(raw, raw)
             candidates.append(
                 {
                     "server": server,
                     "raw": raw,
                     "namespace": namespace,
-                    "name": project(raw) or "_",
+                    "name": project(public_name) or "_",
                     "raw_namespace": raw_namespace,
-                    "identity": f"{raw_namespace}\0{raw}\0{raw}",
+                    "identity": f"{raw_namespace}\0{public_name}\0{raw}",
                 }
             )
 

@@ -947,7 +947,11 @@
     {
       "path": "sdk-agent-profile-durable-transport-comparison.patch",
       "sha256": "331ceb875035ae10cdd6c23ab34c43642b4978da51137ad1c0998cb28b024ab0"
+    },
+    {
+      "path": "sdk-mcp-tool-name-overrides.patch",
+      "sha256": "45bf8a7b350479d551b41fc06a4ee38bd81c9faee0497d004fe99e2a1bdcebe3"
     }
   ],
-  "result_tree": "eb449dd7230a2585cf56b79bbf6bf9f0aea36e4d"
+  "result_tree": "2e663cd5a94e2eab55160ae9d4dc313eb6f3b775"
 }
