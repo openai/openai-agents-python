@@ -18,6 +18,7 @@ import statistics
 import subprocess
 import sys
 import time
+from collections import Counter
 from contextlib import AsyncExitStack
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -354,7 +355,7 @@ def validate_receipts(workload, result, stats):
                 raise AssertionError(f"Incorrect tool-output history for {operation['id']}")
 
 
-def validate_transport(workload, stats, *, engine, response_mode, native_transport="http"):
+def validate_transport(workload, stats, *, engine, response_mode, native_transport="http", peer_http_mode="h1"):
     """Validate actual provider work, independent of public observation granularity."""
     expected_stream = workload.stream if engine == "v0" else response_mode == "streaming"
     expected_requests = (
@@ -376,6 +377,18 @@ def validate_transport(workload, stats, *, engine, response_mode, native_transpo
     ):
         raise ValueError("Fresh WebSocket connections have not been retiring")
     for receipt in receipts:
+        if peer_http_mode == "dual":
+            expected_version = "2" if engine == "v1" and not websocket else "1.1"
+            connection = stats.get("tls_transports", {}).get(str(receipt.get("tls_connection_id")))
+            if not connection or receipt.get("http_version") != expected_version:
+                raise ValueError("Actual HTTP protocol differs from the dual peer schedule")
+            allowed_alpn = ("h2",) if expected_version == "2" else (None, "http/1.1")
+            if (connection.get("http_version") != expected_version
+                or receipt.get("tls_alpn_protocol") not in allowed_alpn
+                or connection.get("alpn_protocol") != receipt.get("tls_alpn_protocol")):
+                raise ValueError("Actual TLS/ALPN connection receipt differs from the request")
+            if not websocket and receipt.get("response_body_complete") is not True:
+                raise ValueError("HTTP response body has not completed")
         if (receipt.get("wire_transport") == "websocket") != websocket:
             raise ValueError("Provider transport differs from the scheduled transport")
         if type(receipt.get("stream")) is not bool or receipt["stream"] != expected_stream:
@@ -387,6 +400,11 @@ def validate_transport(workload, stats, *, engine, response_mode, native_transpo
         )
         if receipt.get("text_chunks") != expected_chunks:
             raise ValueError("Provider wire text chunk count differs from the scheduled work")
+    if peer_http_mode == "dual":
+        observed = Counter(str(row["tls_connection_id"]) for row in receipts)
+        declared = {key: value["requests"] for key, value in stats["tls_transports"].items()}
+        if dict(observed) != declared:
+            raise ValueError("TLS connection request counts differ from actual receipts")
     expected_chunks = (
         workload.concurrency * (workload.prefill + workload.iterations) * workload.chunks
         if expected_stream
@@ -406,6 +424,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=["v0", "v1"], required=True)
     parser.add_argument("--default-host-setup", type=Path)
+    parser.add_argument("--peer-http-mode", choices=("h1", "dual"), default="h1")
     parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
     parser.add_argument(
         "--native-provider-mode",
@@ -421,6 +440,8 @@ def main():
     parser.add_argument("--sample-index", type=int)
     parser.add_argument("--import-only", action="store_true")
     args = parser.parse_args()
+    if args.peer_http_mode == "dual" and not args.default_host_setup:
+        parser.error("Dual HTTP peer requires default-host TLS setup")
     if args.native_provider_mode == "omitted" and (
         args.engine != "v1" or not args.default_host_setup
     ):
@@ -527,6 +548,7 @@ def main():
             else "json"
         ),
         "engine": args.engine,
+        "peer_http_mode": args.peer_http_mode,
         "case": "startup_import" if args.import_only else args.case,
         "sample_index": args.sample_index,
         "workload": workload.dictionary(),
@@ -547,6 +569,7 @@ def main():
                         server_python,
                         "-B",
                         str(Path(__file__).with_name("protocol_peer.py")),
+                        "--peer-http-mode", args.peer_http_mode,
                         "--tools-per-round",
                         str(workload.tools_per_round),
                         "--tool-rounds",
@@ -616,6 +639,7 @@ def main():
                 engine=args.engine,
                 response_mode=args.response_mode,
                 native_transport=args.native_transport,
+                peer_http_mode=args.peer_http_mode,
             )
         result["versions"] = {
             name: importlib.metadata.version(name)
