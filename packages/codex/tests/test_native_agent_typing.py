@@ -1248,6 +1248,13 @@ def body_error_callback(key: str) -> str:
 direct_body_formatter = function_tool(body_error_callback, error_function=body_error_formatter)
 decorated_body_formatter = function_tool(error_function=body_error_formatter)(body_error_callback)
 assert_type(Agent(instructions="Read.", tools=[direct_body_formatter]), Agent[Application, str])
+direct_body_formatter_ignoring_extra = function_tool(
+    body_error_callback, error_function=body_error_formatter, extra_arguments="ignore"
+)
+assert_type(
+    Agent(instructions="Read.", tools=[direct_body_formatter_ignoring_extra]),
+    Agent[Application, str],
+)
 assert_type(Agent(instructions="Read.", tools=[decorated_body_formatter]), Agent[Application, str])
 
 

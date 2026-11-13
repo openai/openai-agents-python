@@ -250,3 +250,29 @@ async def test_litellm_refusal_adapter_keeps_client_projection_separate():
     result = await LitellmModel(Client()).complete(request)
     assert result.output[0]["content"] == [{"type": "refusal", "refusal": "synthetic refusal"}]
     assert result._raw_chat_completion == response
+
+
+def test_chat_parameter_failure_does_not_retain_message_content_in_traceback() -> None:
+    secret = "synthetic private Chat prompt"
+    model = ChatCompletionsModel(SimpleNamespace())
+    request = ModelRequest(
+        body={
+            "model": "fixture",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": secret}],
+                }
+            ],
+            "tools": [{"type": "file_search"}],
+        },
+        context=None,
+        session_id="test-session",
+        turn_id="test-turn",
+    )
+    with pytest.raises(ValueError, match="ChatCompletionsModel") as rejected:
+        model._parameters(request, streaming=True)
+    frame = rejected.traceback[-1].frame
+    assert frame.code.name == "_parameters"
+    assert secret not in repr(frame.f_locals)

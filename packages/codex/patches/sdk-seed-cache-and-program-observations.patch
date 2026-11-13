@@ -1,0 +1,74 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 3281e628..4d37c0c8 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1185,7 +1185,7 @@ impl CodexThread {
+     #[doc(hidden)]
+     pub async fn inject_response_items_for_initialization(
+         &self,
+-        items: Vec<ResponseItem>,
++        items: Vec<ResponseItemEnvelope>,
+     ) -> CodexResult<Vec<ResponseItem>> {
+         if items.is_empty() {
+             return Err(CodexErr::InvalidRequest("items must not be empty".into()));
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 018f6247..e686abc3 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -116,22 +116,21 @@ impl Session {
+     pub(crate) async fn record_initial_response_items(
+         &self,
+         turn_context: &TurnContext,
+-        items: Vec<ResponseItem>,
++        items: Vec<ResponseItemEnvelope>,
+     ) -> codex_protocol::error::Result<Vec<ResponseItem>> {
+         if self.active_turn.lock().await.is_some() {
+             return Err(codex_protocol::error::CodexErr::InvalidRequest(
+                 "initial response items require an idle fresh initializer".into(),
+             ));
+         }
+-        let (prepared, image_preparations) = self
+-            .prepare_conversation_items_for_history(turn_context, turn_context.model_info(), &items)
++        let (envelopes, image_preparations) = self
++            .prepare_annotated_conversation_items_for_history(
++                turn_context,
++                turn_context.model_info(),
++                items,
++            )
+             .await;
+-        let prepared = prepared.into_owned();
+-        let envelopes = prepared
+-            .iter()
+-            .cloned()
+-            .map(ResponseItemEnvelope::new)
+-            .collect();
++        let prepared = envelopes.iter().map(|envelope| envelope.item.clone()).collect();
+         self.record_prepared_conversation_items(
+             turn_context,
+             turn_context.model_info(),
+diff --git a/codex-rs/core/src/session/inject_tests.rs b/codex-rs/core/src/session/inject_tests.rs
+index c9972f72..27d4625b 100644
+--- a/codex-rs/core/src/session/inject_tests.rs
++++ b/codex-rs/core/src/session/inject_tests.rs
+@@ -407,7 +407,7 @@ async fn sdk_ordinary_compacted_resume_defers_originals_until_explicit_read() {
+     }
+     let input: ResponseItem = serde_json::from_value(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"after resume"}]})).unwrap();
+     let admitted = session
+-        .record_initial_response_items(&turn, vec![input])
++        .record_initial_response_items(&turn, vec![codex_history::ResponseItemEnvelope::new(input)])
+         .await
+         .unwrap();
+     originals.extend(
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 407e5b58..d7e6152b 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -611,6 +611,8 @@ pub(crate) async fn handle_non_tool_response_item(
+         | ResponseItem::CodeInterpreterCall { .. }
+         | ResponseItem::ShellCall { .. }
+         | ResponseItem::ShellCallOutput { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::ImageGenerationCall { .. } => {
+             let mut turn_item = parse_turn_item(item)?;
+             finalize_turn_item(sess, contributor_policy, &mut turn_item, plan_mode).await;

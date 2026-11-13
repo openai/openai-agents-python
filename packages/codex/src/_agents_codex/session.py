@@ -80,6 +80,8 @@ from ._events import (
     ImageGenerationCallItem,
     McpListToolsItem,
     MessageItem,
+    ProgramCallItem,
+    ProgramOutputItem,
     ReasoningItem,
     SessionItem as SessionItem,
     ShellCallItem,
@@ -464,6 +466,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "store",
         "prompt_cache_retention",
         "prompt_cache_ttl",
+        "prompt_cache_mode",
         "truncation",
         "include",
         "context_management",
@@ -526,6 +529,22 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     return result
 
 
+def _output_model_settings(
+    output: _PreparedOutput | None, settings: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if output is None or output.mode != "native":
+        return settings
+    controls = (settings or {}).get("request_controls", {})
+    if not isinstance(controls, dict) or (
+        "output_schema_strict" in controls and type(controls["output_schema_strict"]) is not bool
+    ):
+        raise ValueError("Invalid captured output schema strictness")
+    return {
+        **(settings or {}),
+        "request_controls": {**controls, "output_schema_strict": output.strict},
+    }
+
+
 def _manual_restore_model_settings(
     state: SessionState, *, authorized_model: str | None, trusted_default: str | None
 ) -> tuple[str, dict[str, Any]]:
@@ -584,6 +603,7 @@ def _manual_restore_model_settings(
             "store",
             "prompt_cache_retention",
             "prompt_cache_ttl",
+            "prompt_cache_mode",
             "truncation",
             "include",
             "context_management",
@@ -595,9 +615,11 @@ def _manual_restore_model_settings(
             | {
                 "named_tool_choice",
                 "hosted_tool_choice",
+                "output_schema_strict",
                 "attempt_timeout_ms",
                 "retry",
                 "hosted_prompt",
+                "prompt_cache_key",
             }
         ):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
@@ -605,6 +627,14 @@ def _manual_restore_model_settings(
             None,
             cast(ModelSettings, {key: value for key, value in controls.items() if key in ordinary}),
         ).get("request_controls", {})
+        if "output_schema_strict" in controls:
+            if type(controls["output_schema_strict"]) is not bool:
+                raise ValueError("Manual checkpoint has invalid output schema strictness")
+            normalized["output_schema_strict"] = controls["output_schema_strict"]
+        if "prompt_cache_key" in controls:
+            from ._cache_affinity import _saved_cache_key
+
+            normalized["prompt_cache_key"] = _saved_cache_key(controls["prompt_cache_key"])
         if "hosted_prompt" in controls:
             prompt = controls["hosted_prompt"]
             if prompt is not None and (
@@ -1610,6 +1640,8 @@ def _project_progress(
                     "web_search_call",
                     "mcp_list_tools",
                     "mcp_call",
+                    "program",
+                    "program_output",
                     "file_search_call",
                     "code_interpreter_call",
                     "shell_call",
@@ -1632,6 +1664,8 @@ def _project_progress(
                             | WebSearchCallItem
                             | McpListToolsItem
                             | HostedMcpCallItem
+                            | ProgramCallItem
+                            | ProgramOutputItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
                             | ShellCallItem
@@ -2704,6 +2738,8 @@ def _capture_profile_runtimes(
         instructions = root_instructions if index == 0 else (declaration.instructions or "")
         captured[profile.id] = _ProfileRuntime(profile, catalog, output, instructions)
         settings = _native_model_settings(declaration.model, declaration.model_settings)
+        if output.mode == "native" and not output.strict:
+            settings = _output_model_settings(output, settings) or {}
         if any(profile.declaration.hosted_prompt is not None for profile in profiles):
             settings.setdefault("request_controls", {})["hosted_prompt"] = _hosted_prompt_controls(
                 declaration.hosted_prompt,
@@ -3835,7 +3871,12 @@ def _opening_tool_policy(
         ]
         + mcp_names
         + [
-            {"name": tool["type"], "namespace": "functions"}
+            {
+                "name": tool["definition"]["type"]
+                if tool["type"] == "provider_only"
+                else tool["type"],
+                "namespace": "functions",
+            }
             for tool in hosted_tools
             if tool["type"] != "mcp"
         ]
@@ -4034,6 +4075,7 @@ class Session(Generic[ContextT, OutputT]):
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
         _private_text_run: bool = False,
+        _prompt_cache_key: str | None = None,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
         authenticated_memory_history = isinstance(state, ManagedWorkspaceCheckpoint)
@@ -4046,7 +4088,9 @@ class Session(Generic[ContextT, OutputT]):
             resume_budget=resume_budget,
         )
         if state is not None:
+            # Accepted request controls retain the source run's affinity on restore.
             state._check_prompt_references()
+            _prompt_cache_key = None
         hosted_restore_grants = _capture_restored_hosted_mcp(state, restored_hosted_mcp)
         lease = None
         pending_environment: _EnvironmentLease | None = None
@@ -4613,7 +4657,7 @@ class Session(Generic[ContextT, OutputT]):
                     ):
                         private_http = True
                         websockets_enabled = False
-                    private_wss_tls = (
+                    private_function_run = (
                         _private_wss_candidate
                         and observation_retention == "bounded"
                         and provider.model_backend is None
@@ -4624,12 +4668,23 @@ class Session(Generic[ContextT, OutputT]):
                             provider, provider_config, websockets_enabled
                         )
                     )
-                    return use_completed_owner, websockets_enabled, private_http, private_wss_tls
+                    if private_function_run:
+                        # The fresh scope has been borrowing HTTP;
+                        # parent transport capabilities have been staying fixed.
+                        private_http = True
+                    return (
+                        use_completed_owner,
+                        websockets_enabled,
+                        private_http,
+                        private_function_run,
+                    )
 
-                use_completed_owner, websockets_enabled, private_http, private_wss_tls = (
+                use_completed_owner, websockets_enabled, private_http, private_function_run = (
                     private_run_policy(provider)
                 )
-                _atomic_first_turn = any((_atomic_first_turn, use_completed_owner, private_wss_tls))
+                _atomic_first_turn = any(
+                    (_atomic_first_turn, use_completed_owner, private_function_run)
+                )
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
@@ -4687,7 +4742,6 @@ class Session(Generic[ContextT, OutputT]):
                         if startup_transport is not None
                         else {}
                     ),
-                    **({"_sdk_websocket_tls": True} if private_wss_tls else {}),
                     **guidance_options,
                     **(
                         {"user_instructions_appendix": lease._workspace_instructions}
@@ -4744,6 +4798,11 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     },
                     **({"_sdk_resume_thread_id": resume} if resume is not None else {}),
+                    **(
+                        {"_sdk_prompt_cache_key": _prompt_cache_key}
+                        if _prompt_cache_key is not None
+                        else {}
+                    ),
                     "_application_instructions": instructions,
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
@@ -4885,9 +4944,13 @@ class Session(Generic[ContextT, OutputT]):
                                 json.dumps(settings),
                                 api_key=opening.api_key or "",
                                 provider_lease=provider_lease,
-                                _share_model_http=not private_wss_tls,
+                                _share_model_http=not private_function_run,
                                 _private_http=private_http,
-                                **({"_process_private_runtime": True} if private_wss_tls else {}),
+                                **(
+                                    {"_process_private_runtime": True}
+                                    if private_function_run
+                                    else {}
+                                ),
                             )
                         ),
                     )
@@ -5043,7 +5106,6 @@ class Session(Generic[ContextT, OutputT]):
                 session._bind_native_producers(lease, thread, provider)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
-                options.pop("_sdk_websocket_tls", None)
                 options.pop("_sdk_request_transport", None)
                 session._native_options = json.dumps(options)
                 if owned_provider:
@@ -5236,6 +5298,7 @@ class Session(Generic[ContextT, OutputT]):
         histories: dict[str, dict[str, Any]] = {}
         followup_calls: set[tuple[str, str]] = set()
         child_root_turns: dict[tuple[str, str], str] = {}
+        provider_sampling_risks: set[tuple[str, str]] = set()
         projected: dict[
             str,
             tuple[list[RecordedTurn], list[SessionItem], list[UncertainCall], set[tuple[str, str]]],
@@ -5264,6 +5327,25 @@ class Session(Generic[ContextT, OutputT]):
                     and payload.get("root_turn_id")
                 ):
                     child_root_turns[(thread_id, payload["turn_id"])] = payload["root_turn_id"]
+                receipt = payload.get("sdk_receipt")
+                if (
+                    row["type"] == "turn_context"
+                    and isinstance(turn_id := payload.get("turn_id"), str)
+                    and receipt is not None
+                    and (
+                        not isinstance(receipt, dict)
+                        or (
+                            "provider_effects_possible" in receipt
+                            and (
+                                type(receipt.get("version")) is not int
+                                or receipt.get("version") != 1
+                                or receipt.get("thread_id") != thread_id
+                                or receipt.get("provider_effects_possible") is not False
+                            )
+                        )
+                    )
+                ):
+                    provider_sampling_risks.add((thread_id, turn_id))
             calls, shell_receipts = _application_shell_recovery(history, thread_id)
             turns, items = project_history(history, self.id, subagent_id, uncertain_calls=calls)
             if subagent_id is not None:
@@ -5316,9 +5398,9 @@ class Session(Generic[ContextT, OutputT]):
         recovery_turns.update(
             (thread, turn["id"])
             for thread, turns in recorded.items()
-            if thread in children
             for turn in turns
             if turn["status"] == "in_progress"
+            and (thread in children or (thread, turn["id"]) in provider_sampling_risks)
         )
         receipt_turns = {
             (thread, turn)
@@ -5405,12 +5487,19 @@ class Session(Generic[ContextT, OutputT]):
                             "root_recovery_turns": [
                                 turn["id"]
                                 for turn in recorded[self.id]
-                                if recovery_lineage and (self.id, turn["id"]) in recovery_turns
+                                if (
+                                    recovery_lineage
+                                    or (self.id, turn["id"]) in provider_sampling_risks
+                                )
+                                and (self.id, turn["id"]) in recovery_turns
                             ],
                             "automatic_root_turns": [
                                 turn["id"]
                                 for turn in recorded[self.id]
-                                if recovery_lineage
+                                if (
+                                    recovery_lineage
+                                    or (self.id, turn["id"]) in provider_sampling_risks
+                                )
                                 and turn["status"] == "in_progress"
                                 and (self.id, turn["id"]) in recovery_turns
                                 and (self.id, turn["id"]) not in receipt_turns
@@ -9179,7 +9268,7 @@ class Session(Generic[ContextT, OutputT]):
             transport_settings = {
                 key: value
                 for key, value in self._effective_agent().model_settings.items()
-                if key in ("extra_headers", "extra_query")
+                if key in ("extra_headers", "extra_query", "request_transport")
             }
             if (
                 self._repair_transport_settings is not None
@@ -10126,7 +10215,7 @@ class Session(Generic[ContextT, OutputT]):
                     **{
                         key: value
                         for key, value in captured_update_settings.items()
-                        if key in ("extra_headers", "extra_query")
+                        if key in ("extra_headers", "extra_query", "request_transport")
                     },
                 }
                 if transport:
@@ -10274,6 +10363,16 @@ class Session(Generic[ContextT, OutputT]):
             await self._update_instructions(instructions)
         elif settings:
             await self._update_model_settings(json.dumps(settings))
+
+    async def _bind_prompt_cache_key(self, key: str | None) -> None:
+        if key is None:
+            return
+        from ._cache_affinity import _saved_cache_key
+
+        key = _saved_cache_key(key)
+        self._check_idle_update()
+        encoded = json.dumps({"request_controls": {"prompt_cache_key": key}})
+        await self._join_mutation(asyncio.create_task(self._update_model_settings(encoded)))
 
     async def _update_model_settings(self, encoded: str) -> None:
         try:
@@ -11631,9 +11730,13 @@ class Session(Generic[ContextT, OutputT]):
                             request["start"] = {"final_output_json_schema": state.output.schema}
                         if state.model_override is not None:
                             request.setdefault("start", {})["model_override"] = state.model_override
-                        if state.model_settings_override is not None:
+                        output_settings = _output_model_settings(
+                            state.output if state.realtime_tool is None else None,
+                            state.model_settings_override,
+                        )
+                        if output_settings is not None:
                             request.setdefault("start", {})["model_settings_override"] = (
-                                state.model_settings_override
+                                output_settings
                             )
                         if state.raise_on_unknown_tool:
                             request["raise_on_unknown_tool"] = True
@@ -11771,6 +11874,13 @@ class Session(Generic[ContextT, OutputT]):
             error = caught
         finally:
             state.stopping = True
+            # Retire run-owned transports independently of a tool that is
+            # still joining after cancellation.
+            model_cleanup = (
+                _create_task(self._close_model_run(state))
+                if error is not None and state.model_run is not None
+                else None
+            )
             # A pending selector blocks Core before it can settle an interrupt.
             # Notify callbacks now; retain this owner until their exit below.
             for callback in state.callbacks:
@@ -11884,6 +11994,13 @@ class Session(Generic[ContextT, OutputT]):
                 if error is None:
                     error = cleanup_error
             finally:
+                if model_cleanup is not None:
+                    try:
+                        model_cleanup_error = await _join(model_cleanup)
+                    except BaseException as cleanup_failure:
+                        model_cleanup_error = cleanup_failure
+                    if model_cleanup_error is not None:
+                        state.retain_cleanup_error(model_cleanup_error)
                 if (
                     self._environment_lease is not None
                     and self._environment_lease._sandbox_memory is not None
@@ -11901,7 +12018,9 @@ class Session(Generic[ContextT, OutputT]):
                     # the graph and thread. Consumers wait for their outcome.
                     state.deferred_close = (input is not None, error, outcome)
                 else:
-                    self._settle_submission(state, input is not None, error, outcome)
+                    await self._settle_submission_with_models(
+                        state, input is not None, error, outcome
+                    )
 
     async def _capture_memory_admission(self, state: _Submission) -> None:
         lease = self._environment_lease
@@ -11932,6 +12051,69 @@ class Session(Generic[ContextT, OutputT]):
             question._release_tracing()
         state.questions.clear()
 
+    async def _close_model_run(self, state: _Submission) -> BaseException | None:
+        model_run, state.model_run = state.model_run, None
+        assert model_run is not None
+
+        async def invoke(cleanup: Any, owner: Any) -> None:
+            guard = _Invocation(self)
+            token = _invocation.set(guard)
+            value = None
+            try:
+                value = cleanup(owner)
+                if inspect.isawaitable(value):
+                    await value
+            finally:
+                guard.active = False
+                _invocation.reset(token)
+                del cleanup, owner, value
+
+        pending = model_run.close(invoke)
+        error: BaseException | None = None
+        try:
+            errors = await _join(pending)
+        except asyncio.CancelledError as cancelled:
+            error = cancelled
+            errors = pending.result()
+        for cleanup_error in errors:
+            if error is None:
+                error = cleanup_error
+            else:
+                _retain_cleanup_error(error, cleanup_error, _error_contexts(error.__context__))
+        return error
+
+    def _can_continue_submission(self, state: _Submission) -> bool:
+        return (
+            not self._closing
+            and not self._broken
+            and not state.graceful_requested
+            and not self._graph_interrupts
+            and not self._root_interrupts
+        )
+
+    async def _settle_submission_with_models(
+        self,
+        state: _Submission,
+        has_input: bool,
+        error: BaseException | None,
+        outcome: Completed[Any] | None,
+    ) -> None:
+        continuing = (
+            error is None
+            and state.cleanup_error is None
+            and has_input
+            and state.unsampled_steering
+            and self._can_continue_submission(state)
+        )
+        if state.model_run is not None and not continuing:
+            cleanup_error = await self._close_model_run(state)
+            if cleanup_error is not None:
+                if error is None:
+                    error = cleanup_error
+                else:
+                    _retain_cleanup_error(error, cleanup_error, _error_contexts(error.__context__))
+        self._settle_submission(state, has_input, error, outcome)
+
     def _settle_submission(
         self,
         state: _Submission,
@@ -11961,13 +12143,7 @@ class Session(Generic[ContextT, OutputT]):
                     _error_contexts(error.__context__),
                 )
         if error is None and has_input and state.unsampled_steering:
-            if (
-                not self._closing
-                and not self._broken
-                and not state.graceful_requested
-                and not self._graph_interrupts
-                and not self._root_interrupts
-            ):
+            if self._can_continue_submission(state):
                 assert state.handle is not None
                 continuation = _Submission(
                     state.output,
@@ -12002,6 +12178,10 @@ class Session(Generic[ContextT, OutputT]):
                 self._active = continuation
             else:
                 error = NativeError("Accepted steering input remains in history after interruption")
+        if continuation is not None:
+            continuation.model_run, state.model_run = state.model_run, None
+        else:
+            assert state.model_run is None
         if state.tracing is not None:
             state.tracing.close(
                 error,
@@ -12183,7 +12363,7 @@ class Session(Generic[ContextT, OutputT]):
         transport_settings = {
             key: value
             for key, value in source_agent.model_settings.items()
-            if key in ("extra_headers", "extra_query")
+            if key in ("extra_headers", "extra_query", "request_transport")
         }
         source_profile = (
             (source_message["profile_id"], source_message["profile_epoch"])
@@ -13329,10 +13509,14 @@ class Session(Generic[ContextT, OutputT]):
         request_id: int,
         active: Callable[[], bool],
     ) -> bool:
-        from .models import _BorrowedResponsesEvent, _ChatStreamEvent, _RawChatChunk
+        from .models import (
+            _BorrowedResponsesEvent,
+            _ChatStreamEvent,
+            _RawChatChunk,
+            _ResponsesWebSocketFrame,
+        )
 
         started = False
-        observing_chat = False
         produced: Any = None
         iterator: Any = None
         event: Any = None
@@ -13359,26 +13543,25 @@ class Session(Generic[ContextT, OutputT]):
                     raise TypeError("NativeModel.stream must yield Responses event mappings")
                 if not started:
                     chat_stream = isinstance(event, _ChatStreamEvent)
-                    observing_chat = chat_stream and getattr(
-                        request, "_observe_raw_provider_events", False
-                    )
-                    started = (
-                        native._start_model_producer_stream(request_id, chat_stream=True)
-                        if chat_stream
-                        else native._start_model_producer_stream(
-                            request_id, upstream_request_id=event.request_id
-                        )
-                        if isinstance(event, _BorrowedResponsesEvent)
-                        else native._start_model_producer_stream(request_id)
+                    started = native._start_model_producer_stream(
+                        request_id,
+                        chat_stream=chat_stream,
+                        responses_websocket_stream=isinstance(event, _ResponsesWebSocketFrame),
+                        upstream_request_id=(
+                            event.request_id if isinstance(event, _BorrowedResponsesEvent) else None
+                        ),
                     )
                     if not started:
                         return False
                 data = json.dumps(dict(event), allow_nan=False)
 
-                accepted = (
-                    await native._push_model_producer_event(request_id, data, raw_chat_chunk=True)
-                    if observing_chat and isinstance(event, _RawChatChunk)
-                    else await native._push_model_producer_event(request_id, data)
+                accepted = await native._push_model_producer_event(
+                    request_id,
+                    data,
+                    raw_chat_chunk=isinstance(event, _RawChatChunk),
+                    raw_responses_websocket_frame=(
+                        isinstance(event, _ResponsesWebSocketFrame) and event.raw
+                    ),
                 )
                 if not accepted:
                     return False
@@ -13399,6 +13582,7 @@ class Session(Generic[ContextT, OutputT]):
         backend: Any = None
         complete: Any = None
         stream: Any = None
+        cleanup: Any = None
         request_stream: bool | None = None
         attempt_id = message.get("attempt_id")
         request_id = message["request_id"]
@@ -13464,6 +13648,20 @@ class Session(Generic[ContextT, OutputT]):
                 disable_provider_retries=message.get("disable_provider_retries") is True,
                 _report_usage=report_usage,
             )
+            if measurement_owner is not None:
+
+                def account_provider_request(operation: dict[str, Any]) -> str | None:
+                    result = cast(
+                        str | None,
+                        native._account_provider_request(
+                            measurement_owner, json.dumps(operation, allow_nan=False)
+                        ),
+                    )
+                    if operation.get("operation") == "manage":
+                        state.model_run_usage.manage_provider_attempts()
+                    return result
+
+                object.__setattr__(request, "_account_provider_request", account_provider_request)
             if "request_transport" in message:
                 object.__setattr__(
                     request, "_request_transport", deepcopy(message["request_transport"])
@@ -13480,6 +13678,13 @@ class Session(Generic[ContextT, OutputT]):
                 if not active():
                     return
                 complete = getattr(backend, "complete", None)
+            cleanup = getattr(backend, "cleanup_on_run_end", None)
+            if callable(cleanup):
+                from ._model_run import _ModelRun
+
+                if state.model_run is None:
+                    state.model_run = _ModelRun(self.id, message["turn_id"])
+                object.__setattr__(request, "run_owner", state.model_run.admit(backend, cleanup))
             stream = getattr(backend, "stream", None)
             if callable(stream):
                 request_stream = True
@@ -13580,7 +13785,7 @@ class Session(Generic[ContextT, OutputT]):
                 message = {}
                 complete = None
                 stream = None
-                del request, produced, reply, backend, callback_owner, issuing
+                del request, produced, reply, backend, callback_owner, issuing, cleanup
 
     async def _prepare_sampling_request(self, state: _Submission, message: dict[str, Any]) -> None:
         request_id = message["request_id"]
@@ -16737,6 +16942,11 @@ class Session(Generic[ContextT, OutputT]):
                 nested_call_id=(code_origin["nested_call_id"] if code_origin is not None else None),
             )
 
+            if code_origin is None:
+                from ._hosted_agent_metadata import _bind_hosted_agent_metadata
+
+                _bind_hosted_agent_metadata(call, message.get("_sdk_hosted_agent_metadata"))
+
             def make_context(
                 effective_arguments: Mapping[str, Any],
             ) -> ToolContext[ContextT | None]:
@@ -17135,7 +17345,10 @@ class Session(Generic[ContextT, OutputT]):
                 failure_output = ToolOutput.error(text)
             if not self._admit_tool(state, request):
                 return
-            from .decision_handoff import _CapturedDecisionHandoff, _DecisionHandoffSelection
+            from .decision_handoff import (
+                _CapturedDecisionHandoff,
+                _DecisionHandoffSelection,
+            )
 
             handoff_target_profile_id = None
             if failure_output is None and isinstance(entry, _CapturedDecisionHandoff):
@@ -18668,7 +18881,9 @@ class Session(Generic[ContextT, OutputT]):
                     if state is not None and state.deferred_close is not None:
                         has_input, turn_error, outcome = state.deferred_close
                         state.deferred_close = None
-                        self._settle_submission(state, has_input, turn_error, outcome)
+                        await self._settle_submission_with_models(
+                            state, has_input, turn_error, outcome
+                        )
                     results = await asyncio.gather(*interrupts, return_exceptions=True)
                     for result in results:
                         # Closing an unadmitted root may cancel its accepted future.

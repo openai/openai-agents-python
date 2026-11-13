@@ -1,0 +1,207 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index ff14db34..e10a6813 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -802,6 +802,11 @@ impl ModelClient {
+     }
+
+     fn prompt_cache_key(&self, responses_metadata: &CodexResponsesMetadata) -> String {
++        if !self.state.session_source.is_non_root_agent()
++            && let Some(key) = &responses_metadata.sdk_prompt_cache_key
++        {
++            return key.clone();
++        }
+         if let Some(prompt_cache_key) = &self.prompt_cache_key_override {
+             return prompt_cache_key.clone();
+         }
+@@ -2250,9 +2255,15 @@ impl ModelClientSession {
+         .map_err(|message| ApiError::InvalidRequest { message })?;
+         let connection_key = ResponsesConnectionKey::new(&api_provider, auth_revision)
+             .with_request_transport(&api_provider, request_transport)?;
++        // Include the effective routing header when deciding if the socket can be reused.
++        let mut connection_headers = build_session_headers(
++            Some(self.client.responses_session_id(responses_metadata)),
++            None,
++        );
++        connection_headers.extend(responses_headers.clone());
+         let reset_reason = match self.websocket_session.connection.as_ref() {
+             Some(_)
+-                if self.websocket_session.responses_headers != *responses_headers
++                if self.websocket_session.responses_headers != connection_headers
+                     || self.websocket_session.connection_key.as_ref() != Some(&connection_key) =>
+             {
+                 Some("other")
+@@ -2294,7 +2305,7 @@ impl ModelClientSession {
+                 .await?;
+             self.websocket_session.connection = Some(new_conn);
+             self.websocket_session.physical_connection = Some(Arc::new(()));
+-            self.websocket_session.responses_headers = responses_headers.clone();
++            self.websocket_session.responses_headers = connection_headers;
+             self.websocket_session.auth_owner_generation = auth_owner_generation;
+             self.websocket_session.connection_key = Some(connection_key);
+             self.websocket_session
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 5b3c6147..1ae3d69d 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1505,6 +1505,24 @@ fn internal_session_prompt_cache_key_is_scoped_to_parent_thread() {
+     );
+ }
+
++#[test]
++fn sdk_cache_affinity_keeps_body_and_routing_key_separate_from_thread_identity() {
++    let client = test_model_client(SessionSource::Cli);
++    let mut metadata = test_responses_metadata_for_client(
++        &client, Some("turn-cache"), "window-cache".to_string(), None,
++        TestCodexResponsesRequestKind::Turn,
++    );
++    let original = metadata.session_id.clone();
++    let key = "agents-sdk:group:0123456789abcdef0123456789abcdef";
++    metadata.sdk_prompt_cache_key = Some(key.into());
++    assert_eq!(client.prompt_cache_key(&metadata), key);
++    assert_eq!(client.responses_session_id(&metadata), key);
++    assert_eq!(metadata.session_id, original);
++    assert!(!metadata.turn_metadata_json().unwrap().contains(key));
++    metadata.sdk_prompt_cache_key = None;
++    assert_eq!(client.prompt_cache_key(&metadata), original);
++}
++
+ #[test]
+ fn build_subagent_headers_sets_internal_memory_consolidation_label() {
+     let client = test_model_client(SessionSource::Internal(
+diff --git a/codex-rs/core/src/responses_metadata.rs b/codex-rs/core/src/responses_metadata.rs
+index d7124cc7..d8a4f6a5 100644
+--- a/codex-rs/core/src/responses_metadata.rs
++++ b/codex-rs/core/src/responses_metadata.rs
+@@ -234,6 +234,8 @@ pub struct CodexResponsesMetadata {
+     pub(crate) parent_response_id: Option<String>,
+     pub(crate) installation_id: String,
+     pub(crate) session_id: String,
++    // Private routing preference; excluded from serialized turn metadata.
++    pub(crate) sdk_prompt_cache_key: Option<String>,
+     pub(crate) thread_id: String,
+     pub(crate) agent_name: Option<String>,
+     pub(crate) turn_id: Option<String>,
+@@ -281,6 +283,7 @@ impl CodexResponsesMetadata {
+             parent_response_id: None,
+             installation_id,
+             session_id,
++            sdk_prompt_cache_key: None,
+             thread_id,
+             agent_name: None,
+             turn_id: None,
+diff --git a/codex-rs/core/src/turn_metadata.rs b/codex-rs/core/src/turn_metadata.rs
+index ddd96eda..77b06af6 100644
+--- a/codex-rs/core/src/turn_metadata.rs
++++ b/codex-rs/core/src/turn_metadata.rs
+@@ -52,6 +52,7 @@ const WORKSPACE_KIND_KEY: &str = "workspace_kind";
+
+ /// Captured execution settings shared by Responses and MCP metadata.
+ pub(crate) struct ExecutionMetadata<'a> {
++    pub(crate) sdk_prompt_cache_key: Option<&'a str>,
+     pub(crate) model: &'a str,
+     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
+     pub(crate) node_repl_disabled: bool,
+@@ -62,6 +63,11 @@ pub(crate) struct ExecutionMetadata<'a> {
+ impl<'a> ExecutionMetadata<'a> {
+     pub(crate) fn from_settings(settings: &'a ResolvedStepSettings) -> Self {
+         Self {
++            sdk_prompt_cache_key: settings
++                .request_controls()
++                .prompt_cache_key
++                .as_ref()
++                .and_then(Option::as_deref),
+             model: settings.model_info.slug.as_str(),
+             reasoning_effort: settings.effective_reasoning_effort(),
+             node_repl_disabled: settings.model_info.node_repl_disabled,
+@@ -74,6 +80,7 @@ impl<'a> ExecutionMetadata<'a> {
+     }
+
+     pub(crate) fn apply_to(&self, metadata: &mut CodexResponsesMetadata) {
++        metadata.sdk_prompt_cache_key = self.sdk_prompt_cache_key.map(str::to_owned);
+         metadata.auto_review_enabled = Some(self.auto_review_enabled);
+         metadata.node_repl_auto_review_required = Some(self.node_repl_auto_review_required);
+         metadata.node_repl_disabled = Some(self.node_repl_disabled);
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index b4525da9..e9217855 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -334,6 +334,15 @@ pub struct ModelRequestControls {
+     #[ts(optional = nullable, as = "Option<PromptCacheTtl>")]
+     #[schemars(with = "Option<PromptCacheTtl>")]
+     pub prompt_cache_ttl: Option<Option<PromptCacheTtl>>,
++    /// SDK-generated logical-run cache affinity; it never changes thread identity.
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, as = "Option<String>")]
++    #[schemars(with = "Option<String>")]
++    pub prompt_cache_key: Option<Option<String>>,
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -398,6 +407,7 @@ impl ModelRequestControls {
+             && self.prompt_cache_retention.is_none()
+             && self.prompt_cache_ttl.is_none()
+             && self.prompt_cache_mode.is_none()
++            && self.prompt_cache_key.is_none()
+             && self.named_tool_choice.is_none()
+             && self.hosted_tool_choice.is_none()
+             && self.reset_tool_choice.is_none()
+@@ -472,6 +482,9 @@ impl ModelRequestControls {
+         if patch.prompt_cache_mode.is_some() {
+             self.prompt_cache_mode = patch.prompt_cache_mode;
+         }
++        if patch.prompt_cache_key.is_some() {
++            self.prompt_cache_key = patch.prompt_cache_key.clone();
++        }
+         if patch.hosted_tool_choice.is_some() {
+             self.hosted_tool_choice = patch.hosted_tool_choice.clone();
+         }
+@@ -488,6 +501,19 @@ impl ModelRequestControls {
+         if let Some(Some(transport)) = &self.request_transport {
+             transport.validate()?;
+         }
++        if let Some(Some(key)) = &self.prompt_cache_key {
++            let digest = key
++                .strip_prefix("agents-sdk:conversation:")
++                .or_else(|| key.strip_prefix("agents-sdk:group:"));
++            if !digest.is_some_and(|value| {
++                value.len() == 32
++                    && value
++                        .bytes()
++                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++            }) {
++                return Err("Invalid SDK prompt cache affinity".into());
++            }
++        }
+         if let Some(Some(prompt)) = &self.hosted_prompt {
+             if prompt
+                 .reference
+@@ -757,6 +783,24 @@ mod sdk_extension_tests {
+         );
+     }
+
++    #[test]
++    fn cache_affinity_preserves_omission_and_explicit_clearing() {
++        let key = "agents-sdk:conversation:0123456789abcdef0123456789abcdef";
++        let mut controls: ModelRequestControls =
++            serde_json::from_value(json!({"prompt_cache_key": key})).unwrap();
++        controls.validate_shape().unwrap();
++        assert!(!controls.is_empty());
++        controls.apply_patch(&ModelRequestControls::default());
++        assert_eq!(controls.prompt_cache_key, Some(Some(key.into())));
++        let clear: ModelRequestControls =
++            serde_json::from_value(json!({"prompt_cache_key": null})).unwrap();
++        controls.apply_patch(&clear);
++        assert_eq!(controls.prompt_cache_key, Some(None));
++        let bad: ModelRequestControls =
++            serde_json::from_value(json!({"prompt_cache_key": "invalid"})).unwrap();
++        assert!(bad.validate_shape().is_err());
++    }
++
+     #[test]
+     fn empty_extra_body_is_a_patch_without_wire_values() {
+         for body in [json!({}), serde_json::Value::Null] {

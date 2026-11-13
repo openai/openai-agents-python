@@ -80,6 +80,7 @@ pub struct EngineState {
     cloud_config: codex_config::CloudConfigBundleLoader,
     pub(crate) service_config: Config,
     pub(crate) model_http_pool: Option<codex_http_client::SdkModelHttpPool>,
+    pub(crate) private_function_http_pool: OnceLock<codex_http_client::SdkModelHttpPool>,
     initial_config_available: AtomicBool,
     pub(crate) interception: Arc<crate::native_interception::Boundary>,
     pub(crate) recovery: Arc<crate::recovery_guard::RecoveryContributor>,
@@ -697,6 +698,7 @@ impl EngineState {
             // The isolated HTTP pool enables Core's redirect rejection when
             // the provider declares its fixed routing, including on restore.
             model_http_pool: siwc.then(codex_http_client::SdkModelHttpPool::default),
+            private_function_http_pool: OnceLock::new(),
             // Session opening captures one configuration for its owned runtime
             // and immediate first thread. Raw creation retains its prior behavior.
             initial_config_available: AtomicBool::new(
@@ -744,7 +746,8 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let private_http = options.private_http;
-        let private_wss_tls = options.private_wss_tls;
+        let private_function_wss_tls = options.private_function_scope;
+        let force_http = private_http && !options.private_function_scope;
         let process_private_http = options.process_private_http
             && cfg!(target_os = "linux")
             && self.owns_runtime_services()
@@ -894,13 +897,14 @@ impl EngineState {
                     .collect(),
             );
         }
-        crate::private_wss::install(&mut startup, private_wss_tls);
+        crate::private_wss::install(&mut startup, private_function_wss_tls);
         let native = self
             .start_prepared_with_transport(
                 startup,
                 instructions,
                 private_http,
                 process_private_http,
+                force_http,
             )
             .await?;
         if let Some(batch) = initial_messages {
@@ -923,7 +927,7 @@ impl EngineState {
         startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
     ) -> anyhow::Result<NativeThread> {
-        self.start_prepared_with_transport(startup, instructions, false, false)
+        self.start_prepared_with_transport(startup, instructions, false, false, false)
             .await
     }
 
@@ -933,6 +937,7 @@ impl EngineState {
         instructions: Arc<options::ThreadInstructions>,
         private_http: bool,
         process_private_http: bool,
+        force_http: bool,
     ) -> anyhow::Result<NativeThread> {
         // build_startup has already validated the unchanged provider against the
         // retained Engine. Only this owned thread config receives the restriction.
@@ -941,6 +946,7 @@ impl EngineState {
             &mut startup,
             process_pool.as_ref().or(self.model_http_pool.as_ref()),
             private_http || process_private_http,
+            force_http || process_private_http,
         )?;
         if self.runtime_parent.is_some() {
             ensure!(
@@ -1739,6 +1745,16 @@ impl EngineState {
         Ok(())
     }
 
+    // A dedicated fallback owns its own pool; a scope borrows its parent's pool.
+    pub(crate) fn private_function_http_pool(&self) -> codex_http_client::SdkModelHttpPool {
+        self.runtime_parent
+            .as_deref()
+            .unwrap_or(self)
+            .private_function_http_pool
+            .get_or_init(crate::private_http::pool)
+            .clone()
+    }
+
     async fn close_locked(&self) -> anyhow::Result<()> {
         self.discard_stored_forks(None).await?;
         if self.runtime_parent.is_some() {
@@ -1784,6 +1800,9 @@ impl EngineState {
             .downcast_ref::<crate::canonical_storage::CanonicalStore>()
         {
             store.close_all().await?;
+        }
+        if let Some(pool) = self.private_function_http_pool.get() {
+            pool.close();
         }
         self.closed.store(true, Ordering::Release);
         if let Some(store) = &self.local_checklist_store {
@@ -3385,6 +3404,7 @@ fn prepare_private_transport(
     startup: &mut StartThreadOptions,
     pool: Option<&codex_http_client::SdkModelHttpPool>,
     private_http: bool,
+    force_http: bool,
 ) -> anyhow::Result<()> {
     if private_http {
         let config = &mut startup.config;
@@ -3399,9 +3419,11 @@ fn prepare_private_transport(
                 && !provider.has_request_routing_overrides(),
             "private HTTP requires the implicit default SDK Responses provider on a fresh thread"
         );
-        provider.supports_websockets = false;
-        if let Some(selected) = config.model_providers.get_mut(&config.model_provider_id) {
-            selected.supports_websockets = false;
+        if force_http {
+            provider.supports_websockets = false;
+            if let Some(selected) = config.model_providers.get_mut(&config.model_provider_id) {
+                selected.supports_websockets = false;
+            }
         }
     }
     if let Some(pool) = pool {
@@ -3604,6 +3626,7 @@ mod rebuild_consumer_tests {
                         internal_chat_message_metadata_passthrough: None,
                     };
                     let earlier_call = ResponseItem::FunctionCall {
+                        caller: None,
                         id: None,
                         name: "reserve".into(),
                         namespace: None,
@@ -3635,6 +3658,7 @@ mod rebuild_consumer_tests {
                         ),
                     };
                     let call = ResponseItem::FunctionCall {
+                        caller: None,
                         id: None,
                         name: "reserve".into(),
                         namespace: None,

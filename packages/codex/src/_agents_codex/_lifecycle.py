@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio as asyncio
+import builtins
+import sys
 from collections.abc import Awaitable as Awaitable, Callable as Callable
 from concurrent.futures import Future as Future
 from contextvars import ContextVar as ContextVar
 from threading import RLock as RLock
+from traceback import clear_frames
 from typing import Any as Any, TypeVar as TypeVar
 
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -106,6 +109,23 @@ async def _join(task: asyncio.Future[Any], *, outcome: Future[Any] | None = None
     if cancelled is not None:
         raise cancelled
     return value
+
+
+def _clear_error_frames(error: BaseException) -> None:
+    """Clear finished frames throughout a chained transport failure."""
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        clear_frames(current.__traceback__)
+        if sys.version_info >= (3, 11):
+            if isinstance(current, builtins.BaseExceptionGroup):
+                pending.extend(current.exceptions)
+        pending.extend(
+            item for item in (current.__cause__, current.__context__) if item is not None
+        )
 
 
 def _error_contexts(error: BaseException | None) -> tuple[BaseException, ...]:

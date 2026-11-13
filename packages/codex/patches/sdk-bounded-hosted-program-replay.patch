@@ -1,0 +1,242 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4446,11 +4446,40 @@
+     assert!(sdk_request_may_have_provider_effects(&prompt, &[]));
+ }
+
++// The existing analytics capture bounds distinct per-response tool IDs at 256.
++// Bound provider program admission independently at the same capacity.
++const MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE: usize = 256;
++
++fn retained_hosted_program_calls(prompt: &Prompt) -> HashMap<String, bool> {
++    let mut retained = HashMap::new();
++    for item in prompt.input.iter() {
++        match item {
++            ResponseItem::Program { call_id, .. } => {
++                retained.insert(call_id.clone(), false);
++            }
++            ResponseItem::ProgramOutput {
++                call_id, status, ..
++            } => {
++                retained.insert(
++                    call_id.clone(),
++                    matches!(
++                        status,
++                        codex_protocol::models::ProgramOutputStatus::Completed
++                    ),
++                );
++            }
++            _ => {}
++        }
++    }
++    retained
++}
++
+ // Provider actions have no local accepted-call deduplication owner. Unknown
+ // output has lost its raw type, so its replay safety cannot be established.
+ fn admit_hosted_program_item(
+     prompt: &Prompt,
+     calls: &mut HashMap<String, bool>,
++    retained_calls: &mut Option<HashMap<String, bool>>,
+     item: &ResponseItem,
+ ) -> CodexResult<()> {
+     let opaque_prompt_catalog = prompt.tools.is_empty()
+@@ -4472,34 +4501,158 @@
+     }
+     match item {
+         ResponseItem::Program { call_id, .. } => {
+-            if call_id.is_empty() || calls.insert(call_id.clone(), false).is_some() {
+-                return Err(CodexErr::InvalidRequest("Invalid provider program call ID".into()));
+-            }
+-        }
+-        ResponseItem::ProgramOutput { call_id, status, .. } => {
++            if call_id.is_empty() || calls.contains_key(call_id) {
++                return Err(CodexErr::InvalidRequest(
++                    "Invalid provider program call ID".into(),
++                ));
++            }
++            if calls.len() >= MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE {
++                return Err(CodexErr::InvalidRequest(
++                    "Too many provider program calls in one response".into(),
++                ));
++            }
++            calls.insert(call_id.clone(), false);
++        }
++        ResponseItem::ProgramOutput {
++            call_id, status, ..
++        } => {
++            if !calls.contains_key(call_id)
++                && calls.len() >= MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "Too many provider program calls in one response".into(),
++                ));
++            }
+             let prior = calls.entry(call_id.clone()).or_insert_with(|| {
+-                // A different response can finish a program admitted in the retained input.
+-                prompt.input.iter().rev().find_map(|item| match item {
+-                    ResponseItem::ProgramOutput { call_id: existing, status, .. }
+-                        if existing == call_id => Some(matches!(
+-                            status, codex_protocol::models::ProgramOutputStatus::Completed
+-                        )),
+-                    ResponseItem::Program { call_id: existing, .. } if existing == call_id => {
+-                        Some(false)
+-                    }
+-                    _ => None,
+-                }).unwrap_or(true)
++                // The retained prompt is immutable for this response. Index its latest state once.
++                retained_calls
++                    .get_or_insert_with(|| retained_hosted_program_calls(prompt))
++                    .get(call_id)
++                    .copied()
++                    .unwrap_or(true)
+             });
+             if *prior {
+                 return Err(CodexErr::InvalidRequest(
+                     "Provider program output has no unfinished program with this call ID".into(),
+                 ));
+             }
+-            *prior = matches!(status, codex_protocol::models::ProgramOutputStatus::Completed);
++            *prior = matches!(
++                status,
++                codex_protocol::models::ProgramOutputStatus::Completed
++            );
+         }
+         _ => unreachable!("program admission only handles program items"),
+     }
+     Ok(())
++}
++
++#[cfg(test)]
++mod hosted_program_admission_tests {
++    use super::*;
++
++    fn prompt(input: Vec<ResponseItem>) -> Prompt {
++        let mut prompt = Prompt::default();
++        prompt.input = input.into();
++        prompt.request_controls.hosted_prompt = Some(Some(Default::default()));
++        prompt
++            .request_controls
++            .hosted_prompt
++            .as_mut()
++            .unwrap()
++            .as_mut()
++            .unwrap()
++            .omit_tools = true;
++        prompt
++    }
++    fn program(call_id: &str) -> ResponseItem {
++        serde_json::from_value(
++            serde_json::json!({"type":"program","call_id":call_id,"code":"pass"}),
++        )
++        .unwrap()
++    }
++    fn output(call_id: &str) -> ResponseItem {
++        serde_json::from_value(serde_json::json!({"type":"program_output","call_id":call_id,"result":"done","status":"completed"})).unwrap()
++    }
++
++    #[test]
++    fn retained_program_index_keeps_latest_state_and_current_response_ownership() {
++        let prompt = prompt(vec![program("closed"), output("closed"), program("open")]);
++        let mut calls = HashMap::new();
++        let mut retained = None;
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("closed"))
++                .is_err()
++        );
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("open")).is_ok()
++        );
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("open")).is_err()
++        );
++        let mut calls = HashMap::new();
++        let mut retained = None;
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &program("closed"))
++                .is_ok()
++        );
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("closed"))
++                .is_ok()
++        );
++    }
++
++    #[test]
++    fn many_retained_programs_share_one_index_without_a_lifetime_call_limit() {
++        let input = (0..4096)
++            .map(|index| program(&format!("retained-{index}")))
++            .collect::<Vec<_>>();
++        let prompt = prompt(input);
++        let before = serde_json::to_value(&*prompt.input).unwrap();
++        let mut calls = HashMap::new();
++        let mut retained = None;
++        for index in 0..MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE {
++            admit_hosted_program_item(
++                &prompt,
++                &mut calls,
++                &mut retained,
++                &output(&format!("retained-{index}")),
++            )
++            .unwrap();
++        }
++        assert_eq!(retained.as_ref().unwrap().len(), 4096);
++        assert_eq!(calls.len(), MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE);
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("retained-256"))
++                .is_err()
++        );
++        assert_eq!(serde_json::to_value(&*prompt.input).unwrap(), before);
++    }
++
++    #[test]
++    fn response_program_limit_rejects_another_call_before_growing_the_ledger() {
++        let prompt = prompt(vec![]);
++        let mut calls = HashMap::new();
++        let mut retained = None;
++        for index in 0..MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE {
++            admit_hosted_program_item(
++                &prompt,
++                &mut calls,
++                &mut retained,
++                &program(&format!("current-{index}")),
++            )
++            .unwrap();
++        }
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &program("too-many"))
++                .is_err()
++        );
++        assert_eq!(calls.len(), MAX_HOSTED_PROGRAM_CALL_IDS_PER_RESPONSE);
++        assert!(
++            admit_hosted_program_item(&prompt, &mut calls, &mut retained, &output("current-0"))
++                .is_ok()
++        );
++        assert!(retained.is_none());
++    }
+ }
+
+ fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::ToolSpec]) -> bool {
+@@ -4743,6 +4896,7 @@
+         let mut pending_provider_agent: Option<codex_protocol::response_facts::ResponseFactRecord> = None;
+         // Admission is local to the provider request; nothing here executes its program.
+         let mut program_calls = HashMap::new();
++        let mut retained_program_calls = None;
+         loop {
+             let handle_responses = trace_span!(
+                 parent: &receiving_span,
+@@ -4887,7 +5041,12 @@
+                         }
+                     });
+                     if matches!(item, ResponseItem::Program { .. } | ResponseItem::ProgramOutput { .. }) {
+-                        admit_hosted_program_item(prompt, &mut program_calls, &item)?;
++                        admit_hosted_program_item(
++                            prompt,
++                            &mut program_calls,
++                            &mut retained_program_calls,
++                            &item,
++                        )?;
+                         if let Some(attempt) = &model_attempt {
+                             attempt.mark_unsafe_output();
+                         }

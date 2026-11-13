@@ -69,7 +69,8 @@ class Agent:
         self.gap = self.mismatch = self.hold = self.missing_terminal = False
         self.started = asyncio.Event()
 
-    async def run(self, prompt):
+    async def run(self, prompt, **options):
+        self.run_options = options
         operation = prompt.split("=", 1)[1].split(" ", 1)[0]
         self.started.set()
         if self.hold:
@@ -89,7 +90,7 @@ class Agent:
         )
 
 
-def adapter(stream):
+def adapter(stream, request_transport=None):
     module = SimpleNamespace(
         Agent=Agent,
         ToolContext=Context,
@@ -109,10 +110,25 @@ def adapter(stream):
             with_tool=True,
             stream=stream,
             transport="websocket",
+            request_transport=request_transport,
         )
 
 
 class FreshToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_transport_preserves_fresh_tool_context_and_reader_contract(self):
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                async with adapter(stream, request_transport="http") as value:
+                    result = await value.run("BENCH_RUN=http input")
+                    self.assertEqual(
+                        value.agent.run_options,
+                        {"model_settings": {"request_transport": "http"}},
+                    )
+                    self.assertTrue(result["tool_context_validated"])
+                    self.assertTrue(result["context_submission_is_result_turn"])
+                    self.assertEqual(result["deltas"], ["first", "last"] if stream else [])
+                    self.assertEqual(value._pending, {})
+
     async def test_active_reader_owns_first_read_and_skips_unneeded_suffix(self):
         async with adapter(True) as value:
             result = await value.run("BENCH_RUN=first input")

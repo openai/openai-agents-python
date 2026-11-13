@@ -19,6 +19,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._web_projection import project_web_search_item as project_web_search_item
 from .history import (
     ReceivedTokenUsage as ReceivedTokenUsage,
+    RecordedRequestUsage as RecordedRequestUsage,
     RecordedResponse as RecordedResponse,
     RecordedTurn as RecordedTurn,
 )
@@ -42,6 +43,7 @@ _EXECUTION_TYPES = {"command_execution", "mcp_call", "patch_execution"}
 _CALL_TYPES_BY_OUTPUT = {
     "function_call_output": "function_call",
     "shell_call_output": "shell_call",
+    "program_output": "program",
     "tool_search_output": "tool_search_call",
 }
 
@@ -96,6 +98,7 @@ def _response_item(
         "apply_patch_call",
         "shell_call",
         "local_shell_call",
+        "program",
         "tool_search_call",
     }:
         item_id = item_id or raw.get("call_id")
@@ -105,6 +108,7 @@ def _response_item(
         "computer_call_output",
         "apply_patch_call_output",
         "shell_call_output",
+        "program_output",
         "tool_search_output",
     }:
         item_id = item_id or (f"{raw['call_id']}:output" if raw.get("call_id") else None)
@@ -237,6 +241,92 @@ def _received_usage(raw: dict[str, Any] | None) -> ReceivedTokenUsage | None:
     return cast(ReceivedTokenUsage, usage)
 
 
+def _request_usage_entries(
+    facts: list[dict[str, Any]], owners: dict[str | None, _UsageCollector]
+) -> tuple[list[RecordedRequestUsage], bool]:
+    if any(owner._managed_model_owner is not None for owner in owners.values()):
+        # Only cumulative physical totals are retained. Logical events cannot
+        # establish the number or attribution of individual provider requests.
+        return [], False
+    entries: list[RecordedRequestUsage] = []
+    totals: dict[str, tuple[int, dict[str, int], int]] = {}
+    seen: dict[tuple[str, int], tuple[str, dict[str, Any]]] = {}
+    attempt_ids: set[tuple[str, str]] = set()
+    fields = (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+    for payload in facts:
+        fact = payload["data"]
+        if fact["phase"] != "finished":
+            continue
+        owner, attempt = fact.get("owner_attempt_id"), fact.get("attempt_id")
+        if not all(
+            isinstance(value, str) and value
+            for value in (owner, attempt, payload.get("thread"), payload.get("turn_id"))
+        ):
+            return [], False
+        owner, attempt = cast(str, owner), cast(str, attempt)
+        usage = fact["usage"]
+        ordinal, missing, tokens = (
+            usage["requests"],
+            usage["requests_without_token_usage"],
+            usage["token_usage"],
+        )
+        key = (owner, ordinal)
+        if key in seen:
+            if seen[key] != (attempt, usage):
+                return [], False
+            continue
+        prior, previous, previous_missing = totals.get(owner, (0, dict.fromkeys(fields, 0), 0))
+        delta = {name: tokens[name] - previous[name] for name in fields}
+        if (
+            ordinal != prior + 1
+            or (owner, attempt) in attempt_ids
+            or (missing - previous_missing == 1 and any(delta.values()))
+            or missing - previous_missing not in (0, 1)
+            or any(value < 0 for value in delta.values())
+        ):
+            # A cumulative snapshot cannot establish detail for an omitted attempt.
+            return [], False
+        entries.append(
+            {
+                "scope": "sdk_model_attempt",
+                "thread_id": payload["thread"],
+                "turn_id": payload["turn_id"],
+                "owner_attempt_id": owner,
+                "attempt_id": attempt,
+                "request_ordinal": ordinal,
+                "token_usage_known": missing == previous_missing,
+                "input_tokens": delta["input_tokens"],
+                "input_tokens_details": {
+                    "cached_tokens": delta["cached_input_tokens"],
+                    "cache_write_tokens": delta["cache_write_input_tokens"],
+                },
+                "output_tokens": delta["output_tokens"],
+                "output_tokens_details": {"reasoning_tokens": delta["reasoning_output_tokens"]},
+                "total_tokens": delta["total_tokens"],
+            }
+        )
+        totals[owner] = ordinal, dict(tokens), missing
+        seen[key] = attempt, usage
+        attempt_ids.add((owner, attempt))
+    complete = True
+    for owner, measured in owners.items():
+        snapshot = measured.snapshot()
+        count, tokens, missing = totals.get(cast(str, owner), (0, dict.fromkeys(fields, 0), 0))
+        complete = complete and (
+            count == snapshot.requests
+            and missing == snapshot.missing_usage_requests
+            and all(tokens[name] == getattr(snapshot, name) for name in fields)
+        )
+    return entries, complete
+
+
 def project_history(
     history: list[dict[str, Any]],
     session_id: str,
@@ -254,6 +344,7 @@ def project_history(
     latest_calls: dict[tuple[str, str, str], _HistoryItem] = {}
     usage: dict[str, Any] = {}
     model_owners: dict[str, dict[str | None, _UsageCollector]] = {}
+    model_usage_facts: dict[str, list[dict[str, Any]]] = {}
     legacy_usage: dict[str, _UsageCollector] = {}
     responses: list[tuple[str, RecordedResponse]] = []
     response_facts: list[RecordedResponseFact] = []
@@ -490,6 +581,7 @@ def project_history(
                         turns.pop(old, None)
                         usage.pop(old, None)
                         model_owners.pop(old, None)
+                        model_usage_facts.pop(old, None)
                         legacy_usage.pop(old, None)
                     responses = [entry for entry in responses if entry[1]["turn_id"] not in removed]
                     items = [item for item in items if item.value["turn_id"] not in removed]
@@ -507,11 +599,12 @@ def project_history(
             turn_id = payload.get("turn_id") or payload.get("turnId") or current_turn
             if not turn_id:
                 continue
-            if event_kind == "sdk_model_attempt":
+            if event_kind in ("_sdk_model_attempt", "sdk_model_attempt"):
                 fact = payload["data"]
                 owners = model_owners.setdefault(turn_id, {})
                 owner = owners.setdefault(fact.get("owner_attempt_id"), _UsageCollector())
                 owner.replace_model_attempt(fact)
+                model_usage_facts.setdefault(turn_id, []).append(payload)
             elif event_kind in {"task_complete", "turn_complete", "turn_aborted"}:
                 snapshot = payload.get("model_attempt")
                 if snapshot is not None:
@@ -596,9 +689,15 @@ def project_history(
             turn["usage"] = usage[turn_id]
         if turn_id in model_owners:
             measured = legacy_usage.get(turn_id) or _UsageCollector()
+            has_legacy_requests = measured.snapshot().requests > 0
             for owner in model_owners[turn_id].values():
                 measured.attach(owner)
             turn["run_usage"] = asdict(measured.snapshot())
+            entries, complete = _request_usage_entries(
+                model_usage_facts.get(turn_id, []), model_owners[turn_id]
+            )
+            turn["request_usage_entries"] = entries
+            turn["request_usage_entries_complete"] = complete and not has_legacy_requests
     projected_fact_ids: set[str] = set()
     for fact in response_facts:
         fact_turn = turns.get(fact["turn_id"])
