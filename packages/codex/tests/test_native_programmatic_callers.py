@@ -17,6 +17,7 @@ from agents import (
     NativeProvider,
     function_tool,
 )
+from agents.observation import ModelOutputItemCompleted
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, responses as responses
 
@@ -47,6 +48,7 @@ async def test_hosted_program_open_precedes_its_native_callback(stored: bool) ->
         "status": "incomplete",
         "result": "working",
     }
+    repeated = {key: value for key, value in interim.items() if key != "id"}
     answer = {
         "type": "message",
         "id": "msg_hosted",
@@ -82,7 +84,15 @@ async def test_hosted_program_open_precedes_its_native_callback(stored: bool) ->
                             "id": "resp_hosted",
                             "status": "completed",
                             "store": stored,
-                            "output": [program, interim, call, program_result, answer],
+                            "output": [
+                                program,
+                                interim,
+                                call,
+                                repeated,
+                                repeated,
+                                program_result,
+                                answer,
+                            ],
                         },
                     }
                 )
@@ -106,19 +116,37 @@ async def test_hosted_program_open_precedes_its_native_callback(stored: bool) ->
                     provider=provider,
                     tools=[lookup, HostedProgrammaticToolCalling()],
                 )
-                async with agent.session() as session:
-                    result = await (await session.submit("Call the tool.")).get_result()
+                async with agent.session(observation_retention="all") as session:
+                    turn = await session.submit("Call the tool.")
+                    result = await turn.get_result()
                     assert result.final_output == "complete"
                     recorded = [
                         item
                         async for item in session.items()
                         if item["type"] in {"program", "program_output"}
                     ]
-                    assert [item["provider_data"] for item in recorded] == [
-                        program,
-                        interim,
-                        program_result,
-                    ]
+
+                    def observed_payload(payload: dict[str, Any]) -> dict[str, Any]:
+                        if payload.get("id") in {
+                            "program_item",
+                            "program_interim",
+                            "program_result",
+                        }:
+                            return payload
+                        return {key: value for key, value in payload.items() if key != "id"}
+
+                    expected = [program, interim, repeated, repeated, program_result]
+                    assert [
+                        observed_payload(item["provider_data"]) for item in recorded
+                    ] == expected
+                    completed_items = []
+                    async for event in turn.events(include_execution_details=True):
+                        if not isinstance(event, ModelOutputItemCompleted):
+                            continue
+                        item = event.item
+                        if isinstance(item, dict) and item["type"] in ("program", "program_output"):
+                            completed_items.append(item["provider_data"])
+                    assert [observed_payload(item) for item in completed_items] == expected
     assert effects == ["selected"]
     assert [frame["type"] for frame in requests] == ["response.create", "response.inject"]
     assert any(
@@ -131,6 +159,7 @@ async def test_hosted_program_open_precedes_its_native_callback(stored: bool) ->
     "scenario",
     [
         "positive",
+        "positive-namespaced",
         "default-direct",
         "no-permission",
         "no-parent",
@@ -144,7 +173,8 @@ async def test_hosted_program_open_precedes_its_native_callback(stored: bool) ->
 )
 async def test_programmatic_call_requires_exact_native_owner(responses: Any, scenario: str) -> None:
     effects: list[str] = []
-    positive = scenario in ("positive", "default-direct")
+    namespaced = scenario == "positive-namespaced"
+    positive = scenario in ("positive", "positive-namespaced", "default-direct")
     diagnostics = {
         "no-permission": "does not permit this provider caller",
         "no-parent": "has no live parent program",
@@ -155,7 +185,7 @@ async def test_programmatic_call_requires_exact_native_owner(responses: Any, sce
         "programmatic-only-direct": "does not permit this provider caller",
         "code-only": "requires an offered programmatic caller or tool search",
     }
-    options: dict[str, Any] = {}
+    options: dict[str, Any] = {"namespace": "billing"} if namespaced else {}
     if scenario not in ("no-permission", "default-direct"):
         options["allowed_callers"] = ["code"] if scenario == "code-only" else ["programmatic"]
 
@@ -180,6 +210,8 @@ async def test_programmatic_call_requires_exact_native_owner(responses: Any, sce
         "name": "lookup",
         "arguments": "{}",
     }
+    if namespaced:
+        call["namespace"] = "billing"
     if scenario not in ("default-direct", "programmatic-only-direct"):
         call["caller"] = {
             "type": "program",
@@ -222,6 +254,11 @@ async def test_programmatic_call_requires_exact_native_owner(responses: Any, sce
             declarations: list[dict[str, Any]] = []
             for spec in responses.requests[0]["tools"]:
                 declarations.extend(spec["tools"] if spec["type"] == "namespace" else [spec])
+            if namespaced:
+                assert any(
+                    spec["type"] == "namespace" and spec["name"] == "billing"
+                    for spec in responses.requests[0]["tools"]
+                )
             spec = next(spec for spec in declarations if spec.get("name") == "lookup")
             assert spec.get("allowed_callers") == (
                 None if scenario == "default-direct" else ["programmatic"]

@@ -435,21 +435,28 @@ class ResponsesWebSocketModel(ResponsesModel):
         if state.closing is None:
             state.retired = True
 
-            async def close() -> None:
-                if state.opening is not None:
-                    try:
-                        await _join(state.opening)
-                    except BaseException:
-                        pass
-                if state.connection is not None:
-                    await _join(state.connection.close())
+            async def close(current: _Owner) -> None:
+                try:
+                    if current.opening is not None:
+                        try:
+                            await _join(current.opening)
+                        except BaseException:
+                            pass
+                    if current.connection is not None:
+                        await _join(current.connection.close())
+                finally:
+                    del current
 
-            state.closing = asyncio.create_task(close())
+            state.closing = asyncio.create_task(close(state))
         try:
             await _join(state.closing)
+        except BaseException as error:
+            _clear_error_frames(error)
+            raise
         finally:
             if self._owners.get(owner) is state:
                 del self._owners[owner]
+            del self, owner, state
 
     async def _stream_websocket(
         self, request: ModelRequest

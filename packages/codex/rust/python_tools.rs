@@ -2517,7 +2517,9 @@ impl PythonTools {
     ) -> Result<Generation> {
         validate_declarations(&specs)?;
         let mut entries = Vec::new();
-        for (declaration, (namespace, tool)) in specs.iter().zip(functions(&specs)) {
+        for (slot, (declaration, (namespace, tool))) in
+            specs.iter().zip(functions(&specs)).enumerate()
+        {
             let name = ToolName::new(
                 namespace.as_ref().map(|ns| ns.name.clone()),
                 tool.name.clone(),
@@ -2566,6 +2568,17 @@ impl PythonTools {
                 _ => {
                     let mut function = dynamic_tool_to_responses_api_tool(&tool)?;
                     function.defer_loading = None;
+                    if let Some(callers) = specs.provider_callers(slot) {
+                        use codex_tools::{ProviderToolCaller, ProviderToolCallers};
+                        let mut values = Vec::new();
+                        if callers.contains(ProviderToolCallers::DIRECT) {
+                            values.push(ProviderToolCaller::Direct);
+                        }
+                        if callers.contains(ProviderToolCallers::PROGRAMMATIC) {
+                            values.push(ProviderToolCaller::Programmatic);
+                        }
+                        function.allowed_callers = Some(values);
+                    }
                     match namespace.filter(|_| !key.is_default_namespace()) {
                         None => ToolSpec::Function(function),
                         Some(ns) => ToolSpec::Namespace(ResponsesApiNamespace {
@@ -6967,20 +6980,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
     }
 
     fn spec(&self) -> ToolSpec {
-        let mut spec = self.generation.entries[self.slot].spec.clone();
-        if let Some(callers) = self.generation.specs.provider_callers(self.slot) {
-            if let ToolSpec::Function(function) = &mut spec {
-                let mut values = Vec::new();
-                if callers.contains(codex_tools::ProviderToolCallers::DIRECT) {
-                    values.push(codex_tools::ProviderToolCaller::Direct);
-                }
-                if callers.contains(codex_tools::ProviderToolCallers::PROGRAMMATIC) {
-                    values.push(codex_tools::ProviderToolCaller::Programmatic);
-                }
-                function.allowed_callers = Some(values);
-            }
-        }
-        spec
+        self.generation.entries[self.slot].spec.clone()
     }
 
     fn allowed_provider_callers(&self) -> Option<codex_tools::ProviderToolCallers> {

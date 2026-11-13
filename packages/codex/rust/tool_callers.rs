@@ -153,6 +153,11 @@ impl<'de> Deserialize<'de> for ToolDeclarations {
                     }
                     limits |= route;
                 }
+                if programmatic && matches!(&spec, DynamicToolSpec::Custom(_)) {
+                    return Err(D::Error::custom(
+                        "Custom string tools do not support programmatic callers",
+                    ));
+                }
                 Some(CallerLimits {
                     surfaces: limits,
                     programmatic,

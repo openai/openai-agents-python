@@ -144,6 +144,12 @@ class HostedResponsesWebSocketModel:
         )
 
     def _begin(self, request: ModelRequest) -> _Run:
+        for name in ("multi_agent", "betas", "max_tool_calls"):
+            if name in request.body:
+                raise ValueError(f"Hosted Responses does not accept request field {name}")
+        reasoning = request.body.get("reasoning")
+        if isinstance(reasoning, Mapping) and reasoning.get("summary") is not None:
+            raise ValueError("Hosted Responses does not support reasoning.summary")
         if request.run_owner is None:
             raise TypeError("Hosted Responses requires a native run owner")
         run = self._runs.setdefault(request.run_owner, _Run())
@@ -183,8 +189,14 @@ class HostedResponsesWebSocketModel:
         return self._transport.get_retry_advice(request)
 
     async def cleanup_on_run_end(self, owner: ModelRunOwner) -> None:
-        await self._transport.cleanup_on_run_end(owner)
-        self._runs.pop(owner, None)
+        try:
+            await self._transport.cleanup_on_run_end(owner)
+        except BaseException as error:
+            _clear_error_frames(error)
+            raise
+        finally:
+            self._runs.pop(owner, None)
+            del self, owner
 
 
 def _stable(item: dict[str, Any]) -> bool:

@@ -583,6 +583,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                     "FunctionTool allowed_callers must select distinct "
                     "direct, code, or programmatic callers"
                 )
+            if self._custom_format is not None and "programmatic" in callers:
+                raise ValueError("Custom string tools do not support programmatic callers")
             object.__setattr__(
                 self,
                 "allowed_callers",
