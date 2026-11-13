@@ -106,8 +106,21 @@ def _capture_agent_graph(
             input_guardrails=source.input_guardrails,
             output_guardrails=source.output_guardrails,
         )
-        if declaration.provider is not None and declaration.provider is not opening.provider:
-            raise ValueError("Handoff profiles must share the Session provider")
+        target_provider = declaration.provider
+        if (
+            target_provider is not None
+            and target_provider is not opening.provider
+            and (
+                opening.realtime is not None
+                or opening.provider is None
+                or opening.provider.model_backend is None
+                or target_provider.model_backend is None
+            )
+        ):
+            raise ValueError(
+                "Handoff profiles must share the Session provider or use "
+                "captured text model backends"
+            )
         if declaration.programmatic_tool_calling != opening.programmatic_tool_calling:
             raise ValueError("Handoff profiles must share programmatic tool calling mode")
         output = _prepare_spec(declaration.output_type)

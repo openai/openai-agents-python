@@ -1822,6 +1822,7 @@ class _OpeningOwner:
 
     def __init__(self, environment: EnvironmentSource[Any] | None = None) -> None:
         self.lease: Any = None
+        self.profile_leases: dict[int, Any] = {}
         self._environment_reservation: Any = None
         self.api_key: str | None = None
         self.environment = environment
@@ -1929,6 +1930,9 @@ class _OpeningOwner:
 
     def disown(self, session: Session[Any, Any]) -> None:
         self.lease.adopt()
+        for lease in self.profile_leases.values():
+            lease.adopt()
+        session._profile_provider_leases, self.profile_leases = self.profile_leases, {}
         session._model_api_key = self.api_key
         self.api_key = None
 
@@ -4518,6 +4522,15 @@ class Session(Generic[ContextT, OutputT]):
             try:
                 native, transport, provider_lease = provider._acquire_lease()
                 opening.lease = provider_lease
+                for profile in profiles:
+                    target = profile.declaration.provider
+                    if (
+                        target is not None
+                        and target is not provider
+                        and id(target) not in opening.profile_leases
+                    ):
+                        _, _, target_lease = target._acquire_lease()
+                        opening.profile_leases[id(target)] = target_lease
                 engine = None
                 thread = None
                 provider_config = await _opening_provider_config(
@@ -5133,6 +5146,12 @@ class Session(Generic[ContextT, OutputT]):
                 raise
 
         except BaseException as error:
+            for profile_lease in opening.profile_leases.values():
+                try:
+                    profile_lease.release()
+                except BaseException as release_error:
+                    _retain_cleanup_error(error, release_error, _error_contexts(error.__context__))
+            opening.profile_leases.clear()
             # Initialization closures and options share these SDK-owned dictionaries.
             # Remove secrets in place so every traceback reference loses the payload,
             # while leaving the application's Environment and exception chain intact.
@@ -5405,6 +5424,7 @@ class Session(Generic[ContextT, OutputT]):
         self._tool_error_formatter = tool_error_formatter
         self._trace_context: str | None = None
         self._provider_lease: Any = None
+        self._profile_provider_leases: dict[int, Any] = {}
         self._storage: LocalStorage | CustomStorage | None = None
         self._history_ttl_seconds: int | None = None
         self._environment_lease: _EnvironmentLease | None = None
@@ -13630,7 +13650,9 @@ class Session(Generic[ContextT, OutputT]):
         try:
             if not active():
                 return
-            if self._model_backend is None:
+            provider = self._agent_for_message(message).provider if self._profiles else None
+            backend = self._model_backend if provider is None else provider.model_backend
+            if backend is None:
                 raise NativeError("Native model producer has no current application backend")
             from .models import ModelRequest, ModelResponse
 
@@ -13669,7 +13691,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
             if self._include_raw_provider_events:
                 object.__setattr__(request, "_observe_raw_provider_events", True)
-            backend = self._model_backend
             complete = getattr(backend, "complete", None)
             if not callable(complete) and not callable(getattr(backend, "stream", None)):
                 routing_model = message.get("model", request.body.get("model"))
@@ -18726,6 +18747,9 @@ class Session(Generic[ContextT, OutputT]):
         await _join(asyncio.create_task(self._retire_provider()))
 
     async def _retire_provider(self) -> None:
+        for provider_id, lease in tuple(self._profile_provider_leases.items()):
+            lease.release()
+            del self._profile_provider_leases[provider_id]
         if self._provider_lease is not None:
             self._provider_lease.release()
             self._provider_lease = None
