@@ -171,6 +171,7 @@ jobs:
         id: native-source
         if: >-
           github.repository == 'openai/openai-agents-python' && steps.changes.outputs.run == 'true' &&
+          (github.event_name != 'push' || github.ref_name != 'ci/hillclimb/python-cold-test-profile-12') &&
           ((github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch ||
           (github.ref_name == 'feat/codex-harness' || startsWith(github.ref_name, 'ci/hillclimb/')) || inputs.native_only)) ||
           (github.event_name == 'pull_request' &&

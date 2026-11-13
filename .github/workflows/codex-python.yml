@@ -48,18 +48,18 @@ jobs:
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04-arm' && inputs.native_source_run == '' &&
-          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09') &&
+          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-test-profile-12') &&
           '{"group":"codex-runners","labels":"codex-linux-arm64"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
           (inputs.native_source_run == '' &&
            ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
              (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness') ||
-            (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09'))) &&
+            (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-test-profile-12'))) &&
            '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
            '{"group":"codex-runners","labels":"codex-windows-x64"}') ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' &&
           (inputs.native_source_run != '' && '"macos-15"' ||
-           (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09')) &&
+           (github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-test-profile-12')) &&
            '"macos-26-xlarge"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
       ) }}
@@ -136,7 +136,7 @@ jobs:
         env:
           ARM_CARGO_BUILD_JOBS: >-
             ${{ github.repository == 'openai/openai-agents-python' && inputs.native_source_run == '' &&
-              github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09') && '14' || '3' }}
+              github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-test-profile-12') && '14' || '3' }}
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
@@ -191,6 +191,24 @@ jobs:
               echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=$COLD_PR_RUST_OPT_LEVEL"
             } >> "$GITHUB_ENV"
           fi
+      - name: Select the isolated cold diagnostic profile
+        if: >-
+          github.repository == 'openai/openai-agents-python' &&
+          github.event_name == 'push' && github.ref_name == 'ci/hillclimb/python-cold-test-profile-12'
+        env:
+          NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
+          NATIVE_DEPENDENCY_RUN: ${{ inputs.native_dependency_run }}
+        run: |
+          test -z "$NATIVE_SOURCE_RUN"
+          test -z "$NATIVE_DEPENDENCY_RUN"
+          {
+            echo "OPENAI_AGENTS_NATIVE_DIAGNOSTIC_PROFILE=cold-test-opt1"
+            echo "MATURIN_PGO=false"
+            echo "CARGO_PROFILE_RELEASE_LTO=off"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+            echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=1"
+            echo "CARGO_PROFILE_RELEASE_DEBUG=0"
+          } >> "$GITHUB_ENV"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         if: env.OPENAI_AGENTS_NATIVE_BUILD_IMAGE == ''
         with:
@@ -277,7 +295,7 @@ jobs:
         if: >-
           runner.os == 'Windows' && inputs.native_source_run == '' &&
           !(github.repository == 'openai/openai-agents-python' &&
-          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09'))
+          github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-test-profile-12'))
         run: |
           python -I -S - <<'PYTHON'
           import os
@@ -327,7 +345,7 @@ jobs:
               os.environ.get("RUNNER_OS") == "Windows"
               and os.environ.get("GITHUB_REPOSITORY") == "openai/openai-agents-python"
               and os.environ.get("GITHUB_EVENT_NAME") == "push"
-              and os.environ.get("GITHUB_REF_NAME") in {"feat/codex-harness", "ci/hillclimb/python-production-09"}
+              and os.environ.get("GITHUB_REF_NAME") in {"feat/codex-harness", "ci/hillclimb/python-production-09", "ci/hillclimb/python-cold-test-profile-12"}
           ):
               subprocess.run(
                   ["cargo", "test", "--release", "--locked", *options,
@@ -520,7 +538,9 @@ jobs:
             df -h "$RUNNER_TEMP"
           fi
           python -I -S - <<'PYTHON'
+          import json
           import os
+          from datetime import datetime, timezone
           from pathlib import Path
           donor = os.environ["NATIVE_SOURCE_RUN"]
           if donor:
@@ -529,6 +549,24 @@ jobs:
               source = "Compiled native package"
           cpus = os.cpu_count()
           jobs = os.environ.get("CARGO_BUILD_JOBS", f"Cargo default ({cpus} logical CPUs)")
+          if os.environ.get("OPENAI_AGENTS_NATIVE_DIAGNOSTIC_PROFILE") == "cold-test-opt1":
+              record = {
+                  "profile": "cold-test-opt1",
+                  "canonical_donor": False,
+                  "source_sha": os.environ["GITHUB_SHA"],
+                  "source_ref": os.environ["GITHUB_REF_NAME"],
+                  "reported_at": datetime.now(timezone.utc).isoformat(),
+                  "environment": {name: os.environ.get(name) for name in (
+                      "RUNNER_OS", "RUNNER_ARCH", "RUSTUP_TOOLCHAIN", "CARGO_BUILD_JOBS",
+                      "CARGO_INCREMENTAL", "MATURIN_PGO", "CARGO_PROFILE_RELEASE_LTO",
+                      "CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+                      "CARGO_PROFILE_RELEASE_DEBUG",
+                  )},
+              }
+              timings = Path(os.environ["CARGO_TARGET_DIR"]) / "cargo-timings"
+              timings.mkdir(parents=True, exist_ok=True)
+              (timings / "diagnostic-profile.json").write_text(json.dumps(record, sort_keys=True))
+              print("Native diagnostic profile: " + json.dumps(record, sort_keys=True))
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
               summary.write(f"### Native build\n\n{source}\n\n")
               summary.write(f"Runner: {os.environ.get('RUNNER_OS')} / {os.environ.get('RUNNER_ARCH')}; Cargo jobs: {jobs}\n\n")
@@ -541,7 +579,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: native-timings-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/agents-native-target/cargo-timings/*.html
+          path: |
+            ${{ runner.temp }}/agents-native-target/cargo-timings/*.html
+            ${{ runner.temp }}/agents-native-target/cargo-timings/diagnostic-profile.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -550,7 +590,7 @@ jobs:
     if: >-
       inputs.runner == 'windows-latest' && inputs.native_source_run == '' &&
       github.repository == 'openai/openai-agents-python' &&
-      github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09')
+      github.event_name == 'push' && (github.ref_name == 'feat/codex-harness' || github.ref_name == 'ci/hillclimb/python-production-09' || github.ref_name == 'ci/hillclimb/python-cold-test-profile-12')
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
     defaults:
