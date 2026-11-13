@@ -966,7 +966,7 @@
     },
     {
       "path": "sdk-websocket-provider-history.patch",
-      "sha256": "816fba1cbd547ccfbbf6829ceb33f3a37a105ac86c3522fc86305918ce20dcf4"
+      "sha256": "55164389d2c111f53155639e39d85786ebe4bfba4eaf5f35ebfae3617a4cc5eb"
     },
     {
       "path": "sdk-conversation-locked-retry.patch",
@@ -974,12 +974,12 @@
     },
     {
       "path": "sdk-video-input.patch",
-      "sha256": "614b311673b21959d58608111dea2d351ec98e4f1acbbb083a710c07c4fa2ebb"
+      "sha256": "8312f4b4cccdea8af8081cea56818735e6560ebc6ad5405c84cd877bdc0db125"
     },
     {
       "path": "sdk-api-demand-text-coalescing.patch",
       "sha256": "c70b44f00289e47111d5a7260bfd406dacaf870eb3a50460f91ecc551762db30"
     }
   ],
-  "result_tree": "6555538200c18c8aaa80db34ee3e450632bc1f74"
+  "result_tree": "d7757ab7aef95dd7e4266d8e54271f411f2aebae"
 }

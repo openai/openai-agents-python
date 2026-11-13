@@ -655,3 +655,51 @@ index 7b6a5619..61a895fb 100644
                      UserInput::LocalAudio { path } => json!({"type": "localAudio", "path": path}),
                      UserInput::Skill { name, path } => json!({"type": "skill", "name": name, "path": path}),
                      UserInput::Mention { name, path } => json!({"type": "mention", "name": name, "path": path}),
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index b6bfd1710a925092c7fc119ad3c346b121c445f8..a0cd4a6b4e33308904c8cfbac4ff0bd5910b106b 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -348,7 +348,8 @@ fn has_subagent_notification<'a>(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+@@ -368,7 +369,8 @@ fn history_contains_text<'a>(
+             }
+             ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+@@ -417,7 +419,8 @@ fn history_contains_assistant_inter_agent_communication<'a>(
+             ContentItem::InputText { .. }
+             | ContentItem::InputFile { .. }
+             | ContentItem::InputImage { .. }
+-            | ContentItem::InputAudio { .. } => false,
++            | ContentItem::InputAudio { .. }
++            | ContentItem::InputVideo { .. } => false,
+         })
+     })
+ }
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index a0f475f3cc2a8f03f7e812e6dd24c48cceeb3310..20608ff2aa6bd7e2ead2ca29418de14ae5bc39a0 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -309,7 +309,8 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
+         }
+         ContentItem::InputFile { .. }
+         | ContentItem::InputImage { .. }
+-        | ContentItem::InputAudio { .. } => false,
++        | ContentItem::InputAudio { .. }
++        | ContentItem::InputVideo { .. } => false,
+     })
+ }
+ 
