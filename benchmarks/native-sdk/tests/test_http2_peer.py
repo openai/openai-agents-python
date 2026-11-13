@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import ssl
 import subprocess
@@ -13,7 +14,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-import httpx
 from aiohttp import ClientSession, TCPConnector
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -22,8 +22,11 @@ from protocol_peer import final_text
 from worker import validate_transport
 
 
+@unittest.skipUnless(importlib.util.find_spec("hypercorn"), "Install requirements-http2-peer.txt")
 class HTTP2PeerTests(unittest.IsolatedAsyncioTestCase):
     async def test_h2_reuses_one_connection_and_h1_keeps_json_semantics(self):
+        import httpx
+
         with tempfile.TemporaryDirectory() as directory:
             cert, key = Path(directory) / "cert.pem", Path(directory) / "key.pem"
             subprocess.run(

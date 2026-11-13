@@ -214,9 +214,9 @@ async def serve(args, peer, encode):
 
     control.router.add_get("/health", health)
     runner = web.AppRunner(control, access_log=None)
-    await runner.setup()
     task = None
     try:
+        await runner.setup()
         await web.TCPSite(runner, "127.0.0.1", args.port).start()
         task = asyncio.create_task(
             hypercorn_serve(Application(peer, encode), config, shutdown_trigger=stop.wait, mode="asgi")

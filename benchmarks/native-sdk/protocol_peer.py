@@ -1,7 +1,8 @@
 """Standalone, loopback-only synthetic Responses peer for SDK benchmarks.
 
-Run with the native checkout's Python (aiohttp is its only dependency). Receipt
-storage is bounded; operation counters and output verification remain exact.
+The default H1 peer has been using aiohttp only; optional dual mode has been
+using requirements-http2-peer.txt. Receipt storage has been remaining bounded,
+with exact operation counters and output verification.
 """
 
 from __future__ import annotations
