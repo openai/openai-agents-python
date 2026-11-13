@@ -14,7 +14,7 @@ class _CapturedValues(dict[str, object]):
         super().__init__(*args, **kwargs)
         self._initialized = True
 
-    def _immutable(self, *args: Any, **kwargs: Any) -> NoReturn:
+    def _immutable(self: object, *args: Any, **kwargs: Any) -> NoReturn:
         raise TypeError("Captured values are immutable")
 
     __setitem__ = __delitem__ = clear = pop = popitem = __ior__ = _immutable
