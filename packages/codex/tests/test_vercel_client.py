@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,7 @@ async def test_vercel_client_reports_observation_loss_without_success(
     async with (
         timeout(20),
         Agent(instructions="Reply.", provider=provider(responses)).session() as session,
+        aclosing(session.events()),
     ):
         old = await session.submit("First")
         assert (await old.get_result()).final_output == "old"
