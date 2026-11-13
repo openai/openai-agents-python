@@ -132,7 +132,12 @@ async def test_standalone_invalid_input_formatter_clears_private_diagnostics():
 
 @pytest.mark.parametrize(
     ("exception_type", "stage"),
-    [("SystemExit", "body"), ("KeyboardInterrupt", "policy")],
+    [
+        ("SystemExit", "body"),
+        ("KeyboardInterrupt", "policy"),
+        ("SystemExit", "deadline"),
+        ("KeyboardInterrupt", "deadline"),
+    ],
 )
 def test_standalone_delivers_process_control_to_the_invoking_task(exception_type, stage):
     program = """
@@ -141,12 +146,22 @@ import sys
 from agents import Allow, ToolInvocationContext, function_tool
 
 problem = SystemExit(23) if sys.argv[1] == "SystemExit" else KeyboardInterrupt("synthetic")
+stage = sys.argv[2]
 
 def before(_context: ToolInvocationContext[None]) -> Allow:
     raise problem
 
-@function_tool(before=before if sys.argv[2] == "policy" else None)
+@function_tool(
+    before=before if stage == "policy" else None,
+    callback_timeout=0.1 if stage == "deadline" else None,
+    timeout_behavior="error_as_result" if stage == "deadline" else "raise_exception",
+)
 async def owned() -> None:
+    if stage == "deadline":
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            raise problem from None
     raise problem
 
 async def main():

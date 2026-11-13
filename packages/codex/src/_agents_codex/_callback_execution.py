@@ -108,16 +108,14 @@ async def _call_application_callback(
 
             await _close_after_error(error, join)
             raise
+        if control_error is not None:
+            raise control_error
         if cutoff is not None and (not active or settled_at is not None and settled_at >= cutoff):
             failure = None if pending.cancelled() else pending.exception()
-            if failure is None:
-                failure = control_error
             if isinstance(failure, _FunctionBodyFailure):
                 failure = failure.original
             assert timeout_error is not None
             raise timeout_error from failure
-        if control_error is not None:
-            raise control_error
         return pending.result()
     finally:
         if timer is not None:
