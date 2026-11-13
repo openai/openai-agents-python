@@ -10,7 +10,6 @@ use rustls::{ClientConfig, DigitallySignedStruct, Error, RootCertStore, Signatur
 #[derive(Debug)]
 struct CurrentDefaultRoots {
     provider: Arc<CryptoProvider>,
-    bundle_first: bool,
     #[cfg(all(test, target_os = "linux"))]
     roots_path: Option<std::path::PathBuf>,
     #[cfg(all(test, target_os = "linux"))]
@@ -29,19 +28,6 @@ impl CurrentDefaultRoots {
         rustls_native_certs::load_native_certs()
     }
 
-    fn bundle(&self) -> Option<rustls_native_certs::CertificateResult> {
-        #[cfg(all(test, target_os = "linux"))]
-        if let Some(path) = &self.roots_path {
-            return Some(rustls_native_certs::load_certs_from_paths(Some(path), None));
-        }
-        #[cfg(target_os = "linux")]
-        return openssl_probe::probe()
-            .cert_file
-            .map(|path| rustls_native_certs::load_certs_from_paths(Some(&path), None));
-        #[cfg(not(target_os = "linux"))]
-        None
-    }
-
     fn stock(
         &self,
         certs: Vec<CertificateDer<'static>>,
@@ -50,11 +36,6 @@ impl CurrentDefaultRoots {
         let mut roots = RootCertStore::empty();
         let (added, ignored) = roots.add_parsable_certificates(certs);
         tracing::debug!("Added {added}/{total} native root certificates (ignored {ignored})");
-        if self.bundle_first && roots.is_empty() {
-            return Err(Error::InvalidCertificate(
-                rustls::CertificateError::UnknownIssuer,
-            ));
-        }
         WebPkiServerVerifier::builder_with_provider(Arc::new(roots), self.provider.clone())
             .build()
             .map_err(|error| Error::General(error.to_string()))
@@ -80,38 +61,11 @@ impl ServerCertVerifier for CurrentDefaultRoots {
                 "private HTTP default trust profile changed".into(),
             ));
         }
-        if self.bundle_first {
-            if let Some(bundle) = self.bundle() {
-                if bundle.errors.is_empty() {
-                    if let Ok(verifier) = self.stock(bundle.certs) {
-                        if let Ok(success) = verifier.verify_server_cert(
-                            end_entity,
-                            intermediates,
-                            server_name,
-                            ocsp_response,
-                            now,
-                        ) {
-                            return Ok(success);
-                        }
-                    }
-                }
-            }
-        }
         let rustls_native_certs::CertificateResult { certs, errors, .. } = self.load();
-        // Match the pinned default-WSS loader: warn on individual source errors
-        // while using its current partial result, never a retained verifier.
+        // Warn on individual source errors while using the current partial result,
+        // never a retained verifier.
         if !errors.is_empty() {
-            if self.bundle_first {
-                tracing::warn!(target: "codex_http_client::custom_ca", native_root_error_count = errors.len(),
-                    "encountered errors while loading native root certificates");
-            } else {
-                tracing::warn!("native root CA certificate loading errors: {errors:?}");
-            }
-        }
-        if self.bundle_first && certs.is_empty() {
-            return Err(Error::InvalidCertificate(
-                rustls::CertificateError::UnknownIssuer,
-            ));
+            tracing::warn!("native root CA certificate loading errors: {errors:?}");
         }
         if certs.is_empty() {
             return Err(Error::General(format!(
@@ -194,7 +148,6 @@ pub(crate) fn pool() -> codex_http_client::SdkModelHttpPool {
         provider: CryptoProvider::get_default()
             .expect("crypto provider initialized")
             .clone(),
-        bundle_first: false,
         #[cfg(all(test, target_os = "linux"))]
         roots_path: None,
         #[cfg(all(test, target_os = "linux"))]
@@ -206,17 +159,3 @@ pub(crate) fn pool() -> codex_http_client::SdkModelHttpPool {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "private_http_tls_tests.rs"]
 mod tests;
-
-// A new config retains WSS defaults: empty ALPN and an unshared resumption store.
-pub(crate) fn websocket_config() -> ClientConfig {
-    connection_config(Arc::new(CurrentDefaultRoots {
-        provider: CryptoProvider::get_default()
-            .expect("crypto provider initialized")
-            .clone(),
-        bundle_first: true,
-        #[cfg(all(test, target_os = "linux"))]
-        roots_path: None,
-        #[cfg(all(test, target_os = "linux"))]
-        roots_dir: None,
-    }))
-}

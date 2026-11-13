@@ -4807,7 +4807,6 @@ class Session(Generic[ContextT, OutputT]):
                 session._bind_native_producers(lease, thread, provider)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
-                options.pop("_sdk_websocket_tls", None)
                 options.pop("_sdk_request_transport", None)
                 session._native_options = json.dumps(options)
                 if owned_provider:

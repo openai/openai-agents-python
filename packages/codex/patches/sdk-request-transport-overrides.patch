@@ -8,7 +8,7 @@ index b52d33a28d00ad2f620116d0d1c2e8402793788c..aca02a2db0504a95d46698ec67671c83
      sse_telemetry: Option<Arc<dyn SseTelemetry>>,
 +    request_transport: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
  }
-
+ 
  #[derive(Default)]
 @@ -47,6 +48,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
          Self {
@@ -17,7 +17,7 @@ index b52d33a28d00ad2f620116d0d1c2e8402793788c..aca02a2db0504a95d46698ec67671c83
 +            request_transport: None,
          }
      }
-
+ 
 @@ -58,9 +60,18 @@ impl<T: HttpTransport> ResponsesClient<T> {
          Self {
              session: self.session.with_request_telemetry(request),
@@ -25,7 +25,7 @@ index b52d33a28d00ad2f620116d0d1c2e8402793788c..aca02a2db0504a95d46698ec67671c83
 +            request_transport: self.request_transport,
          }
      }
-
+ 
 +    pub fn with_request_transport(
 +        mut self,
 +        overrides: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
@@ -40,7 +40,7 @@ index b52d33a28d00ad2f620116d0d1c2e8402793788c..aca02a2db0504a95d46698ec67671c83
 @@ -226,6 +237,10 @@ impl<T: HttpTransport> ResponsesClient<T> {
              Compression::Zstd => RequestCompression::Zstd,
          };
-
+ 
 +        let prepared = crate::prepare_request_transport(
 +            &self.session.provider().url_for_path("/responses"),
 +            self.request_transport.as_ref(),
@@ -57,7 +57,7 @@ index b52d33a28d00ad2f620116d0d1c2e8402793788c..aca02a2db0504a95d46698ec67671c83
                      req.response_body_limit_bytes = response_body_limit_bytes;
                  },
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index ae61392914c06ab63b25dc2e6431ba9b743b0f6d..9afa4d55e37645074ab546602d2f08249152f6ad 100644
+index b3a5a7a939f30f66b0bc90850144a979fe257373..55c98f3ed0f3271be03d5112d80ad36bb589ebbd 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -394,6 +394,7 @@ impl ResponsesWebsocketConnection {
@@ -66,16 +66,16 @@ index ae61392914c06ab63b25dc2e6431ba9b743b0f6d..9afa4d55e37645074ab546602d2f0824
      provider: Provider,
 +    request_transport: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
      auth: SharedAuthProvider,
-     tls_selector: Option<Arc<crate::SdkWebsocketTlsSelector>>,
  }
-@@ -429,9 +430,18 @@ impl ResponsesWebsocketClient {
+ 
+@@ -427,9 +428,18 @@ impl ResponsesWebsocketClient {
+         Self {
              provider,
              auth,
-             tls_selector: None,
 +            request_transport: None,
          }
      }
-
+ 
 +    pub fn with_request_transport(
 +        mut self,
 +        overrides: Option<codex_protocol::model_request_transport::RequestTransportOverrides>,
@@ -84,11 +84,11 @@ index ae61392914c06ab63b25dc2e6431ba9b743b0f6d..9afa4d55e37645074ab546602d2f0824
 +        self
 +    }
 +
-     /// Select SDK TLS only for this client; None retains the canonical connector.
-     pub fn with_tls_selector(
-         mut self,
-@@ -462,6 +472,12 @@ impl ResponsesWebsocketClient {
-
+     #[instrument(
+         name = "responses_websocket.connect",
+         level = "info",
+@@ -451,6 +461,12 @@ impl ResponsesWebsocketClient {
+ 
          let mut headers =
              merge_request_headers(&self.provider.headers, extra_headers, default_headers);
 +        let mut effective_url = ws_url.to_string();
@@ -98,10 +98,10 @@ index ae61392914c06ab63b25dc2e6431ba9b743b0f6d..9afa4d55e37645074ab546602d2f0824
 +            message: "invalid request query URL".into(),
 +        })?;
          self.auth.add_auth_headers(&mut headers);
-
+ 
          let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index 628f299c76729594e1fe988fce7eecfb76f91532..100fabad82e1e1dcaf820d6a9f47a6ee62b69b90 100644
+index 88a38dec560cd078dae6175631f1b1803c68f302..813561f5daa686f9259b114a8b5c6b1bf029392c 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
 @@ -8,6 +8,7 @@ pub(crate) mod error;
@@ -118,9 +118,14 @@ index 628f299c76729594e1fe988fce7eecfb76f91532..100fabad82e1e1dcaf820d6a9f47a6ee
  pub use codex_client::TransportError;
 +pub use crate::request_transport::prepare_request_transport;
 +pub use crate::request_transport::PreparedRequestTransport;
-
+ 
  pub use crate::api_bridge::map_api_error;
  pub use crate::auth::AgentIdentityTelemetry;
+@@ -173,3 +176,4 @@ pub use crate::endpoint::RealtimeHostedMcpApprovalFilter;
+ pub use crate::endpoint::RealtimeHostedMcpApprovalMode;
+ pub use crate::endpoint::RealtimeHostedMcpTool;
+ pub use crate::endpoint::RealtimeHostedMcpToolFilter;
++
 diff --git a/codex-rs/codex-api/src/request_transport.rs b/codex-rs/codex-api/src/request_transport.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..e6e44372d1cec1fcae829e29885b6c7f8c476528
@@ -567,10 +572,10 @@ index 0000000000000000000000000000000000000000..0e626dca99e6add268f142fb26d21b69
 +    server.await.unwrap();
 +}
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7076407ee 100644
+index 4feb045b4cb76bf187a07fbc09c5b9d618b78b4b..76ea3215285b245d3d41a2e9a87aef5b8d5931c2 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -1674,6 +1674,9 @@ impl ModelClient {
+@@ -1664,6 +1664,9 @@ impl ModelClient {
          auth_context: AuthRequestTelemetryContext,
          request_route_telemetry: RequestRouteTelemetry,
          responses_headers: &ApiHeaderMap,
@@ -580,15 +585,15 @@ index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7
      ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
          let mut headers = self.build_websocket_headers(responses_metadata).await;
          headers.extend(responses_headers.clone());
-@@ -1688,6 +1691,7 @@ impl ModelClient {
+@@ -1678,6 +1681,7 @@ impl ModelClient {
          let result = match tokio::time::timeout(
              websocket_connect_timeout,
              ApiWebSocketResponsesClient::new(api_provider, api_auth)
 +                .with_request_transport(request_transport.cloned())
-                 .with_tls_selector(self.sdk_websocket_tls_selector.clone())
                  .connect(
                      &self.http_client_factory,
-@@ -2016,6 +2020,7 @@ impl ModelClientSession {
+                     headers,
+@@ -2005,6 +2009,7 @@ impl ModelClientSession {
                      auth_context,
                      request_route_telemetry: RequestRouteTelemetry::for_endpoint("/responses"),
                      responses_headers: &responses_headers,
@@ -596,7 +601,7 @@ index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7
                  })
                  .await
              {
-@@ -2085,6 +2090,7 @@ impl ModelClientSession {
+@@ -2074,6 +2079,7 @@ impl ModelClientSession {
              auth_context,
              request_route_telemetry,
              responses_headers,
@@ -604,7 +609,7 @@ index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7
          } = params;
          let api_auth = codex_model_provider::prepare_websocket_auth(
              self.client.state.provider.info(),
-@@ -2094,7 +2100,8 @@ impl ModelClientSession {
+@@ -2083,7 +2089,8 @@ impl ModelClientSession {
          )
          .await
          .map_err(|message| ApiError::InvalidRequest { message })?;
@@ -614,7 +619,7 @@ index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7
          let reset_reason = match self.websocket_session.connection.as_ref() {
              Some(_)
                  if self.websocket_session.responses_headers != *responses_headers
-@@ -2129,6 +2136,7 @@ impl ModelClientSession {
+@@ -2118,6 +2125,7 @@ impl ModelClientSession {
                      auth_context,
                      request_route_telemetry,
                      responses_headers,
@@ -622,7 +627,7 @@ index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7
                  )
                  .await?;
              self.websocket_session.connection = Some(new_conn);
-@@ -2352,7 +2360,8 @@ impl ModelClientSession {
+@@ -2341,7 +2349,8 @@ impl ModelClientSession {
                  client_setup.api_provider,
                  client_setup.api_auth,
              )
@@ -632,7 +637,7 @@ index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7
              crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
              if let Some(admission) = &prompt.prepared_request_admission {
                  admission.admit_request().map_err(CodexErr::Fatal)?;
-@@ -2596,6 +2605,11 @@ impl ModelClientSession {
+@@ -2585,6 +2594,11 @@ impl ModelClientSession {
                      auth_context: request_auth_context,
                      request_route_telemetry: RequestRouteTelemetry::for_endpoint("/responses"),
                      responses_headers: &responses_headers,
@@ -644,14 +649,14 @@ index 179e58e5e0b703881c4e699eb6baa61e68db9feb..48da6c0c6f50c58feac49fb30437b9a7
                  })
                  .await
              {
-@@ -3567,6 +3581,8 @@ struct WebsocketConnectParams<'a> {
+@@ -3556,6 +3570,8 @@ struct WebsocketConnectParams<'a> {
      auth_context: AuthRequestTelemetryContext,
      request_route_telemetry: RequestRouteTelemetry,
      responses_headers: &'a ApiHeaderMap,
 +    request_transport:
 +        Option<&'a codex_protocol::model_request_transport::RequestTransportOverrides>,
  }
-
+ 
  fn emit_auth_recovery_event(
 diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
 index aa55d51ebbbb6b5f502bbfb226e4037d5bf2d5ec..60968dc973d6c8dbcf4f801284c1989f370b5318 100644
@@ -800,7 +805,7 @@ index b59308436d9845f0aec7c605137c06ea84326133..29fc6e4e37b46cc9843bac6a6608f58c
 +    }
 +}
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index cf9c02c0fe07ffb6dab707708cbc92884012086b..c5e4a121bc19dbc732ce41e4efa11572289eca44 100644
+index 546ffbeeef739d851bbe0713f8e9fb2a7316aa50..70e325ceacf2b0b26dd8834cb2675ab4a52df11f 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
 @@ -3,6 +3,7 @@ use crate::ExtensionData;
@@ -811,7 +816,7 @@ index cf9c02c0fe07ffb6dab707708cbc92884012086b..c5e4a121bc19dbc732ce41e4efa11572
  use codex_protocol::models::ResponseItem;
  use futures::future::BoxFuture;
  use futures::stream::BoxStream;
-@@ -352,6 +353,10 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+@@ -410,6 +411,10 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
      fn step_store(&self) -> Option<&ExtensionData> {
          None
      }
@@ -828,7 +833,7 @@ index 267a2644465dcc1142eea4d9e497bc5cc3acc9f8..77cd6e0cf16077a376b191a2f62bf73b
 +++ b/codex-rs/model-provider/src/workspace_routing.rs
 @@ -85,19 +85,106 @@ pub struct ResolvedResponsesProvider {
  }
-
+ 
  /// Effective destination and credentials that permit reusing a Responses socket.
 -#[derive(Debug, PartialEq, Eq)]
 +#[derive(PartialEq, Eq)]
@@ -852,7 +857,7 @@ index 267a2644465dcc1142eea4d9e497bc5cc3acc9f8..77cd6e0cf16077a376b191a2f62bf73b
 +            .finish()
 +    }
  }
-
+ 
  impl ResponsesConnectionKey {
 +    pub fn with_request_transport(
 +        mut self,
@@ -953,7 +958,7 @@ index 68c06eb388e2d69be268576c48890201a656bc37..37568d537a7bcf36bf63acd173a19523
 @@ -120,11 +120,48 @@ pub struct HostedPromptControls {
      pub resolved_instructions: Option<String>,
  }
-
+ 
 +/// Sparse start-only preferences, retained independently of profile defaults.
 +#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 +#[serde(default, deny_unknown_fields)]
@@ -1000,7 +1005,7 @@ index 68c06eb388e2d69be268576c48890201a656bc37..37568d537a7bcf36bf63acd173a19523
      #[serde(
          default,
 @@ -311,7 +348,8 @@ pub struct ModelRequestControls {
-
+ 
  impl ModelRequestControls {
      pub fn is_empty(&self) -> bool {
 -        self.retry.is_none()
@@ -1011,7 +1016,7 @@ index 68c06eb388e2d69be268576c48890201a656bc37..37568d537a7bcf36bf63acd173a19523
              && self.input_modalities.is_none()
 @@ -336,6 +374,11 @@ impl ModelRequestControls {
      }
-
+ 
      pub fn apply_patch(&mut self, patch: &Self) {
 +        match (&mut self.request_transport, &patch.request_transport) {
 +            (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
@@ -1022,7 +1027,7 @@ index 68c06eb388e2d69be268576c48890201a656bc37..37568d537a7bcf36bf63acd173a19523
              (Some(Some(current)), Some(Some(update))) => current.apply_patch(update),
              (_, Some(update)) => self.retry = Some(update.clone()),
 @@ -409,6 +452,9 @@ impl ModelRequestControls {
-
+ 
      /// Check wire shapes independently of uncertain model-level support.
      pub fn validate_shape(&self) -> Result<(), String> {
 +        if let Some(Some(transport)) = &self.request_transport {

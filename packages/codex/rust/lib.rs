@@ -33,7 +33,6 @@ mod ops;
 mod options;
 mod plan_usage;
 mod private_http;
-mod private_wss;
 mod project_search;
 mod provider_owner;
 mod python_tools;
@@ -4408,7 +4407,7 @@ fn conversation_opening(
         serde_json::from_str(specs_json).map_err(py_error)?;
     let process_private_functions = process_private_runtime
         && !private_disposable
-        && (private_http || options.private_wss_tls)
+        && private_http
         && cfg!(target_os = "linux")
         && options.permits_private_functions()
         && !specs.is_empty()

@@ -1,7 +1,8 @@
 diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index a4fea21c738037be46b870ea44e15625808167f9..ae31dec555769e8cdaa8a53f4d2c8c55f62baeda 100644
 --- a/codex-rs/codex-api/src/endpoint/responses.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses.rs
-@@ -41,6 +41,7 @@
+@@ -41,6 +41,7 @@ pub struct ResponsesOptions {
      pub turn_state: Option<Arc<OnceLock<String>>>,
      pub terminal_limit_errors: bool,
      pub observe_raw_provider_events: bool,
@@ -9,7 +10,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/s
  }
  
  impl<T: HttpTransport> ResponsesClient<T> {
-@@ -95,6 +96,7 @@
+@@ -164,6 +165,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
              options.turn_state,
              options.terminal_limit_errors,
              options.observe_raw_provider_events,
@@ -17,7 +18,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/s
          )
          .await
      }
-@@ -190,6 +192,7 @@
+@@ -259,6 +261,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
              turn_state,
              /*terminal_limit_errors*/ false,
              /*observe_raw_provider_events*/ false,
@@ -25,7 +26,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/s
          )
          .await
      }
-@@ -202,6 +205,7 @@
+@@ -271,6 +274,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
          turn_state: Option<Arc<OnceLock<String>>>,
          terminal_limit_errors: bool,
          observe_raw_provider_events: bool,
@@ -33,7 +34,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/s
      ) -> Result<ResponseStream, ApiError> {
          let stream_response = self
              .send_encoded(
-@@ -221,6 +225,7 @@
+@@ -290,6 +294,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
              turn_state,
              terminal_limit_errors,
              observe_raw_provider_events,
@@ -41,10 +42,55 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/s
          ))
      }
      async fn send_encoded(
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+index 5ec63a3e19ab2cbd8e020e6cf1daaa837121bb15..7b68b0415144b408c213e24bc16c56d474b731fc 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+@@ -40,6 +40,7 @@ fn from_bytes(body: Vec<u8>) -> BoxStream<'static, Result<ResponseEvent, ApiErro
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     )
+     .1
+ }
+@@ -267,6 +268,7 @@ async fn lazy_body_is_not_polled_at_headers_and_drop_releases_pending_body_direc
+             },
+             Duration::from_secs(5),
+             None,
++            false,
+         );
+         assert_eq!(polls.load(Ordering::SeqCst), 0);
+         if stage > 0 {
+@@ -305,6 +307,7 @@ async fn body_timeout_transport_error_and_truncation_are_stream_failures_without
+         },
+         Duration::from_millis(1),
+         None,
++        false,
+     );
+     let reset = pending.next().await;
+     assert!(default_header_reset(reset.as_ref()));
+@@ -323,6 +326,7 @@ async fn body_timeout_transport_error_and_truncation_are_stream_failures_without
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     );
+     let events: Events = events.collect().await;
+     assert!(default_header_reset(events.first()));
+@@ -350,6 +354,7 @@ async fn body_size_error_retains_its_nonretryable_transport_classification() {
+         },
+         Duration::from_secs(5),
+         None,
++        false,
+     );
+     let events: Events = events.collect().await;
+     assert!(default_header_reset(events.first()));
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 55c98f3ed0f3271be03d5112d80ad36bb589ebbd..bd9eabe4d86d93ea1eb591cd051a02e3af9bc6c7 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-@@ -251,6 +251,7 @@
+@@ -251,6 +251,7 @@ impl ResponsesWebsocketConnection {
              turn_state,
              observe_raw_provider_events,
              None,
@@ -52,7 +98,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
          )
          .await
      }
-@@ -269,6 +270,7 @@
+@@ -269,6 +270,7 @@ impl ResponsesWebsocketConnection {
          turn_state: Option<Arc<OnceLock<String>>>,
          observe_raw_provider_events: bool,
          send_observer: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -60,7 +106,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
      ) -> Result<ResponseStream, ApiError> {
          let (tx_event, rx_event) =
              mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
-@@ -361,6 +363,7 @@
+@@ -361,6 +363,7 @@ impl ResponsesWebsocketConnection {
                              rx_interrupt,
                              observe_raw_provider_events && !timing_log_context.warmup,
                              send_observer.as_deref(),
@@ -68,7 +114,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
                          ) => result,
                          _ = &mut stopped => Err(ApiError::Stream("local response invocation stopped".into())),
                          _ = tx_event.closed() => Err(ApiError::Stream(
-@@ -800,6 +803,7 @@
+@@ -783,6 +786,7 @@ async fn run_websocket_response_stream(
      interrupt: oneshot::Receiver<()>,
      observe_raw_provider_events: bool,
      send_observer: Option<&(dyn Fn() + Send + Sync)>,
@@ -76,7 +122,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
  ) -> Result<(), ApiError> {
      let mut last_server_model: Option<String> = None;
      let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
-@@ -818,10 +822,18 @@
+@@ -801,10 +805,18 @@ async fn run_websocket_response_stream(
      // A response owns its interrupt, and create must be sent before interrupt.
      let mut interrupt = interrupt.fuse();
      let mut response_id = None;
@@ -98,7 +144,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
                  response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
              }
              Ok(()) = &mut interrupt, if response_id.is_some() => {
-@@ -837,9 +849,11 @@
+@@ -820,9 +832,11 @@ async fn run_websocket_response_stream(
                      timing_log_context.connection_reused,
                  )
                  .await?;
@@ -111,7 +157,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
          if let Some(t) = telemetry.as_ref() {
              t.on_ws_event(&response, poll_start.elapsed());
          }
-@@ -890,9 +904,11 @@
+@@ -873,9 +887,11 @@ async fn run_websocket_response_stream(
                              payload_bytes = text.len(),
                              "Failed to parse WebSocket event"
                          );
@@ -123,7 +169,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
                  emit_responses_websocket_timing_event(
                      event.kind(),
                      text.as_str(),
-@@ -1021,6 +1037,12 @@
+@@ -1004,6 +1020,12 @@ async fn run_websocket_response_stream(
      }
  
      Ok(())
@@ -136,7 +182,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
  }
  
  fn emit_responses_websocket_timing_event(
-@@ -1536,6 +1558,7 @@
+@@ -1519,6 +1541,7 @@ mod tests {
              rx_interrupt,
              /*observe_raw_provider_events*/ false,
              /*send_observer*/ None,
@@ -144,7 +190,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
          )
          .await
          .unwrap_err();
-@@ -1951,6 +1974,7 @@
+@@ -1934,6 +1957,7 @@ mod tests {
                  rx_interrupt,
                  /*observe_raw_provider_events*/ false,
                  /*send_observer*/ None,
@@ -152,7 +198,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
              )
              .await
              .unwrap_err();
-@@ -1980,3 +2004,172 @@
+@@ -1963,3 +1987,172 @@ mod tests {
          }
      }
  }
@@ -326,21 +372,21 @@ diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/c
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 050c9ead1df95e5c9029ebfa8ea79f8887447015..8003ab1f2a0ba3d275a53507ffbd8ccd8eb63caa 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
-@@ -182,5 +182,8 @@
- pub struct SdkWebsocketTlsSelector(
-     pub fn(&url::Url) -> Option<std::sync::Arc<rustls::ClientConfig>>,
- );
+@@ -179,3 +179,6 @@ pub use crate::endpoint::RealtimeHostedMcpToolFilter;
+ 
  
  pub use common::ProviderHistoryInputProjection;
 +
 +mod text_delta;
 +pub use text_delta::TextDeltaDemand;
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index e480b8df4f3f4f45ef015402e9a68cc1690901b2..259185d48d0ddd0e1d1d800db74d519a59b58330 100644
 --- a/codex-rs/codex-api/src/sse/responses.rs
 +++ b/codex-rs/codex-api/src/sse/responses.rs
-@@ -29,7 +29,6 @@
+@@ -29,7 +29,6 @@ use std::sync::OnceLock;
  use std::time::Duration;
  use tokio::sync::mpsc;
  use tokio::time::Instant;
@@ -348,7 +394,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
  use tracing::debug;
  use tracing::trace;
  
-@@ -46,6 +45,7 @@
+@@ -46,6 +45,7 @@ pub fn spawn_response_stream(
      turn_state: Option<Arc<OnceLock<String>>>,
      terminal_limit_errors: bool,
      observe_raw_provider_events: bool,
@@ -356,7 +402,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
  ) -> ResponseStream {
      let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
      let api_rate_limits = parse_api_rate_limits(&stream_response.headers);
-@@ -112,6 +112,7 @@
+@@ -112,6 +112,7 @@ pub fn spawn_response_stream(
              safety_buffering_treatment,
              terminal_limit_errors,
              observe_raw_provider_events,
@@ -364,7 +410,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
          )
          .await;
              } => {},
-@@ -716,6 +717,7 @@
+@@ -716,6 +717,7 @@ pub async fn process_sse(
          SafetyBufferingTreatment::default(),
          /*terminal_limit_errors*/ false,
          /*observe_raw_provider_events*/ false,
@@ -372,7 +418,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
      )
      .await;
  }
-@@ -728,18 +730,31 @@
+@@ -728,18 +730,31 @@ async fn process_sse_with_treatment(
      safety_buffering_treatment: SafetyBufferingTreatment,
      terminal_limit_errors: bool,
      observe_raw_provider_events: bool,
@@ -408,7 +454,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
          if let Some(t) = telemetry.as_ref() {
              t.on_sse_poll(&response, start.elapsed());
          }
-@@ -798,9 +813,17 @@
+@@ -798,9 +813,17 @@ async fn process_sse_with_treatment(
                      payload_bytes = sse.data.len(),
                      "Failed to parse SSE event"
                  );
@@ -426,7 +472,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
          if let Some(snapshot) = event.api_rate_limits()
              && tx_event
                  .send(Ok(ResponseEvent::ApiRateLimits(snapshot)))
-@@ -2041,6 +2064,7 @@
+@@ -2041,6 +2064,7 @@ mod tests {
              /*turn_state*/ None,
              /*terminal_limit_errors*/ false,
              /*observe_raw_provider_events*/ false,
@@ -434,7 +480,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
          );
          assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
          let event = stream
-@@ -2083,6 +2107,7 @@
+@@ -2083,6 +2107,7 @@ mod tests {
              /*turn_state*/ None,
              /*terminal_limit_errors*/ false,
              /*observe_raw_provider_events*/ false,
@@ -442,7 +488,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
          );
          let mut events = Vec::new();
          while let Some(event) = stream.rx_event.recv().await {
-@@ -2551,3 +2576,118 @@
+@@ -2551,3 +2576,118 @@ mod tests {
  
      const CYBER_RESTRICTED_MODEL_FOR_TESTS: &str = "gpt-5.3-codex";
  }
@@ -562,9 +608,10 @@ diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/ss
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index 96ddb9b147037e13dc96d9163c51fa387d738181..1a9dbf1611c57ad70866a368844626dc726650fc 100644
 --- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
 +++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
-@@ -44,6 +44,7 @@
+@@ -44,6 +44,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
              /*turn_state*/ None,
              /*terminal_limit_errors*/ false,
              /*observe_raw_provider_events*/ false,
@@ -574,6 +621,7 @@ diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/code
          let error = loop {
 diff --git a/codex-rs/codex-api/src/text_delta.rs b/codex-rs/codex-api/src/text_delta.rs
 new file mode 100644
+index 0000000000000000000000000000000000000000..a4a70f18059b743bf8e4e30bae9bb8fa6a5eb520
 --- /dev/null
 +++ b/codex-rs/codex-api/src/text_delta.rs
 @@ -0,0 +1,285 @@
@@ -863,9 +911,10 @@ new file mode 100644
 +    }
 +}
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index e6153cb90be1863bd93890709f393aa2b8eacba2..5afcb20b1cc68c4451ed6327a96b43eda69588ba 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -1894,6 +1894,7 @@
+@@ -2021,6 +2021,7 @@ impl ModelClientSession {
              turn_state: Some(Arc::clone(&self.turn_state)),
              terminal_limit_errors: self.terminal_limit_errors(responses_metadata.request_kind),
              observe_raw_provider_events,
@@ -873,7 +922,7 @@ diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
          }
      }
  
-@@ -2406,6 +2407,11 @@
+@@ -2564,6 +2565,11 @@ impl ModelClientSession {
              )
              .await
              .map_err(CodexErr::Fatal)?;
@@ -885,7 +934,7 @@ diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
              let stream_result = if let Some(events) = produced {
                  Ok((None, None, events, None, None))
              } else if prompt.prefer_buffered_response {
-@@ -2821,6 +2827,16 @@
+@@ -3016,6 +3022,16 @@ impl ModelClientSession {
                      );
                  }) as Arc<dyn Fn() + Send + Sync>
              });
@@ -902,7 +951,7 @@ diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
              let stream_result = websocket_connection
                  .stream_request_with_send_observer(
                      ws_request,
-@@ -2828,6 +2844,7 @@
+@@ -3023,6 +3039,7 @@ impl ModelClientSession {
                      Some(Arc::clone(&self.turn_state)),
                      prompt.observe_raw_provider_events,
                      send_observer,
@@ -910,7 +959,7 @@ diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
                  )
                  .await;
              if let Some(original_item_ids) = original_item_ids {
-@@ -3247,6 +3264,24 @@
+@@ -3446,6 +3463,24 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
  }
  
  const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
@@ -935,7 +984,7 @@ diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
  const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
  
  fn map_response_stream(
-@@ -3990,3 +4025,40 @@
+@@ -4189,3 +4224,40 @@ fn provider_window_rejects_schema_bearing_history() {
  #[cfg(test)]
  #[path = "client_tests.rs"]
  mod tests;
@@ -977,9 +1026,10 @@ diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
 +    assert!(text_delta_demand(None, false, &interceptors).is_none());
 +}
 diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index ac4cd0f5a81ded0c35f7104bf3085eb38d706b1c..71e63fbc1acadf521a6d2f2985aa4fda60bc6151 100644
 --- a/codex-rs/core/src/model_request.rs
 +++ b/codex-rs/core/src/model_request.rs
-@@ -103,6 +103,10 @@
+@@ -103,6 +103,10 @@ struct BoundInterceptor {
      admission: Option<Arc<dyn ModelToolAdmission>>,
  }
  impl ModelResponseInterceptor for BoundInterceptor {
@@ -991,9 +1041,10 @@ diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_reques
          self.inner.preserves_provider_message_window()
      }
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 31528e7bf5de1b8cfbe591b1d287aa3467b88170..2b6496c5f0fa71805c9b5925d6660e046e72b7f4 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
-@@ -485,6 +485,12 @@
+@@ -494,6 +494,12 @@ pub struct ModelAttemptInput {
  /// Interceptors compose in registration order; dropping their stream must release unfinished work.
  /// Trusted host implementations must bound any model-visible content they synthesize.
  pub trait ModelResponseInterceptor: Send + Sync {
@@ -1006,46 +1057,3 @@ diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/exte
      /// Attest unchanged completed messages, reasoning and response IDs.
      /// Core additionally rejects every other output kind when issuing lineage.
      /// This native assertion must not cover application rewrites or producers.
-diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
---- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
-+++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
-@@ -40,6 +40,7 @@
-         },
-         Duration::from_secs(5),
-         None,
-+        false,
-     )
-     .1
- }
-@@ -267,6 +268,7 @@
-             },
-             Duration::from_secs(5),
-             None,
-+            false,
-         );
-         assert_eq!(polls.load(Ordering::SeqCst), 0);
-         if stage > 0 {
-@@ -305,6 +307,7 @@
-         },
-         Duration::from_millis(1),
-         None,
-+        false,
-     );
-     let reset = pending.next().await;
-     assert!(default_header_reset(reset.as_ref()));
-@@ -323,6 +326,7 @@
-         },
-         Duration::from_secs(5),
-         None,
-+        false,
-     );
-     let events: Events = events.collect().await;
-     assert!(default_header_reset(events.first()));
-@@ -350,6 +354,7 @@
-         },
-         Duration::from_secs(5),
-         None,
-+        false,
-     );
-     let events: Events = events.collect().await;
-     assert!(default_header_reset(events.first()));

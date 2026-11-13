@@ -709,10 +709,6 @@
       "sha256": "7ad94085ca25e835088fa60efc140869944e889aa02fdd3689b9560b2b300c8c"
     },
     {
-      "path": "0177-sdk-fresh-websocket-tls.patch",
-      "sha256": "1427787a523977fc0bc6523ce7ef92a046f94fc5978b16c7dd3690dccd1ec23f"
-    },
-    {
       "path": "sdk-trace-context-binding.patch",
       "sha256": "28b476d55f92c8b7eb619eedb3ee34d80eaccb512f23e3a6b084668f8b15ebad"
     },
@@ -894,7 +890,7 @@
     },
     {
       "path": "sdk-independent-websocket-base.patch",
-      "sha256": "b29ef217c5eb88d94fc48bb6d6ef2b06c458e6ab6df5ca5cdbfd9e94bb52385a"
+      "sha256": "cd6aa1e559b5c5c8861e1a5034ccf532d33c5d2c3e1611ff26275c591d976331"
     },
     {
       "path": "sdk-staged-manual-continuation-input.patch",
@@ -906,7 +902,7 @@
     },
     {
       "path": "sdk-request-transport-overrides.patch",
-      "sha256": "75adf85dded181bed0b7d305f84a62fc9833aeadf4458bc2cb1202a09eab3fdc"
+      "sha256": "523ef3b68479a8e78901bda79021f8f9487003e77afb88d3625c9494e2fd1c16"
     },
     {
       "path": "sdk-run-model-settings-override.patch",
@@ -942,7 +938,7 @@
     },
     {
       "path": "sdk-provider-history-lineage.patch",
-      "sha256": "6080a8a7da76718c431a73a53136244af8e87d8108d79314e054d066db30ace6"
+      "sha256": "1934627c0daa12ca5d7dd9f696285dcd707499fc0a35b3577eed6503006f645f"
     },
     {
       "path": "sdk-agent-profile-durable-transport-comparison.patch",
@@ -966,8 +962,8 @@
     },
     {
       "path": "sdk-api-demand-text-coalescing.patch",
-      "sha256": "f582480575237dae4ed26d7891c73d79f2ba933997401c73a8778d99548cf264"
+      "sha256": "a3861d66e1091c6ab3677d9b6224dbac652e3639d9a607a6a1a2104695189787"
     }
   ],
-  "result_tree": "d3e3bf8cf71d0bda172047a50922e1b157b7bcf4"
+  "result_tree": "78638c226a510a32e35c4ec57b179a3ce1b5c101"
 }

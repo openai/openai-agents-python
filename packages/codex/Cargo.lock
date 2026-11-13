@@ -1711,7 +1711,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
- "openssl-probe 0.2.1",
  "pretty_assertions",
  "pyo3",
  "pyo3-async-runtimes",
