@@ -6,7 +6,7 @@ from pathlib import Path
 
 assert os.environ["GITHUB_REPOSITORY"] == "openai/openai-agents-python"
 assert os.environ["GITHUB_EVENT_NAME"] == "push"
-assert os.environ["GITHUB_REF"] == "refs/heads/ci/hillclimb/python-warm-linux-overlap-15"
+assert os.environ["GITHUB_REF"] == "refs/heads/ci/hillclimb/python-warm-overlap-macos26xl-18"
 base = "8e1a7067b00249432dae979379ab68554af00033"
 donor = "43324263604"
 expected_identity = "71048ea1d3793c8dd2d94885cf1804ba35c23eb8665b180b92ac7d1490104270"

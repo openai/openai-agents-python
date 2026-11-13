@@ -1,3 +1,4 @@
+# Diagnostic only: alternate macOS 26 XL coverage; no macOS 15 equivalence claim.
 name: Build installable SDK package
 
 on:
@@ -30,7 +31,7 @@ jobs:
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' && '{"group":"codex-runners","labels":"codex-windows-x64"}' ||
-        github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' && '"macos-15"' ||
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' && '"macos-26-xlarge"' ||
         toJSON(inputs.runner)
       ) }}
     timeout-minutes: 100
