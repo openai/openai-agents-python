@@ -23,6 +23,7 @@ from agents import (
     MCPResourceTemplate,
     MCPResultContext,
     MCPTextResourceContents,
+    NativeError,
     NativeToolCall,
     Session,
     StdioMCP,
@@ -160,3 +161,7 @@ async def read_prompts(session: Session[Application, Answer], args: Mapping[str,
         if message["content"]["type"] == "text":
             assert_type(message["content"]["text"], str)
     await session.get_mcp_prompt("resources", "review", {"language": 1})  # pyright: ignore[reportArgumentType]
+
+
+def read_private_mcp_callback_error(error: NativeError) -> None:
+    assert_type(error.get_mcp_callback_error(), Exception | None)

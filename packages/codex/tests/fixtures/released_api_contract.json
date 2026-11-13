@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "fd9829054d56165d4a30098310d09f1cf92aa5ed",
+  "baseline_commit": "6fe079aa65e7662eadcc387e262010c011cb2b33",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1634,7 +1634,7 @@
           "FeatureName: TypeAlias = Literal['native_output', 'prompted_output', 'manual_suspend', 'native_output_manual_restore', 'tool_selection', 'function_policy', 'mcp_before_policy', 'mcp_result_policy', 'environment_before_policy', 'environment_code_result_policy', 'native_agents', 'remote_skills', 'checklist']",
           "class Capabilities:\n\n    def __init__(self, session: Session[Any, Any]) -> None:\n        pass\n\n    @property\n    def websockets_allowed(self) -> bool:\n        pass\n\n    def get(self, feature: FeatureName) -> FeatureSupport:\n        pass\n\n    def require(self, feature: FeatureName, *, allow_limited: bool=False) -> None:\n        pass",
           "ResponseIntegrityReason: TypeAlias = Literal['undecodable_output_item', 'provider_owned_tool_receipt', 'unfinished_assistant_item', 'missing_supported_terminal_output', 'provider_refusal', 'malformed_probability_facts']",
-          "class NativeError(RuntimeError):\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n    _interrupted: bool = False\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None, param: str | None=None) -> None:\n        pass\n\n    @property\n    def response_integrity_reason(self) -> ResponseIntegrityReason | None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
+          "class NativeError(RuntimeError):\n    __slots__ = ('_mcp_callback_error',)\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n    _interrupted: bool = False\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None, param: str | None=None) -> None:\n        pass\n\n    def get_mcp_callback_error(self) -> Exception | None:\n        pass\n\n    @property\n    def response_integrity_reason(self) -> ResponseIntegrityReason | None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
           "class InteractionRequired(NativeError):\n    state: SessionState | None = None",
           "@dataclass(frozen=True, slots=True)\nclass ManagedAgentToolOrigin:\n    name: str\n    role: str",
           "@dataclass(frozen=True, slots=True)\nclass ProducedItem:\n    item: SessionItem\n    agent: Agent[Any, Any]\n    handoff_target: Agent[Any, Any] | None = None\n    tool_origin: ManagedAgentToolOrigin | None = None",

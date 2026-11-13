@@ -115,3 +115,79 @@ async def test_child_metadata_failure_joins_work_without_replaying_or_stopping_r
             assert [path for path in paths if path != "/root"] == child_paths
             assert paths.count("/root") == 3
             assert len(effects) == 1
+
+
+async def test_settled_child_drops_private_mcp_callback_traceback(responses, tmp_path, monkeypatch):
+    import gc
+    import weakref
+
+    references = []
+
+    class PrivatePayload:
+        pass
+
+    async def metadata(context):
+        payload = PrivatePayload()
+        references.append(weakref.ref(payload))
+        raise ValueError("SYNTHETIC_PRIVATE_CHILD_CALLBACK")
+
+    class Program(deque):
+        def __bool__(self):
+            return True
+
+        def popleft(self):
+            owner = request_owner(responses.requests[-1], responses.request_headers[-1])[
+                "agent_name"
+            ]
+            if owner != "/root":
+                return [mcp_call("search", "mcp__local", "private-child-call")]
+            if (
+                sum(
+                    request_owner(body, headers)["agent_name"] == "/root"
+                    for body, headers in zip(
+                        responses.requests, responses.request_headers, strict=True
+                    )
+                )
+                == 1
+            ):
+                return [
+                    collaboration(
+                        "spawn_agent",
+                        {"task_name": "child", "message": "Read.", "fork_turns": "none"},
+                        "spawn-child",
+                    )
+                ]
+            return [assistant_output("root remains usable")]
+
+    responses.replies = Program()
+    async with timeout(30), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        agent = Agent(
+            instructions="Start the child.",
+            model="gpt-5.5",
+            tools=[stdio(tmp_path / "child-metadata", request_metadata=metadata), NativeAgents()],
+            provider=provider(responses),
+        )
+        async with agent.session(environment=declaration(executor)) as session:
+            assert (
+                await (await session.submit("Start.")).get_result()
+            ).final_output == "root remains usable"
+            [child] = await handles(session, 1)
+            with pytest.raises(NativeError) as caught:
+                await child.get_result()
+            assert caught.value.get_mcp_callback_error() is None
+            del caught
+            assert len(references) == 1
+            states = list(session._callbacks_for_child(child))
+            assert states
+            for state in states:
+                await state.task
+                assert state.completion.done() and state.completion.result() is None
+            for _ in range(3):
+                await asyncio.sleep(0)
+                gc.collect()
+            assert references[0]() is None
+            assert session._child_callbacks
+            assert (
+                await (await session.submit("Continue.")).get_result()
+            ).final_output == "root remains usable"
