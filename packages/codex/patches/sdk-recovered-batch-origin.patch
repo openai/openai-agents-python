@@ -1,0 +1,37 @@
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -153,6 +153,8 @@
+ /// A single completed direct-call batch. The host applies the same final
+ /// reservation and stop policies used for individual tool completion.
+ pub struct ToolBatchCompletionInput<'a> {
++    /// This batch comes from recovered history, rather than a new live sample.
++    pub recovered: bool,
+     pub turn_id: &'a str,
+     pub model: &'a str,
+     pub continuation_count: usize,
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3024,6 +3024,7 @@
+ /// Original direct-call order and accepted outputs from this sample only.
+ #[derive(Debug, Default)]
+ struct SettledDirectTools {
++    recovered: bool,
+     calls: Vec<ResponseItem>,
+     outputs: Vec<ResponseItem>,
+     /// Unknown for pending execution and unqualified recovered receipts.
+@@ -3219,6 +3220,7 @@
+         ordered_outputs.push(output);
+     }
+     Ok(SettledDirectTools {
++        recovered: true,
+         calls,
+         outputs: ordered_outputs,
+         outcomes: ordered_outcomes,
+@@ -3546,6 +3548,7 @@
+     for contributor in enabled {
+         let decision = contributor
+             .propose_tool_batch_completion(codex_extension_api::ToolBatchCompletionInput {
++                recovered: tools.recovered,
+                 turn_id: &step.turn.sub_id,
+                 model: &step.settings.model_info.slug,
+                 continuation_count: 0,
