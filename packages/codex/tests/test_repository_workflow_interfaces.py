@@ -188,7 +188,11 @@ def test_release_checks_gate_collection_without_rebuilding() -> None:
             else:
                 assert "if" not in step
     tests = yaml.load(TESTS_WORKFLOW.read_text(), Loader=yaml.BaseLoader)
-    assert set(tests["on"]["push"]["branches"]) == {"main", "feat/codex-harness"}
+    assert set(tests["on"]["push"]["branches"]) == {
+        "main",
+        "feat/codex-harness",
+        "ci/hillclimb/python-current-seed-31",
+    }
 
 
 def test_release_checks_reject_stale_lockfile(tmp_path: Path) -> None:
@@ -337,5 +341,9 @@ def test_preview_install_checks_do_not_enable_pypi_or_automatic_tags() -> None:
     tags = yaml.load((workflows / "release-tag.yml").read_text(), Loader=yaml.BaseLoader)
     assert tags["jobs"]["tag-release"]["if"].startswith("false &&")
     codeql = yaml.load((workflows / "codeql.yml").read_text(), Loader=yaml.BaseLoader)
-    assert codeql["on"]["push"]["branches"] == ["main", "feat/codex-harness"]
+    assert codeql["on"]["push"]["branches"] == [
+        "main",
+        "feat/codex-harness",
+        "ci/hillclimb/python-current-seed-31",
+    ]
     assert codeql["on"]["pull_request"]["branches"] == ["main", "feat/codex-harness"]

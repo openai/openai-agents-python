@@ -53,7 +53,9 @@ jobs:
            inputs.native_source_run == '' && '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
            '{"group":"codex-runners","labels":"codex-windows-x64"}') ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' &&
-          (inputs.native_source_run != '' && '"macos-15"' || '"macos-15-xlarge"') ||
+          (inputs.native_source_run != '' && '"macos-15"' ||
+           (github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-current-seed-31') &&
+           '"macos-26-xlarge"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
       ) }}
     # PyPA manylinux 2026.11.07-1. See https://github.com/pypa/manylinux/actions/runs/42368406253.

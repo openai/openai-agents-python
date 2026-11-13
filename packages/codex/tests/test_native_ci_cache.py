@@ -524,6 +524,7 @@ def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
         "jobs"
     ]
     values = {
+        "github.repository": "openai/openai-agents-python",
         "inputs.native_only": False,
         "needs.changes.outputs.code": code,
         "github.event_name": event,
