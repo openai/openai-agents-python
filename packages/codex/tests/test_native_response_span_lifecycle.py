@@ -28,6 +28,7 @@ from agents import (
     function_tool,
     telemetry,
 )
+from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 from tests.telemetry_transport_fixtures import decoded_collector
 from tests.test_tracing_native import Recorder, _attrs, _descends, _spans
@@ -148,7 +149,7 @@ async def run(case):
 
     async def wait_ends(count):
         try:
-            async with asyncio.timeout(5):
+            async with timeout(5):
                 while len(responses("end")) < count:
                     processor_changed.clear()
                     if len(responses("end")) < count:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
@@ -161,6 +162,31 @@ def _assert_current_mount_authority(state: SandboxSessionState, manifest: Manife
     ):
         raise MountConfigError(
             message="Sandbox mount authority must match current trusted configuration"
+        )
+
+
+async def _apply_borrowed_manifest(session: SandboxSession, manifest: Manifest) -> None:
+    from agents.classic.sandbox.entries import resolve_workspace_path
+    from agents.classic.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
+
+    current = session.state.manifest
+    SandboxRuntimeSessionManager._validate_live_session_host_path_grants(
+        current_manifest=current, processed_manifest=manifest
+    )
+    SandboxRuntimeSessionManager._validate_running_live_session_manifest_update(
+        current_manifest=current, processed_manifest=manifest
+    )
+    entries = SandboxRuntimeSessionManager._diff_live_session_entries(
+        current_entries=current.entries, processed_entries=manifest.entries
+    )
+    if entries:
+        await session._apply_entry_batch(
+            [(resolve_workspace_path(Path(manifest.root), path), entry) for path, entry in entries],
+            base_dir=session._manifest_base_dir(),
+        )
+    if current != manifest:
+        session.state = session.state.model_copy(
+            update={"manifest": manifest.model_copy(deep=True)}
         )
 
 
@@ -371,9 +397,14 @@ def sandbox_environment(
                         raise ValueError("Managed resume requires a supported snapshot factory")
                     selected.state.snapshot = publication.build(uuid4().hex)
             else:
-                _assert_current_mount_authority(selected.state, captured_manifest)
-                await selected._validate_manifest_application(manifest=captured_manifest)
-                await client.assert_borrowed_session_authority(selected, captured_options)
+                owner = selected._inner
+                if owner._borrowed_manifest_lock is None:
+                    owner._borrowed_manifest_lock = asyncio.Lock()
+                async with owner._borrowed_manifest_lock:
+                    _assert_current_mount_authority(selected.state, captured_manifest)
+                    await selected._validate_manifest_application(manifest=captured_manifest)
+                    await client.assert_borrowed_session_authority(selected, captured_options)
+                    await _apply_borrowed_manifest(selected, captured_manifest)
                 if concurrency_limits is not None:
                     selected._set_concurrency_limits(concurrency_limits)
                 if archive_limits is not None:
