@@ -174,6 +174,7 @@ class _PendingManual(BaseModel):
     arguments: str
     approval_required: bool = False
     effective_arguments: str | None = None
+    continuation: dict[str, Any] | None = None
 
 
 class _ToolOutcomes(BaseModel):

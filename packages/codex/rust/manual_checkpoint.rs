@@ -824,7 +824,12 @@ fn validate_frame(
         ensure!(
             fields.keys().all(|key| matches!(
                 key.as_str(),
-                "call_id" | "tool" | "arguments" | "approval_required" | "effective_arguments"
+                "call_id"
+                    | "tool"
+                    | "arguments"
+                    | "approval_required"
+                    | "effective_arguments"
+                    | "continuation"
             )) && fields
                 .get("approval_required")
                 .is_none_or(Value::is_boolean)
@@ -1456,9 +1461,30 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
         )?;
     }
     for item in &frame.pending {
-        frame
-            .receivers
-            .push(if let Some(source) = &frame.profile_source {
+        let configured_call_id = manual_request(item)?.1;
+        frame.receivers.push(
+            if let Some(continuation) = frame.state["native_continuation"]["pending_manual"]
+                .as_array()
+                .and_then(|pending| {
+                    pending.iter().find(|pending| {
+                        pending["call_id"].as_str() == Some(configured_call_id.as_str())
+                    })
+                })
+                .and_then(|pending| pending.get("continuation"))
+                .filter(|value| !value.is_null())
+            {
+                ensure!(
+                    frame.profile_source.is_none(),
+                    "Configured continuation with managed profiles is not supported"
+                );
+                tools.enqueue_configured_reentry(
+                    &thread.id.to_string(),
+                    &frame.turn,
+                    item,
+                    model,
+                    continuation.clone(),
+                )?
+            } else if let Some(source) = &frame.profile_source {
                 crate::agent_profiles::enqueue_manual_reentry(
                     thread,
                     source,
@@ -1471,7 +1497,8 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
                 )?
             } else {
                 tools.enqueue_manual_reentry(&thread.id.to_string(), &frame.turn, item, model)?
-            });
+            },
+        );
     }
     for pending in frame.state["native_continuation"]["pending_manual"]
         .as_array()
@@ -1791,18 +1818,44 @@ pub(crate) async fn capture(
             ready(thread, owner).await?,
             "Manual continuation changed during export"
         );
+        let tools = thread
+            .thread
+            .thread_extension_data()
+            .get::<crate::python_tools::PythonTools>()
+            .context("Manual continuation requires current tools")?;
+        let pending = tools.pending_manual_keys(&thread.id.to_string())?;
+        let configured = tools.continuations(&pending)?;
         let mut current = owner
             .lock()
             .map_err(|_| anyhow::anyhow!("Manual continuation poisoned"))?;
         let frame = current
             .as_mut()
             .context("Manual continuation is no longer pending")?;
+        ensure!(
+            pending.iter().all(|key| key.turn == frame.turn),
+            "Configured continuations belong to another restored turn"
+        );
         snapshot["format_version"] = serde_json::json!(if snapshot["format_version"] == 4 {
             5
         } else {
             3
         });
-        snapshot["native_continuation"] = frame.continuation_snapshot(false)?;
+        let mut continuation = frame.continuation_snapshot(false)?;
+        for call in continuation["pending_manual"]
+            .as_array_mut()
+            .context("Missing pending manual calls")?
+        {
+            let id = call["call_id"].as_str().context("Missing manual call ID")?;
+            if let Some(value) = configured.get(id) {
+                call["continuation"] = value.clone();
+            } else {
+                ensure!(
+                    call.get("continuation").is_none(),
+                    "Configured continuation is no longer parked"
+                );
+            }
+        }
+        snapshot["native_continuation"] = continuation;
         frame.sealed = true;
         frame.receivers.clear();
         return Ok(Some(snapshot));
@@ -1827,6 +1880,7 @@ pub(crate) async fn capture(
         .iter()
         .map(|key| Ok((key.call.clone(), tools.manual_approval_state(key)?)))
         .collect::<Result<_>>()?;
+    let configured = tools.continuations(&pending)?;
     let turn = pending[0].turn.clone();
     ensure!(
         pending.iter().all(|key| key.turn == turn),
@@ -2036,6 +2090,9 @@ pub(crate) async fn capture(
         if let Some(arguments) = effective_arguments {
             captured["effective_arguments"] = Value::String(serde_json::to_string(&arguments)?);
         }
+        if let Some(value) = configured.get(id) {
+            captured["continuation"] = value.clone();
+        }
         pending_manual.push(captured);
     }
     ensure!(
@@ -2116,25 +2173,43 @@ mod apply_patch_portability_tests {
 
     #[test]
     fn settled_application_patch_is_portable_without_another_execution_grant() {
-        assert!(portable_manual_actions(&records(true), &HashSet::new(), |_| false));
-        assert!(!portable_manual_actions(&records(false), &HashSet::new(), |_| false));
+        assert!(portable_manual_actions(
+            &records(true),
+            &HashSet::new(),
+            |_| false
+        ));
+        assert!(!portable_manual_actions(
+            &records(false),
+            &HashSet::new(),
+            |_| false
+        ));
     }
 
     #[test]
     fn missing_duplicate_or_cross_kind_patch_receipts_remain_nonportable() {
         let mut history = records(true);
         let output = history.pop().unwrap();
-        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| false));
+        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| {
+            false
+        }));
         history.push(serde_json::from_value(serde_json::json!({
             "type":"response_item","payload":{"type":"function_call_output","call_id":"patch","output":"done"}
         })).unwrap());
-        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| false));
+        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| {
+            false
+        }));
         history.pop();
         history.push(output.clone());
         history.push(output);
-        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| false));
+        assert!(!portable_manual_actions(&history, &HashSet::new(), |_| {
+            false
+        }));
         let mut duplicate_pairs = records(true);
         duplicate_pairs.extend(records(true));
-        assert!(!portable_manual_actions(&duplicate_pairs, &HashSet::new(), |_| false));
+        assert!(!portable_manual_actions(
+            &duplicate_pairs,
+            &HashSet::new(),
+            |_| false
+        ));
     }
 }

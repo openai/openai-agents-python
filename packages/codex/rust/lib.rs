@@ -265,7 +265,12 @@ impl Engine {
                 &payload,
                 options.application_instructions.as_deref().unwrap_or(""),
                 specs.as_deref().unwrap_or(&[]),
-                &options.manual_tool_slots,
+                &options
+                    .manual_tool_slots
+                    .iter()
+                    .chain(&options.configured_continuation_tool_slots)
+                    .copied()
+                    .collect::<Vec<_>>(),
                 options.agent_profiles.as_ref(),
             )
             .map_err(py_error)?;
@@ -1347,6 +1352,21 @@ impl NativeThread {
             });
             serde_json::to_string(&state).map_err(py_error)
         })
+    }
+
+    fn _configured_continuation(&self, request_json: &str) -> PyResult<Option<String>> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("configured continuation owner is unavailable"))?;
+        let request = serde_json::from_str(request_json).map_err(py_error)?;
+        tools
+            .configured_continuation(&request)
+            .map_err(py_error)?
+            .map(|value| serde_json::to_string(&value).map_err(py_error))
+            .transpose()
     }
 
     // Recheck after caller-owned checkpoint storage has settled, immediately
@@ -3347,9 +3367,28 @@ impl NativeThread {
                 python_tools::Reply::Continuation {
                     request,
                     continuation,
-                } => tools
-                    .park_continuation(&inner.id.to_string(), &request, continuation)
-                    .map_err(py_error),
+                    callback,
+                    rollback,
+                } => {
+                    if rollback {
+                        tools
+                            .rollback_continuation(
+                                &inner.id.to_string(),
+                                &request,
+                                callback.as_ref(),
+                            )
+                            .map_err(py_error)
+                    } else {
+                        tools
+                            .park_continuation(
+                                &inner.id.to_string(),
+                                &request,
+                                continuation,
+                                callback.as_ref(),
+                            )
+                            .map_err(py_error)
+                    }
+                }
                 python_tools::Reply::Output {
                     request,
                     response,
@@ -4650,7 +4689,12 @@ fn create_checkpoint_engine<'py>(
                     &payload,
                     options.application_instructions.as_deref().unwrap_or(""),
                     specs.as_deref().unwrap_or(&[]),
-                    &options.manual_tool_slots,
+                    &options
+                        .manual_tool_slots
+                        .iter()
+                        .chain(&options.configured_continuation_tool_slots)
+                        .copied()
+                        .collect::<Vec<_>>(),
                     options.agent_profiles.as_ref(),
                 )
                 .map_err(py_error)?;

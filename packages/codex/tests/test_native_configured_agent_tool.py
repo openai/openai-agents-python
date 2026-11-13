@@ -504,8 +504,6 @@ async def test_configured_child_approval_and_held_sibling_owners(approve):
             assert len(root_model.requests) == len(child_model.requests) == 1
             history = [item async for item in session.items()]
             assert not any(item["type"] == "function_call_output" for item in history)
-            with pytest.raises(RuntimeError, match="manual"):
-                await session.suspend()
             reply = request.reply(approve)
             with pytest.raises(InteractionExpiredError):
                 await foreign.respond(reply)
