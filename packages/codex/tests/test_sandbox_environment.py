@@ -1295,3 +1295,74 @@ def test_sandbox_state_equality_ignores_memory_lock_identity() -> None:
         changed = original.model_copy()
         setattr(changed, name, value)
         assert changed != original
+
+
+@pytest.mark.parametrize("ending", ["error", "cancel"])
+@pytest.mark.parametrize("alias", ["original", "wrapped"])
+async def test_borrowed_partial_manifest_write_blocks_reuse_before_binding(
+    tmp_path: Path, ending: str, alias: str
+) -> None:
+    from agents.classic.sandbox.entries import File
+    from agents.sandbox import SandboxCapability
+
+    client = Client([])
+    original = Manifest(root=str(tmp_path))
+    selected = await client.create(manifest=original, options=Options())
+    client.backend_id = selected.state.type
+    client.events.clear()
+    written = tmp_path / "first-private.txt"
+    calls: list[str] = []
+
+    async def partial(entries, **kwargs):
+        path, entry = entries[0]
+        path.write_bytes(entry.content)
+        assert path == written
+        if ending == "cancel":
+            raise asyncio.CancelledError()
+        raise OSError("second synthetic write failed")
+
+    selected._apply_entry_batch = partial
+
+    class Probe(SandboxCapability):
+        name = "borrowed-reuse-probe"
+
+        async def bind(self, session, *, user, workspace):
+            calls.append("bind")
+
+    @asynccontextmanager
+    async def connect(session):
+        calls.append("connect")
+        yield Environment(url="wss://executor.invalid", cwd=str(tmp_path))
+
+    requested = Manifest(
+        root=str(tmp_path),
+        entries={
+            Path("first-private.txt"): File(content=b"synthetic-private-before-failed-update"),
+            Path("second.txt"): File(content=b"never fully applied"),
+        },
+    )
+    with pytest.raises(OSError if ending == "error" else asyncio.CancelledError):
+        async with sandbox_environment(
+            client,
+            manifest=requested,
+            options=Options(),
+            session=selected,
+            connect=connect,
+        ):
+            pytest.fail("Partial application was published")
+    assert written.read_bytes() == b"synthetic-private-before-failed-update"
+    assert not (tmp_path / "second.txt").exists()
+    assert selected.state.manifest == original
+    reused = selected if alias == "original" else SandboxSession(SandboxSession(selected._inner))
+    with pytest.raises(ValueError, match="manifest.*failed|failed.*manifest"):
+        async with sandbox_environment(
+            client,
+            manifest=original,
+            options=Options(),
+            session=reused,
+            connect=connect,
+            capabilities=[Probe()],
+        ):
+            pytest.fail("Partially changed borrowed resource was reused")
+    assert not calls
+    assert not client.events  # The app still owns this resource; no close or delete.

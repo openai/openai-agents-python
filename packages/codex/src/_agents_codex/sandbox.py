@@ -177,7 +177,7 @@ async def _apply_borrowed_manifest(
     manifest: Manifest,
     concurrency_limits: SandboxConcurrencyLimits | None = None,
 ) -> None:
-    from _agents_shared.sandbox_manifest import _BorrowedManifestPolicy
+    from _agents_shared.sandbox_manifest import _BorrowedManifestPolicy, _poison_borrowed_manifest
     from agents.classic.sandbox.entries import resolve_workspace_path
 
     current = session.state.manifest
@@ -204,6 +204,7 @@ async def _apply_borrowed_manifest(
             if not isinstance(owner, SandboxSession):
                 break
             owner = owner._inner
+    application_started = False
     try:
         if concurrency_limits is not None:
             session._set_concurrency_limits(concurrency_limits)
@@ -212,18 +213,22 @@ async def _apply_borrowed_manifest(
                 update={"extra_path_grants": deepcopy(manifest.extra_path_grants)}
             )
             session.state = session.state.model_copy(update={"manifest": staged})
-            await session._apply_entry_batch(
-                [
-                    (resolve_workspace_path(Path(manifest.root), path), entry)
-                    for path, entry in entries
-                ],
-                base_dir=session._manifest_base_dir(),
-            )
+            pending_entries = [
+                (resolve_workspace_path(Path(manifest.root), path), entry)
+                for path, entry in entries
+            ]
+            base_dir = session._manifest_base_dir()
+            application_started = True
+            await session._apply_entry_batch(pending_entries, base_dir=base_dir)
         if current != manifest:
             session.state = session.state.model_copy(
                 update={"manifest": manifest.model_copy(deep=True)}
             )
     except BaseException:
+        if application_started:
+            # Provider batches can leave files behind after error or cancellation.
+            # Restoring metadata cannot restore filesystem authority.
+            _poison_borrowed_manifest(session)
         session.state = session.state.model_copy(update={"manifest": current})
         for owner, manifest_entries, local_dir_files in previous_limits:
             owner._max_manifest_entry_concurrency = manifest_entries
@@ -549,9 +554,13 @@ def sandbox_environment(
                         raise ValueError("Managed resume requires a supported snapshot factory")
                     selected.state.snapshot = publication.build(uuid4().hex)
             else:
-                from _agents_shared.sandbox_manifest import _borrowed_manifest_lock
+                from _agents_shared.sandbox_manifest import (
+                    _assert_borrowed_manifest_reusable,
+                    _borrowed_manifest_lock,
+                )
 
                 async with _borrowed_manifest_lock(selected._inner):
+                    _assert_borrowed_manifest_reusable(selected)
                     if skill_lease is not None:
                         skill_lease._validate_borrowed_manifest(selected, captured_manifest)
                     _assert_current_mount_authority(selected.state, captured_manifest)

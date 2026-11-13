@@ -178,7 +178,27 @@ class _BorrowedManifestPolicy:
         return False
 
 
+def _borrowed_manifest_owner(owner: BaseSandboxSession) -> BaseSandboxSession:
+    from agents.classic.sandbox.session.sandbox_session import SandboxSession
+
+    while isinstance(owner, SandboxSession):
+        owner = owner._inner
+    return owner
+
+
+def _assert_borrowed_manifest_reusable(owner: BaseSandboxSession) -> None:
+    if getattr(_borrowed_manifest_owner(owner), "_borrowed_manifest_failed", False):
+        raise ValueError(
+            "Borrowed sandbox manifest application failed; create a fresh sandbox resource"
+        )
+
+
+def _poison_borrowed_manifest(owner: BaseSandboxSession) -> None:
+    setattr(_borrowed_manifest_owner(owner), "_borrowed_manifest_failed", True)  # noqa: B010
+
+
 def _borrowed_manifest_lock(owner: BaseSandboxSession) -> asyncio.Lock:
+    owner = _borrowed_manifest_owner(owner)
     lock: asyncio.Lock | None = getattr(owner, "_borrowed_manifest_lock", None)
     if lock is None:
         lock = asyncio.Lock()
