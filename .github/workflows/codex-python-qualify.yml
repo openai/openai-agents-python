@@ -9,6 +9,14 @@ on:
       runner:
         type: string
         required: true
+      native_source_run:
+        type: string
+        required: false
+        default: ''
+      native_artifacts:
+        type: string
+        required: false
+        default: '{}'
       artifact_id:
         type: string
         required: true
@@ -91,8 +99,8 @@ jobs:
       - name: Begin SDK qualification
         env:
           GH_TOKEN: ${{ github.token }}
-          NATIVE_ARTIFACTS: ${{ format('{{"{0}-{1}":{{"id":{2},"digest":"sha256:{3}","provenance":{4},"name":"native-snapshot-{0}-{1}-{5}"}}}}', runner.os, runner.arch, inputs.artifact_id, inputs.artifact_digest, inputs.native_provenance, steps.native-inputs.outputs.identity) }}
-          NATIVE_SOURCE_RUN: ${{ github.run_id }}
+          NATIVE_ARTIFACTS: ${{ inputs.native_source_run != '' && inputs.native_artifacts || format('{{"{0}-{1}":{{"id":{2},"digest":"sha256:{3}","provenance":{4},"name":"native-snapshot-{0}-{1}-{5}"}}}}', runner.os, runner.arch, inputs.artifact_id, inputs.artifact_digest, inputs.native_provenance, steps.native-inputs.outputs.identity) }}
+          NATIVE_SOURCE_RUN: ${{ inputs.native_source_run || github.run_id }}
           SNAPSHOT_DIRECTORY: ${{ runner.temp }}/agents-native-qualified
         run: python -I -S .github/scripts/download-native-snapshot.py
       - name: Prepare the source distribution
