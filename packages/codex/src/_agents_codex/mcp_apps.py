@@ -164,7 +164,7 @@ class MCPApp:
             if (
                 not any(server is selected for selected in session._mcp_tools)
                 or call["name"] not in server.tools
-                or server.approval_mode != "preapproved"
+                or server._effective_approval_mode(call["name"]) != "preapproved"
                 or server.before is not None
                 or server.approval is not None
                 or server.request_metadata is not None

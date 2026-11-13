@@ -527,6 +527,9 @@ class _MCP(Generic[ContextT_contra]):
         object.__setattr__(ref, "_mcp_identity", (self.name, raw_name))
         return ref
 
+    def _effective_approval_mode(self, raw_name: str) -> Literal["native", "prompt", "preapproved"]:
+        return (self.tool_approval_overrides or {}).get(raw_name, self.approval_mode)
+
     def _config(self, environment: Environment[Any] | None = None) -> dict[str, object]:
         config: dict[str, object] = {
             "enabled_tools": list(self.tools),
@@ -538,10 +541,9 @@ class _MCP(Generic[ContextT_contra]):
         if self.cache_tools_list is not None:
             config["sdk_cache_tools_list"] = self.cache_tools_list
         approval_modes = {"preapproved": "approve", "prompt": "prompt"}
-        approvals = self.tool_approval_overrides or {}
         tool_settings = {}
         for name in self.tools:
-            approval = approval_modes.get(approvals.get(name, self.approval_mode))
+            approval = approval_modes.get(self._effective_approval_mode(name))
             if approval is not None:
                 tool_settings[name] = {"approval_mode": approval}
         for raw, public_name in (self.tool_name_overrides or {}).items():
