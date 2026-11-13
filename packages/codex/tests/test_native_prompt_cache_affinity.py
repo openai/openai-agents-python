@@ -1,7 +1,13 @@
 import hashlib
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from pydantic import BaseModel
 
 from agents import Agent, ConversationsHistory, FunctionTool, InteractionRequired, NativeProvider
@@ -16,8 +22,44 @@ from tests.native_fixtures import (
 from tests.test_conversations_history import endpoint as endpoint
 
 
-async def test_current_native_prompt_cache_affinity(responses: ResponsesFixture) -> None:
+@pytest.mark.parametrize("case", ["session", "manual"])
+def test_native_prompt_cache_trace_affinity(case: str, tmp_path: Path) -> None:
+    # Native telemetry must be configured before the first SDK client in this process.
+    env = {**os.environ, "CODEX_HOME": str(tmp_path)}
+    root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, env.get("PYTHONPATH"))))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio, sys; "
+            "from tests.test_native_prompt_cache_affinity import _trace_affinity_case; "
+            "asyncio.run(asyncio.wait_for(_trace_affinity_case(sys.argv[1]), 30))",
+            case,
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=40,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _trace_affinity_case(case: str) -> None:
     await configure()
+    fixture = ResponsesFixture()
+    application = web.Application()
+    application.router.add_post("/v1/responses", fixture.handle)
+    async with TestServer(application) as server:
+        fixture.url = str(server.make_url("/v1"))
+        if case == "session":
+            await _session_affinity(fixture)
+        else:
+            assert case == "manual"
+            await _manual_affinity(fixture)
+
+
+async def _session_affinity(responses: ResponsesFixture) -> None:
     for index in range(6):
         responses.respond(assistant_output(f"answer {index}"))
 
@@ -84,8 +126,7 @@ class LookupArgs(BaseModel):
     key: str
 
 
-async def test_current_native_manual_cache_affinity(responses) -> None:
-    await configure()
+async def _manual_affinity(responses: ResponsesFixture) -> None:
     responses.respond(function_call("lookup", {"key": "fixture"}, "cache-affinity-manual"))
     responses.respond(assistant_output("resumed"))
     lookup = FunctionTool(
