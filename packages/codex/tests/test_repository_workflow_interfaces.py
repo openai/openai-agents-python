@@ -337,5 +337,9 @@ def test_preview_install_checks_do_not_enable_pypi_or_automatic_tags() -> None:
     tags = yaml.load((workflows / "release-tag.yml").read_text(), Loader=yaml.BaseLoader)
     assert tags["jobs"]["tag-release"]["if"].startswith("false &&")
     codeql = yaml.load((workflows / "codeql.yml").read_text(), Loader=yaml.BaseLoader)
-    assert codeql["on"]["push"]["branches"] == ["main", "feat/codex-harness"]
+    assert codeql["on"]["push"]["branches"] == [
+        "main",
+        "feat/codex-harness",
+        "ci/hillclimb/python-warm-historical-13",
+    ]
     assert codeql["on"]["pull_request"]["branches"] == ["main", "feat/codex-harness"]

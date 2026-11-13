@@ -1,0 +1,540 @@
+name: Historical warm Python replay
+'on':
+  push:
+    branches:
+    - ci/hillclimb/python-warm-historical-13
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: python-warm-historical-13-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  UV_FROZEN: '1'
+  CARGO_BUILD_JOBS: '3'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  changes:
+    if: github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref == 'refs/heads/ci/hillclimb/python-warm-historical-13'
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.native-source.outputs.code }}
+      windows: ${{ steps.native-source.outputs.windows }}
+      native_source_run: ${{ steps.native-source.outputs.native_source_run }}
+      native_artifacts: ${{ steps.native-source.outputs.native_artifacts }}
+      native_provenance: ${{ steps.native-source.outputs.native_provenance }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Verify fixed historical donor
+      id: native-source
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python -I -S .github/scripts/python-warm-historical-check.py
+  native-linux:
+    needs: changes
+    uses: ./.github/workflows/codex-python-warm-historical.yml
+    with:
+      runner: ubuntu-24.04
+      source_run: '43324263604'
+      artifact_id: '13993960846'
+      artifact_digest: e42de4fb0dc341c9ea28f065f56409717bd2657d5d070ebbe79f9f00ee5991ae
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+  native-linux-arm64:
+    needs: changes
+    uses: ./.github/workflows/codex-python-warm-historical.yml
+    with:
+      runner: ubuntu-24.04-arm
+      source_run: '43324263604'
+      artifact_id: '13995122857'
+      artifact_digest: 25e5bb87372379bccf1dd8332c7154eefb2f108d8dfe1f4a12775dcca8a2ade8
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+  native-windows:
+    needs: changes
+    uses: ./.github/workflows/codex-python-warm-historical.yml
+    with:
+      runner: windows-latest
+      source_run: '43324263604'
+      artifact_id: '13996441291'
+      artifact_digest: 60173f6b642205cd878a9350d4bf47554c55f78fc233a5ae3f1fb4d75ca10c34
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+  native-macos:
+    needs: changes
+    uses: ./.github/workflows/codex-python-warm-historical.yml
+    with:
+      runner: macos-latest
+      source_run: '43324263604'
+      artifact_id: '13999891258'
+      artifact_digest: 2d772c725642a24e915b18e75bc7b867ac8202db485b84afd364f59c87f6b3f1
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+
+  lint:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' }}
+    env:
+      UV_NO_SYNC: "1"
+      PYTHONPATH: src:packages/codex/src
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Detect code changes
+        id: changes
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: "3.14"
+      - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: uv sync --group dev --no-install-project
+      - name: Verify formatting
+        if: steps.changes.outputs.run == 'true'
+        run: make format-check
+      - name: Run lint
+        if: steps.changes.outputs.run == 'true'
+        run: make lint
+      - name: Skip lint
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping lint for non-code changes."
+
+  typecheck:
+    if: ${{ !cancelled() && needs.changes.result == 'success' }}
+    needs: changes
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    timeout-minutes: 100
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Detect code changes
+        id: changes
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: "3.14"
+      - name: Restore mypy cache
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native-historical
+        with:
+          source-run: "43324263604"
+          snapshots: ${{ needs.changes.outputs.native_artifacts }}
+      - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: make sync
+      - name: Run typecheck
+        if: steps.changes.outputs.run == 'true'
+        run: make typecheck
+      - name: Skip typecheck
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping typecheck for non-code changes."
+
+  mypy-win32:
+    if: ${{ !cancelled() && needs.changes.result == 'success' }}
+    needs: changes
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    timeout-minutes: 100
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Detect code changes
+        id: changes
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: "3.14"
+      - name: Restore mypy cache
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mypy_cache
+          key: mypy-win32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-win32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native-historical
+        with:
+          source-run: "43324263604"
+          snapshots: ${{ needs.changes.outputs.native_artifacts }}
+      - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: make sync
+      - name: Run mypy for Windows
+        if: steps.changes.outputs.run == 'true'
+        run: uv run mypy --platform win32 src
+      - name: Skip Windows mypy
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping Windows mypy for non-code changes."
+
+  tests:
+    needs: [changes, native-linux]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.native-linux.result == 'success' }}
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    env:
+      OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Detect code changes
+        id: changes
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: ${{ matrix.python-version }}
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native
+      - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: make sync
+      - name: Allow the test executor and packaged helper to create sandboxes
+        if: steps.changes.outputs.run == 'true'
+        shell: bash
+        run: |
+          bash .github/scripts/use-ubuntu-archive-if-needed.sh
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes bubblewrap
+          helper="$(uv run --no-sync python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import agents
+          helper = (Path(agents.__file__).resolve().parent / "bin" / "codex-linux-sandbox").resolve()
+          assert helper.is_file() and os.access(helper, os.X_OK), "packaged Linux helper is not executable"
+          runtime = helper.with_name("codex-sdk-runtime")
+          assert runtime.is_file() and os.access(runtime, os.X_OK), "packaged runtime is not executable"
+          print(helper)
+          PYTHON
+          )"
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            executor="$GITHUB_WORKSPACE/packages/codex/target/debug/examples/exec-server-fixture"
+            sudo tee /etc/apparmor.d/agents-sdk-test-executor > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile agents-sdk-test-executor "$executor" flags=(unconfined) {
+            userns,
+          }
+          EOF
+            sudo apparmor_parser -r /etc/apparmor.d/agents-sdk-test-executor
+            sudo tee /etc/apparmor.d/agents-sdk-linux-sandbox > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile agents-sdk-linux-sandbox "$helper" flags=(unconfined) {
+            userns,
+          }
+          profile agents-sdk-linux-runtime "${helper%/*}/codex-sdk-runtime" flags=(unconfined) {
+            userns,
+          }
+          EOF
+            sudo apparmor_parser -r /etc/apparmor.d/agents-sdk-linux-sandbox
+          fi
+      - name: Run native SDK tests
+        if: steps.changes.outputs.run == 'true'
+        run: make tests
+      - name: Qualify native tracing and decoded OTLP transports
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        env:
+          AGENTS_REQUIRE_TRACING_QUALIFICATION: '1'
+        run: |
+          uv run --with grpcio==1.85.0 --with opentelemetry-proto==1.45.1 python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_tracing_native.py packages/codex/tests/test_telemetry_transports.py
+      - name: Verify the qualified wheel archive
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        env:
+          OPENAI_AGENTS_WHEEL: ${{ env.OPENAI_AGENTS_NATIVE_WHEEL }}
+        run: PYTHONPATH=. uv run --no-sync python -m pytest -q packages/codex/tests/test_distribution.py
+      - name: Verify copied documentation code against the qualified wheel
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        run: |
+          uv pip install --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python .github/scripts/check_docs.py
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_docs_code.py
+      - name: Set up Node for the optional Vercel client example
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Verify the optional Vercel client example with ai 6.0.315
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        env:
+          AGENTS_REQUIRE_VERCEL_CLIENT: '1'
+        run: |
+          npm ci --prefix packages/codex/tests/vercel-client --ignore-scripts
+          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_vercel_client.py
+      - name: Verify the optional AG-UI example
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        run: |
+          uv run --with-requirements examples/codex/ag_ui/requirements.txt python -c 'import ag_ui.core'
+          uv run --with-requirements examples/codex/ag_ui/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_ag_ui_example.py
+      - name: Verify the optional Classic HTTP examples
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        run: |
+          uv run --with-requirements examples/classic/realtime/twilio_sip/requirements.txt python -c 'import fastapi'
+          uv run --with-requirements examples/classic/realtime/twilio_sip/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_twilio_sip_example.py packages/codex/tests/test_mcp_manager_example.py
+      - name: Verify the optional MCP Tasks adapter
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python -c 'from agents.experimental.mcp_tasks import MCPTasksProvider'
+          uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_deferred_mcp_response_budget.py packages/codex/tests/test_deferred_mcp_tasks.py packages/codex/tests/test_deferred_mcp_tasks_import.py packages/codex/tests/test_deferred_mcp_wire_primitives.py packages/codex/tests/test_deferred_mcp_worker_context.py
+      - name: Skip tests
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping tests for non-code changes."
+
+  native-macos-sandbox-shards:
+    if: ${{ !cancelled() && needs.changes.result == 'success' }}
+    needs: changes
+    runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
+    name: macOS sandbox shard (${{ matrix.shard }})
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    env:
+      OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Detect code changes
+        id: changes
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: false
+          python-version: "3.14"
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native-historical
+        with:
+          source-run: "43324263604"
+          snapshots: ${{ needs.changes.outputs.native_artifacts }}
+      - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: make sync
+      - name: Prepare the macOS sandbox account
+        if: steps.changes.outputs.run == 'true' && runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          # The managed shell clears its bootstrap port before running commands.
+          # Give libc's local lookup the existing runner account.
+          record="$(python3 - <<'PY'
+          import os
+          import pwd
+          from pathlib import Path
+
+          account = pwd.getpwuid(os.getuid())
+          if account.pw_uid == 0:
+              raise SystemExit("Expected a non-root runner account")
+          uid, gid = str(account.pw_uid), str(account.pw_gid)
+          identity = (account.pw_name, uid, gid, account.pw_dir, account.pw_shell)
+          fields = (account.pw_name, "*", uid, gid, account.pw_gecos, account.pw_dir, account.pw_shell)
+          if any(":" in value or "\r" in value or "\n" in value for value in fields):
+              raise SystemExit("Invalid runner account field in passwd record")
+          for row in Path("/etc/passwd").read_text().splitlines():
+              columns = row.split(":")
+              if len(columns) != 7:
+                  continue
+              name, _, local_uid, local_gid, _, home, shell = columns
+              if name != account.pw_name and local_uid != uid:
+                  continue
+              if (name, local_uid, local_gid, home, shell) != identity:
+                  raise SystemExit("Runner account conflicts with an existing passwd record")
+              raise SystemExit(0)
+          print(":".join(fields))
+          PY
+          )"
+          if [[ -n "$record" ]]; then
+            printf '\n%s\n' "$record" | sudo -n /usr/bin/tee -a /etc/passwd >/dev/null
+          fi
+      - name: Run native SDK tests on macOS
+        if: steps.changes.outputs.run == 'true'
+        timeout-minutes: 35
+        env:
+          PYTEST_ADDOPTS: "-ra -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
+          PYTHONUNBUFFERED: "1"
+          SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
+          SDK_TEST_SHARD_COUNT: ${{ strategy.job-total }}
+        run: make tests-parallel
+      - name: Run serial tests after all workers exit
+        if: steps.changes.outputs.run == 'true' && matrix.shard == 0
+        timeout-minutes: 35
+        env:
+          PYTEST_ADDOPTS: "-ra -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
+          PYTHONUNBUFFERED: "1"
+        run: make tests-serial
+      - name: Skip native macOS sandbox tests
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping native macOS sandbox tests for non-code changes."
+
+  native-macos-sandbox:
+    needs: native-macos-sandbox-shards
+    if: ${{ always() && needs.native-macos-sandbox-shards.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all macOS test shards
+        env:
+          RESULT: ${{ needs.native-macos-sandbox-shards.result }}
+        run: test "$RESULT" = success
+
+  tests-windows-shards:
+    if: ${{ !cancelled() && needs.changes.result == 'success' }}
+    needs: changes
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
+    name: Windows test shard (${{ matrix.python-version }}, ${{ matrix.shard }})
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.14"
+        shard: [0, 1]
+    env:
+      OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Detect code changes
+        id: changes
+        shell: bash
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: ${{ matrix.python-version }}
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native-historical
+        with:
+          source-run: "43324263604"
+          snapshots: ${{ needs.changes.outputs.native_artifacts }}
+      - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: uv sync --group dev
+      - name: Run parallel tests
+        id: parallel-tests
+        if: steps.changes.outputs.run == 'true'
+        env:
+          SDK_TEST_SHARD_INDEX: ${{ matrix.shard }}
+          SDK_TEST_SHARD_COUNT: 2
+        # Native completions use loopback sockets on Windows.
+        run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 4 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
+      - name: Run serial tests after all workers exit
+        if: ${{ !cancelled() && matrix.shard == 0 && (steps.parallel-tests.outcome == 'success' || steps.parallel-tests.outcome == 'failure') }}
+        run: uv run python .github/scripts/run_serial_tests.py
+      - name: Skip tests
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping tests for non-code changes."
+
+  tests-windows:
+    needs: tests-windows-shards
+    if: ${{ always() && needs.tests-windows-shards.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - name: Require all Windows test shards
+        env:
+          RESULT: ${{ needs.tests-windows-shards.result }}
+        run: test "$RESULT" = success
+
+  build-docs:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' }}
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    timeout-minutes: 100
+    env:
+      UV_NO_SYNC: "1"
+      PYTHONPATH: src:packages/codex/src
+      OPENAI_API_KEY: fake-for-tests
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Detect docs changes
+        id: changes
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: "3.14"
+      - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
+        run: uv sync --group dev --no-install-project
+      - name: Check documentation imports
+        if: steps.changes.outputs.run == 'true'
+        run: uv run --no-sync python .github/scripts/check_docs.py --imports-only
+      - name: Build docs
+        if: steps.changes.outputs.run == 'true'
+        run: make build-docs
+      - name: Skip docs build
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping docs build for non-docs changes."
