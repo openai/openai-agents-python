@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestServer
 from agents import (
     Agent,
     Environment,
+    HostedShell,
     ImageGeneration,
     LocalRecoveryRequired,
     LocalStorage,
@@ -222,14 +223,18 @@ async def worker() -> None:
         api_key="destination" if request["resume"] else "source",
         supports_websockets=False,
     )
+    settled_hosted_root = request["mode"] == "cold-settled-hosted-root"
     native = None if request["no_children"] else NativeAgents(max_children=2, max_depth=2)
+    if native is not None and settled_hosted_root:
+        native = replace(native, before_step=lambda _: [])
     agent = Agent(
         instructions="Record a memory.",
         model=request["model"],
         provider=connection,
         programmatic_tool_calling=False,
         tools=([lookup] if native is None else [lookup, native])
-        + ([ImageGeneration()] if request["mode"] == "cold-hosted" else []),
+        + ([ImageGeneration()] if request["mode"] == "cold-hosted" else [])
+        + ([HostedShell(environment={"type": "container_auto"})] if settled_hosted_root else []),
     )
     try:
         async with (
@@ -789,7 +794,11 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
 async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
     tmp_path, monkeypatch, depth, no_children, native_effect, root_active
 ):
-    model = "gpt-5.5" if native_effect == "hosted-progress" else DESCENDANT_MODEL
+    model = (
+        "gpt-5.5"
+        if native_effect in {"hosted-progress", "settled-hosted-root"}
+        else DESCENDANT_MODEL
+    )
     unsafe_effect = native_effect in {"shell", "hosted-progress"}
     peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     entered, release = asyncio.Event(), asyncio.Event()
@@ -845,6 +854,37 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             return [message]
         result = original_response()
         if (
+            native_effect == "settled-hosted-root"
+            and peer.request_headers[-1]["authorization"] == "Bearer source"
+            and path == "/root"
+            and result[0].get("item", {}).get("type") == "message"
+        ):
+            assert any(tool["type"] == "shell" for tool in source_requests[-1]["tools"])
+            shell = {
+                "type": "shell_call",
+                "id": "settled-shell-command",
+                "call_id": "settled-shell",
+                "status": "completed",
+                "action": {"commands": ["printf provider"]},
+            }
+            output = {
+                "type": "shell_call_output",
+                "id": "settled-shell-receipt",
+                "call_id": "settled-shell",
+                "status": "completed",
+                "output": [
+                    {
+                        "stdout": "provider",
+                        "stderr": "",
+                        "outcome": {"type": "exit", "exit_code": 0},
+                    }
+                ],
+            }
+            return [
+                {"type": "response.output_item.done", "output_index": index, "item": item}
+                for index, item in enumerate([shell, output, result[0]["item"]])
+            ]
+        if (
             root_active is True
             and path == "/root"
             and result[0].get("item", {}).get("type") == "message"
@@ -880,6 +920,8 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
             if root_active == "followup"
             else "cold-hosted"
             if native_effect == "hosted-progress"
+            else "cold-settled-hosted-root"
+            if native_effect == "settled-hosted-root"
             else "cold-active",
             depth,
             model=model,
@@ -926,29 +968,28 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
         if native_effect == "settled-hosted-root":
             [root_rollout] = (tmp_path / "profile").rglob(f"*{opened['opened']}.jsonl")
             root_history = [json.loads(line) for line in root_rollout.read_text().splitlines()]
-            completed_turns = {
+            [root_turn] = [
                 row["payload"]["turn_id"]
                 for row in root_history
                 if row["type"] == "event_msg" and row["payload"]["type"] == "task_complete"
-            }
-            marked = 0
-            for row in root_history:
-                if (
-                    row["type"] == "turn_context"
-                    and row["payload"].get("turn_id") in completed_turns
-                    and row["payload"].get("sdk_receipt", {}).get("thread_id") == opened["opened"]
-                ):
-                    row["payload"]["sdk_receipt"]["provider_effects_possible"] = True
-                    marked += 1
-            assert marked
-            root_rollout.write_text("".join(json.dumps(row) + "\n" for row in root_history))
+            ]
+            assert [
+                (
+                    item["type"],
+                    item["status"],
+                    item["internal_chat_message_metadata_passthrough"]["turn_id"],
+                )
+                for row in root_history
+                if row["type"] == "response_item"
+                and (item := row["payload"]).get("call_id") == "settled-shell"
+            ] == [
+                ("shell_call", "completed", root_turn),
+                ("shell_call_output", "completed", root_turn),
+            ]
             assert any(
                 row["type"] == "turn_context"
+                and row["payload"]["turn_id"] == root_turn
                 and row["payload"].get("sdk_receipt", {}).get("provider_effects_possible") is True
-                for row in root_history
-            )
-            assert any(
-                row["type"] == "event_msg" and row["payload"]["type"] == "task_complete"
                 for row in root_history
             )
         if native_effect == "hosted-progress":

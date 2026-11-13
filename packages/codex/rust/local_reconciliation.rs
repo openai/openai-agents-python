@@ -945,10 +945,11 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     let (root_append, protected) = plan(&history, &root_receipts)?;
     validate_interrupted_effects(
         &history,
-        &request.root_recovery_turns,
+        &interrupted_root_turns,
         &root_command_turns,
         &root_append,
         &root_receipts,
+        &request.root_recovery_turns,
     )?;
 
     // The root writer fences the original owner. Also reserve each child writer
@@ -1006,6 +1007,7 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
             &command_turns,
             &outputs,
             &receipts,
+            &[],
         )?;
         let prior_interruption = history.iter().any(|row| {
             matches!(row,
@@ -1180,8 +1182,9 @@ fn validate_interrupted_effects(
     command_turns: &HashSet<String>,
     reconciled: &[ResponseItem],
     receipts: &[&ReconciledCall],
+    historical_shell_turns: &[String],
 ) -> Result<()> {
-    if turns.is_empty() && command_turns.is_empty() {
+    if turns.is_empty() && command_turns.is_empty() && historical_shell_turns.is_empty() {
         return Ok(());
     }
     let mut context = None;
@@ -1213,7 +1216,30 @@ fn validate_interrupted_effects(
                 let Some(turn) = item.turn_id().or(context) else {
                     continue;
                 };
+                // Completed provider-hosted work does not belong to a new
+                // interruption. Historical local invocations still need proof.
+                let local_shell = match item {
+                    ResponseItem::LocalShellCall { .. } => true,
+                    ResponseItem::ShellCall {
+                        provider_fields, ..
+                    } => {
+                        envelope
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.sdk_application_tool.as_deref())
+                            == Some("shell")
+                            || provider_fields
+                                .get("environment")
+                                .and_then(|value| value.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("local")
+                    }
+                    ResponseItem::ShellCallOutput { .. } => output_identity(item)
+                        .is_some_and(|(id, _)| application_shells.contains(&(turn, id))),
+                    _ => false,
+                };
                 let selected = turns.iter().any(|id| id == turn)
+                    || local_shell && historical_shell_turns.iter().any(|id| id == turn)
                     || command_turns.contains(turn)
                         && is_native_command(item)
                         && !matches!(item, ResponseItem::FunctionCall { name, .. } if name == "write_stdin");
@@ -1589,7 +1615,8 @@ mod tests {
         };
         let turns = vec!["original".to_owned()];
         assert!(
-            validate_interrupted_effects(&[start()], &turns, &HashSet::new(), &[], &[]).is_ok()
+            validate_interrupted_effects(&[start()], &turns, &HashSet::new(), &[], &[], &[])
+                .is_ok()
         );
         for invocation in [
             serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"effect", "arguments":"{}"}),
@@ -1602,7 +1629,8 @@ mod tests {
                 RolloutItem::ResponseItem(ResponseItemEnvelope::new(call)),
             ];
             assert!(
-                validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err()
+                validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[])
+                    .is_err()
             );
         }
     }
@@ -1630,7 +1658,9 @@ mod tests {
             ),
         ];
         let turns = vec!["original".to_owned()];
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
         let terminal = |call, turn| {
             RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({
             "type":"item_completed", "thread_id":ThreadId::new(), "turn_id":turn,
@@ -1639,9 +1669,13 @@ mod tests {
         };
         history.push(terminal("unrelated", "original"));
         history.push(terminal("effect", "unrelated"));
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
         history.push(terminal("effect", "original"));
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_ok());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_ok()
+        );
     }
 
     #[test]
@@ -1670,33 +1704,47 @@ mod tests {
             row(serde_json::json!({"type":"function_call_output", "call_id":"poll", "output":"retained poll result"})),
         ];
         let turns = vec!["turn".to_owned()];
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
         history.push(terminal("42", "unified_exec_startup"));
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
         history.pop();
         history.push(terminal("41", "unified_exec_startup"));
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_ok());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_ok()
+        );
         history.pop();
         history.push(terminal("41", "unified_exec_interaction"));
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
         history.pop();
         history.push(terminal("41", "unified_exec_startup"));
         history[1] = row(
             serde_json::json!({"type":"function_call", "namespace":"application", "name":"exec_command", "call_id":"exec", "arguments":"{}"}),
         );
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
         history[1] = row(
             serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"exec", "arguments":"{}"}),
         );
         history[3] = row(
             serde_json::json!({"type":"function_call", "name":"write_stdin", "call_id":"poll", "arguments":"{\"session_id\":\"41\"}"}),
         );
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
         history[3] = row(
             serde_json::json!({"type":"function_call", "name":"write_stdin", "call_id":"poll", "arguments":"{\"session_id\":41}"}),
         );
         history.remove(4);
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
     }
 
     #[test]
@@ -1717,6 +1765,7 @@ mod tests {
                     &history,
                     &["original".into()],
                     &HashSet::new(),
+                    &[],
                     &[],
                     &[]
                 )
@@ -1754,6 +1803,7 @@ mod tests {
                 &["later".into()],
                 &HashSet::from(["earlier".into(), "later".into()]),
                 &[],
+                &[],
                 &[]
             )
             .is_err()
@@ -1763,6 +1813,7 @@ mod tests {
                 &history,
                 &[],
                 &HashSet::from(["earlier".into()]),
+                &[],
                 &[],
                 &[]
             )
@@ -1780,6 +1831,7 @@ mod tests {
                 &[],
                 &HashSet::from(["earlier".into()]),
                 &[],
+                &[],
                 &[]
             )
             .is_ok()
@@ -1794,6 +1846,7 @@ mod tests {
                 &history,
                 &["later".into()],
                 &HashSet::from(["earlier".into(), "later".into()]),
+                &[],
                 &[],
                 &[]
             )
@@ -1922,6 +1975,7 @@ mod tests {
                         &turns,
                         &HashSet::new(),
                         &[],
+                        &[],
                         &[]
                     )
                     .is_ok()
@@ -1934,6 +1988,7 @@ mod tests {
                             &[start(), row(item)],
                             &turns,
                             &HashSet::new(),
+                            &[],
                             &[],
                             &[]
                         )
@@ -1949,6 +2004,7 @@ mod tests {
                             &turns,
                             &HashSet::new(),
                             &[],
+                            &[],
                             &[]
                         )
                         .is_err()
@@ -1961,6 +2017,7 @@ mod tests {
                         &[start(), row(item)],
                         &turns,
                         &HashSet::new(),
+                        &[],
                         &[],
                         &[]
                     )
@@ -1983,16 +2040,101 @@ mod tests {
             row(serde_json::json!({"type":"shell_call_output", "id":"receipt", "call_id":"shell", "status":"completed", "output":[]})),
         ];
         let turns = vec!["turn".to_owned()];
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
         if let RolloutItem::ResponseItem(envelope) = &mut history[1] {
             envelope.metadata = Some(codex_history::CodexHarnessMetadata {
                 sdk_application_tool: Some("shell".into()),
                 ..Default::default()
             });
         }
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_ok());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_ok()
+        );
         history.remove(1);
-        assert!(validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err());
+        assert!(
+            validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[]).is_err()
+        );
+    }
+
+    #[test]
+    fn cold_interruption_distinguishes_settled_hosted_and_historical_local_shells() {
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let start = || {
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({"type":"task_started", "turn_id":"settled", "root_turn_id":"settled"})).unwrap())
+        };
+        let completed = || {
+            RolloutItem::EventMsg(
+                serde_json::from_value(
+                    serde_json::json!({"type":"task_complete", "turn_id":"settled"}),
+                )
+                .unwrap(),
+            )
+        };
+        let historical = vec!["settled".to_owned()];
+        let commands = HashSet::from(["settled".to_owned()]);
+        let mut history = vec![
+            start(),
+            row(
+                serde_json::json!({"type":"shell_call", "id":"provider", "call_id":"shell", "status":"completed", "environment":{"type":"container_reference", "container_id":"hosted"}}),
+            ),
+            row(serde_json::json!({"type":"shell_call_output", "call_id":"shell", "output":[]})),
+            completed(),
+        ];
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_ok()
+        );
+        assert!(
+            validate_interrupted_effects(&history, &historical, &commands, &[], &[], &historical)
+                .is_err()
+        );
+        history[1] = row(
+            serde_json::json!({"type":"local_shell_call", "call_id":"shell", "status":"completed", "action":{"type":"exec", "command":["true"]}}),
+        );
+        history.remove(2);
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_err()
+        );
+        assert!(
+            validate_interrupted_effects(&history, &[], &HashSet::new(), &[], &[], &historical)
+                .is_err()
+        );
+        history.insert(2, row(serde_json::json!({"type":"function_call_output", "call_id":"shell", "output":"done"})));
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_ok()
+        );
+        history[1] = row(
+            serde_json::json!({"type":"shell_call", "call_id":"shell", "environment":{"type":"local"}}),
+        );
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_err()
+        );
+        if let RolloutItem::ResponseItem(envelope) = &mut history[1] {
+            envelope.metadata = Some(codex_history::CodexHarnessMetadata {
+                sdk_application_tool: Some("shell".into()),
+                ..Default::default()
+            });
+        }
+        history[2] =
+            row(serde_json::json!({"type":"shell_call_output", "call_id":"shell", "output":[]}));
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_ok()
+        );
+        history.remove(2);
+        assert!(
+            validate_interrupted_effects(&history, &[], &commands, &[], &[], &historical).is_err()
+        );
+        assert!(
+            validate_interrupted_effects(&history, &[], &HashSet::new(), &[], &[], &historical)
+                .is_err()
+        );
+        // Prior unrelated application-shell turns do not gain a new refusal.
+        assert!(validate_interrupted_effects(&history, &[], &commands, &[], &[], &[]).is_ok());
     }
 
     #[test]
@@ -2015,6 +2157,7 @@ mod tests {
                 &turns,
                 &HashSet::new(),
                 &[],
+                &[],
                 &[]
             )
             .is_ok()
@@ -2024,6 +2167,7 @@ mod tests {
                 &[start(), row(approval.clone()), row(response(true))],
                 &turns,
                 &HashSet::new(),
+                &[],
                 &[],
                 &[]
             )
@@ -2037,7 +2181,8 @@ mod tests {
                 row(call(status, serde_json::Value::Null)),
             ];
             assert!(
-                validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[]).is_err()
+                validate_interrupted_effects(&history, &turns, &HashSet::new(), &[], &[], &[])
+                    .is_err()
             );
         }
         let completed = call("completed", serde_json::json!(""));
@@ -2051,6 +2196,7 @@ mod tests {
                 ],
                 &turns,
                 &HashSet::new(),
+                &[],
                 &[],
                 &[]
             )
@@ -2069,6 +2215,7 @@ mod tests {
                 &turns,
                 &HashSet::new(),
                 &[],
+                &[],
                 &[]
             )
             .is_err()
@@ -2081,6 +2228,7 @@ mod tests {
                 &turns,
                 &HashSet::new(),
                 &[],
+                &[],
                 &[]
             )
             .is_err()
@@ -2092,6 +2240,7 @@ mod tests {
                 &[start(), row(approval), row(response(true)), row(mismatched)],
                 &turns,
                 &HashSet::new(),
+                &[],
                 &[],
                 &[]
             )
