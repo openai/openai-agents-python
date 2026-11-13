@@ -1,5 +1,11 @@
 """Application model producers for the native Core turn and tool loop."""
 
+from _agents_codex._responses_websocket import (
+    ResponsesSocketFactory as ResponsesSocketFactory,
+    ResponsesSocketOptions as ResponsesSocketOptions,
+    ResponsesWebSocketModel as ResponsesWebSocketModel,
+    ResponsesWebSocketOptions as ResponsesWebSocketOptions,
+)
 from _agents_codex.models import (
     AnyLLMModel as AnyLLMModel,
     ChatCompletionsModel as ChatCompletionsModel,
@@ -10,6 +16,7 @@ from _agents_codex.models import (
     ModelRequestOptionsFactory as ModelRequestOptionsFactory,
     ModelResponse as ModelResponse,
     ModelRetryAdviceRequest as ModelRetryAdviceRequest,
+    ModelRunOwner as ModelRunOwner,
     NativeModel as NativeModel,
     NativeStreamingModel as NativeStreamingModel,
     ProviderConversation as ProviderConversation,

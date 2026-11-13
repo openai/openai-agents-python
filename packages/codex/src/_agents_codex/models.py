@@ -61,6 +61,14 @@ def _capture_model_override(value: str | None) -> str | None:
     return value
 
 
+@dataclass(frozen=True, eq=False)
+class ModelRunOwner:
+    """Identity of one live native run, shared only with its owned continuations."""
+
+    session_id: str
+    turn_id: str
+
+
 @dataclass(frozen=True)
 class ModelRequest:
     """Detached provider request. The current application context is never persisted."""
@@ -73,6 +81,7 @@ class ModelRequest:
     attempt: int | None = field(default=None, kw_only=True)
     retry_configured: bool = field(default=False, kw_only=True)
     disable_provider_retries: bool = field(default=False, kw_only=True)
+    run_owner: ModelRunOwner | None = field(default=None, repr=False, kw_only=True)
     _report_usage: Callable[[dict[str, int]], bool] | None = field(
         default=None, repr=False, compare=False, kw_only=True
     )
@@ -1498,7 +1507,7 @@ class AnyLLMModel(ChatCompletionsModel):
     Inherited native cache hints are omitted for providers declaring them unsupported.
     Explicit adapter cache overrides, including empty strings, remain provider-validated.
     Generic completion requests omit the native ``store=False`` default.
-    Set ``api="responses"`` for an AnyLLM OpenAI or OpenRouter provider with public
+    Set ``api="responses"`` for an AnyLLM OpenAI, Azure OpenAI, or OpenRouter provider with public
     ``aresponses(extra_body=...)`` support. ``api="auto"`` selects Responses
     when both conditions hold, otherwise it uses Chat Completions. The default
     uses Chat Completions. ``include_usage`` applies to Chat Completions only.
@@ -1521,7 +1530,11 @@ class AnyLLMModel(ChatCompletionsModel):
             raise ValueError("AnyLLMModel api must be chat_completions, responses or auto")
         use_responses = False
         if api != "chat_completions":
-            is_qualified = getattr(client, "PROVIDER_NAME", None) in ("openai", "openrouter")
+            is_qualified = getattr(client, "PROVIDER_NAME", None) in (
+                "openai",
+                "openrouter",
+                "azureopenai",
+            )
             advertises_responses = getattr(client, "SUPPORTS_RESPONSES", False) is True
             if is_qualified and advertises_responses:
                 create = getattr(client, "aresponses", None)
@@ -1535,8 +1548,8 @@ class AnyLLMModel(ChatCompletionsModel):
                         )
             if api == "responses" and not use_responses:
                 raise ValueError(
-                    "AnyLLM Responses requires an OpenAI or OpenRouter provider with public "
-                    "aresponses extra_body support"
+                    "AnyLLM Responses requires an OpenAI, Azure OpenAI, or OpenRouter provider "
+                    "with public aresponses extra_body support"
                 )
             if use_responses and request_options is not None:
                 raise TypeError("request_options requires an OpenAI-compatible client adapter")

@@ -526,6 +526,22 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     return result
 
 
+def _output_model_settings(
+    output: _PreparedOutput | None, settings: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if output is None or output.mode != "native":
+        return settings
+    controls = (settings or {}).get("request_controls", {})
+    if not isinstance(controls, dict) or (
+        "output_schema_strict" in controls and type(controls["output_schema_strict"]) is not bool
+    ):
+        raise ValueError("Invalid captured output schema strictness")
+    return {
+        **(settings or {}),
+        "request_controls": {**controls, "output_schema_strict": output.strict},
+    }
+
+
 def _manual_restore_model_settings(
     state: SessionState, *, authorized_model: str | None, trusted_default: str | None
 ) -> tuple[str, dict[str, Any]]:
@@ -596,6 +612,7 @@ def _manual_restore_model_settings(
             | {
                 "named_tool_choice",
                 "hosted_tool_choice",
+                "output_schema_strict",
                 "attempt_timeout_ms",
                 "retry",
                 "hosted_prompt",
@@ -607,6 +624,10 @@ def _manual_restore_model_settings(
             None,
             cast(ModelSettings, {key: value for key, value in controls.items() if key in ordinary}),
         ).get("request_controls", {})
+        if "output_schema_strict" in controls:
+            if type(controls["output_schema_strict"]) is not bool:
+                raise ValueError("Manual checkpoint has invalid output schema strictness")
+            normalized["output_schema_strict"] = controls["output_schema_strict"]
         if "prompt_cache_key" in controls:
             from ._cache_affinity import _saved_cache_key
 
@@ -2629,6 +2650,8 @@ def _capture_profile_runtimes(
         instructions = root_instructions if index == 0 else (declaration.instructions or "")
         captured[profile.id] = _ProfileRuntime(profile, catalog, output, instructions)
         settings = _native_model_settings(declaration.model, declaration.model_settings)
+        if output.mode == "native" and not output.strict:
+            settings = _output_model_settings(output, settings) or {}
         if any(profile.declaration.hosted_prompt is not None for profile in profiles):
             settings.setdefault("request_controls", {})["hosted_prompt"] = _hosted_prompt_controls(
                 declaration.hosted_prompt,
@@ -11506,9 +11529,13 @@ class Session(Generic[ContextT, OutputT]):
                             request["start"] = {"final_output_json_schema": state.output.schema}
                         if state.model_override is not None:
                             request.setdefault("start", {})["model_override"] = state.model_override
-                        if state.model_settings_override is not None:
+                        output_settings = _output_model_settings(
+                            state.output if state.realtime_tool is None else None,
+                            state.model_settings_override,
+                        )
+                        if output_settings is not None:
                             request.setdefault("start", {})["model_settings_override"] = (
-                                state.model_settings_override
+                                output_settings
                             )
                         if state.raise_on_unknown_tool:
                             request["raise_on_unknown_tool"] = True
@@ -11776,7 +11803,9 @@ class Session(Generic[ContextT, OutputT]):
                     # the graph and thread. Consumers wait for their outcome.
                     state.deferred_close = (input is not None, error, outcome)
                 else:
-                    self._settle_submission(state, input is not None, error, outcome)
+                    await self._settle_submission_with_models(
+                        state, input is not None, error, outcome
+                    )
 
     async def _capture_memory_admission(self, state: _Submission) -> None:
         lease = self._environment_lease
@@ -11807,6 +11836,69 @@ class Session(Generic[ContextT, OutputT]):
             question._release_tracing()
         state.questions.clear()
 
+    async def _close_model_run(self, state: _Submission) -> BaseException | None:
+        model_run, state.model_run = state.model_run, None
+        assert model_run is not None
+
+        async def invoke(cleanup: Any, owner: Any) -> None:
+            guard = _Invocation(self)
+            token = _invocation.set(guard)
+            value = None
+            try:
+                value = cleanup(owner)
+                if inspect.isawaitable(value):
+                    await value
+            finally:
+                guard.active = False
+                _invocation.reset(token)
+                del cleanup, owner, value
+
+        pending = model_run.close(invoke)
+        error: BaseException | None = None
+        try:
+            errors = await _join(pending)
+        except asyncio.CancelledError as cancelled:
+            error = cancelled
+            errors = pending.result()
+        for cleanup_error in errors:
+            if error is None:
+                error = cleanup_error
+            else:
+                _retain_cleanup_error(error, cleanup_error, _error_contexts(error.__context__))
+        return error
+
+    def _can_continue_submission(self, state: _Submission) -> bool:
+        return (
+            not self._closing
+            and not self._broken
+            and not state.graceful_requested
+            and not self._graph_interrupts
+            and not self._root_interrupts
+        )
+
+    async def _settle_submission_with_models(
+        self,
+        state: _Submission,
+        has_input: bool,
+        error: BaseException | None,
+        outcome: Completed[Any] | None,
+    ) -> None:
+        continuing = (
+            error is None
+            and state.cleanup_error is None
+            and has_input
+            and state.unsampled_steering
+            and self._can_continue_submission(state)
+        )
+        if state.model_run is not None and not continuing:
+            cleanup_error = await self._close_model_run(state)
+            if cleanup_error is not None:
+                if error is None:
+                    error = cleanup_error
+                else:
+                    _retain_cleanup_error(error, cleanup_error, _error_contexts(error.__context__))
+        self._settle_submission(state, has_input, error, outcome)
+
     def _settle_submission(
         self,
         state: _Submission,
@@ -11836,13 +11928,7 @@ class Session(Generic[ContextT, OutputT]):
                     _error_contexts(error.__context__),
                 )
         if error is None and has_input and state.unsampled_steering:
-            if (
-                not self._closing
-                and not self._broken
-                and not state.graceful_requested
-                and not self._graph_interrupts
-                and not self._root_interrupts
-            ):
+            if self._can_continue_submission(state):
                 assert state.handle is not None
                 continuation = _Submission(
                     state.output,
@@ -11877,6 +11963,10 @@ class Session(Generic[ContextT, OutputT]):
                 self._active = continuation
             else:
                 error = NativeError("Accepted steering input remains in history after interruption")
+        if continuation is not None:
+            continuation.model_run, state.model_run = state.model_run, None
+        else:
+            assert state.model_run is None
         if state.tracing is not None:
             state.tracing.close(
                 error,
@@ -13274,6 +13364,7 @@ class Session(Generic[ContextT, OutputT]):
         backend: Any = None
         complete: Any = None
         stream: Any = None
+        cleanup: Any = None
         request_stream: bool | None = None
         attempt_id = message.get("attempt_id")
         request_id = message["request_id"]
@@ -13355,6 +13446,13 @@ class Session(Generic[ContextT, OutputT]):
                 if not active():
                     return
                 complete = getattr(backend, "complete", None)
+            cleanup = getattr(backend, "cleanup_on_run_end", None)
+            if callable(cleanup):
+                from ._model_run import _ModelRun
+
+                if state.model_run is None:
+                    state.model_run = _ModelRun(self.id, message["turn_id"])
+                object.__setattr__(request, "run_owner", state.model_run.admit(backend, cleanup))
             stream = getattr(backend, "stream", None)
             if callable(stream):
                 request_stream = True
@@ -13455,7 +13553,7 @@ class Session(Generic[ContextT, OutputT]):
                 message = {}
                 complete = None
                 stream = None
-                del request, produced, reply, backend, callback_owner, issuing
+                del request, produced, reply, backend, callback_owner, issuing, cleanup
 
     async def _prepare_sampling_request(self, state: _Submission, message: dict[str, Any]) -> None:
         request_id = message["request_id"]
@@ -18509,7 +18607,9 @@ class Session(Generic[ContextT, OutputT]):
                     if state is not None and state.deferred_close is not None:
                         has_input, turn_error, outcome = state.deferred_close
                         state.deferred_close = None
-                        self._settle_submission(state, has_input, turn_error, outcome)
+                        await self._settle_submission_with_models(
+                            state, has_input, turn_error, outcome
+                        )
                     results = await asyncio.gather(*interrupts, return_exceptions=True)
                     for result in results:
                         # Closing an unadmitted root may cancel its accepted future.

@@ -190,13 +190,32 @@ async def test_native_modality_updates_restore_and_provider_isolation() -> None:
         assert not has_audio(seen[-1])
 
 
-async def test_native_audio_and_named_selector_through_real_chat_client() -> None:
+@pytest.mark.parametrize("adapter", ["chat", "litellm"])
+async def test_native_audio_and_named_selector_through_real_chat_client(
+    adapter: str, monkeypatch
+) -> None:
     import json
 
     import httpx2 as httpx
     from openai import AsyncOpenAI
 
     from agents import ChatCompletionsModel
+
+    def backend(client):
+        if adapter == "chat":
+            return ChatCompletionsModel(client)
+        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+        litellm = pytest.importorskip("litellm")
+        monkeypatch.setattr(litellm, "telemetry", False)
+        from agents import LitellmModel
+
+        class Borrowed:
+            async def acompletion(self, **options):
+                return await litellm.acompletion(
+                    client=client, api_base=str(client.base_url), api_key=client.api_key, **options
+                )
+
+        return LitellmModel(Borrowed(), "openai/gpt-4.1")
 
     seen: list[dict[str, Any]] = []
     effects: list[str] = []
@@ -248,9 +267,11 @@ async def test_native_audio_and_named_selector_through_real_chat_client() -> Non
     async with (
         timeout(30),
         httpx.AsyncClient(transport=httpx.MockTransport(handle)) as transport,
-        AsyncOpenAI(api_key="fixture", http_client=transport) as client,
+        AsyncOpenAI(
+            api_key="fixture", base_url="https://example.invalid/v1", http_client=transport
+        ) as client,
         NativeProvider(
-            base_url="https://example.invalid/v1", model_backend=ChatCompletionsModel(client)
+            base_url="https://example.invalid/v1", model_backend=backend(client)
         ) as provider,
     ):
         result = await Agent(
