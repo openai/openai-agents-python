@@ -172,6 +172,23 @@ class _Connection:
         return self.closing
 
 
+def _decode_socket_frame(payload: Any) -> Any:
+    try:
+        return json.loads(payload)
+    except (ValueError, TypeError, RecursionError):
+        # Decoder exceptions and their tracebacks can retain the input value.
+        pass
+    finally:
+        del payload
+    raise ValueError("Responses WebSocket received an invalid JSON frame") from None
+
+
+def _socket_closed(socket: Any) -> bool:
+    return getattr(socket, "close_code", None) is not None or getattr(
+        getattr(socket, "state", None), "name", None
+    ) in ("CLOSING", "CLOSED")
+
+
 @dataclass(eq=False, repr=False)
 class _Owner:
     busy: bool = False
@@ -301,7 +318,8 @@ class ResponsesWebSocketModel(ResponsesModel):
                 body["model"] = self.model
             if self.prompt_cache_key is not None:
                 body["prompt_cache_key"] = self.prompt_cache_key
-            body.update(type="response.create", stream=True)
+            body.pop("stream", None)
+            body["type"] = "response.create"
             selected = await _request_options_for(self._request_options_source, request)
             options = await _socket_options(self.client, selected, self._websocket_options)
             key = hashlib.sha256(
@@ -312,7 +330,9 @@ class ResponsesWebSocketModel(ResponsesModel):
                     }
                 ).encode()
             ).hexdigest()
-            if state.connection is not None and state.connection.key != key:
+            if state.connection is not None and (
+                state.connection.key != key or _socket_closed(state.connection.socket)
+            ):
                 await _join(state.connection.close())
                 state.connection = None
             if state.connection is None:
@@ -366,7 +386,7 @@ class ResponsesWebSocketModel(ResponsesModel):
                 payload = await _limited(
                     connection.socket.recv(), _timeout(self.client, selected, "read")
                 )
-                event = json.loads(payload)
+                event = _decode_socket_frame(payload)
                 if not isinstance(event, dict):
                     raise ValueError("Responses WebSocket requires object events")
                 candidate = event.get("response", {}).get("id")

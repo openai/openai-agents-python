@@ -260,7 +260,7 @@ async def test_real_websocket_retains_borrowed_client_headers_query_and_native_t
     assert headers["x-default"] == "retained" and "x-omit" not in headers
     assert headers["x-request"] == "retained"
     assert query == {"base": "retained", "override": "current"}
-    assert all(frame["type"] == "response.create" and frame["stream"] is True for frame in frames)
+    assert all(frame["type"] == "response.create" and "stream" not in frame for frame in frames)
     assert any(item["type"] == "function_call_output" for item in frames[1]["input"])
     assert effects == ["lookup"] and http_calls == []
 
