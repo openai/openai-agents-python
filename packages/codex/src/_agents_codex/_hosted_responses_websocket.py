@@ -276,7 +276,8 @@ class _Socket:
         self, active: _Active, frame: dict[str, Any], outputs: list[dict[str, Any]]
     ) -> None:
         completed = next_frame = replay = acknowledged = terminal_output = item = result = None
-        anchored_users = call_id = messages = None
+        anchored_users: dict[str | None, list[dict[str, Any]]] | None = None
+        call_id = messages = None
         try:
             completed = (active.terminal or {}).get("response")
             if not isinstance(completed, dict) or not isinstance(completed.get("id"), str):
