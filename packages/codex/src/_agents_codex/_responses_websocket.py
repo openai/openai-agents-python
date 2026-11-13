@@ -444,6 +444,9 @@ class ResponsesWebSocketModel(ResponsesModel):
                             await _join(opened.close())
                             raise RuntimeError("Responses socket owner retired during connection")
                         return opened
+                    except BaseException as error:
+                        _clear_error_frames(error)
+                        raise
                     finally:
                         del captured_request, captured_options, captured_key, socket, opened
 
