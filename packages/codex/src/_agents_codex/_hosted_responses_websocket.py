@@ -314,20 +314,26 @@ class _Socket:
             del self, frame, active, result
 
     async def _create(self, frame: dict[str, Any], emitted: set[str] | None = None) -> None:
-        lineage = None
+        lineage = encoded = envelope = None
         try:
-            size = len(json.dumps(frame, allow_nan=False).encode("utf-8"))
+            envelope = {**frame, "type": "response.create", "multi_agent": self._config}
+            encoded = json.dumps(envelope, allow_nan=False)
+            size = len(encoded.encode("utf-8"))
             if size > _MAX_RESPONSE_BYTES:
                 raise ValueError("Hosted request exceeds the native retained-byte limit")
+            _check_socket_json_structure(encoded)
             lineage = self._account({"operation": "create"})
             if not lineage:
                 raise TypeError("Hosted create requires a native request lineage")
             self._run.active = _Active(
                 create=frame, lineage=lineage, emitted=emitted or set(), size=size
             )
-            await self._send({**frame, "type": "response.create", "multi_agent": self._config})
+            await self._send(envelope)
+        except BaseException as error:
+            _clear_error_frames(error)
+            raise
         finally:
-            del self, frame, emitted, lineage
+            del self, frame, emitted, lineage, encoded, envelope
 
     async def _fallback(
         self, active: _Active, frame: dict[str, Any], outputs: list[dict[str, Any]]
@@ -382,12 +388,19 @@ class _Socket:
     def _continuation(
         self, active: _Active, frame: dict[str, Any]
     ) -> tuple[list[dict[str, Any]], set[str]]:
-        items = input_items = original_user_ids = ids = None
+        items = input_items = original_user_ids = rejected_user_ids = ids = None
         try:
             original_user_ids = {
                 item.get("id")
                 for item in active.create.get("input", [])
                 if isinstance(item, dict) and item.get("role") == "user"
+            }
+            rejected_user_ids = {
+                item["id"]
+                for item in active.fallback_input or ()
+                if item.get("type") == "message"
+                and item.get("role") == "user"
+                and isinstance(item.get("id"), str)
             }
             input_items = frame.get("input", [])
             items = [
@@ -402,6 +415,7 @@ class _Socket:
                     and isinstance(item.get("id"), str)
                     and item["id"] not in original_user_ids
                     and item["id"] not in active.acknowledged_user_items
+                    and item["id"] not in rejected_user_ids
                 )
             ]
             ids = {item["call_id"] for item in items if item["type"] == "function_call_output"}
@@ -409,7 +423,7 @@ class _Socket:
                 raise ValueError("Hosted response requires the matching local function outputs")
             return items, ids
         finally:
-            del self, frame, active, items, input_items, original_user_ids, ids
+            del self, frame, active, items, input_items, original_user_ids, rejected_user_ids, ids
 
     async def _replace_before_send(
         self, frame: dict[str, Any], replacing: bool, *, scope_changed: bool
@@ -617,7 +631,11 @@ class _Socket:
                     and isinstance(event.get("error"), dict)
                     and event["error"].get("code") == "response_already_completed"
                 ):
-                    active.fallback_input = active.injection_input
+                    active.fallback_input = [
+                        *(active.fallback_input or ()),
+                        *(active.injection_input or ()),
+                    ]
+                    active.injection_input = None
                     active.pending.difference_update(active.injecting or ())
                     active.injecting = None
                 elif kind in {"response.inject.failed", "response.error", "error"}:
