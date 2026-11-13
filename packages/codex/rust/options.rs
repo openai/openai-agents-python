@@ -69,6 +69,8 @@ pub struct ThreadOptions {
     pub sdk_resume_thread_id: Option<ThreadId>,
     #[serde(rename = "_sdk_history", deserialize_with = "deserialize_sdk_history")]
     sdk_history: Option<Vec<ResponseItem>>,
+    #[serde(rename = "_sdk_prompt_cache_key")]
+    sdk_prompt_cache_key: Option<String>,
     #[serde(rename = "_application_instructions")]
     pub(crate) application_instructions: Option<String>,
     #[serde(rename = "_agent_profiles")]
@@ -299,6 +301,13 @@ impl ThreadOptions {
             selection.validate_shape().map_err(anyhow::Error::msg)?;
         }
         configuration.sdk_provider_history = self.provider_history;
+        if let Some(key) = self.sdk_prompt_cache_key {
+            configuration.sdk_request_controls.prompt_cache_key = Some(Some(key));
+            configuration
+                .sdk_request_controls
+                .validate_shape()
+                .map_err(anyhow::Error::msg)?;
+        }
         let mut options = StartThreadOptions::new(configuration);
         options
             .thread_extension_init

@@ -88,6 +88,7 @@ class _UsageCollector:
         self.model_owner_attempt_id: str | None = None
         self.model_terminal_attempt_id: str | None = None
         self.model_final = False
+        self._managed_model_owner: str | None = None
 
     @staticmethod
     def capture(usage: TokenUsage | None, requests: int = 1) -> RunUsage:
@@ -130,6 +131,17 @@ class _UsageCollector:
         except (TypeError, ValueError):
             self.report(None)
 
+    def manage_provider_attempts(self) -> None:
+        """Defer logical mirrors after Core accepts receipt-owned physical accounting."""
+        with self.lock:
+            if self.model_final or self.model_owner_attempt_id is None:
+                raise ValueError("Native physical accounting requires a live model owner")
+            if self._managed_model_owner is None:
+                self._managed_model_owner = self.model_owner_attempt_id
+                self.model_usage = None
+            elif self._managed_model_owner != self.model_owner_attempt_id:
+                raise ValueError("Native physical accounting owner changed")
+
     def replace_model_attempt(self, snapshot: dict[str, Any], *, final: bool = False) -> None:
         if not isinstance(snapshot, dict) or not isinstance(snapshot.get("usage"), dict):
             raise ValueError("Invalid native model attempt snapshot")
@@ -143,8 +155,8 @@ class _UsageCollector:
         ):
             raise ValueError("Invalid native model usage counters")
         owner = snapshot.get("owner_attempt_id")
-        if (requests == 0 and owner is not None) or (
-            requests > 0 and (not isinstance(owner, str) or not owner)
+        if (owner is not None and (not isinstance(owner, str) or not owner)) or (
+            requests > 0 and owner is None
         ):
             raise ValueError("Invalid native model usage owner")
         terminal = snapshot.get("terminal_attempt_id")
@@ -159,10 +171,28 @@ class _UsageCollector:
             requests=requests,
             missing_usage_requests=missing,
         )
+        provider_managed = snapshot.get("provider_managed")
+        if provider_managed is not None and provider_managed is not True:
+            raise ValueError("Invalid native physical accounting marker")
         with self.lock:
+            if provider_managed is True:
+                if owner is None or self.model_owner_attempt_id not in {None, owner}:
+                    raise ValueError("Invalid native physical accounting owner")
+                if self._managed_model_owner is None:
+                    self._managed_model_owner = owner
+                    self.model_usage = None
+            if requests == 0 and owner is not None and self._managed_model_owner != owner:
+                raise ValueError("Invalid native model usage owner")
             if self.model_final and not final:
                 return
-            if self.model_owner_attempt_id is not None and owner != self.model_owner_attempt_id:
+            if self._managed_model_owner is not None:
+                if owner != self._managed_model_owner and not (requests == 0 and owner is None):
+                    raise ValueError("Native physical accounting owner changed")
+                # Logical started/settled events still describe the attempt timeline.
+                # Only Core's terminal snapshot owns the physical transport totals.
+                if not final:
+                    return
+            elif self.model_owner_attempt_id is not None and owner != self.model_owner_attempt_id:
                 raise ValueError("Native model usage owner changed")
             if self.model_usage is not None and captured.requests < self.model_usage.requests:
                 if final:

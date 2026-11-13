@@ -2488,12 +2488,13 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_model_producer(request_id)))
     }
 
-    #[pyo3(signature = (request_id, *, chat_stream=false, upstream_request_id=None))]
+    #[pyo3(signature = (request_id, *, chat_stream=false, upstream_request_id=None, responses_websocket_stream=false))]
     fn _start_model_producer_stream(
         &self,
         request_id: u64,
         chat_stream: bool,
         upstream_request_id: Option<String>,
+        responses_websocket_stream: bool,
     ) -> PyResult<bool> {
         let Some(inner) = self.live()? else {
             return Ok(false);
@@ -2510,17 +2511,19 @@ impl NativeThread {
                     observe_raw,
                     chat_stream,
                     upstream_request_id,
+                    responses_websocket_stream,
                 )
             }))
     }
 
-    #[pyo3(signature = (request_id, data_json, *, raw_chat_chunk=false))]
+    #[pyo3(signature = (request_id, data_json, *, raw_chat_chunk=false, raw_responses_websocket_frame=false))]
     fn _push_model_producer_event<'py>(
         &self,
         py: Python<'py>,
         request_id: u64,
         data_json: String,
         raw_chat_chunk: bool,
+        raw_responses_websocket_frame: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let tools = self.live()?.and_then(|inner| {
             inner
@@ -2533,7 +2536,12 @@ impl NativeThread {
                 return Ok(false);
             };
             Ok(tools
-                .push_model_producer_event(request_id, &data_json, raw_chat_chunk)
+                .push_model_producer_event(
+                    request_id,
+                    &data_json,
+                    raw_chat_chunk,
+                    raw_responses_websocket_frame,
+                )
                 .await)
         })
     }
@@ -2610,6 +2618,48 @@ impl NativeThread {
                 &owner.attempt_id,
                 &owner.callback,
                 usage,
+            )
+            .map_err(py_error)
+    }
+
+    fn _account_provider_request(
+        &self,
+        owner_json: &str,
+        operation_json: &str,
+    ) -> PyResult<Option<String>> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct UsageOwner {
+            attempt_id: String,
+            callback: serde_json::Value,
+        }
+        if owner_json.len() > 16_384 || operation_json.len() > 65_536 {
+            return Err(py_error(
+                "Native provider request accounting exceeds capacity",
+            ));
+        }
+        let owner: UsageOwner = serde_json::from_str(owner_json).map_err(py_error)?;
+        let operation = serde_json::from_str(operation_json).map_err(py_error)?;
+        let Some(inner) = self.live()? else {
+            return Err(py_error(
+                "Native provider request accounting receipt expired",
+            ));
+        };
+        let Some(tools) = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+        else {
+            return Err(py_error(
+                "Native provider request accounting receipt expired",
+            ));
+        };
+        tools
+            .account_provider_request(
+                &inner.id.to_string(),
+                &owner.attempt_id,
+                &owner.callback,
+                operation,
             )
             .map_err(py_error)
     }

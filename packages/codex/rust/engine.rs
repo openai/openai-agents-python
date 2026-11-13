@@ -3471,6 +3471,7 @@ mod rebuild_consumer_tests {
                         internal_chat_message_metadata_passthrough: None,
                     };
                     let earlier_call = ResponseItem::FunctionCall {
+                        caller: None,
                         id: None,
                         name: "reserve".into(),
                         namespace: None,
@@ -3502,6 +3503,7 @@ mod rebuild_consumer_tests {
                         ),
                     };
                     let call = ResponseItem::FunctionCall {
+                        caller: None,
                         id: None,
                         name: "reserve".into(),
                         namespace: None,

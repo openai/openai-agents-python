@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestServer
 from agents import (
     Agent,
     Environment,
+    HostedProgrammaticToolCalling,
     HostedShell,
     ImageGeneration,
     LocalRecoveryRequired,
@@ -27,6 +28,7 @@ from agents import (
     NetworkPolicy,
     ReconciledCall,
     ToolContext,
+    ToolSearch,
     _native,
     function_tool,
 )
@@ -224,6 +226,7 @@ async def worker() -> None:
         supports_websockets=False,
     )
     settled_hosted_root = request["mode"] == "cold-settled-hosted-root"
+    provider_only = request["mode"] == "cold-provider-only"
     native = None if request["no_children"] else NativeAgents(max_children=2, max_depth=2)
     if native is not None and settled_hosted_root:
         native = replace(native, before_step=lambda _: [])
@@ -234,6 +237,11 @@ async def worker() -> None:
         programmatic_tool_calling=False,
         tools=([lookup] if native is None else [lookup, native])
         + ([ImageGeneration()] if request["mode"] == "cold-hosted" else [])
+        + (
+            [HostedProgrammaticToolCalling(), ToolSearch(execution="server")]
+            if provider_only
+            else []
+        )
         + ([HostedShell(environment={"type": "container_auto"})] if settled_hosted_root else []),
     )
     try:
@@ -775,6 +783,121 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                 assert failed["status"] == "failed"
                 assert "Cannot reuse an original call identity" in failed["error"]["message"]
                 assert (tmp_path / "effects").read_text() == old_effect + "destination:fresh\n"
+
+
+@pytest.mark.parametrize(
+    ("depth", "provider_only", "receipt_override"),
+    [
+        pytest.param(0, True, None, id="root"),
+        pytest.param(1, True, None, id="descendant"),
+        pytest.param(0, False, None, id="safe-model-only-root"),
+        pytest.param(0, False, {"version": 2}, id="invalid-root-version"),
+        pytest.param(0, False, {"thread_id": "other"}, id="invalid-root-owner"),
+        pytest.param(0, False, {"provider_effects_possible": None}, id="invalid-root-flag"),
+    ],
+)
+async def test_provider_only_dispatch_fences_cold_recovery_before_any_output(
+    tmp_path, monkeypatch, depth, provider_only, receipt_override
+):
+    peer = LocalFamilyPeer(depth)
+    leaf = "/root/alpha" if depth else "/root"
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_response = peer.response
+
+    def response():
+        body, headers = peer.requests[-1], peer.request_headers[-1]
+        if metadata(body, headers)["agent_name"] != leaf:
+            return original_response()
+        provider_tools = {tool["type"] for tool in body["tools"] if tool["type"] != "namespace"}
+        assert ({"programmatic_tool_calling", "tool_search"} <= provider_tools) is provider_only
+        assert not {"code_interpreter", "mcp", "shell", "image_generation"} & provider_tools
+        message = assistant_output("Never sent")
+        message["item"]["id"] = "held-provider-only"
+        return [message]
+
+    async def hold(event):
+        if event.get("item", {}).get("id") == "held-provider-only":
+            entered.set()
+            await release.wait()
+
+    monkeypatch.setattr(peer, "response", response)
+    peer.before_event = hold
+    app = web.Application()
+    app.router.add_post("/v1/responses", peer.handle)
+    app.on_shutdown.append(peer.close_sockets)
+    async with (
+        timeout(55),
+        TestServer(app, shutdown_timeout=1) as server,
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+    ):
+        peer.url = str(server.make_url("/v1"))
+        source = await start(
+            peer,
+            executor,
+            tmp_path,
+            "cold-provider-only" if provider_only else "cold",
+            depth,
+            model="gpt-5.5",
+        )
+        try:
+            assert source.stdout is not None
+            opened = json.loads(await source.stdout.readline())
+            assert opened.get("opened"), opened
+            await entered.wait()
+            if depth:
+                root = json.loads(await source.stdout.readline())
+                assert root["output"] == "/root finished", root
+            source.kill()
+            assert (await _collect(source))[0] != 0
+        finally:
+            release.set()
+            if source.returncode is None:
+                source.kill()
+                await _collect(source)
+
+        leaf_id = next(
+            metadata(body, headers)["thread_id"]
+            for body, headers in zip(peer.requests, peer.request_headers, strict=True)
+            if metadata(body, headers)["agent_name"] == leaf
+        )
+        [rollout] = (tmp_path / "profile").rglob(f"*{leaf_id}.jsonl")
+        history = [json.loads(line) for line in rollout.read_text().splitlines()]
+        assert not any(
+            row["type"] == "response_item" and row["payload"].get("id") == "held-provider-only"
+            for row in history
+        )
+        receipts = [
+            row["payload"]["sdk_receipt"]
+            for row in history
+            if row["type"] == "turn_context"
+            and row["payload"].get("sdk_receipt", {}).get("thread_id") == leaf_id
+        ]
+        assert receipts[-1]["provider_effects_possible"] is provider_only
+        if receipt_override is not None:
+            for row in history:
+                receipt = row.get("payload", {}).get("sdk_receipt")
+                if isinstance(receipt, dict) and receipt.get("thread_id") == leaf_id:
+                    receipt.update(receipt_override)
+            rollout.write_text("\n".join(json.dumps(row) for row in history) + "\n")
+        sends = len(peer.requests)
+        destination = await start(
+            peer, executor, tmp_path, "inspect", depth, identity=opened["opened"], model="gpt-5.5"
+        )
+        code, rows, errors = await _collect(destination)
+        if provider_only or receipt_override is not None:
+            expected = (
+                "Local resume requires the recorded executor write and network policy"
+                if receipt_override is not None and "thread_id" in receipt_override
+                else "unknown tool effects"
+            )
+            assert code != 0 and expected in rows[0].get("message", ""), (
+                rows,
+                errors,
+            )
+        else:
+            assert code == 0 and rows[0].get("opened"), (rows, errors)
+        assert len(peer.requests) == sends
+        assert not (tmp_path / "effects").exists()
 
 
 @pytest.mark.parametrize(

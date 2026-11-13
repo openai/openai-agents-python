@@ -144,6 +144,7 @@ struct Fixture {
 
 pub(crate) fn request(text: &str) -> TurnInputRequest {
     TurnInputRequest {
+        prompt_cache_breakpoints: Vec::new(),
         input: TurnInput::UserInput {
             content: vec![UserInput::Text {
                 text: text.to_owned(),

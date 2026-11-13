@@ -614,6 +614,19 @@ class HostedMcpCallItem(_HostedCallItem):
     error: JsonValue | None
 
 
+class ProgramCallItem(_HostedCallItem):
+    type: Literal["program"]
+    call_id: str
+    code: str
+    fingerprint: str | None
+
+
+class ProgramOutputItem(_HostedCallItem):
+    type: Literal["program_output"]
+    call_id: str
+    result: str
+
+
 class FileSearchCallItem(_HostedCallItem):
     type: Literal["file_search_call"]
     queries: list[str]
@@ -804,6 +817,8 @@ OutputItem = _PublicTypeAliasType(
         | WebSearchCallItem
         | McpListToolsItem
         | HostedMcpCallItem
+        | ProgramCallItem
+        | ProgramOutputItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ShellCallItem

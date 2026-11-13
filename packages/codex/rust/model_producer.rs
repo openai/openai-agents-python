@@ -28,6 +28,7 @@ pub(super) enum Delivery {
         finish: oneshot::Sender<StreamResult>,
         projection: ApplicationModelStream,
         observe_raw_chat: bool,
+        observe_raw_responses_websocket: bool,
         chat_stream: bool,
     },
 }
@@ -227,7 +228,11 @@ impl PythonTools {
         observe_raw: bool,
         chat_stream: bool,
         upstream_request_id: Option<String>,
+        responses_websocket_stream: bool,
     ) -> bool {
+        if chat_stream && responses_websocket_stream {
+            return false;
+        }
         let mut replies = self
             .preparation_replies
             .lock()
@@ -254,8 +259,11 @@ impl PythonTools {
             Delivery::Streaming {
                 events,
                 finish,
-                projection: ApplicationModelStream::new(observe_raw && !chat_stream),
+                projection: ApplicationModelStream::new(
+                    observe_raw && !chat_stream && !responses_websocket_stream,
+                ),
                 observe_raw_chat: observe_raw && chat_stream,
+                observe_raw_responses_websocket: observe_raw && responses_websocket_stream,
                 chat_stream,
             },
         ) else {
@@ -274,6 +282,7 @@ impl PythonTools {
         id: u64,
         data: &str,
         raw_chat_chunk: bool,
+        raw_responses_websocket_frame: bool,
     ) -> bool {
         let (projected, sender, continue_stream) = {
             let mut replies = self
@@ -293,6 +302,7 @@ impl PythonTools {
                         events,
                         projection,
                         observe_raw_chat,
+                        observe_raw_responses_websocket,
                         ..
                     },
                 ..
@@ -300,19 +310,30 @@ impl PythonTools {
             else {
                 return false;
             };
-            let (projected, continue_stream) = if raw_chat_chunk {
-                if !*observe_raw_chat || data.len() > 8 * 1024 * 1024 {
+            let (projected, continue_stream) = if raw_chat_chunk || raw_responses_websocket_frame {
+                if (raw_chat_chunk && !*observe_raw_chat)
+                    || (raw_responses_websocket_frame && !*observe_raw_responses_websocket)
+                    || data.len() > 8 * 1024 * 1024
+                {
                     return false;
                 }
+                use codex_protocol::protocol::{
+                    ResponsesEventTransport, SdkRawProviderEvent, SdkRawProviderSource,
+                };
+                let (source, transport) = if raw_chat_chunk {
+                    (SdkRawProviderSource::ChatCompletions, ResponsesEventTransport::Json)
+                } else {
+                    (SdkRawProviderSource::Responses, ResponsesEventTransport::Websocket)
+                };
                 let Ok(payload) = serde_json::from_str::<serde_json::Map<String, Value>>(data)
                 else {
                     return false;
                 };
                 (
                     vec![ResponseEvent::RawProvider(
-                        codex_protocol::protocol::SdkRawProviderEvent {
-                            source: codex_protocol::protocol::SdkRawProviderSource::ChatCompletions,
-                            transport: codex_protocol::protocol::ResponsesEventTransport::Json,
+                        SdkRawProviderEvent {
+                            source,
+                            transport,
                             payload: Value::Object(payload),
                         },
                     )],

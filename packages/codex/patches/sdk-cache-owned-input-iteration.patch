@@ -1,0 +1,134 @@
+diff --git a/codex-rs/codex-api/src/request_input.rs b/codex-rs/codex-api/src/request_input.rs
+index f1a4945f..e61dbab9 100644
+--- a/codex-rs/codex-api/src/request_input.rs
++++ b/codex-rs/codex-api/src/request_input.rs
+@@ -39,6 +39,15 @@ impl<T> CacheAnnotatedInput<T> {
+     }
+ }
+
++impl IntoIterator for CacheAnnotatedInput<Vec<ResponseItem>> {
++    type Item = ResponseItem;
++    type IntoIter = std::vec::IntoIter<ResponseItem>;
++
++    fn into_iter(self) -> Self::IntoIter {
++        self.items.into_iter()
++    }
++}
++
+ impl From<Vec<ResponseItem>> for CacheAnnotatedInput<Vec<ResponseItem>> {
+     fn from(items: Vec<ResponseItem>) -> Self {
+         Self::with_annotations(items, Vec::new())
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index 4ba3da00..d996a00d 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -383,7 +383,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
+             content: vec![ContentItem::InputText { text: "hi".into() }],
+             phase: None,
+             internal_chat_message_metadata_passthrough: None,
+-        }],
++        }].into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".into()),
+         parallel_tool_calls: Some(false),
+@@ -438,7 +438,7 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
+             content: vec![ContentItem::InputText { text: large_input }],
+             phase: None,
+             internal_chat_message_metadata_passthrough: None,
+-        }],
++        }].into(),
+         tools: None,
+         tool_choice: Some("auto".into()),
+         parallel_tool_calls: Some(false),
+@@ -650,7 +650,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
+             content: vec![ContentItem::InputText { text: "hi".into() }],
+             phase: None,
+             internal_chat_message_metadata_passthrough: None,
+-        }],
++        }].into(),
+         tools: Some(empty_tools().into()),
+         tool_choice: Some("auto".into()),
+         parallel_tool_calls: Some(false),
+diff --git a/codex-rs/core/src/client_tool_metadata_tests.rs b/codex-rs/core/src/client_tool_metadata_tests.rs
+index 12097331..6e263cb8 100644
+--- a/codex-rs/core/src/client_tool_metadata_tests.rs
++++ b/codex-rs/core/src/client_tool_metadata_tests.rs
+@@ -131,7 +131,7 @@ fn http_message_budget_preserves_resources_until_the_message_still_exceeds_limit
+             }
+         }
+         assert_eq!(bounded_ordinary, ordinary);
+-        request.input = bounded;
++        request.input = request.input.with_items(bounded);
+         // The last case cannot fit even without raw metadata: ordinary content is never cut.
+         assert_eq!(
+             serialized_json_bytes(&request).unwrap() > MAX_RESPONSE_MESSAGE_BYTES,
+@@ -187,7 +187,7 @@ fn message_budget_removes_residual_values_and_markers_when_ordinary_input_fits()
+                 let bounded = bounded_input(&message, &request.input)
+                     .expect("optional result metadata must not keep a fitting message oversized");
+                 let ResponsesWsRequest::ResponseCreate(payload) = &mut message;
+-                payload.input = &bounded;
++                payload.input = payload.input.borrow_with(&bounded);
+                 let expected_message =
+                     ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest::from(&expected));
+                 assert_eq!(
+@@ -205,13 +205,13 @@ fn message_budget_removes_residual_values_and_markers_when_ordinary_input_fits()
+                 let bounded = bounded_input(&request, &request.input)
+                     .expect("optional result metadata must not keep a fitting message oversized");
+                 let mut message = request.clone();
+-                message.input = bounded.clone();
++                message.input = message.input.with_items(bounded.clone());
+                 assert_eq!(message, expected);
+                 assert!(serialized_json_bytes(&message).unwrap() <= MAX_RESPONSE_MESSAGE_BYTES);
+                 bounded
+             };
+             // Whole-input equality covers sources, calls, completion and ordinary output.
+-            assert_eq!(bounded, expected.input);
++            assert_eq!(bounded.as_slice(), expected.input.as_ref());
+             assert_eq!(request.input, original_input);
+         }
+     }
+@@ -252,9 +252,9 @@ fn residual_marker_removal_preserves_earlier_resources_and_stops_when_message_fi
+     assert!(serialized_json_bytes(&request).unwrap() > MAX_RESPONSE_MESSAGE_BYTES);
+     let original_input = request.input.clone();
+     let bounded = bounded_input(&request, &request.input).unwrap();
+-    assert_eq!(bounded, expected.input);
++    assert_eq!(bounded.as_slice(), expected.input.as_ref());
+     assert_eq!(request.input, original_input);
+-    request.input = bounded;
++    request.input = request.input.with_items(bounded);
+     assert_eq!(request, expected);
+     assert_eq!(
+         serialized_json_bytes(&request).unwrap(),
+@@ -283,7 +283,7 @@ fn websocket_budget_uses_the_actual_delta_and_does_not_mutate_logical_history()
+     let mut full = ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest::from(&request));
+     let bounded = bounded_input(&full, &request.input).unwrap();
+     let ResponsesWsRequest::ResponseCreate(payload) = &mut full;
+-    payload.input = &bounded;
++    payload.input = payload.input.borrow_with(&bounded);
+     assert_eq!(bounded[0], request.input[0]);
+     let mut ordinary = request.input[1].clone();
+     let mut bounded_ordinary = bounded[1].clone();
+@@ -318,9 +318,9 @@ fn inventory_only_message_budget_counts_the_complete_encoded_envelope() {
+                 ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest::from(&request));
+             let bounded = bounded_input(&message, &request.input)
+                 .expect("inventory without raw results must not keep the message oversized");
+-            assert_eq!(bounded, ordinary.input);
++            assert_eq!(bounded.as_slice(), ordinary.input.as_ref());
+             let ResponsesWsRequest::ResponseCreate(payload) = &mut message;
+-            payload.input = &bounded;
++            payload.input = payload.input.borrow_with(&bounded);
+             assert_eq!(
+                 serialized_json_bytes(&message).unwrap(),
+                 MAX_RESPONSE_MESSAGE_BYTES
+@@ -328,9 +328,9 @@ fn inventory_only_message_budget_counts_the_complete_encoded_envelope() {
+         } else {
+             let bounded = bounded_input(&request, &request.input)
+                 .expect("inventory without raw results must not keep the message oversized");
+-            assert_eq!(bounded, ordinary.input);
++            assert_eq!(bounded.as_slice(), ordinary.input.as_ref());
+             let mut message = request.clone();
+-            message.input = bounded;
++            message.input = message.input.with_items(bounded);
+             assert_eq!(message, ordinary);
+             assert_eq!(
+                 serialized_json_bytes(&message).unwrap(),

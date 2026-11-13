@@ -121,6 +121,23 @@ class RecordedResponse(TypedDict):
     ]
 
 
+class RecordedRequestUsage(TokenUsage):
+    """One settled SDK-managed model attempt, in native owner order.
+
+    Zero fields with token_usage_known=False are accounting placeholders, not
+    received provider measurements. Retries hidden inside an external library
+    have no separate native identity and are not synthesized here.
+    """
+
+    scope: Literal["sdk_model_attempt"]
+    thread_id: str
+    turn_id: str
+    owner_attempt_id: str
+    attempt_id: str
+    request_ordinal: int
+    token_usage_known: bool
+
+
 class RecordedTurn(TypedDict):
     """Recorded turn; unavailable timestamps and usage are null.
 
@@ -148,6 +165,10 @@ class RecordedTurn(TypedDict):
     # Retained native attempt measurements; absent without native facts.
     # JSON fields match RunUsage. Child owners and external reports stay separate.
     run_usage: NotRequired[dict[str, int]]
+    # SDK-owned attempts only; opaque internal library retries remain outside this scope.
+    request_usage_entries: NotRequired[list[RecordedRequestUsage]]
+    # False for missing settled facts or legacy requests without native attempt identities.
+    request_usage_entries_complete: NotRequired[bool]
     # Present only on separate native output-correction attempts.
     parent_session_id: NotRequired[str]
     parent_turn_id: NotRequired[str]

@@ -15,8 +15,8 @@
           "TypedAgentT = TypeVar('TypedAgentT', bound='Agent[Any, Any]')",
           "_MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()",
           "_OBSERVATION_RETENTION_UNSET: Any = object()",
-          "class HostedToolChoice(TypedDict, total=False, closed=True):\n    type: _Required[Literal['web_search', 'file_search', 'code_interpreter', 'image_generation', 'computer', 'computer_use_preview', 'shell', 'apply_patch', 'tool_search', 'mcp']]\n    server_label: str\n    name: str",
-          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | HostedToolChoice | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    extra_headers: Mapping[str, str | Omit | None] | None\n    extra_query: Mapping[str, Any] | None\n    request_transport: Literal['auto', 'http', 'websocket'] | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    attempt_timeout_ms: int | None\n    retry: ModelRetrySettings | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    provider_compaction: ProviderCompactionPolicy | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
+          "class HostedToolChoice(TypedDict, total=False, closed=True):\n    type: _Required[Literal['web_search', 'file_search', 'code_interpreter', 'image_generation', 'computer', 'computer_use_preview', 'shell', 'apply_patch', 'tool_search', 'programmatic_tool_calling', 'mcp']]\n    server_label: str\n    name: str",
+          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | HostedToolChoice | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    extra_headers: Mapping[str, str | Omit | None] | None\n    extra_query: Mapping[str, Any] | None\n    request_transport: Literal['auto', 'http', 'websocket'] | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    prompt_cache_mode: Literal['explicit'] | None\n    invocation_timeout_ms: int | None\n    attempt_timeout_ms: int | None\n    retry: ModelRetrySettings | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    provider_compaction: ProviderCompactionPolicy | None\n    extra_body: Mapping[str, Any] | None\n    reset_tool_choice: bool | None",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)\n    credential_directory: str | Path | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
           "@dataclass(frozen=True, kw_only=True, slots=True, repr=False)\nclass SignInWithChatGPTCredentials:\n    issuer: str\n    client_id: str\n    subject: str\n    access_token: str",
@@ -537,7 +537,8 @@
           "class ReceivedOutputTokensDetails(TypedDict, total=False):\n    reasoning_tokens: int",
           "class ReceivedTokenUsage(TypedDict, total=False):\n    input_tokens: int\n    input_tokens_details: ReceivedInputTokensDetails\n    output_tokens: int\n    output_tokens_details: ReceivedOutputTokensDetails\n    total_tokens: int",
           "class RecordedResponse(TypedDict):\n    id: str | None\n    thread_id: str\n    turn_id: str\n    response_id: str | None\n    upstream_request_id: NotRequired[str]\n    usage_source: Literal['received', 'native_normalized']\n    usage: ReceivedTokenUsage | TokenUsage | None\n    status: NotRequired[Literal['completed', 'incomplete', 'failed']]\n    incomplete_reason: NotRequired[Literal['content_filter', 'max_output_tokens', 'interrupted', 'unknown']]",
-          "class RecordedTurn(TypedDict):\n    id: str\n    object: Literal['agent.session.turn']\n    session_id: str\n    subagent_id: str | None\n    status: Literal['in_progress', 'completed', 'failed', 'cancelled']\n    created_at: int | None\n    started_at: int | None\n    completed_at: int | None\n    error: Failure | None\n    usage: TokenUsage | None\n    run_usage: NotRequired[dict[str, int]]\n    parent_session_id: NotRequired[str]\n    parent_turn_id: NotRequired[str]\n    receipt: NotRequired[TurnReceipt]\n    responses: NotRequired[list[RecordedResponse]]\n    response_facts: NotRequired[list[RecordedResponseFact]]"
+          "class RecordedRequestUsage(TokenUsage):\n    scope: Literal['sdk_model_attempt']\n    thread_id: str\n    turn_id: str\n    owner_attempt_id: str\n    attempt_id: str\n    request_ordinal: int\n    token_usage_known: bool",
+          "class RecordedTurn(TypedDict):\n    id: str\n    object: Literal['agent.session.turn']\n    session_id: str\n    subagent_id: str | None\n    status: Literal['in_progress', 'completed', 'failed', 'cancelled']\n    created_at: int | None\n    started_at: int | None\n    completed_at: int | None\n    error: Failure | None\n    usage: TokenUsage | None\n    run_usage: NotRequired[dict[str, int]]\n    request_usage_entries: NotRequired[list[RecordedRequestUsage]]\n    request_usage_entries_complete: NotRequired[bool]\n    parent_session_id: NotRequired[str]\n    parent_turn_id: NotRequired[str]\n    receipt: NotRequired[TurnReceipt]\n    responses: NotRequired[list[RecordedResponse]]\n    response_facts: NotRequired[list[RecordedResponseFact]]"
         ],
         "exports": {
           "CanonicalHistoryPop": "agents.history.CanonicalHistoryPop",
@@ -545,6 +546,7 @@
           "ReceivedInputTokensDetails": "agents.history.ReceivedInputTokensDetails",
           "ReceivedOutputTokensDetails": "agents.history.ReceivedOutputTokensDetails",
           "ReceivedTokenUsage": "agents.history.ReceivedTokenUsage",
+          "RecordedRequestUsage": "agents.history.RecordedRequestUsage",
           "RecordedResponse": "agents.history.RecordedResponse",
           "RecordedTurn": "agents.history.RecordedTurn"
         },
@@ -599,12 +601,14 @@
       },
       "agents.input": {
         "declarations": [
-          "class InputText(TypedDict):\n    type: Literal['input_text']\n    text: str",
-          "class InputAudio(TypedDict):\n    type: Literal['input_audio']\n    audio_url: str",
-          "class InputImage(TypedDict):\n    type: Literal['input_image']\n    image_url: str\n    detail: NotRequired[ImageDetail | None]",
+          "class _PromptCacheBreakpoint(TypedDict, closed=True):\n    mode: Literal['explicit']",
+          "class _CacheablePart(TypedDict):\n    prompt_cache_breakpoint: NotRequired[_PromptCacheBreakpoint]",
+          "class InputText(_CacheablePart):\n    type: Literal['input_text']\n    text: str",
+          "class InputAudio(_CacheablePart):\n    type: Literal['input_audio']\n    audio_url: str",
+          "class InputImage(_CacheablePart):\n    type: Literal['input_image']\n    image_url: str\n    detail: NotRequired[ImageDetail | None]",
           "class InputVideo(TypedDict):\n    type: Literal['input_video']\n    video_url: str",
-          "class InputImageFile(TypedDict):\n    type: Literal['input_image']\n    file_id: str\n    detail: NotRequired[ImageDetail | None]",
-          "class InputFile(TypedDict):\n    type: Literal['input_file']\n    file_id: NotRequired[str]\n    file_data: NotRequired[str]\n    file_url: NotRequired[str]\n    filename: NotRequired[str | None]",
+          "class InputImageFile(_CacheablePart):\n    type: Literal['input_image']\n    file_id: str\n    detail: NotRequired[ImageDetail | None]",
+          "class InputFile(_CacheablePart):\n    type: Literal['input_file']\n    file_id: NotRequired[str]\n    file_data: NotRequired[str]\n    file_url: NotRequired[str]\n    filename: NotRequired[str | None]",
           "class UserMessage(TypedDict):\n    role: Literal['user']\n    content: str | Sequence[InputText | InputImage | InputImageFile | InputFile | InputAudio | InputVideo]\n    type: NotRequired[Literal['message']]",
           "UserInput: TypeAlias = str | UserMessage",
           "class AssistantMessage(TypedDict):\n    role: Literal['assistant']\n    content: str\n    type: NotRequired[Literal['message']]",
@@ -843,9 +847,10 @@
       "agents.models": {
         "declarations": [
           "class ProviderConversation(TypedDict):\n    type: Literal['conversation']\n    id: str",
-          "class ProviderResponseChain(TypedDict):\n    type: Literal['previous_response']\n    id: NotRequired[str]",
+          "class ProviderResponseChain(TypedDict):\n    type: Literal['previous_response']\n    id: NotRequired[str]\n    item_ids: NotRequired[list[str]]",
           "ProviderHistory: TypeAlias = ProviderConversation | ProviderResponseChain",
-          "@dataclass(frozen=True)\nclass ModelRequest:\n    body: dict[str, Any] = field(repr=False)\n    context: Any = field(repr=False)\n    session_id: str\n    turn_id: str\n    attempt_id: str | None = field(default=None, kw_only=True)\n    attempt: int | None = field(default=None, kw_only=True)\n    retry_configured: bool = field(default=False, kw_only=True)\n    disable_provider_retries: bool = field(default=False, kw_only=True)\n    _report_usage: Callable[[dict[str, int]], bool] | None = field(default=None, repr=False, compare=False, kw_only=True)\n\n    def report_usage(self, usage: Mapping[str, int]) -> bool:\n        pass",
+          "@dataclass(frozen=True, eq=False)\nclass ModelRunOwner:\n    session_id: str\n    turn_id: str",
+          "@dataclass(frozen=True)\nclass ModelRequest:\n    body: dict[str, Any] = field(repr=False)\n    context: Any = field(repr=False)\n    session_id: str\n    turn_id: str\n    attempt_id: str | None = field(default=None, kw_only=True)\n    attempt: int | None = field(default=None, kw_only=True)\n    retry_configured: bool = field(default=False, kw_only=True)\n    disable_provider_retries: bool = field(default=False, kw_only=True)\n    run_owner: ModelRunOwner | None = field(default=None, repr=False, kw_only=True)\n    _report_usage: Callable[[dict[str, int]], bool] | None = field(default=None, repr=False, compare=False, kw_only=True)\n\n    def report_usage(self, usage: Mapping[str, int]) -> bool:\n        pass",
           "@dataclass(frozen=True, slots=True)\nclass ModelRetryAdviceRequest:\n    request: ModelRequest = field(repr=False)\n    error: BaseException = field(repr=False)\n    attempt_id: str\n    attempt: int\n    request_attempt: int\n    stream: bool | None = field(default=None, kw_only=True)",
           "class ModelRequestOptions(TypedDict, total=False):\n    headers: Mapping[str, str | None]\n    query: Mapping[str, JsonValue]\n    timeout_ms: float\n    max_retries: int",
           "ModelRequestOptionsFactory: TypeAlias = Callable[[ModelRequest], ModelRequestOptions | None | Awaitable[ModelRequestOptions | None]]",
@@ -869,6 +874,7 @@
           "ModelRequestOptionsFactory": "collections.abc.Callable",
           "ModelResponse": "agents.models.ModelResponse",
           "ModelRetryAdviceRequest": "agents.models.ModelRetryAdviceRequest",
+          "ModelRunOwner": "agents.models.ModelRunOwner",
           "NativeModel": "agents.models.NativeModel",
           "NativeStreamingModel": "agents.models.NativeStreamingModel",
           "ProviderConversation": "agents.models.ProviderConversation",
@@ -882,12 +888,22 @@
           "from typing import Any, Literal, Protocol, TypeAlias",
           "from uuid import uuid4",
           "from typing_extensions import NotRequired, TypedDict",
+          "from ._hosted_agent_metadata import HostedAgentMetadata as HostedAgentMetadata, get_hosted_agent_metadata as get_hosted_agent_metadata",
           "from .config import JsonValue",
-          "from .retry import RetryAdvice"
+          "from .retry import RetryAdvice",
+          "from ._hosted_responses_websocket import HostedResponsesWebSocketModel as HostedResponsesWebSocketModel",
+          "from ._responses_websocket import ResponsesSocketFactory as ResponsesSocketFactory, ResponsesSocketOptions as ResponsesSocketOptions, ResponsesWebSocketModel as ResponsesWebSocketModel, ResponsesWebSocketOptions as ResponsesWebSocketOptions"
         ],
         "references": {
+          "HostedAgentMetadata": "_agents_codex._hosted_agent_metadata.HostedAgentMetadata",
+          "HostedResponsesWebSocketModel": "_agents_codex._hosted_responses_websocket.HostedResponsesWebSocketModel",
           "JsonValue": "agents.config.JsonValue",
-          "RetryAdvice": "agents.retry.RetryAdvice"
+          "ResponsesSocketFactory": "_agents_codex._responses_websocket.ResponsesSocketFactory",
+          "ResponsesSocketOptions": "_agents_codex._responses_websocket.ResponsesSocketOptions",
+          "ResponsesWebSocketModel": "_agents_codex._responses_websocket.ResponsesWebSocketModel",
+          "ResponsesWebSocketOptions": "_agents_codex._responses_websocket.ResponsesWebSocketOptions",
+          "RetryAdvice": "agents.retry.RetryAdvice",
+          "get_hosted_agent_metadata": "_agents_codex._hosted_agent_metadata.get_hosted_agent_metadata"
         }
       },
       "agents.native_agents": {
@@ -978,8 +994,8 @@
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass OutputTextDelta(_SubmissionEvent):\n    item_id: str\n    delta: str\n    type: Literal['output_text_delta'] = field(default='output_text_delta', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ResponseFactReceived(_SubmissionEvent):\n    record: RecordedResponseFact | RecordedResponseFactSummary = field(repr=False)\n    type: Literal['response_fact'] = field(default='response_fact', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass RawProviderEvent(_SubmissionEvent):\n    source: Literal['responses', 'chat_completions']\n    transport: Literal['sse', 'websocket', 'json']\n    payload: dict[str, JsonValue] = field(repr=False)\n    type: Literal['raw_provider_event'] = field(default='raw_provider_event', init=False)",
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass HostedToolCallSummary:\n    type: Literal['file_search_call', 'code_interpreter_call', 'image_generation_call', 'shell_call', 'shell_call_output', 'mcp_list_tools', 'mcp_call']\n    id: str\n    turn_id: str\n    status: str",
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ModelOutputItemCompleted(_SubmissionEvent):\n    item: MessageItem | ReasoningItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | ShellCallOutputItem | ImageGenerationCallItem | HostedToolCallSummary\n    type: Literal['model_output_item_completed'] = field(default='model_output_item_completed', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass HostedToolCallSummary:\n    type: Literal['file_search_call', 'code_interpreter_call', 'image_generation_call', 'shell_call', 'shell_call_output', 'mcp_list_tools', 'mcp_call', 'program', 'program_output']\n    id: str\n    turn_id: str\n    status: str",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ModelOutputItemCompleted(_SubmissionEvent):\n    item: MessageItem | ReasoningItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | ProgramCallItem | ProgramOutputItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | ShellCallOutputItem | ImageGenerationCallItem | HostedToolCallSummary\n    type: Literal['model_output_item_completed'] = field(default='model_output_item_completed', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass HostedToolCallProgress(_SubmissionEvent):\n    item_id: str\n    event: dict[str, JsonValue]\n    type: Literal['hosted_tool_call_progress'] = field(default='hosted_tool_call_progress', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UsageUpdated(_SubmissionEvent):\n    usage: TokenUsageInfo | None\n    type: Literal['usage_updated'] = field(default='usage_updated', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimitsUpdated(_SubmissionEvent):\n    snapshot: ApiRateLimits\n    type: Literal['api_rate_limits_updated'] = field(default='api_rate_limits_updated', init=False)",
@@ -1027,7 +1043,7 @@
           "from dataclasses import dataclass as dataclass, field as field",
           "from typing import Any as Any, Literal as Literal, TypeAlias as TypeAlias, TypeVar as TypeVar",
           "from typing_extensions import TypedDict as TypedDict",
-          "from ._events import CodeInterpreterCallItem, ExecutionItem as ExecutionItem, FileSearchCallItem, FunctionCallStatus as FunctionCallStatus, HostedMcpCallItem, ImageGenerationCallItem, McpListToolsItem, MessageItem, ReasoningItem, ShellCallItem, ShellCallOutputItem, WebSearchCallItem",
+          "from ._events import CodeInterpreterCallItem, ExecutionItem as ExecutionItem, FileSearchCallItem, FunctionCallStatus as FunctionCallStatus, HostedMcpCallItem, ImageGenerationCallItem, McpListToolsItem, MessageItem, ProgramCallItem, ProgramOutputItem, ReasoningItem, ShellCallItem, ShellCallOutputItem, WebSearchCallItem",
           "from .config import JsonValue as JsonValue",
           "from .rate_limits import ApiRateLimits as ApiRateLimits",
           "from .response_facts import RecordedResponseFact as RecordedResponseFact, RecordedResponseFactSummary as RecordedResponseFactSummary",
@@ -1046,6 +1062,8 @@
           "JsonValue": "agents.config.JsonValue",
           "McpListToolsItem": "agents._events.McpListToolsItem",
           "MessageItem": "agents._events.MessageItem",
+          "ProgramCallItem": "agents._events.ProgramCallItem",
+          "ProgramOutputItem": "agents._events.ProgramOutputItem",
           "ReasoningItem": "agents._events.ReasoningItem",
           "RecordedResponseFact": "agents.response_facts.RecordedResponseFact",
           "RecordedResponseFactSummary": "agents.response_facts.RecordedResponseFactSummary",
@@ -1395,16 +1413,20 @@
           "class ProbabilityToken(ProbabilityAlternative):\n    top_logprobs: NotRequired[list[ProbabilityAlternative]]",
           "class RefusalFact(TypedDict):\n    kind: Literal['refusal']\n    item_id: str | None\n    content_index: int | None\n    snapshot: bool\n    text: str\n    capture_complete: bool",
           "class TextProbabilitiesFact(TypedDict):\n    kind: Literal['text_probabilities']\n    item_id: str | None\n    output_index: int | None\n    content_index: int | None\n    snapshot: bool\n    delta: str | None\n    tokens: list[ProbabilityToken]\n    capture_complete: bool",
+          "class HostedAgentAttributionFact(TypedDict):\n    kind: Literal['hosted_agent_attribution']\n    item_fingerprint: str\n    agent_name: str\n    phase: str | None",
+          "class HostedAgentAttributionSummary(TypedDict):\n    kind: Literal['hosted_agent_attribution']",
           "class CaptureTruncatedFact(TypedDict):\n    kind: Literal['capture_truncated']",
           "class MalformedProbabilitiesFact(TypedDict):\n    kind: Literal['malformed_probabilities']",
-          "ResponseFact: TypeAlias = RefusalFact | TextProbabilitiesFact | CaptureTruncatedFact | MalformedProbabilitiesFact",
+          "ResponseFact: TypeAlias = RefusalFact | TextProbabilitiesFact | HostedAgentAttributionFact | CaptureTruncatedFact | MalformedProbabilitiesFact",
           "class RecordedResponseFact(TypedDict):\n    id: str\n    thread_id: str\n    turn_id: str\n    request_id: str | None\n    response_id: str | None\n    upstream_request_id: NotRequired[str]\n    fact: ResponseFact",
           "class ResponseFactContentSummary(TypedDict):\n    kind: Literal['refusal', 'text_probabilities']\n    capture_complete: bool",
-          "ResponseFactSummary: TypeAlias = ResponseFactContentSummary | CaptureTruncatedFact | MalformedProbabilitiesFact",
+          "ResponseFactSummary: TypeAlias = ResponseFactContentSummary | HostedAgentAttributionSummary | CaptureTruncatedFact | MalformedProbabilitiesFact",
           "class RecordedResponseFactSummary(TypedDict):\n    id: str\n    thread_id: str\n    turn_id: str\n    request_id: str | None\n    response_id: str | None\n    upstream_request_id: NotRequired[str]\n    fact: ResponseFactSummary"
         ],
         "exports": {
           "CaptureTruncatedFact": "agents.history.CaptureTruncatedFact",
+          "HostedAgentAttributionFact": "agents.history.HostedAgentAttributionFact",
+          "HostedAgentAttributionSummary": "agents.history.HostedAgentAttributionSummary",
           "MalformedProbabilitiesFact": "agents.history.MalformedProbabilitiesFact",
           "ProbabilityAlternative": "agents.history.ProbabilityAlternative",
           "ProbabilityToken": "agents.history.ProbabilityToken",
@@ -1620,12 +1642,12 @@
       "agents.schema": {
         "declarations": [
           "OutputT = TypeVar('OutputT')",
-          "@dataclass(frozen=True)\nclass NativeOutput(Generic[OutputT]):\n    type_: type[OutputT]",
+          "@dataclass(frozen=True)\nclass NativeOutput(Generic[OutputT]):\n    type_: type[OutputT]\n    strict: bool = True",
           "@dataclass(frozen=True)\nclass PromptedOutput(Generic[OutputT]):\n    type_: type[OutputT]\n    max_retries: int = 0",
           "OutputSpec: TypeAlias = type[OutputT] | NativeOutput[OutputT] | PromptedOutput[OutputT]",
           "@dataclass(frozen=True)\nclass OutputValidationIssue:\n    code: str\n    path: tuple[str | int, ...]",
           "class OutputValidationError(ValueError):\n\n    def __init__(self, raw_output: str, issues: tuple[OutputValidationIssue, ...]=()) -> None:\n        pass",
-          "@dataclass(frozen=True)\nclass _PreparedOutput:\n    mode: Literal['plain', 'native', 'prompted']\n    adapter: TypeAdapter[Any] | None\n    schema: dict[str, Any] | None\n    wrapped: bool = False\n    max_retries: int = 0\n    value_adapter: TypeAdapter[Any] | None = None\n\n    @property\n    def fingerprint(self) -> str:\n        pass\n\n    def validate(self, text: str) -> Any:\n        pass\n\n    def terminal_value(self, text: str) -> tuple[Any, Any]:\n        pass\n\n    def terminal_application_value(self, value: Any) -> tuple[Any, Any]:\n        pass",
+          "@dataclass(frozen=True)\nclass _PreparedOutput:\n    mode: Literal['plain', 'native', 'prompted']\n    adapter: TypeAdapter[Any] | None\n    schema: dict[str, Any] | None\n    wrapped: bool = False\n    max_retries: int = 0\n    value_adapter: TypeAdapter[Any] | None = None\n    strict: bool = True\n\n    @property\n    def fingerprint(self) -> str:\n        pass\n\n    def validate(self, text: str) -> Any:\n        pass\n\n    def terminal_value(self, text: str) -> tuple[Any, Any]:\n        pass\n\n    def terminal_application_value(self, value: Any) -> tuple[Any, Any]:\n        pass",
           "def output_schema(output_type: Any) -> dict[str, Any] | None:\n    pass"
         ],
         "exports": {
@@ -2100,9 +2122,10 @@
           "@dataclass(frozen=True, kw_only=True)\nclass HostedShell:\n    environment: HostedShellAutoEnvironment | HostedShellReferenceEnvironment\n    allowed_callers: Sequence[Literal['direct', 'programmatic']] | None = None\n    provider_data: dict[str, Any] | None = None",
           "@dataclass(frozen=True, kw_only=True)\nclass ImageGeneration:\n    model: str | None = None\n    action: Literal['generate', 'edit', 'auto'] | None = None\n    quality: Literal['low', 'medium', 'high', 'xhigh', 'max', 'auto'] | None = None\n    size: str | None = None\n    background: Literal['transparent', 'opaque', 'auto'] | None = None\n    output_format: Literal['png', 'webp', 'jpeg', 'gif', 'svg'] | None = None\n    output_compression: int | None = None\n    moderation: Literal['auto', 'low'] | None = None\n    input_fidelity: Literal['high', 'low'] | None = None\n    input_image_mask: ImageGenerationMask | None = None\n    partial_images: int | None = None\n    complexity: Literal['low', 'medium', 'high'] | None = None\n    frame_count: int | None = None\n    frame_duration_ms: int | None = None\n    svg: ImageGenerationSvg | None = None\n    provider_data: dict[str, Any] | None = None",
           "@dataclass(frozen=True, kw_only=True)\nclass ToolSearch:\n    execution: Literal['server', 'client'] | None = None\n    description: str | None = None\n    parameters: object | None = None\n    provider_data: dict[str, Any] | None = None\n    _manual: FunctionTool[Any, ToolSearchResult, Any] | None = field(default=None, init=False, repr=False, compare=False)\n\n    @property\n    def ref(self) -> ToolRef:\n        pass\n\n    def match(self, event: object) -> ActionRequested[Any, ToolSearchResult] | None:\n        pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass HostedProgrammaticToolCalling:\n    pass",
           "@dataclass(frozen=True)\nclass ToolRef:\n    name: str\n    namespace: str | None = None",
           "@dataclass(frozen=True, kw_only=True)\nclass ToolSearchResult:\n    tool_refs: tuple[ToolRef, ...] = ()",
-          "ToolCaller = Literal['direct', 'code']",
+          "ToolCaller = Literal['direct', 'code', 'programmatic']",
           "ToolNotFoundBehavior = Literal['return_error_to_model', 'raise_error']",
           "@dataclass(frozen=True)\nclass ToolCallInfo:\n    tool: ToolRef\n    session_id: str\n    turn_id: str\n    call_id: str | None\n    child_id: str | None\n    child_incarnation: str | None\n    role: str | None\n    model: str | None\n    route: Literal['direct', 'code']\n    outer_call_id: str | None = None\n    cell_id: str | None = None\n    nested_call_id: str | None = None",
           "@dataclass(frozen=True)\nclass ToolOutputText:\n    text: str",
@@ -2124,6 +2147,7 @@
           "FileSearchCompoundFilter": "agents.tools.FileSearchCompoundFilter",
           "FileSearchHybridRanking": "agents.tools.FileSearchHybridRanking",
           "FileSearchRanking": "agents.tools.FileSearchRanking",
+          "HostedProgrammaticToolCalling": "agents.tools.HostedProgrammaticToolCalling",
           "HostedShell": "agents.tools.HostedShell",
           "HostedShellAutoEnvironment": "agents.tools.HostedShellAutoEnvironment",
           "HostedShellReferenceEnvironment": "agents.tools.HostedShellReferenceEnvironment",
@@ -2279,7 +2303,7 @@
           "@dataclass(frozen=True, slots=True)\nclass RawProviderUsage:\n    response_id: str\n    upstream_request_id: str | None\n    usage: dict[str, Any] = field(repr=False)",
           "@dataclass(frozen=True, slots=True)\nclass TokenUsage:\n    input_tokens: int\n    cached_input_tokens: int\n    cache_write_input_tokens: int\n    output_tokens: int\n    reasoning_output_tokens: int\n    total_tokens: int",
           "@dataclass(frozen=True, slots=True)\nclass RunUsage(TokenUsage):\n    requests: int\n    missing_usage_requests: int",
-          "class _UsageCollector:\n\n    def __init__(self, initial: RunUsage | None=None) -> None:\n        pass\n\n    @staticmethod\n    def capture(usage: TokenUsage | None, requests: int=1) -> RunUsage:\n        pass\n\n    def add(self, delta: RunUsage) -> None:\n        pass\n\n    def report(self, usage: TokenUsage | None, requests: int=1) -> None:\n        pass\n\n    def observe(self, raw: dict[str, Any] | None, model_attempt_id: str | None=None) -> None:\n        pass\n\n    def replace_model_attempt(self, snapshot: dict[str, Any], *, final: bool=False) -> None:\n        pass\n\n    def attach(self, child: _UsageCollector) -> None:\n        pass\n\n    def attach_configured_child(self, child: _UsageCollector, accounted: RunUsage | None=None) -> None:\n        pass\n\n    def snapshot(self) -> RunUsage:\n        pass",
+          "class _UsageCollector:\n\n    def __init__(self, initial: RunUsage | None=None) -> None:\n        pass\n\n    @staticmethod\n    def capture(usage: TokenUsage | None, requests: int=1) -> RunUsage:\n        pass\n\n    def add(self, delta: RunUsage) -> None:\n        pass\n\n    def report(self, usage: TokenUsage | None, requests: int=1) -> None:\n        pass\n\n    def observe(self, raw: dict[str, Any] | None, model_attempt_id: str | None=None) -> None:\n        pass\n\n    def manage_provider_attempts(self) -> None:\n        pass\n\n    def replace_model_attempt(self, snapshot: dict[str, Any], *, final: bool=False) -> None:\n        pass\n\n    def attach(self, child: _UsageCollector) -> None:\n        pass\n\n    def attach_configured_child(self, child: _UsageCollector, accounted: RunUsage | None=None) -> None:\n        pass\n\n    def snapshot(self) -> RunUsage:\n        pass",
           "@dataclass(frozen=True, slots=True)\nclass RunBudget:\n    max_requests: int | None = None\n    max_tokens: int | None = None\n    max_estimated_cost_micros: int | None = None\n    estimate_cost_micros: Callable[[TokenUsage], int | None] | None = None\n    missing_usage: Literal['stop', 'continue'] = 'stop'",
           "@dataclass(frozen=True, slots=True)\nclass TokenUsageInfo:\n    total_token_usage: TokenUsage\n    last_token_usage: TokenUsage\n    model_context_window: int | None"
         ],
@@ -2375,12 +2399,15 @@
       "GuardrailResult": "agents.guardrails.GuardrailResult",
       "GuardrailTripwire": "agents.guardrails.GuardrailTripwire",
       "Handoff": "agents.handoffs.Handoff",
+      "HostedAgentMetadata": "agents.models.HostedAgentMetadata",
       "HostedMCP": "agents.hosted_mcp.HostedMCP",
       "HostedMCPApprovalArguments": "agents.hosted_mcp.HostedMCPApprovalArguments",
       "HostedMCPApprovalRequest": "agents.hosted_mcp.HostedMCPApprovalRequest",
       "HostedMCPApprovalResult": "agents.hosted_mcp.HostedMCPApprovalResult",
+      "HostedProgrammaticToolCalling": "agents.tools.HostedProgrammaticToolCalling",
       "HostedPromptReference": "agents.model_context.HostedPromptReference",
       "HostedPromptSource": "agents.model_context.HostedPromptSource",
+      "HostedResponsesWebSocketModel": "agents.models.HostedResponsesWebSocketModel",
       "HostedShell": "agents.tools.HostedShell",
       "HostedToolChoice": "agents.agent.HostedToolChoice",
       "HostedVerificationMCP": "agents.mcp.HostedVerificationMCP",
@@ -2435,6 +2462,7 @@
       "ModelResponse": "agents.models.ModelResponse",
       "ModelRetryAdviceRequest": "agents.models.ModelRetryAdviceRequest",
       "ModelRetrySettings": "agents.retry.ModelRetrySettings",
+      "ModelRunOwner": "agents.models.ModelRunOwner",
       "ModelSettings": "agents.agent.ModelSettings",
       "MongoDBSessionStore": "agents.canonical_storage.MongoDBSessionStore",
       "NativeAgents": "agents.native_agents.NativeAgents",
@@ -2477,6 +2505,10 @@
       "ResponsesCompaction": "agents.compaction.ResponsesCompaction",
       "ResponsesCompactionContext": "agents.compaction.ResponsesCompactionContext",
       "ResponsesModel": "agents.models.ResponsesModel",
+      "ResponsesSocketFactory": "agents.models.ResponsesSocketFactory",
+      "ResponsesSocketOptions": "agents.models.ResponsesSocketOptions",
+      "ResponsesWebSocketModel": "agents.models.ResponsesWebSocketModel",
+      "ResponsesWebSocketOptions": "agents.models.ResponsesWebSocketOptions",
       "RetryAdvice": "agents.retry.RetryAdvice",
       "RetryBackoffSettings": "agents.retry.RetryBackoffSettings",
       "RetryDecision": "agents.retry.RetryDecision",
@@ -2544,6 +2576,7 @@
       "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
       "get_cleanup": "agents.session.get_cleanup",
+      "get_hosted_agent_metadata": "agents.models.get_hosted_agent_metadata",
       "retry_policies": "agents.retry.retry_policies",
       "run_demo_loop": "agents.repl.run_demo_loop",
       "shell_tool": "agents.shell.shell_tool"
@@ -2591,6 +2624,41 @@
           "_ObservationBuffer": "agents.observation._ObservationBuffer"
         }
       },
+      "_agents_codex._hosted_agent_metadata": {
+        "declarations": [
+          "@dataclass(frozen=True, slots=True)\nclass HostedAgentMetadata:\n    agent_name: str\n    phase: str | None = None",
+          "def get_hosted_agent_metadata(value: object) -> HostedAgentMetadata | None:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from dataclasses import dataclass"
+        ],
+        "references": {}
+      },
+      "_agents_codex._hosted_responses_websocket": {
+        "declarations": [
+          "class HostedResponsesWebSocketModel:\n\n    def __init__(self, client: Any, model: str | None=None, *, prompt_cache_key: str | None=None, request_options: ModelRequestOptions | ModelRequestOptionsFactory | None=None, websocket_options: ResponsesWebSocketOptions | None=None, socket_factory: ResponsesSocketFactory | None=None, max_concurrent_subagents: int | None=None) -> None:\n        pass\n\n    async def stream(self, request: ModelRequest) -> AsyncIterator[Mapping[str, Any]]:\n        pass\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass\n\n    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:\n        pass\n\n    async def cleanup_on_run_end(self, owner: ModelRunOwner) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import AsyncIterator, Mapping",
+          "from typing import Any",
+          "from ._responses_websocket import ResponsesSocketFactory, ResponsesWebSocketOptions",
+          "from .models import ModelRequest, ModelRequestOptions, ModelRequestOptionsFactory, ModelResponse, ModelRetryAdviceRequest, ModelRunOwner",
+          "from .retry import RetryAdvice"
+        ],
+        "references": {
+          "ModelRequest": "agents.models.ModelRequest",
+          "ModelRequestOptions": "agents.models.ModelRequestOptions",
+          "ModelRequestOptionsFactory": "agents.models.ModelRequestOptionsFactory",
+          "ModelResponse": "agents.models.ModelResponse",
+          "ModelRetryAdviceRequest": "agents.models.ModelRetryAdviceRequest",
+          "ModelRunOwner": "agents.models.ModelRunOwner",
+          "ResponsesSocketFactory": "_agents_codex._responses_websocket.ResponsesSocketFactory",
+          "ResponsesWebSocketOptions": "_agents_codex._responses_websocket.ResponsesWebSocketOptions",
+          "RetryAdvice": "agents.retry.RetryAdvice"
+        }
+      },
       "_agents_codex._managed_workspace": {
         "declarations": [
           "@dataclass(frozen=True)\nclass ManagedWorkspaceCheckpoint:\n    conversation_json: str\n    workspace_json: str\n    association: str\n    _capture_provenance: ClassVar[tuple[str, str, str] | None] = None\n\n    @property\n    def conversation(self) -> SessionState:\n        pass\n\n    @property\n    def workspace(self) -> dict[str, Any]:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, source: str) -> ManagedWorkspaceCheckpoint:\n        pass"
@@ -2620,6 +2688,36 @@
           "from openai import Omit as Omit"
         ],
         "references": {}
+      },
+      "_agents_codex._responses_websocket": {
+        "declarations": [
+          "class ResponsesWebSocketOptions(TypedDict, total=False):\n    ping_interval: float | None\n    ping_timeout: float | None\n    max_size: int | None",
+          "class ResponsesSocketOptions(TypedDict):\n    url: str\n    headers: dict[str, str]\n    open_timeout: float | None\n    websocket_options: ResponsesWebSocketOptions",
+          "ResponsesSocketFactory: TypeAlias = Callable[[ModelRequest, ResponsesSocketOptions], Awaitable[Any]]",
+          "@dataclass(eq=False, repr=False)\nclass _Connection:\n    socket: Any\n    key: str\n    closing: asyncio.Task[None] | None = None\n\n    def close(self) -> asyncio.Task[None]:\n        pass",
+          "@dataclass(eq=False, repr=False)\nclass _Owner:\n    busy: bool = False\n    retired: bool = False\n    connection: _Connection | None = None\n    opening: asyncio.Task[_Connection] | None = None\n    closing: asyncio.Task[None] | None = None",
+          "class ResponsesWebSocketModel(ResponsesModel):\n    _socket_factory: ResponsesSocketFactory\n    _websocket_options: ResponsesWebSocketOptions\n    _owners: WeakKeyDictionary[ModelRunOwner, _Owner]\n\n    def __init__(self, client: Any, model: str | None=None, *, prompt_cache_key: str | None=None, request_options: ModelRequestOptions | ModelRequestOptionsFactory | None=None, websocket_options: ResponsesWebSocketOptions | None=None, socket_factory: ResponsesSocketFactory | None=None) -> None:\n        pass\n\n    @property\n    def stream(self) -> Callable[[ModelRequest], AsyncIterator[Mapping[str, Any]]]:\n        pass\n\n    def get_retry_advice(self, request: ModelRetryAdviceRequest) -> RetryAdvice | None:\n        pass\n\n    async def cleanup_on_run_end(self, owner: ModelRunOwner) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "import asyncio",
+          "from collections.abc import AsyncIterator, Awaitable, Callable, Mapping",
+          "from dataclasses import dataclass",
+          "from typing import Any, TypeAlias",
+          "from weakref import WeakKeyDictionary",
+          "from typing_extensions import TypedDict",
+          "from .models import ModelRequest, ModelRequestOptions, ModelRequestOptionsFactory, ModelRetryAdviceRequest, ModelRunOwner, ResponsesModel",
+          "from .retry import RetryAdvice"
+        ],
+        "references": {
+          "ModelRequest": "agents.models.ModelRequest",
+          "ModelRequestOptions": "agents.models.ModelRequestOptions",
+          "ModelRequestOptionsFactory": "agents.models.ModelRequestOptionsFactory",
+          "ModelRetryAdviceRequest": "agents.models.ModelRetryAdviceRequest",
+          "ModelRunOwner": "agents.models.ModelRunOwner",
+          "ResponsesModel": "agents.models.ResponsesModel",
+          "RetryAdvice": "agents.retry.RetryAdvice"
+        }
       },
       "_agents_codex._sandbox_events": {
         "declarations": [
@@ -3383,6 +3481,8 @@
           "class _HostedCallItem(TypedDict):\n    id: str\n    turn_id: str\n    status: str\n    provider_data: dict[str, JsonValue]",
           "class McpListToolsItem(_HostedCallItem):\n    type: Literal['mcp_list_tools']\n    server_label: str\n    tools: list[JsonValue]\n    error: JsonValue | None",
           "class HostedMcpCallItem(_HostedCallItem):\n    type: Literal['mcp_call']\n    server_label: str\n    name: str\n    arguments: str\n    output: JsonValue | None\n    error: JsonValue | None",
+          "class ProgramCallItem(_HostedCallItem):\n    type: Literal['program']\n    call_id: str\n    code: str\n    fingerprint: str | None",
+          "class ProgramOutputItem(_HostedCallItem):\n    type: Literal['program_output']\n    call_id: str\n    result: str",
           "class FileSearchCallItem(_HostedCallItem):\n    type: Literal['file_search_call']\n    queries: list[str]\n    results: list[dict[str, JsonValue]] | None",
           "class CodeInterpreterCallItem(_HostedCallItem):\n    type: Literal['code_interpreter_call']\n    container_id: str\n    code: str | None\n    outputs: list[dict[str, JsonValue]] | None",
           "class ShellCallItem(_HostedCallItem):\n    type: Literal['shell_call']\n    call_id: str\n    action: dict[str, JsonValue]",
@@ -3405,7 +3505,7 @@
           "class InterruptSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['interrupt_subagent_call']",
           "class CloseSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['close_subagent_call']",
           "class WaitForSubagentsCallItem(_SubagentCallItem):\n    type: Literal['wait_for_subagents_call']\n    sender_agent_id: str",
-          "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | LocalShellCallItem | ShellCallOutputItem | ImageGenerationCallItem)",
+          "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | McpListToolsItem | HostedMcpCallItem | ProgramCallItem | ProgramOutputItem | FileSearchCallItem | CodeInterpreterCallItem | ShellCallItem | LocalShellCallItem | ShellCallOutputItem | ImageGenerationCallItem)",
           "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile | _InputAudio | _InputVideo]",
           "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | ToolSearchCallItem | ToolSearchOutputItem | UserMessageItem)"
         ],
@@ -3442,7 +3542,7 @@
           "@dataclass(frozen=True)\nclass _RunErrorFormatterInheritance:\n    allowed: bool\n    has_function: bool",
           "@dataclass(frozen=True, kw_only=True)\nclass FunctionTool(Generic[InputT, ResultT, BinderT_co]):\n    name: str\n    description: str\n    input_type: type[InputT]\n    output_type: type[ResultT]\n    _bind: BinderT_co | None = field(default=None, repr=False)\n    _requires_context: bool = field(default=False, repr=False)\n    callback_timeout: float | None = None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None = field(default=None, repr=False)\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | BackgroundResult[ToolOutput] | Awaitable[ToolOutput | BackgroundResult[ToolOutput]]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n    allowed_callers: tuple[ToolCaller, ...] | None = None\n    strict: bool = False\n    output_schema: dict[str, Any] | None = None\n    timeout_behavior: ToolTimeoutBehavior = 'raise_exception'\n    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None = field(default=None, repr=False)\n    input_error_function: Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None = field(default=None, repr=False)\n    namespace: str | None = None\n    namespace_description: str | None = None\n    finish_turn: bool = False\n    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False\n    run_before_approval: bool = False\n    approval_key: str | None = None\n    is_enabled: bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True\n    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(default=None, repr=False)\n    _allow_run_error_formatter: bool | _RunErrorFormatterInheritance = field(default=True, repr=False)\n    _custom_format: tuple[str, str, str] | None = field(default=None, repr=False)\n\n    def __init__(self, *, name: str, description: str, input_type: type[InputT], output_type: type[ResultT], _bind: BinderT_co | None=None, _requires_context: bool=False, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | BackgroundResult[ToolOutput] | Awaitable[ToolOutput | BackgroundResult[ToolOutput]]] | None=None, defer_loading: bool=False, allowed_callers: Sequence[ToolCaller] | None=None, strict: bool=False, output_schema: dict[str, Any] | None=None, timeout_behavior: ToolTimeoutBehavior='raise_exception', timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None=None, input_error_function: Callable[[ToolInputErrorContext[Any], Exception, Any], str | Awaitable[str]] | None=None, namespace: str | None=None, namespace_description: str | None=None, finish_turn: bool=False, needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False, run_before_approval: bool=False, approval_key: str | None=None, is_enabled: bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]=True, error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None=_UNSET_ERROR_FUNCTION, _allow_run_error_formatter: bool | _RunErrorFormatterInheritance | None=None, _custom_format: tuple[str, str, str] | None=None) -> None:\n        pass\n\n    def match(self, event: object) -> ActionRequested[InputT, ResultT] | None:\n        pass\n\n    @property\n    def ref(self) -> ToolRef:\n        pass\n\n    def as_custom(self, *, grammar: str | None=None, syntax: Literal['lark', 'regex']='lark') -> FunctionTool[InputT, ResultT, BinderT_co]:\n        pass\n\n    async def invoke(self, arguments: str | Mapping[str, Any], *, context: object=None) -> ResultT | ToolOutput:\n        pass",
           "_PythonTool: TypeAlias = FunctionTool[Any, Any, Callable[[ToolContextT, PolicyContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]]",
-          "Tool: TypeAlias = _PythonTool[ToolContextT, ToolContextT] | _PythonTool[ToolContextT, object] | _PythonTool[object, ToolContextT] | FunctionTool[Any, Any] | HttpMCP[object] | StdioMCP[object] | HttpMCP[ToolContextT] | StdioMCP[ToolContextT] | Checklist | NativeGoals | WebSearch | FileSearch | CodeInterpreter | HostedShell | ImageGeneration | HostedMCP[ToolContextT] | ToolSearch | NativeAgents[ToolContextT]",
+          "Tool: TypeAlias = _PythonTool[ToolContextT, ToolContextT] | _PythonTool[ToolContextT, object] | _PythonTool[object, ToolContextT] | FunctionTool[Any, Any] | HttpMCP[object] | StdioMCP[object] | HttpMCP[ToolContextT] | StdioMCP[ToolContextT] | Checklist | NativeGoals | WebSearch | FileSearch | CodeInterpreter | HostedShell | HostedProgrammaticToolCalling | ImageGeneration | HostedMCP[ToolContextT] | ToolSearch | NativeAgents[ToolContextT]",
           "class _ToolDecorator(Protocol[PolicyContextT_contra]):\n\n    @overload\n    def __call__(self, function: Callable[Concatenate[ToolContext[object], ParametersT], Any], /) -> _PythonTool[Any, PolicyContextT_contra]:\n        pass\n\n    @overload\n    def __call__(self, function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any], /) -> _PythonTool[ToolContextT, PolicyContextT_contra]:\n        pass\n\n    @overload\n    def __call__(self, function: Callable[ParametersT, Any], /) -> _PythonTool[Any, PolicyContextT_contra]:\n        pass",
           "def _requires_context(annotation: Any) -> bool:\n    pass",
           "_BeforePolicy: TypeAlias = Callable[[ToolContext[PolicyContextT]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]]",
@@ -3477,7 +3577,7 @@
           "from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments",
           "from .realtime_result import BackgroundResult as BackgroundResult",
           "from .realtime_usage import RealtimeUsage as RealtimeUsage, RealtimeUsageAccounting as RealtimeUsageAccounting",
-          "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, HostedShell as HostedShell, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCaller as ToolCaller, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolRef as ToolRef, ToolSearch, WebSearch as WebSearch, _CapturedFunction as _CapturedFunction",
+          "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, HostedProgrammaticToolCalling as HostedProgrammaticToolCalling, HostedShell as HostedShell, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCaller as ToolCaller, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolRef as ToolRef, ToolSearch, WebSearch as WebSearch, _CapturedFunction as _CapturedFunction",
           "from .turn import Turn as Turn",
           "from .decisions import DecisionInput, DecisionProvider",
           "from .executor import Environment",
@@ -3497,6 +3597,7 @@
           "Environment": "agents.executor.Environment",
           "FileSearch": "agents.tools.FileSearch",
           "HostedMCP": "agents.hosted_mcp.HostedMCP",
+          "HostedProgrammaticToolCalling": "agents.tools.HostedProgrammaticToolCalling",
           "HostedShell": "agents.tools.HostedShell",
           "HttpMCP": "agents.mcp.HttpMCP",
           "ImageGeneration": "agents.tools.ImageGeneration",
@@ -5509,12 +5610,15 @@
       "GuardrailResult",
       "GuardrailTripwire",
       "Handoff",
+      "HostedAgentMetadata",
       "HostedMCP",
       "HostedMCPApprovalArguments",
       "HostedMCPApprovalRequest",
       "HostedMCPApprovalResult",
+      "HostedProgrammaticToolCalling",
       "HostedPromptReference",
       "HostedPromptSource",
+      "HostedResponsesWebSocketModel",
       "HostedShell",
       "HostedToolChoice",
       "HostedVerificationMCP",
@@ -5569,6 +5673,7 @@
       "ModelResponse",
       "ModelRetryAdviceRequest",
       "ModelRetrySettings",
+      "ModelRunOwner",
       "ModelSettings",
       "MongoDBSessionStore",
       "NativeAgents",
@@ -5611,6 +5716,10 @@
       "ResponsesCompaction",
       "ResponsesCompactionContext",
       "ResponsesModel",
+      "ResponsesSocketFactory",
+      "ResponsesSocketOptions",
+      "ResponsesWebSocketModel",
+      "ResponsesWebSocketOptions",
       "RetryAdvice",
       "RetryBackoffSettings",
       "RetryDecision",
@@ -5678,6 +5787,7 @@
       "computer_tool",
       "function_tool",
       "get_cleanup",
+      "get_hosted_agent_metadata",
       "retry_policies",
       "run_demo_loop",
       "shell_tool"
@@ -5703,7 +5813,7 @@
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalDecision as ApprovalDecision, ApprovalRequest as ApprovalRequest, ApprovalRequested as ApprovalRequested, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPDiscoveryContext as MCPDiscoveryContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, MCPToolDefinition as MCPToolDefinition, StdioMCP as StdioMCP",
       "from .model_context import HostedPromptReference as HostedPromptReference, HostedPromptSource as HostedPromptSource, ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",
-      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, ModelRetryAdviceRequest as ModelRetryAdviceRequest, NativeModel as NativeModel, NativeStreamingModel as NativeStreamingModel, ProviderConversation as ProviderConversation, ProviderHistory as ProviderHistory, ProviderResponseChain as ProviderResponseChain, ResponsesModel as ResponsesModel",
+      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, HostedAgentMetadata as HostedAgentMetadata, HostedResponsesWebSocketModel as HostedResponsesWebSocketModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, ModelRetryAdviceRequest as ModelRetryAdviceRequest, ModelRunOwner as ModelRunOwner, NativeModel as NativeModel, NativeStreamingModel as NativeStreamingModel, ProviderConversation as ProviderConversation, ProviderHistory as ProviderHistory, ProviderResponseChain as ProviderResponseChain, ResponsesModel as ResponsesModel, ResponsesSocketFactory as ResponsesSocketFactory, ResponsesSocketOptions as ResponsesSocketOptions, ResponsesWebSocketModel as ResponsesWebSocketModel, ResponsesWebSocketOptions as ResponsesWebSocketOptions, get_hosted_agent_metadata as get_hosted_agent_metadata",
       "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole, NativeRoleTool as NativeRoleTool, NativeRoleToolInvocation as NativeRoleToolInvocation, NativeRoleToolResult as NativeRoleToolResult, NativeRoleToolStreamEvent as NativeRoleToolStreamEvent",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
       "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",
@@ -5716,7 +5826,7 @@
       "from .shell import ShellAction as ShellAction, ShellCall as ShellCall, ShellCommandOutput as ShellCommandOutput, ShellExit as ShellExit, ShellOutput as ShellOutput, ShellSkill as ShellSkill, ShellTimeout as ShellTimeout, shell_tool as shell_tool",
       "from .state import ApplicationToolOutput as ApplicationToolOutput, ChecklistState as ChecklistState, ChecklistStep as ChecklistStep, CheckpointStatus as CheckpointStatus, LocalStorage as LocalStorage, NativeGoal as NativeGoal, SessionState as SessionState",
       "from .subagents import Subagent as Subagent",
-      "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, HostedShell as HostedShell, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolNotFoundBehavior as ToolNotFoundBehavior, ToolOutput as ToolOutput, ToolOutputFile as ToolOutputFile, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, ToolSearch as ToolSearch, ToolSearchResult as ToolSearchResult, WebSearch as WebSearch",
+      "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, HostedProgrammaticToolCalling as HostedProgrammaticToolCalling, HostedShell as HostedShell, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolNotFoundBehavior as ToolNotFoundBehavior, ToolOutput as ToolOutput, ToolOutputFile as ToolOutputFile, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, ToolSearch as ToolSearch, ToolSearchResult as ToolSearchResult, WebSearch as WebSearch",
       "from .turn import AcceptedTextChunk as AcceptedTextChunk, ChildTurn as ChildTurn, PendingRequests as PendingRequests, RequestAttemptCount as RequestAttemptCount, RequestAttempts as RequestAttempts, SteeringReceipt as SteeringReceipt, Turn as Turn, TurnNeedsAttention as TurnNeedsAttention",
       "from .turn_receipt import ExecutorNetworkReceipt as ExecutorNetworkReceipt, ExecutorPolicyReceipt as ExecutorPolicyReceipt, InstructionFileReceipt as InstructionFileReceipt, TurnReceipt as TurnReceipt",
       "from .usage import RawProviderUsage as RawProviderUsage, RunBudget as RunBudget, RunUsage as RunUsage"
