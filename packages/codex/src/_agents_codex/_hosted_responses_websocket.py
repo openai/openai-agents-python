@@ -9,11 +9,11 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from traceback import clear_frames
 from typing import Any, cast
 from weakref import WeakKeyDictionary
 
 from ._compat import cancellation_requested
+from ._lifecycle import _clear_error_frames
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._responses_websocket import (
     ResponsesSocketFactory,
@@ -251,7 +251,7 @@ class _Socket:
             if inspect.isawaitable(result):
                 await result
         except BaseException as error:
-            clear_frames(error.__traceback__)
+            _clear_error_frames(error)
             raise
         finally:
             del self, frame, active, result

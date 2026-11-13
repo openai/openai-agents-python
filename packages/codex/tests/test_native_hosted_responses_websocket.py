@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import os
+import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -629,7 +632,21 @@ async def test_hosted_nonstored_fallback_replays_all_injected_outputs(
 
 
 @pytest.mark.parametrize("operation", ["create", "inject", "fallback"])
-async def test_hosted_send_failure_releases_private_locals_and_keeps_cause(operation) -> None:
+@pytest.mark.parametrize(
+    "failure_kind",
+    [
+        "direct",
+        "cause",
+        "context",
+        pytest.param(
+            "group",
+            marks=pytest.mark.skipif(sys.version_info < (3, 11), reason="Native exception groups"),
+        ),
+    ],
+)
+async def test_hosted_send_failure_releases_private_locals_and_keeps_cause(
+    operation, failure_kind
+) -> None:
     from tests.test_native_responses_websocket_review import _diagnostics
 
     private = "synthetic-hosted-private-send"
@@ -645,12 +662,28 @@ async def test_hosted_send_failure_releases_private_locals_and_keeps_cause(opera
         "arguments": "{}",
     }
 
+    def fail_leaf(replay: str) -> None:
+        assert private in replay
+        raise ConnectionError("nested hosted socket disconnected")
+
     class Socket:
         async def send(self, payload: str) -> None:
             frame = json.loads(payload)
             sends.append(frame["type"])
             if len(sends) == {"create": 1, "inject": 2, "fallback": 3}[operation]:
                 assert private in payload
+                if failure_kind != "direct":
+                    try:
+                        fail_leaf(payload)
+                    except ConnectionError as leaf:
+                        if failure_kind == "cause":
+                            raise failure from leaf
+                        if failure_kind == "context":
+                            raise failure  # noqa: B904 - exercise implicit exception context
+                        if sys.version_info >= (3, 11):
+                            raise builtins.ExceptionGroup(
+                                "hosted socket disconnected", [leaf, failure]
+                            ) from None
                 raise failure
             if len(sends) == 1:
                 pending.put_nowait(
@@ -707,13 +740,23 @@ async def test_hosted_send_failure_releases_private_locals_and_keeps_cause(opera
                 await agent.run("Public synthetic input.")
         assert not client.is_closed()
 
-    causes = [caught.value]
+    causes: list[BaseException] = [caught.value]
     for cause in causes:
-        for nested in (cause.__cause__, cause.__context__, getattr(cause, "model_error", None)):
+        for nested in (
+            cause.__cause__,
+            cause.__context__,
+            getattr(cause, "model_error", None),
+            *getattr(cause, "exceptions", ()),
+        ):
             if isinstance(nested, BaseException) and nested not in causes:
                 causes.append(nested)
     assert failure in causes
     assert private not in _diagnostics(caught.value)
+    for cause in causes:
+        for frame, _ in traceback.walk_tb(cause.__traceback__):
+            # Include the supported custom socket's external send/leaf frames.
+            if frame.f_code.co_name in ("send", "fail_leaf"):
+                assert private not in repr(frame.f_locals)
     assert len(sends) == {"create": 1, "inject": 2, "fallback": 3}[operation]
 
 
