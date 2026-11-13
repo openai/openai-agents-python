@@ -2052,6 +2052,21 @@ impl LocalChecklistStore {
         path: &Path,
         items: Vec<RolloutItem>,
     ) -> ThreadStoreResult<Vec<RolloutItem>> {
+        if items.is_empty() {
+            // Reconfirm an earlier recovery replacement after an interrupted
+            // directory sync, without replacing the unchanged rollout again.
+            tokio::task::block_in_place(|| {
+                std::fs::File::open(path)
+                    .map_err(checklist_error)?
+                    .sync_all()
+                    .map_err(checklist_error)?;
+                sync_local_directory(
+                    path.parent()
+                        .ok_or_else(|| checklist_error("native rollout has no parent directory"))?,
+                )
+            })?;
+            return Self::read_recovery_rollout(id, path).await;
+        }
         // Keep the original bytes and ordinal offsets for native fork readers.
         // A process can die during any stage write without tearing the live rollout.
         let path = codex_rollout::materialize_rollout_for_reference(path)

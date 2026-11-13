@@ -505,6 +505,8 @@ struct ReconciledCall {
 struct RecoveryRequest {
     receipts: Vec<ReconciledCall>,
     histories: HashMap<ThreadId, DescendantHistory>,
+    #[serde(default)]
+    root_recovery_turns: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -870,7 +872,6 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         .get::<crate::recovery_guard::Guard>()
         .context("Reconciliation requires the SDK replay guard")?;
 
-    let has_receipts = !request.receipts.is_empty();
     let mut receipts_by_thread = HashMap::<_, Vec<_>>::new();
     for receipt in &request.receipts {
         ensure!(
@@ -884,6 +885,12 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     }
     let root_receipts = receipts_by_thread.remove(&state.id).unwrap_or_default();
     let (root_append, protected) = plan(&history, &root_receipts)?;
+    validate_interrupted_effects(
+        &history,
+        &request.root_recovery_turns,
+        &root_append,
+        &root_receipts,
+    )?;
 
     // The root writer fences the original owner. Also reserve each child writer
     // so an independently reopened child cannot race recovery or change topology.
@@ -906,36 +913,65 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
             protected_children.insert(id.to_string(), protected);
         }
         let writes_receipts = !outputs.is_empty();
+        let prior_interruption = history.iter().any(|row| {
+            matches!(row,
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event))
+                if event.reason == TurnAbortReason::Interrupted && event.turn_id.is_some()
+                    && event.model_attempt.is_none() && event.error.is_none()
+                    && event.started_at.is_none() && event.completed_at.is_none() && event.duration_ms.is_none())
+        });
         if writes_receipts || !expected.interrupted.is_empty() {
-            ensure!(
-                has_receipts,
-                "An interrupted descendant turn requires a confirmed call"
-            );
-            let mut items = Vec::new();
-            for turn in &expected.interrupted {
-                items.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
-                    TurnAbortedEvent {
-                        model_attempt: None,
-                        turn_id: Some(turn.clone()),
-                        reason: TurnAbortReason::Interrupted,
-                        error: None,
-                        started_at: None,
-                        completed_at: None,
-                        duration_ms: None,
-                    },
-                )));
-            }
+            validate_interrupted_effects(&history, &expected.interrupted, &outputs, &receipts)?;
+            let mut items: Vec<_> = expected
+                .interrupted
+                .iter()
+                .map(|turn| interruption(turn.clone()))
+                .collect();
             items.extend(
                 outputs
                     .into_iter()
                     .map(|item| RolloutItem::ResponseItem(ResponseItemEnvelope::new(item))),
             );
             child_appends.push((writes_receipts, id, path, items, receipts));
+        } else if prior_interruption {
+            // A previous replace can be visible before its directory sync
+            // completed. Reconfirm it even when no new abort is necessary.
+            child_appends.push((false, id, path, Vec::new(), receipts));
         }
     }
     // Validate every supplied result before recording any part of the batch.
     // Publish interrupted ancestors before receipts that could clear the last
     // unresolved call and allow the next open without confirmations.
+    let mut active_root_turns = HashSet::new();
+    for row in &history {
+        match row {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                active_root_turns.insert(event.turn_id.as_str());
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                active_root_turns.remove(event.turn_id.as_str());
+            }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
+                if let Some(turn) = event.turn_id.as_deref() {
+                    active_root_turns.remove(turn);
+                }
+            }
+            _ => {}
+        }
+    }
+    let root_interruptions: Vec<_> = request
+        .root_recovery_turns
+        .iter()
+        .filter(|turn| active_root_turns.contains(turn.as_str()))
+        .map(|turn| interruption(turn.clone()))
+        .collect();
+    if !root_interruptions.is_empty() {
+        state
+            .thread
+            .append_rollout_items(&root_interruptions)
+            .await?;
+        state.thread.flush_rollout().await?;
+    }
     child_appends.sort_by_key(|(writes_receipts, ..)| *writes_receipts);
     for (_, id, path, items, receipts) in child_appends {
         confirm_durable(
@@ -953,6 +989,113 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         .engine
         .recovery
         .set_reconciled_descendants(protected_children);
+    Ok(())
+}
+
+fn interruption(turn: String) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+        model_attempt: None,
+        turn_id: Some(turn),
+        reason: TurnAbortReason::Interrupted,
+        error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+    }))
+}
+
+// Aborting a cold turn changes its lifecycle, never the outcome of its tools.
+// Check original retained invocations, including native tools omitted by the
+// application reconciliation projection, before publishing any interruption.
+fn validate_interrupted_effects(
+    history: &[RolloutItem],
+    turns: &[String],
+    reconciled: &[ResponseItem],
+    receipts: &[&ReconciledCall],
+) -> Result<()> {
+    if turns.is_empty() {
+        return Ok(());
+    }
+    let mut context = None;
+    let mut calls = HashMap::new();
+    let mut outputs = HashMap::new();
+    let mut terminal_commands = HashSet::new();
+    for row in history {
+        match row {
+            RolloutItem::TurnContext(turn) => context = turn.turn_id.as_deref().or(context),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(turn)) => context = Some(&turn.turn_id),
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
+                if let codex_protocol::items::TurnItem::CommandExecution(command) = &event.item
+                    && command.status != codex_protocol::items::CommandExecutionStatus::InProgress
+                {
+                    terminal_commands.insert((event.turn_id.as_str(), command.id.as_str()));
+                }
+            }
+            RolloutItem::ResponseItem(envelope) => {
+                let item = &envelope.item;
+                let Some(turn) = item.turn_id().or(context) else {
+                    continue;
+                };
+                if !turns.iter().any(|id| id == turn) {
+                    continue;
+                }
+                let call = match item {
+                    ResponseItem::FunctionCall { call_id, .. }
+                    | ResponseItem::CustomToolCall { call_id, .. }
+                    | ResponseItem::ComputerCall { call_id, .. }
+                    | ResponseItem::ApplyPatchCall { call_id, .. } => Some(call_id.as_str()),
+                    ResponseItem::LocalShellCall { call_id, .. } => Some(
+                        call_id
+                            .as_deref()
+                            .context("Native shell invocation lacks identity")?,
+                    ),
+                    ResponseItem::ShellCall {
+                        provider_fields, ..
+                    } => Some(
+                        shell_call_id(provider_fields)
+                            .context("Native shell invocation lacks identity")?
+                            .as_str(),
+                    ),
+                    ResponseItem::McpApprovalRequest { id, .. } => {
+                        Some(id.as_ref().context("MCP approval lacks identity")?.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(call) = call {
+                    ensure!(
+                        calls.insert((turn, call), item).is_none(),
+                        "Ambiguous tool identity in interrupted history"
+                    );
+                } else if let Some((call, _)) = output_identity(item) {
+                    outputs.insert((turn, call), item);
+                }
+            }
+            _ => {}
+        }
+    }
+    for item in reconciled {
+        if let Some((call, Some(turn))) = output_identity(item) {
+            outputs.insert((turn, call), item);
+        }
+    }
+    for (key, call) in calls {
+        ensure!(outputs.get(&key).is_some_and(|output| {
+            output_matches_invocation(call, output)
+                || matches!((call, *output), (ResponseItem::LocalShellCall { call_id: Some(expected), .. }, ResponseItem::FunctionCallOutput { call_id: Some(actual), .. }) if expected == actual)
+        }), "Native local history contains unknown tool effects; interruption requires a retained result");
+        if matches!(call, ResponseItem::FunctionCall { name, .. } if matches!(name.as_str(), "exec_command" | "write_stdin" | "shell" | "shell_command"))
+        {
+            // A tool result can acknowledge a still-running command process.
+            // Cold recovery cannot establish that process's terminal state.
+            ensure!(
+                terminal_commands.contains(&key)
+                    || receipts
+                        .iter()
+                        .any(|receipt| receipt.turn_id == key.0 && receipt.call_id == key.1),
+                "Native local history has unproven command process lifetime; interruption is unsafe"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1161,6 +1304,69 @@ fn plan(
 mod tests {
     use super::*;
     use crate::environment::workspace_profile;
+
+    #[test]
+    fn cold_interruption_preserves_unknown_native_effects() {
+        let start = || {
+            RolloutItem::EventMsg(
+                serde_json::from_value(serde_json::json!({
+                    "type": "task_started", "turn_id": "original", "root_turn_id": "original"
+                }))
+                .unwrap(),
+            )
+        };
+        let turns = vec!["original".to_owned()];
+        assert!(validate_interrupted_effects(&[start()], &turns, &[], &[]).is_ok());
+        for invocation in [
+            serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"effect", "arguments":"{}"}),
+            serde_json::json!({"type":"shell_call", "call_id":"effect", "action":{"commands":["synthetic"], "timeout_ms":1000, "max_output_length":1000}}),
+            serde_json::json!({"type":"apply_patch_call", "call_id":"effect", "operation":{"type":"delete_file", "path":"synthetic.txt"}}),
+        ] {
+            let call: ResponseItem = serde_json::from_value(invocation).unwrap();
+            let history = vec![
+                start(),
+                RolloutItem::ResponseItem(ResponseItemEnvelope::new(call)),
+            ];
+            assert!(validate_interrupted_effects(&history, &turns, &[], &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn cold_interruption_requires_the_original_command_to_be_terminal() {
+        let start = RolloutItem::EventMsg(
+            serde_json::from_value(serde_json::json!({
+                "type":"task_started", "turn_id":"original", "root_turn_id":"original"
+            }))
+            .unwrap(),
+        );
+        let row = |value| {
+            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                serde_json::from_value(value).unwrap(),
+            ))
+        };
+        let mut history = vec![
+            start,
+            row(
+                serde_json::json!({"type":"function_call", "name":"exec_command", "call_id":"effect", "arguments":"{}"}),
+            ),
+            row(
+                serde_json::json!({"type":"function_call_output", "call_id":"effect", "output":"Process running with session ID 123"}),
+            ),
+        ];
+        let turns = vec!["original".to_owned()];
+        assert!(validate_interrupted_effects(&history, &turns, &[], &[]).is_err());
+        let terminal = |call, turn| {
+            RolloutItem::EventMsg(serde_json::from_value(serde_json::json!({
+            "type":"item_completed", "thread_id":ThreadId::new(), "turn_id":turn,
+            "item":{"type":"CommandExecution", "id":call, "command":["synthetic"], "cwd":"file:///synthetic", "parsed_cmd":[], "source":"agent", "status":"completed", "exit_code":0}
+        })).unwrap())
+        };
+        history.push(terminal("unrelated", "original"));
+        history.push(terminal("effect", "unrelated"));
+        assert!(validate_interrupted_effects(&history, &turns, &[], &[]).is_err());
+        history.push(terminal("effect", "original"));
+        assert!(validate_interrupted_effects(&history, &turns, &[], &[]).is_ok());
+    }
 
     #[test]
     fn durable_resume_accepts_identified_fork_receipt() {

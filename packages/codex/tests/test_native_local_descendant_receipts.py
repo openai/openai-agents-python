@@ -246,7 +246,10 @@ async def worker() -> None:
                 ),
             ) as session,
         ):
-            print(json.dumps({"opened": session.id, "pid": os.getpid()}), flush=True)
+            opening: dict[str, Any] = {"opened": session.id, "pid": os.getpid()}
+            if request["mode"] == "inspect":
+                opening["root_turns"] = [turn async for turn in session.turns()]
+            print(json.dumps(opening), flush=True)
             if request["mode"] == "inspect":
                 async for child in session.subagents():
                     items = [item async for item in session.items(subagent_id=child.id)]
@@ -763,15 +766,23 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                 assert (tmp_path / "effects").read_text() == old_effect + "destination:fresh\n"
 
 
-@pytest.mark.parametrize("depth", [1, 2], ids=["child", "grandchild"])
 @pytest.mark.parametrize(
-    "no_children", [False, True], ids=["current-children", "no-current-children"]
+    ("depth", "no_children", "native_effect", "root_active"),
+    [
+        (1, False, None, False),
+        (2, False, None, False),
+        (1, True, None, False),
+        (2, True, None, False),
+        (1, False, "shell", False),
+        (1, False, None, True),
+    ],
 )
-async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
-    tmp_path, monkeypatch, depth, no_children
+async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
+    tmp_path, monkeypatch, depth, no_children, native_effect, root_active
 ):
     peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     entered, release = asyncio.Event(), asyncio.Event()
+    root_entered = asyncio.Event()
     original_response = peer.response
 
     def response():
@@ -785,9 +796,15 @@ async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
             message = assistant_output("leaf not yet settled")
             message["item"]["id"] = "held-leaf-without-tool"
             return [message]
-        return original_response()
+        result = original_response()
+        if root_active and path == "/root" and result[0].get("item", {}).get("type") == "message":
+            result[0]["item"]["id"] = "held-root-with-spawn"
+        return result
 
     async def hold(event):
+        if event.get("item", {}).get("id") == "held-root-with-spawn":
+            root_entered.set()
+            await release.wait()
         if event.get("item", {}).get("id") == "held-leaf-without-tool":
             entered.set()
             await release.wait()
@@ -810,12 +827,16 @@ async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
             opened = json.loads(await source.stdout.readline())
             assert opened.get("opened"), opened
             await entered.wait()
-            root = json.loads(await source.stdout.readline())
-            assert root["output"] == "/root finished"
-            assert not any(
-                item["type"] == "function_call" and item["status"] in ("in_progress", "incomplete")
-                for item in root["root_items"]
-            )
+            if root_active:
+                await root_entered.wait()
+            else:
+                root = json.loads(await source.stdout.readline())
+                assert root["output"] == "/root finished"
+                assert not any(
+                    item["type"] == "function_call"
+                    and item["status"] in ("in_progress", "incomplete")
+                    for item in root["root_items"]
+                )
             assert not (tmp_path / "effects").exists()
             source.kill()
             code, _, err = await _collect(source)
@@ -826,24 +847,81 @@ async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
                 source.kill()
                 await _collect(source)
         before = len(peer.requests)
+        if native_effect is not None:
+            child_id = next(
+                metadata(body, headers)["thread_id"]
+                for body, headers in zip(peer.requests, peer.request_headers, strict=True)
+                if metadata(body, headers)["agent_name"] == "/root/alpha"
+            )
+            [rollout] = (tmp_path / "profile").rglob(f"*{child_id}.jsonl")
+            history = [json.loads(line) for line in rollout.read_text().splitlines()]
+            turn_id = next(
+                row["payload"]["turn_id"]
+                for row in reversed(history)
+                if row["type"] == "turn_context"
+            )
+            payload = {
+                "type": "shell_call",
+                "call_id": "unknown-native",
+                "action": {"commands": ["synthetic"]},
+                "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+            }
+            with rollout.open("a") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "timestamp": history[-1]["timestamp"],
+                            "ordinal": history[-1]["ordinal"] + 1,
+                            "type": "response_item",
+                            "payload": payload,
+                        }
+                    )
+                    + "\n"
+                )
         for _ in range(2):
             restored = await start(
                 peer,
                 executor,
                 tmp_path,
-                "destination",
+                "inspect",
                 depth,
                 identity=opened["opened"],
                 no_children=no_children,
             )
             code, rows, err = await _collect(restored)
-            assert code != 0 and rows and "active descendant" in rows[0].get("message", ""), (
-                rows,
-                err,
-            )
-            assert "opened" not in rows[0], rows
+            if native_effect is not None:
+                assert code != 0 and "unknown tool effects" in rows[0].get("message", ""), (
+                    rows,
+                    err,
+                )
+                assert len(peer.requests) == before
+                assert not (tmp_path / "effects").exists()
+                continue
+            assert code == 0 and rows[0]["opened"] == opened["opened"], (rows, err)
+            if root_active:
+                assert any(turn["status"] == "cancelled" for turn in rows[0]["root_turns"])
+            assert len(rows[1:]) == depth
+            leaf = rows[-1]
+            assert not leaf["is_live"]
+            assert any(turn["status"] == "cancelled" for turn in leaf["turns"])
             assert len(peer.requests) == before
             assert not (tmp_path / "effects").exists()
+        if native_effect is not None:
+            return
+        restored = await start(
+            peer,
+            executor,
+            tmp_path,
+            "destination",
+            depth,
+            identity=opened["opened"],
+            no_children=no_children,
+        )
+        code, rows, err = await _collect(restored)
+        assert code == 0 and rows[0]["opened"] == opened["opened"], (rows, err)
+        assert rows[1]["output"] == "destination finished"
+        assert len(peer.requests) == before + 2
+        assert (tmp_path / "effects").read_text() == "destination:fresh\n"
 
 
 if __name__ == "__main__":
