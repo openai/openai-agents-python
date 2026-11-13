@@ -286,7 +286,12 @@ async def test_pending_handoff_restores_groups_and_blocks_old_receipts_only_when
                     receipt.pop("handoff_input_frontiers")
                 removed += 1
         assert removed > 0
-        checkpoint = SessionState.from_json(json.dumps(value))
+        encoded = json.dumps(value)
+        # This fixture owns the checkpoint and the simulated legacy receipt.
+        checkpoint = SessionState.from_json(
+            encoded,
+            expected_sha256=sha256(encoded.encode()).hexdigest() if prepare_enabled else None,
+        )
         ordinary_or_filtered = replace(
             source, prepare_handoff_input=prepare if prepare_enabled else None
         )
