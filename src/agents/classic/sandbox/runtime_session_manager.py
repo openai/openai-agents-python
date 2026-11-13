@@ -310,12 +310,13 @@ class SandboxRuntimeSessionManager(_BorrowedManifestPolicy, Generic[TContext]):
                 capabilities=capabilities,
                 session=sandbox_config.session,
             )
-            if manifest_update.entries_to_apply:
-                await sandbox_config.session._apply_entry_batch(
-                    manifest_update.entries_to_apply,
-                    base_dir=sandbox_config.session._manifest_base_dir(),
-                )
             if manifest_update.processed_manifest is not None:
+                # Recheck the current declaration after provider validation; borrowed
+                # acquisition never materializes a nonatomic filesystem batch.
+                self._validate_live_session_host_path_grants(
+                    current_manifest=sandbox_config.session.state.manifest,
+                    processed_manifest=manifest_update.processed_manifest,
+                )
                 sandbox_config.session.state = sandbox_config.session.state.model_copy(
                     update={"manifest": manifest_update.processed_manifest}
                 )

@@ -177,8 +177,7 @@ async def _apply_borrowed_manifest(
     manifest: Manifest,
     concurrency_limits: SandboxConcurrencyLimits | None = None,
 ) -> None:
-    from _agents_shared.sandbox_manifest import _BorrowedManifestPolicy, _poison_borrowed_manifest
-    from agents.classic.sandbox.entries import resolve_workspace_path
+    from _agents_shared.sandbox_manifest import _BorrowedManifestPolicy
 
     current = session.state.manifest
     _BorrowedManifestPolicy._validate_live_session_host_path_grants(
@@ -186,9 +185,6 @@ async def _apply_borrowed_manifest(
     )
     _BorrowedManifestPolicy._validate_running_live_session_manifest_update(
         current_manifest=current, processed_manifest=manifest
-    )
-    entries = _BorrowedManifestPolicy._diff_live_session_entries(
-        current_entries=current.entries, processed_entries=manifest.entries
     )
     previous_limits: list[tuple[Any, int | None, int | None]] = []
     if concurrency_limits is not None:
@@ -204,31 +200,14 @@ async def _apply_borrowed_manifest(
             if not isinstance(owner, SandboxSession):
                 break
             owner = owner._inner
-    application_started = False
     try:
         if concurrency_limits is not None:
             session._set_concurrency_limits(concurrency_limits)
-        if entries:
-            staged = current.model_copy(
-                update={"extra_path_grants": deepcopy(manifest.extra_path_grants)}
-            )
-            session.state = session.state.model_copy(update={"manifest": staged})
-            pending_entries = [
-                (resolve_workspace_path(Path(manifest.root), path), entry)
-                for path, entry in entries
-            ]
-            base_dir = session._manifest_base_dir()
-            application_started = True
-            await session._apply_entry_batch(pending_entries, base_dir=base_dir)
         if current != manifest:
             session.state = session.state.model_copy(
                 update={"manifest": manifest.model_copy(deep=True)}
             )
     except BaseException:
-        if application_started:
-            # Provider batches can leave files behind after error or cancellation.
-            # Restoring metadata cannot restore filesystem authority.
-            _poison_borrowed_manifest(session)
         session.state = session.state.model_copy(update={"manifest": current})
         for owner, manifest_entries, local_dir_files in previous_limits:
             owner._max_manifest_entry_concurrency = manifest_entries
@@ -369,7 +348,13 @@ def sandbox_environment(
     The connect manager must connect to the supplied sandbox and own gateway cleanup.
     The provider validates and materializes the captured manifest for create and
     resume. A borrowed session must match the current mount authority. A supplied live
-    session is borrowed: only its gateway is closed. An authorized_resume_state
+    session is borrowed: only its gateway is closed. Its existing manifest entries
+    must already match the current declaration. Generic providers do not offer
+    atomic multi-entry updates, so additions, replacements and entry metadata
+    changes reject before filesystem writes. Use an owned fresh resource or
+    snapshot creation for new entries; no-op borrowed acquisition stays supported.
+    Older provider states can reconnect the same mutable filesystem and do not
+    provide rollback authority. An authorized_resume_state
     explicitly authorizes all provider identity and snapshot fields, not merely
     their types. Never pass untrusted deserialized state without authorizing those
     fields. Resume uses the current manifest for filesystem authority. Snapshot,

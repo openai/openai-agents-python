@@ -1297,34 +1297,39 @@ def test_sandbox_state_equality_ignores_memory_lock_identity() -> None:
         assert changed != original
 
 
-@pytest.mark.parametrize("ending", ["error", "cancel"])
+@pytest.mark.parametrize("change", ["addition", "replacement"])
 @pytest.mark.parametrize("alias", ["original", "wrapped"])
-async def test_borrowed_partial_manifest_write_blocks_reuse_before_binding(
-    tmp_path: Path, ending: str, alias: str
+async def test_borrowed_manifest_changes_reject_before_any_partial_write(
+    tmp_path: Path, change: str, alias: str
 ) -> None:
     from agents.classic.sandbox.entries import File
     from agents.sandbox import SandboxCapability
 
+    current_entries = (
+        {Path("first.txt"): File(content=b"existing edited content")}
+        if change == "replacement"
+        else {}
+    )
+    original = Manifest(root=str(tmp_path), entries=current_entries)
+    if current_entries:
+        (tmp_path / "first.txt").write_bytes(b"existing edited content")
     client = Client([])
-    original = Manifest(root=str(tmp_path))
     selected = await client.create(manifest=original, options=Options())
     client.backend_id = selected.state.type
+    saved_before_update = selected.state.model_copy(deep=True)
     client.events.clear()
-    written = tmp_path / "first-private.txt"
-    calls: list[str] = []
+    calls = []
 
-    async def partial(entries, **kwargs):
-        path, entry = entries[0]
-        path.write_bytes(entry.content)
-        assert path == written
-        if ending == "cancel":
-            raise asyncio.CancelledError()
+    async def unsafe_batch(entries, **kwargs):
+        calls.append("write")
+        (tmp_path / "first.txt").write_bytes(b"synthetic-private-partial-write")
         raise OSError("second synthetic write failed")
 
-    selected._apply_entry_batch = partial
+    selected._apply_entry_batch = unsafe_batch
+    reused = selected if alias == "original" else SandboxSession(SandboxSession(selected._inner))
 
     class Probe(SandboxCapability):
-        name = "borrowed-reuse-probe"
+        name = "no-write-probe"
 
         async def bind(self, session, *, user, workspace):
             calls.append("bind")
@@ -1337,32 +1342,128 @@ async def test_borrowed_partial_manifest_write_blocks_reuse_before_binding(
     requested = Manifest(
         root=str(tmp_path),
         entries={
-            Path("first-private.txt"): File(content=b"synthetic-private-before-failed-update"),
-            Path("second.txt"): File(content=b"never fully applied"),
+            Path("first.txt"): File(content=b"synthetic-private-partial-write"),
+            Path("second.txt"): File(content=b"second file"),
         },
     )
-    with pytest.raises(OSError if ending == "error" else asyncio.CancelledError):
+    with pytest.raises(ValueError, match="atomic provider transaction"):
         async with sandbox_environment(
             client,
             manifest=requested,
-            options=Options(),
-            session=selected,
-            connect=connect,
-        ):
-            pytest.fail("Partial application was published")
-    assert written.read_bytes() == b"synthetic-private-before-failed-update"
-    assert not (tmp_path / "second.txt").exists()
-    assert selected.state.manifest == original
-    reused = selected if alias == "original" else SandboxSession(SandboxSession(selected._inner))
-    with pytest.raises(ValueError, match="manifest.*failed|failed.*manifest"):
-        async with sandbox_environment(
-            client,
-            manifest=original,
             options=Options(),
             session=reused,
             connect=connect,
             capabilities=[Probe()],
         ):
-            pytest.fail("Partially changed borrowed resource was reused")
-    assert not calls
-    assert not client.events  # The app still owns this resource; no close or delete.
+            pytest.fail("Nonatomic borrowed update was published")
+    assert calls == [] and client.events == []
+    assert selected.state == saved_before_update
+    assert selected.state.manifest == original
+    if change == "replacement":
+        assert (tmp_path / "first.txt").read_bytes() == b"existing edited content"
+    else:
+        assert not (tmp_path / "first.txt").exists()
+    # A failed preflight keeps the original clean resource usable, including old state references.
+    assert saved_before_update.manifest == original
+    async with sandbox_environment(
+        client,
+        manifest=original,
+        options=Options(),
+        session=reused,
+        connect=connect,
+    ):
+        pass
+    assert calls == ["connect"] and client.events == []
+
+
+@pytest.mark.parametrize("changed", [False, True])
+async def test_shared_classic_borrowed_acquisition_requires_atomic_changes(
+    tmp_path: Path, changed: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from agents.classic.sandbox.entries import File
+    from agents.classic.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
+
+    manifest = Manifest(root=str(tmp_path))
+    client = Client([])
+    selected = await client.create(manifest=manifest, options=Options())
+    writes = []
+
+    async def unsafe_batch(*args, **kwargs):
+        writes.append("write")
+        pytest.fail("Shared acquisition reached nonatomic writes")
+
+    selected._apply_entry_batch = unsafe_batch
+
+    class AddFile:
+        def process_manifest(self, current):
+            current.entries[Path("private.txt")] = File(content=b"private")
+            return current
+
+    arguments: dict[str, Any] = {
+        "agent": SimpleNamespace(run_as=None),
+        "capabilities": [AddFile()] if changed else [],
+        "session": selected,
+    }
+    if changed:
+        with pytest.raises(ValueError, match="atomic provider transaction"):
+            await SandboxRuntimeSessionManager._process_live_session_manifest(**arguments)
+    else:
+        update = await SandboxRuntimeSessionManager._process_live_session_manifest(**arguments)
+        assert not update.entries_to_apply
+    assert not writes and not (tmp_path / "private.txt").exists()
+
+
+@pytest.mark.parametrize("snapshot_mode", [False, True])
+async def test_owned_and_snapshot_additive_manifest_remain_supported(
+    tmp_path: Path, snapshot_mode: bool
+) -> None:
+    from agents.classic.sandbox.entries import File
+    from agents.classic.sandbox.snapshot import LocalSnapshotSpec
+
+    root = tmp_path / "owned"
+    snapshots = []
+
+    class MaterializingClient(Client):
+        async def create(self, *, manifest=None, options, snapshot=None):
+            snapshots.append(snapshot)
+            selected = await super().create(manifest=manifest, options=options)
+            original_start = selected.start
+
+            async def start():
+                await original_start()
+                root.mkdir()
+                for path, entry in selected.state.manifest.entries.items():
+                    (root / path).write_bytes(entry.content)
+
+            selected.start = start
+            return selected
+
+    client = MaterializingClient([])
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert (root / "first.txt").read_bytes() == b"owned first"
+        assert (root / "second.txt").read_bytes() == b"owned second"
+        yield Environment(url="wss://executor.invalid", cwd=str(root))
+
+    kwargs = (
+        {"snapshot": LocalSnapshotSpec(base_path=tmp_path / "snapshots")} if snapshot_mode else {}
+    )
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(
+            root=str(root),
+            entries={
+                Path("first.txt"): File(content=b"owned first"),
+                Path("second.txt"): File(content=b"owned second"),
+            },
+        ),
+        options=Options(),
+        connect=connect,
+        **kwargs,
+    ):
+        pass
+    assert bool(snapshots[0]) is snapshot_mode
+    assert client.events == ["create", "start", "close", "delete"]

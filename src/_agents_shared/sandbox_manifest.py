@@ -37,6 +37,21 @@ class _BorrowedManifestPolicy:
                 "`manifest.extra_path_grants`; use a fresh session or a session_state resume flow."
             )
 
+        # Generic provider batches cannot roll back partial writes or revoke
+        # older snapshots that still target this mutable resource. Only a
+        # provider transaction or an independently owned layer can admit changes.
+        cls._validate_running_live_session_manifest_update(
+            current_manifest=current_manifest, processed_manifest=processed_manifest
+        )
+        if cls._diff_live_session_entries(
+            current_entries=current_manifest.entries,
+            processed_entries=processed_manifest.entries,
+        ):
+            raise ValueError(
+                "Borrowed sandbox manifest entry changes require an atomic provider transaction; "
+                "use a fresh owned sandbox or snapshot creation"
+            )
+
     @classmethod
     def _validate_running_live_session_manifest_update(
         cls,
@@ -191,10 +206,6 @@ def _assert_borrowed_manifest_reusable(owner: BaseSandboxSession) -> None:
         raise ValueError(
             "Borrowed sandbox manifest application failed; create a fresh sandbox resource"
         )
-
-
-def _poison_borrowed_manifest(owner: BaseSandboxSession) -> None:
-    setattr(_borrowed_manifest_owner(owner), "_borrowed_manifest_failed", True)  # noqa: B010
 
 
 def _borrowed_manifest_lock(owner: BaseSandboxSession) -> asyncio.Lock:
