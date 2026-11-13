@@ -315,7 +315,7 @@ class MCPDiscoveryContext(Generic[ContextT_co]):
     step_index: int
 
 
-def _default_mcp_failure_error_function(context: MCPResultContext[Any], error: Exception) -> str:
+def _default_mcp_failure_error_function(context: MCPResultContext[object], error: Exception) -> str:
     return "MCP tool invocation failed"
 
 
