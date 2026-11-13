@@ -212,7 +212,7 @@ async def native_case(case):
                     hidden.set_outcome(status="ok", data=payload)
                 with pytest.raises(RuntimeError, match="Native trace span end failed"):
                     with telemetry.trace("over-bound") as over:
-                        over.set_outcome(status="ok", data={"large": "x" * 32769})
+                        over.set_outcome(status="ok", data={"large": "x" * 65537})
                 assert over._outcome is None
                 with pytest.raises(RuntimeError, match="Native trace span end failed") as malformed:
                     with telemetry.trace("malformed-unicode") as invalid:
@@ -221,10 +221,10 @@ async def native_case(case):
                         )
                 assert "synthetic-private-annotation" not in str(malformed.value)
                 assert invalid._outcome is None
-                with pytest.raises(RuntimeError, match="64 KiB"):
+                with pytest.raises(RuntimeError, match="128 KiB"):
                     with telemetry.trace(
                         "metadata-still-bounded",
-                        options=telemetry.TraceOptions(metadata={"value": "é" * 32769}),
+                        options=telemetry.TraceOptions(metadata={"value": "é" * 65537}),
                     ):
                         pass
             elif case == "restrictions":

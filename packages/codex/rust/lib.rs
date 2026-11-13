@@ -2686,6 +2686,29 @@ impl NativeThread {
         Ok(())
     }
 
+    #[pyo3(signature = (id, data_json, thread=None, instance=None, *, error=false))]
+    fn _reply_provider_response_span(
+        &self,
+        id: u64,
+        data_json: Option<&str>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<bool> {
+        let Some(tools) = self.live()?.and_then(|inner| {
+            inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+        }) else {
+            return Ok(false);
+        };
+        tools
+            .reply_provider_response_span(id, data_json, error, thread, instance)
+            .map_err(py_error)?;
+        Ok(true)
+    }
+
     #[pyo3(signature = (id, items_json, thread=None, instance=None))]
     fn _reply_context(
         &self,

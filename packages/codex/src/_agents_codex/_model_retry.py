@@ -121,8 +121,6 @@ def _normalized_error(error: BaseException) -> NormalizedError:
 async def _resolve_retry(
     data: dict[str, Any], failure: _ModelFailure | None, policy: Any, invoke: Any
 ) -> dict[str, Any]:
-    from dataclasses import asdict
-
     from .models import ModelRetryAdviceRequest
     from .retry import RetryAdvice, RetryDecision, RetryPolicyContext
     from .usage import TokenUsage, _UsageCollector
@@ -172,8 +170,16 @@ async def _resolve_retry(
                 if advice is not None:
                     from dataclasses import replace
 
+                    # RetryAdvice validates each field before capturing the mapping.
+                    normalized: dict[str, Any] = dict(advice.normalized or {})
+                    if advice.retry_after_ms is not None:
+                        normalized.setdefault("retry_after_ms", advice.retry_after_ms)
+                    normalized["is_abort"] = context.normalized.is_abort or normalized.get(
+                        "is_abort", False
+                    )
                     context = replace(
                         context,
+                        normalized=replace(context.normalized, **normalized),
                         provider_advice=advice,
                         response_started=context.response_started
                         or advice.response_started is True,
@@ -199,7 +205,10 @@ async def _resolve_retry(
         return {
             "decision": decision,
             "provider_advice": (
-                {key: value for key, value in asdict(advice).items() if key != "response_started"}
+                {
+                    key: getattr(advice, key)
+                    for key in ("suggested", "retry_after_ms", "replay_safety", "reason")
+                }
                 if advice is not None
                 else None
             ),
