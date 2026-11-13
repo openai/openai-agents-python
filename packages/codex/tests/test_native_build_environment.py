@@ -581,15 +581,14 @@ def test_native_build_checks_indirect_musl_archive_and_binding_pins(
         f"{stem}.sha256",
     )
     archive_bytes, binding_bytes = b"native v8 archive", b"native v8 source binding"
-    sha = lambda value: hashlib.sha256(value).hexdigest()
-    release_bytes = (
-        f"{sha(archive_bytes)}  {archive}\n{sha(binding_bytes)}  {binding}\n".encode()
-    )
+
+    def sha(value: bytes) -> str:
+        return hashlib.sha256(value).hexdigest()
+
+    release_bytes = f"{sha(archive_bytes)}  {archive}\n{sha(binding_bytes)}  {binding}\n".encode()
     pins = tmp_path / ".upstream/codex/third_party/v8"
     pins.mkdir(parents=True)
-    (tmp_path / "Cargo.lock").write_text(
-        '[[package]]\nname = "v8"\nversion = "150.4.0"\n'
-    )
+    (tmp_path / "Cargo.lock").write_text('[[package]]\nname = "v8"\nversion = "150.4.0"\n')
     (pins / "rusty_v8_150_4_0.sha256").write_text("")
     (pins / "rusty_v8_150_4_0_release_manifests.sha256").write_text(
         f"{sha(release_bytes)}  {release}\n"
