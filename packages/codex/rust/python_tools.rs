@@ -1655,6 +1655,63 @@ impl PythonTools {
         Ok(self.snapshot())
     }
 
+    /// Native restore validates only the application's current root selection.
+    pub(crate) fn native_mcp_root_source(
+        &self,
+        thread: &ExtensionData,
+        binding: &codex_mcp::McpBinding,
+        server: &str,
+        raw_tool: &str,
+    ) -> Result<ExtensionData> {
+        ensure!(
+            !self.managed_profiles.load(Ordering::Acquire) && self.descendant_source.is_none(),
+            "Native MCP root restore requires an ordinary current root"
+        );
+        ensure!(
+            self.policy
+                .allowed_mcp_tools
+                .as_ref()
+                .is_none_or(
+                    |tools| tools
+                        .iter()
+                        .any(
+                            |(selected_server, selected_tool, _)| selected_server == server
+                                && selected_tool == raw_tool
+                        )
+                ),
+            "Native MCP tool is no longer selected by the current root"
+        );
+        let control = self
+            .interception
+            .get()
+            .and_then(Weak::upgrade)
+            .context("Native MCP root has no current policy owner")?;
+        let source = ExtensionData::new(thread.level_id());
+        source.insert(control.capture_mcp_source_for_binding(binding, &self.policy));
+        ensure!(
+            crate::native_interception::native_mcp_checkpoint_source(&source),
+            "Native MCP continuation cannot replay host callbacks"
+        );
+        Ok(source)
+    }
+
+    pub(crate) fn native_mcp_checkpoint_specs(&self, source: &ExtensionData) -> Result<Value> {
+        let generation = source
+            .get::<ProfileCatalog>()
+            .map(|catalog| catalog.generation.clone())
+            .or_else(|| {
+                source
+                    .get::<StepCatalog>()
+                    .map(|catalog| catalog.generation.clone())
+            })
+            .context("Native MCP checkpoint requires its original SDK catalog")?;
+        ensure!(
+            self.admits_generation(&generation),
+            "Native MCP catalog is no longer admitted"
+        );
+        checkpoint_specs(&generation.specs)
+    }
+
     pub(crate) fn request_sampling_stop(&self, turn_id: &str) {
         let admission = self
             .admission
@@ -6823,7 +6880,8 @@ impl ToolContributor for PythonContributor {
                     request["msg"]["initial_input"] = json!(records);
                 }
             }
-            if step.get::<codex_extension_api::StagedInputPreparation>()
+            if step
+                .get::<codex_extension_api::StagedInputPreparation>()
                 .is_some_and(|preparation| preparation.is_for(turn.level_id()))
             {
                 request["msg"]["staged_input_preparation"] = json!(true);
@@ -6935,8 +6993,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
 
     fn exposure(&self) -> ToolExposure {
         let exposure = self.generation.entries[self.slot].exposure;
-        let model_only_custom = matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_))
-            && !self.explicitly_allows_code();
+        let model_only_custom =
+            matches!(self.generation.specs[self.slot], DynamicToolSpec::Custom(_))
+                && !self.explicitly_allows_code();
         if model_only_custom && exposure == ToolExposure::Direct {
             return ToolExposure::DirectModelOnly;
         }

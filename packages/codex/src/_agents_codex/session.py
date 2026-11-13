@@ -210,6 +210,7 @@ from .manual import (
     ActionReply as ActionReply,
     ActionRequested as ActionRequested,
     ApprovalDecision as ApprovalDecision,
+    ApprovalRequest,
     ApprovalRequested as ApprovalRequested,
     ElicitationRequest as ElicitationRequest,
     FormRequest as FormRequest,
@@ -4569,6 +4570,7 @@ class Session(Generic[ContextT, OutputT]):
                                 else {}
                             ),
                         },
+                        "openai/sdk-root-prompts": {},
                         **(
                             {"openai/sdk-child-prompts": {}}
                             if native_agents is not None and native_agents.interactions
@@ -4969,6 +4971,9 @@ class Session(Generic[ContextT, OutputT]):
                             saved.continuation_trace_id if parent_trace is None else None
                         ),
                     )
+                    if continuation.pending_mcp:
+                        # Restore validation needs the current before/approval rules.
+                        session._start_interception()
                     await thread._prepare_manual_restore()
                     session._validate_pending_manual(active)
                     session._observations.append(
@@ -4980,7 +4985,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
                     session._start_output_acceptance(handle)
                     active.task = _create_task(session._execute(active, [], admitted=True))
-                    if continuation.staged_retry:
+                    if continuation.staged_retry or continuation.pending_mcp:
                         driver = _create_task(session._continue_restored_turn(active))
                         active.add_callback(driver)
                 if handoff is not None:
@@ -6675,7 +6680,7 @@ class Session(Generic[ContextT, OutputT]):
         self, question: _NativeQuestion, operation: str, encoded: str
     ) -> None:
         state = self._check_question(question)
-        if question.subagent_id is not None:
+        if question._message.get("_sdk_question_id") is not None:
             if not await self._native._child_question_pending(
                 question._message["_sdk_question_id"]
             ):
@@ -6689,7 +6694,7 @@ class Session(Generic[ContextT, OutputT]):
 
         async def enqueue() -> None:
             try:
-                if question.subagent_id is None:
+                if question._message.get("_sdk_question_id") is None:
                     await self._native.call(operation, encoded)
                 elif not await self._native._respond_child_question(
                     question._message["_sdk_question_id"], operation, encoded
@@ -7531,6 +7536,19 @@ class Session(Generic[ContextT, OutputT]):
             seen.add(request._invocation)
         return bool(seen) and not state.failure.done()
 
+    def _has_pending_portable_mcp(self, state: _Submission) -> bool:
+        if state.handle is None or len(state.questions) != 1:
+            return False
+        (question,) = state.questions.values()
+        return (
+            isinstance(question, ApprovalRequest)
+            and question.subagent_id is None
+            and question.submission_id == state.handle.submission_id
+            and question.turn_id == state.handle.turn_id
+            and question._message.get("type") == "elicitation_request"
+            and isinstance(question._message.get("_sdk_question_id"), str)
+        )
+
     async def _manual_ready(self, state: _Submission, *, probe: bool = False) -> bool:
         if (
             self._active is not state
@@ -7560,9 +7578,13 @@ class Session(Generic[ContextT, OutputT]):
             raise NativeError("Native checkpoint readiness could not be verified") from None
         if not ready:
             return False
-        return self._validate_pending_manual(state) or any(
-            child.owner is state and child.sealing and child.checkpoint is not None
-            for child in self._configured_children
+        return (
+            self._validate_pending_manual(state)
+            or self._has_pending_portable_mcp(state)
+            or any(
+                child.owner is state and child.sealing and child.checkpoint is not None
+                for child in self._configured_children
+            )
         )
 
     async def _wait_manual_boundary(
@@ -7581,13 +7603,17 @@ class Session(Generic[ContextT, OutputT]):
             native_progress = self._native._manual_progress()
             if require_request and (
                 state.handle is None
-                or not self._validate_pending_manual(state)
+                or not (
+                    self._validate_pending_manual(state) or self._has_pending_portable_mcp(state)
+                )
                 or self._child_admissions
                 or any(not child.completion.done() for child in self._child_callbacks.values())
             ):
                 return False
             if await self._manual_ready(state):
                 return True
+            if require_request and self._has_pending_portable_mcp(state):
+                return False
             changed = asyncio.create_task(state.changed.wait())
             finished = asyncio.ensure_future(self._native._wait_manual_progress(native_progress))
             try:

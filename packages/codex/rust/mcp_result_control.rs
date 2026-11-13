@@ -190,6 +190,12 @@ pub(crate) struct Selection {
 }
 
 impl Selection {
+    pub(crate) fn has_callbacks(&self) -> bool {
+        !self.servers.is_empty()
+            || !self.metadata_servers.is_empty()
+            || !self.discovery_servers.is_empty()
+    }
+
     pub(crate) fn validate(&self, requested: &HashMap<String, McpServerConfig>) -> Result<()> {
         for (name, selected) in &self.servers {
             let server = requested.get(name);

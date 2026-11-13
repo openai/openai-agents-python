@@ -2378,3 +2378,17 @@ mod tests {
         assert!(profile_receipt(&invalid).is_err());
     }
 }
+
+/// Native MCP replay cannot rerun host MCP callbacks from a checkpoint.
+pub(crate) fn native_mcp_checkpoint_source(source: &CapturedAgentProfile) -> bool {
+    source
+        .profile
+        .data
+        .get::<crate::native_interception::ProfileMcpPolicy>()
+        .is_some_and(|policy| !policy.has_callbacks())
+        && source
+            .profile
+            .data
+            .get::<crate::mcp_result_control::Selection>()
+            .is_some_and(|selection| !selection.has_callbacks())
+}

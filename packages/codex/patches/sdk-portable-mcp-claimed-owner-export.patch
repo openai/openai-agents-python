@@ -1,0 +1,14 @@
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 23e0b480..6dacde25 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -66,7 +66,8 @@ pub use codex_thread::GuardianRootMessage;
+ pub use codex_thread::GuardianRootSnapshot;
+ pub use codex_thread::ThreadConfigSnapshot;
+ pub use owned_question::{
+-    CapturedMcpApproval, McpApprovalCheckpointData, OwnedQuestion, PreparedMcpApproval,
++    CapturedMcpApproval, ClaimedMcpApproval, McpApprovalCheckpointData, OwnedQuestion,
++    PreparedMcpApproval,
+ };
+ pub use session::sdk_raw_usage::SdkRawUsageLink;
+ pub use session::turn_context::TurnContext;

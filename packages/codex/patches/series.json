@@ -1003,7 +1003,31 @@
     {
       "path": "sdk-provider-websocket-frame-cap.patch",
       "sha256": "4236dfecf6a01d471582da77fdbb78d1416c0e61249bffed060138a51e07702e"
+    },
+    {
+      "path": "sdk-portable-mcp-approval-owner.patch",
+      "sha256": "a95c9563da5db07abbbbd292d9c32040917e10d1f50223e5eaecf416de069dab"
+    },
+    {
+      "path": "sdk-portable-mcp-claimed-owner-export.patch",
+      "sha256": "41895431ed461c5cb0f552b55cb87f309e792a6214d02a290886af0c285ac496"
+    },
+    {
+      "path": "sdk-portable-mcp-handler-export.patch",
+      "sha256": "524dd0fb5b047c25ced972766020fc438ac66a8768c2ffaa0946fc41aa3a4ef3"
+    },
+    {
+      "path": "sdk-portable-mcp-direct-root-binding.patch",
+      "sha256": "3a04e30490c72c278562f33296ffaf8713a7491cc6c2e40f0a19383f07689198"
+    },
+    {
+      "path": "sdk-portable-mcp-admission-source.patch",
+      "sha256": "d51ae0a0be5970a28f8279c4b9582d900ceca84ad149ce3646d3ee4391837cdb"
+    },
+    {
+      "path": "sdk-portable-mcp-step-source.patch",
+      "sha256": "0b139662936e18f98a3b7460a38a3c6a9b07ab5232cb8a525d648c4e086c2f86"
     }
   ],
-  "result_tree": "691233eb5a1e1133061eaa84be7c70c948279bc9"
+  "result_tree": "45c5cd7ad9d6d7bac9bb96becb2b7b3beb0912c5"
 }
