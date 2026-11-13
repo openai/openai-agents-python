@@ -1,0 +1,330 @@
+diff --git a/codex-rs/protocol/src/prompt_cache.rs b/codex-rs/protocol/src/prompt_cache.rs
+index da9f0d040af8fc5254e31b655423e7d17deb4282..6be26958f1eedf9b60d3a312daa8a33ca0ff01d2 100644
+--- a/codex-rs/protocol/src/prompt_cache.rs
++++ b/codex-rs/protocol/src/prompt_cache.rs
+@@ -5,6 +5,7 @@ use crate::models::ResponseItem;
+ use schemars::JsonSchema;
+ use serde::{Deserialize, Serialize};
+ use sha2::{Digest, Sha256};
++use std::collections::{HashMap, HashSet};
+ use ts_rs::TS;
+
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+@@ -111,13 +112,13 @@ impl PromptCacheAnnotation {
+         content: &[ContentItem],
+         breakpoints: &[(usize, PromptCacheBreakpoint)],
+     ) -> Result<Option<Self>, serde_json::Error> {
+-        if occurrence.is_empty()
+-            || breakpoints.is_empty()
+-            || breakpoints.iter().any(|(index, _)| *index >= content.len())
+-            || breakpoints
+-                .iter()
+-                .enumerate()
+-                .any(|(at, (index, _))| breakpoints[..at].iter().any(|(prior, _)| prior == index))
++        if occurrence.is_empty() || breakpoints.is_empty() || breakpoints.len() > content.len() {
++            return Ok(None);
++        }
++        let mut indices = HashSet::with_capacity(breakpoints.len());
++        if breakpoints
++            .iter()
++            .any(|(index, _)| *index >= content.len() || !indices.insert(*index))
+         {
+             return Ok(None);
+         }
+@@ -142,27 +143,49 @@ impl PromptCacheAnnotation {
+         prepared: &[ContentItem],
+         destinations: &[(usize, usize)],
+     ) -> Result<Option<Self>, serde_json::Error> {
+-        if occurrence != self.occurrence || occurrence.is_empty() {
++        if occurrence != self.occurrence
++            || occurrence.is_empty()
++            || self.parts.len() > original.len()
++            || self.parts.len() > prepared.len()
++        {
+             return Ok(None);
+         }
+-        let mut breakpoints = Vec::new();
++        let mut sources = HashSet::with_capacity(self.parts.len());
++        if self
++            .parts
++            .iter()
++            .any(|part| !sources.insert(part.content_index))
++        {
++            return Ok(None);
++        }
++        let mut mappings = HashMap::<usize, Option<usize>>::with_capacity(self.parts.len());
++        for (from, to) in destinations {
++            if sources.contains(from) {
++                mappings
++                    .entry(*from)
++                    .and_modify(|target| *target = None)
++                    .or_insert(Some(*to));
++            }
++        }
++        let mut source_counts = None;
++        let mut target_counts = None;
++        let mut targets = HashSet::with_capacity(self.parts.len());
++        let mut breakpoints = Vec::with_capacity(self.parts.len());
+         for part in &self.parts {
+             let Some(source) = original.get(part.content_index) else {
+                 return Ok(None);
+             };
+-            if content_fingerprint(source)? != part.content_sha256 {
++            let source_fingerprint = content_fingerprint(source)?;
++            if source_fingerprint != part.content_sha256 {
+                 return Ok(None);
+             }
+-            let mut matches = destinations
+-                .iter()
+-                .filter(|(from, _)| *from == part.content_index);
+-            let Some((_, target)) = matches.next() else {
++            let Some(target) = mappings.get(&part.content_index).copied().flatten() else {
+                 return Ok(None);
+             };
+-            let Some(prepared_part) = prepared.get(*target) else {
++            let Some(prepared_part) = prepared.get(target) else {
+                 return Ok(None);
+             };
+-            if matches.next().is_some() {
++            if !targets.insert(target) {
+                 return Ok(None);
+             }
+             let same_prepared_content = match (source, prepared_part) {
+@@ -172,18 +195,25 @@ impl PromptCacheAnnotation {
+             if !same_prepared_content {
+                 return Ok(None);
+             }
+-            if *target != part.content_index {
+-                let repeated_source = original.iter().filter(|item| *item == source).count() > 1;
+-                let repeated_target = prepared
+-                    .iter()
+-                    .filter(|item| *item == prepared_part)
+-                    .count()
+-                    > 1;
+-                if repeated_source || repeated_target {
++            if target != part.content_index {
++                if source_counts.is_none() {
++                    source_counts = Some(fingerprint_counts(original)?);
++                    target_counts = Some(fingerprint_counts(prepared)?);
++                }
++                let target_fingerprint = content_fingerprint(prepared_part)?;
++                if source_counts
++                    .as_ref()
++                    .and_then(|counts| counts.get(&source_fingerprint))
++                    != Some(&1)
++                    || target_counts
++                        .as_ref()
++                        .and_then(|counts| counts.get(&target_fingerprint))
++                        != Some(&1)
++                {
+                     return Ok(None);
+                 }
+             }
+-            breakpoints.push((*target, part.breakpoint));
++            breakpoints.push((target, part.breakpoint));
+         }
+         Self::bind(self.occurrence.clone(), prepared, &breakpoints)
+     }
+@@ -196,17 +226,19 @@ impl PromptCacheAnnotation {
+         let ResponseItem::Message { content, .. } = item else {
+             return Ok(PromptCacheProjection::Refused);
+         };
+-        if occurrence != self.occurrence || occurrence.is_empty() {
++        if occurrence != self.occurrence
++            || occurrence.is_empty()
++            || self.parts.len() > content.len()
++        {
+             return Ok(PromptCacheProjection::Refused);
+         }
+-        for (at, binding) in self.parts.iter().enumerate() {
++        let mut indices = HashSet::with_capacity(self.parts.len());
++        for binding in &self.parts {
+             let Some(part) = content.get(binding.content_index) else {
+                 return Ok(PromptCacheProjection::Refused);
+             };
+             if matches!(part, ContentItem::OutputText { .. })
+-                || self.parts[..at]
+-                    .iter()
+-                    .any(|prior| prior.content_index == binding.content_index)
++                || !indices.insert(binding.content_index)
+                 || content_fingerprint(part)? != binding.content_sha256
+             {
+                 return Ok(PromptCacheProjection::Refused);
+@@ -222,37 +254,55 @@ impl PromptCacheAnnotation {
+     }
+ }
+
++fn fingerprint_counts(
++    content: &[ContentItem],
++) -> Result<HashMap<String, usize>, serde_json::Error> {
++    let mut counts = HashMap::new();
++    for part in content {
++        *counts.entry(content_fingerprint(part)?).or_default() += 1;
++    }
++    Ok(counts)
++}
++
++fn unique_items(items: &[ResponseItem]) -> HashMap<String, Option<&ResponseItem>> {
++    let mut indexed = HashMap::new();
++    for item in items {
++        if let Some(id) = item.id() {
++            indexed
++                .entry(id.to_string())
++                .and_modify(|value| *value = None)
++                .or_insert(Some(item));
++        }
++    }
++    indexed
++}
++
+ /// The caller owns an in-place preparation step; item identities and part counts remain fixed.
+ pub fn after_in_place_item_preparation(
+     annotations: &[PromptCacheAnnotation],
+     original: &[ResponseItem],
+     prepared: &[ResponseItem],
+ ) -> Vec<PromptCacheAnnotation> {
++    if annotations.is_empty() {
++        return Vec::new();
++    }
++    let mut occurrences = HashSet::with_capacity(annotations.len());
++    let mut duplicates = HashSet::new();
++    for annotation in annotations {
++        if !occurrences.insert(annotation.occurrence.as_str()) {
++            duplicates.insert(annotation.occurrence.as_str());
++        }
++    }
++    let sources = unique_items(original);
++    let targets = unique_items(prepared);
+     annotations
+         .iter()
+         .filter_map(|annotation| {
+-            if annotations
+-                .iter()
+-                .filter(|other| other.occurrence == annotation.occurrence)
+-                .count()
+-                != 1
+-            {
+-                return None;
+-            }
+-            let same_occurrence = |item: &&ResponseItem| {
+-                item.id()
+-                    .is_some_and(|id| id.to_string() == annotation.occurrence)
+-            };
+-            let mut sources = original.iter().filter(same_occurrence);
+-            let source = sources.next()?;
+-            if sources.next().is_some() {
+-                return None;
+-            }
+-            let mut targets = prepared.iter().filter(same_occurrence);
+-            let target = targets.next()?;
+-            if targets.next().is_some() {
++            if duplicates.contains(annotation.occurrence.as_str()) {
+                 return None;
+             }
++            let source = sources.get(&annotation.occurrence).copied().flatten()?;
++            let target = targets.get(&annotation.occurrence).copied().flatten()?;
+             let (
+                 ResponseItem::Message {
+                     content: source, ..
+@@ -465,4 +515,101 @@ mod tests {
+             .is_err()
+         );
+     }
++
++    #[test]
++    fn duplicate_part_bindings_refuse_only_the_annotation() {
++        let original = item(json!([{"type":"input_text","text":"unchanged"}]));
++        let before = serde_json::to_value(&original).unwrap();
++        let mut binding = bind("msg_duplicate_parts", &original, 0);
++        binding.parts.push(binding.parts[0].clone());
++        assert_eq!(
++            binding.project("msg_duplicate_parts", &original).unwrap(),
++            PromptCacheProjection::Refused
++        );
++        let ResponseItem::Message { content, .. } = &original else {
++            panic!()
++        };
++        assert!(
++            binding
++                .after_preparation("msg_duplicate_parts", content, content, &[(0, 0)])
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            PromptCacheAnnotation::bind(
++                "msg_duplicate_parts".into(),
++                content,
++                &[(0, marker()), (0, marker())]
++            )
++            .unwrap()
++            .is_none()
++        );
++        assert_eq!(serde_json::to_value(&original).unwrap(), before);
++    }
++
++    #[test]
++    fn large_annotated_part_fixture_stays_within_native_frame_budget() {
++        const PARTS: usize = 32_768;
++        let content = (0..PARTS)
++            .map(|index| ContentItem::InputText {
++                text: format!("part-{index}"),
++            })
++            .collect::<Vec<_>>();
++        let breakpoints = (0..PARTS)
++            .map(|index| (index, marker()))
++            .collect::<Vec<_>>();
++        let binding = PromptCacheAnnotation::bind("msg_many_parts".into(), &content, &breakpoints)
++            .unwrap()
++            .unwrap();
++        assert!(serde_json::to_vec(&(&content, &binding)).unwrap().len() < 8 * 1024 * 1024);
++        let original = item(serde_json::to_value(&content).unwrap());
++        let destinations = (0..PARTS).map(|index| (index, index)).collect::<Vec<_>>();
++        let prepared = binding
++            .after_preparation("msg_many_parts", &content, &content, &destinations)
++            .unwrap()
++            .unwrap();
++        let PromptCacheProjection::Annotated(projected) =
++            prepared.project("msg_many_parts", &original).unwrap()
++        else {
++            panic!()
++        };
++        assert_eq!(prepared.parts.len(), PARTS);
++        for index in [0, PARTS - 1] {
++            assert_eq!(
++                projected["content"][index]["prompt_cache_breakpoint"],
++                json!({"mode":"explicit"})
++            );
++            assert_eq!(projected["content"][index]["text"], format!("part-{index}"));
++        }
++    }
++
++    #[test]
++    fn many_occurrences_keep_unique_annotations_and_refuse_ambiguous_owners() {
++        let original = (0..4096).map(|index| serde_json::from_value(json!({"type":"message","role":"user","id":format!("msg_many_{index}"),"content":[{"type":"input_text","text":"unchanged"}]})).unwrap()).collect::<Vec<ResponseItem>>();
++        let annotations = original
++            .iter()
++            .enumerate()
++            .map(|(index, item)| bind(&format!("msg_many_{index}"), item, 0))
++            .collect::<Vec<_>>();
++        let retained = after_in_place_item_preparation(&annotations, &original, &original);
++        assert_eq!(retained, annotations);
++        let mut duplicates = annotations.clone();
++        duplicates.push(annotations[0].clone());
++        let retained = after_in_place_item_preparation(&duplicates, &original, &original);
++        assert_eq!(retained.len(), annotations.len() - 1);
++        assert!(
++            retained
++                .iter()
++                .all(|annotation| annotation.occurrence != "msg_many_0")
++        );
++        let mut duplicated_source = original.clone();
++        duplicated_source.push(original[0].clone());
++        let retained = after_in_place_item_preparation(&annotations, &duplicated_source, &original);
++        assert_eq!(retained.len(), annotations.len() - 1);
++        assert!(
++            retained
++                .iter()
++                .all(|annotation| annotation.occurrence != "msg_many_0")
++        );
++    }
+ }

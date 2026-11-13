@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, cast
 
-from ._function_tools import FunctionTool
+from ._function_tools import FunctionTool, Tool
 from .agent import Agent
 from .decision_handoff import DecisionHandoff, _decision_handoff_tool
 from .handoffs import Handoff
@@ -30,6 +31,8 @@ class _AgentProfile:
     handoff_callbacks: Mapping[str, int] = field(default_factory=dict)
     handoff_options: Mapping[str, RealtimeHandoff] = field(default_factory=dict)
     decision_handoffs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    native_provider_id: str | None = None
+    opening_tools: tuple[Tool[Any], ...] = ()
 
 
 def _handoff_name(agent: Agent[Any, Any]) -> str:
@@ -49,6 +52,49 @@ def _python_tool_slot(tool: object) -> FunctionTool[Any, Any, Any] | None:
     if isinstance(tool, ToolSearch) and tool._manual is not None:
         return tool._manual
     return tool if isinstance(tool, FunctionTool) else None
+
+
+def _resolve_tool_name_collisions(
+    tools: Sequence[Tool[Any]], handoff_names: Sequence[str]
+) -> tuple[tuple[Tool[Any], ...], tuple[int, ...]]:
+    """Apply the opt-in winner policy only to eager application functions and handoffs."""
+    function_indices: dict[str, list[int]] = {}
+    handoff_indices: dict[str, list[int]] = {}
+    for index, tool in enumerate(tools):
+        if isinstance(tool, FunctionTool) and tool.namespace in (None, "functions"):
+            function_indices.setdefault(tool.name, []).append(index)
+    for index, name in enumerate(handoff_names):
+        handoff_indices.setdefault(name, []).append(index)
+    discard_tools: set[int] = set()
+    discard_handoffs: set[int] = set()
+    for name in dict.fromkeys((*function_indices, *handoff_indices)):
+        functions = function_indices.get(name, [])
+        handoffs = handoff_indices.get(name, [])
+        if len(functions) + len(handoffs) < 2:
+            continue
+        for index in functions:
+            tool = tools[index]
+            if (
+                type(tool) is not FunctionTool
+                or tool.namespace is not None
+                or tool._bind is None
+                or tool.defer_loading
+                or tool._custom_format is not None
+                or tool.allowed_callers is not None
+                and "direct" not in tool.allowed_callers
+            ):
+                raise ValueError(
+                    "Namespaced, deferred and native tool names require unique identities"
+                )
+        discard_tools.update(functions if handoffs else functions[:-1])
+        discard_handoffs.update(handoffs[:-1])
+        logging.getLogger("agents.native.tools").warning(
+            "Duplicate function or handoff name; keeping the final declaration."
+        )
+    return (
+        tuple(tool for index, tool in enumerate(tools) if index not in discard_tools),
+        tuple(index for index in range(len(handoff_names)) if index not in discard_handoffs),
+    )
 
 
 def _capture_agent_graph(
@@ -71,6 +117,33 @@ def _capture_agent_graph(
     )
     indices = {id(root): 0}
     resolved: dict[int, tuple[Callable[[], Agent[Any, Any]], Agent[Any, Any]]] = {}
+    provider_ids: dict[int, str] = {}
+
+    def resolve(reference: Callable[[], Agent[Any, Any]]) -> Agent[Any, Any]:
+        cached = resolved.get(id(reference))
+        if cached is not None:
+            return cached[1]
+        result = reference()
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("Handoff target resolvers must be synchronous")
+        if not isinstance(result, Agent):
+            raise TypeError("A handoff target resolver must return a native Agent")
+        resolved[id(reference)] = (reference, result)
+        return result
+
+    def name_for(
+        reference: Agent[Any, Any] | Handoff[Any, Any] | DecisionHandoff | RealtimeHandoff,
+    ) -> str:
+        if isinstance(reference, DecisionHandoff):
+            return reference.name
+        if isinstance(reference, Handoff):
+            return reference.callback.name
+        if isinstance(reference, RealtimeHandoff):
+            return reference.name if reference.name is not None else _handoff_name(reference.agent)
+        return _handoff_name(reference)
+
     profiles: list[_AgentProfile] = []
     for agent in agents:
         source = opening if agent is root else agent
@@ -82,15 +155,24 @@ def _capture_agent_graph(
         instructions = (
             source.instructions if getattr(source, "_hosted_instructions_provided", True) else None
         )
+        tools = tuple(tool for tool in source.tools if id(tool) not in handoff_bindings)
+        handoffs = source.handoffs
+        if source.tool_name_collision_policy == "warn":
+            references = tuple(
+                resolve(reference) if callable(reference) else reference for reference in handoffs
+            )
+            tools, indices_to_keep = _resolve_tool_name_collisions(
+                tools, tuple(name_for(reference) for reference in references)
+            )
+            handoffs = tuple(references[index] for index in indices_to_keep)
         declaration = Agent[Any, Any](
             instructions=cast(str, instructions),
             realtime=source.realtime,
             hosted_prompt=source.hosted_prompt,
             name=source.name,
-            tools=tuple(tool for tool in source.tools if id(tool) not in handoff_bindings)
-            if getattr(source, "_hosted_tools_provided", True)
-            else None,
-            handoffs=source.handoffs,
+            tools=tools if getattr(source, "_hosted_tools_provided", True) else None,
+            handoffs=handoffs,
+            tool_name_collision_policy=source.tool_name_collision_policy,
             model=source.model,
             model_settings=source.model_settings,
             provider=source.provider,
@@ -98,6 +180,7 @@ def _capture_agent_graph(
             output_type=cast(OutputSpec[Any], source.output_type),
             programmatic_tool_calling=source.programmatic_tool_calling,
             transform_context=source.transform_context,
+            prepare_handoff_input=source.prepare_handoff_input,
             before_compact=source.before_compact,
             compaction=source.compaction,
             before_complete=source.before_complete,
@@ -105,17 +188,45 @@ def _capture_agent_graph(
             input_guardrails=source.input_guardrails,
             output_guardrails=source.output_guardrails,
         )
-        if declaration.provider is not None and declaration.provider is not opening.provider:
-            raise ValueError("Handoff profiles must share the Session provider")
+        target_provider = declaration.provider
+        native_provider_id = None
+        if target_provider is not None and target_provider is not opening.provider:
+            root_provider = opening.provider
+            borrowed = (
+                root_provider is not None
+                and root_provider.model_backend is not None
+                and target_provider.model_backend is not None
+            )
+            native = (
+                target_provider.auth is None
+                and target_provider.model_backend is None
+                and (
+                    root_provider is None
+                    and target_provider.response_mode == "streaming"
+                    or root_provider is not None
+                    and root_provider.auth is None
+                    and root_provider.model_backend is None
+                    and root_provider.response_mode == target_provider.response_mode
+                )
+            )
+            if opening.realtime is not None or not (borrowed or native):
+                raise ValueError(
+                    "Distinct handoff providers require compatible text inference providers"
+                )
+            if native:
+                native_provider_id = provider_ids.setdefault(
+                    id(target_provider), f"sdk_profile_{indices[id(agent)]}"
+                )
         if declaration.programmatic_tool_calling != opening.programmatic_tool_calling:
             raise ValueError("Handoff profiles must share programmatic tool calling mode")
         output = _prepare_spec(declaration.output_type)
-        if (output.mode, output.schema, output.wrapped) != (
+        if opening.realtime is not None and (output.mode, output.schema, output.wrapped, output.strict) != (
             root_output.mode,
             root_output.schema,
             root_output.wrapped,
+            root_output.strict,
         ):
-            raise ValueError("Handoff profiles must share output mode, schema and wrapping")
+            raise ValueError("Realtime handoff profiles must share output mode and prompted schema")
         roles = tuple(tool for tool in declaration.tools if isinstance(tool, NativeAgents))
         if roles != root_roles:
             raise ValueError("Handoff profiles must share native child-role configuration")
@@ -162,26 +273,8 @@ def _capture_agent_graph(
             elif isinstance(reference, Agent):
                 target = reference
             else:
-                cached = resolved.get(id(reference))
-                if cached is None:
-                    result = reference()
-                    if inspect.isawaitable(result):
-                        if inspect.iscoroutine(result):
-                            result.close()
-                        raise TypeError("Handoff target resolvers must be synchronous")
-                    if not isinstance(result, Agent):
-                        raise TypeError("A handoff target resolver must return a native Agent")
-                    resolved[id(reference)] = (reference, result)
-                    target = result
-                else:
-                    target = cached[1]
-            name = (
-                reference.callback.name
-                if isinstance(reference, Handoff)
-                else reference.name
-                if isinstance(reference, RealtimeHandoff) and reference.name is not None
-                else _handoff_name(target)
-            )
+                target = resolve(reference)
+            name = name_for(reference) if not callable(reference) else _handoff_name(target)
             if not name or len(name) > 64 or re.fullmatch(r"[a-zA-Z0-9_-]+", name) is None:
                 raise ValueError("A handoff name must contain 1 to 64 letters, digits, '_' or '-'")
             index = indices.get(id(target))
@@ -237,6 +330,8 @@ def _capture_agent_graph(
                 MappingProxyType(callbacks),
                 MappingProxyType(options),
                 MappingProxyType(decision_handoffs),
+                native_provider_id,
+                tools,
             )
         )
     return tuple(profiles)

@@ -1034,3 +1034,60 @@ asyncio.run(main())
         }
     else:
         assert tool_output(responses.requests[1], "fresh-call") == "fresh-text"
+
+
+@pytest.mark.parametrize("strict", [False, True])
+async def test_selected_mcp_honors_function_tool_strict_declaration(
+    responses: ResponsesFixture, strict: bool
+) -> None:
+    from aiohttp import web
+
+    class SchemaPeer(Peer):
+        async def handle(self, request: web.Request) -> web.Response:
+            body = await request.json()
+            response = await super().handle(request)
+            if body.get("method") == "tools/list":
+                data = json.loads(response.body)
+                for tool in data["result"]["tools"]:
+                    tool["inputSchema"] = {
+                        "type": "object",
+                        "properties": {"key": {"type": "string"}, "optional": {"type": "string"}},
+                        "required": ["key"],
+                        "additionalProperties": False,
+                    }
+                return web.json_response(data)
+            return response
+
+    peer = SchemaPeer(names=("find-record",))
+    context = {"scope": "selected-strict"}
+    native_provider = provider(responses)
+    try:
+        async with timeout(20), peer.serve() as url:
+            async with MCPServerStreamableHttp(
+                params={"url": url}, cache_tools_list=True
+            ) as client:
+                tools = await select_mcp_tools(
+                    MCPNamespace("docs", client), context=context, tool_names=["find-record"]
+                )
+                selected = replace(tools[0], strict=strict)
+                source_schema = selected._schema_json
+                args = {"key": "43", "optional": "present"}
+                call = mcp_call(selected.name, selected.namespace, "selected-strict")
+                call["item"]["arguments"] = json.dumps(args)
+                responses.respond(call)
+                responses.respond(assistant_output("complete"))
+                async with Agent(
+                    instructions="Read.", tools=[selected], provider=native_provider
+                ).session(context=context) as session:
+                    turn = await session.submit("Read")
+                    assert (await turn.get_result()).final_output == "complete"
+                declaration = declarations(responses.requests[0])[selected.namespace, selected.name]
+                assert declaration.get("strict", False) is strict
+                schema = declaration["parameters"]
+                assert set(schema["required"]) == ({"key", "optional"} if strict else {"key"})
+                assert schema["additionalProperties"] is False
+                assert selected._schema_json == source_schema
+                assert json.loads(source_schema)["required"] == ["key"]
+                assert peer.calls == [{"name": "find-record", "arguments": args}]
+    finally:
+        await native_provider.aclose()

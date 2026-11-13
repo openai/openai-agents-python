@@ -1,0 +1,25 @@
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+--- a/codex-rs/core/src/session/model_attempts.rs
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -364,6 +364,7 @@
+                     usage.requests -= 1;
+                     usage.requests_without_token_usage -= 1;
+                     measurement.provider_managed = true;
++                    state.snapshot.provider_managed = Some(true);
+                     Ok(None)
+                 }
+                 ProviderRequestAccounting::Create if measurement.provider_managed => {
+diff --git a/codex-rs/protocol/src/model_retry.rs b/codex-rs/protocol/src/model_retry.rs
+--- a/codex-rs/protocol/src/model_retry.rs
++++ b/codex-rs/protocol/src/model_retry.rs
+@@ -190,6 +190,10 @@
+     pub owner_attempt_id: Option<String>,
+     pub usage: ModelAttemptUsage,
+     pub terminal_attempt_id: Option<String>,
++    /// Physical provider requests own usage; intermediate logical admissions are not additive.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub provider_managed: Option<bool>,
+ }
+
+ #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]

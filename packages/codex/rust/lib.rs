@@ -1168,6 +1168,22 @@ impl NativeThread {
         })
     }
 
+    fn _append_recovered_history<'py>(
+        &self,
+        py: Python<'py>,
+        expected_revision: String,
+        id: String,
+        text: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::append_recovered(&inner, expected_revision, id, text)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
     fn _pop_history<'py>(
         &self,
         py: Python<'py>,
@@ -1180,6 +1196,21 @@ impl NativeThread {
                 .await
                 .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
+    #[pyo3(signature = (*, ttl_seconds=None))]
+    fn _configure_history_retention<'py>(
+        &self,
+        py: Python<'py>,
+        ttl_seconds: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            context::configure_history_retention(&inner, ttl_seconds)
+                .await
+                .map_err(py_error)
         })
     }
 
@@ -1243,6 +1274,25 @@ impl NativeThread {
             .mcp_result_control()?
             .and_then(|control| control.owner(nonce))
             .is_some_and(|control| control.handoff(nonce)))
+    }
+
+    fn _take_native_mcp_transport_error(
+        &self,
+        py: Python<'_>,
+        nonce: u64,
+        turn_id: &str,
+        call_id: &str,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let error = self
+            .mcp_result_control()?
+            .and_then(|control| control.owner(nonce))
+            .and_then(|control| control.take_transport_error(nonce, turn_id, call_id));
+        Ok(error.map(|error| {
+            let error = PyRuntimeError::new_err(mcp_result_control::transport_error_message(
+                error.as_ref(),
+            ));
+            error.into_value(py).into_any()
+        }))
     }
 
     fn _check_native_mcp_result(&self, nonce: u64) -> PyResult<bool> {
@@ -2495,12 +2545,13 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_model_producer(request_id)))
     }
 
-    #[pyo3(signature = (request_id, *, chat_stream=false, upstream_request_id=None))]
+    #[pyo3(signature = (request_id, *, chat_stream=false, upstream_request_id=None, responses_websocket_stream=false))]
     fn _start_model_producer_stream(
         &self,
         request_id: u64,
         chat_stream: bool,
         upstream_request_id: Option<String>,
+        responses_websocket_stream: bool,
     ) -> PyResult<bool> {
         let Some(inner) = self.live()? else {
             return Ok(false);
@@ -2517,17 +2568,19 @@ impl NativeThread {
                     observe_raw,
                     chat_stream,
                     upstream_request_id,
+                    responses_websocket_stream,
                 )
             }))
     }
 
-    #[pyo3(signature = (request_id, data_json, *, raw_chat_chunk=false))]
+    #[pyo3(signature = (request_id, data_json, *, raw_chat_chunk=false, raw_responses_websocket_frame=false))]
     fn _push_model_producer_event<'py>(
         &self,
         py: Python<'py>,
         request_id: u64,
         data_json: String,
         raw_chat_chunk: bool,
+        raw_responses_websocket_frame: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let tools = self.live()?.and_then(|inner| {
             inner
@@ -2540,7 +2593,12 @@ impl NativeThread {
                 return Ok(false);
             };
             Ok(tools
-                .push_model_producer_event(request_id, &data_json, raw_chat_chunk)
+                .push_model_producer_event(
+                    request_id,
+                    &data_json,
+                    raw_chat_chunk,
+                    raw_responses_websocket_frame,
+                )
                 .await)
         })
     }
@@ -2617,6 +2675,48 @@ impl NativeThread {
                 &owner.attempt_id,
                 &owner.callback,
                 usage,
+            )
+            .map_err(py_error)
+    }
+
+    fn _account_provider_request(
+        &self,
+        owner_json: &str,
+        operation_json: &str,
+    ) -> PyResult<Option<String>> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct UsageOwner {
+            attempt_id: String,
+            callback: serde_json::Value,
+        }
+        if owner_json.len() > 16_384 || operation_json.len() > 65_536 {
+            return Err(py_error(
+                "Native provider request accounting exceeds capacity",
+            ));
+        }
+        let owner: UsageOwner = serde_json::from_str(owner_json).map_err(py_error)?;
+        let operation = serde_json::from_str(operation_json).map_err(py_error)?;
+        let Some(inner) = self.live()? else {
+            return Err(py_error(
+                "Native provider request accounting receipt expired",
+            ));
+        };
+        let Some(tools) = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+        else {
+            return Err(py_error(
+                "Native provider request accounting receipt expired",
+            ));
+        };
+        tools
+            .account_provider_request(
+                &inner.id.to_string(),
+                &owner.attempt_id,
+                &owner.callback,
+                operation,
             )
             .map_err(py_error)
     }
@@ -2714,6 +2814,25 @@ impl NativeThread {
             .reply_provider_response_span(id, data_json, error, thread, instance)
             .map_err(py_error)?;
         Ok(true)
+    }
+
+    #[pyo3(signature = (id, data, thread=None, instance=None))]
+    fn _reply_handoff_input(
+        &self,
+        id: u64,
+        data: Option<&str>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Handoff input requires current tools"))?;
+        tools
+            .reply_handoff_input(id, data, thread, instance)
+            .map_err(py_error)
     }
 
     #[pyo3(signature = (id, items_json, thread=None, instance=None))]
@@ -2840,7 +2959,7 @@ impl NativeThread {
             .map_err(py_error)
     }
 
-    #[pyo3(signature = (id, instructions, thread=None, instance=None, *, error=false))]
+    #[pyo3(signature = (id, instructions, thread=None, instance=None, *, error=false, withhold=false))]
     fn _reply_completion(
         &self,
         id: u64,
@@ -2848,6 +2967,7 @@ impl NativeThread {
         thread: Option<&str>,
         instance: Option<&str>,
         error: bool,
+        withhold: bool,
     ) -> PyResult<()> {
         let inner = self.current()?;
         let tools = inner
@@ -2855,13 +2975,22 @@ impl NativeThread {
             .thread_extension_data()
             .get::<python_tools::PythonTools>()
             .ok_or_else(|| py_error("Completion callbacks require Python tools"))?;
+        use codex_extension_api::TurnCompletionDecision;
+        let decision = if withhold {
+            if error || instructions.is_some() {
+                return Err(PyValueError::new_err("Invalid withheld completion reply"));
+            }
+            Ok(TurnCompletionDecision::Withhold)
+        } else if error {
+            Err(())
+        } else {
+            Ok(instructions.map_or(
+                TurnCompletionDecision::Accept,
+                TurnCompletionDecision::Continue,
+            ))
+        };
         tools
-            .reply_completion(
-                id,
-                if error { Err(()) } else { Ok(instructions) },
-                thread,
-                instance,
-            )
+            .reply_completion(id, decision, thread, instance)
             .map_err(py_error)
     }
 
@@ -3009,7 +3138,7 @@ impl NativeThread {
             .is_some_and(|frame| frame.raise_on_unknown_tool))
     }
 
-    #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None, operation_declaration_source_json=None))]
+    #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None, operation_declaration_source_json=None, profile_output_override=false))]
     fn _continue_manual<'py>(
         &self,
         py: Python<'py>,
@@ -3017,6 +3146,7 @@ impl NativeThread {
         tracing_context: Option<&str>,
         trace_json: Option<String>,
         operation_declaration_source_json: Option<&str>,
+        profile_output_override: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let context = tracing_context
             .map(codex_otel::sdk_trace::context)
@@ -3043,6 +3173,7 @@ impl NativeThread {
                     trace,
                     observation_submission_id,
                     operation_declaration_source,
+                    profile_output_override,
                 )
                 .await
                 .map_err(py_error)?;
@@ -4805,6 +4936,7 @@ fn _agent_profiles_restore_source(
     history_json: &str,
 ) -> PyResult<String> {
     let opening = agent_profiles::OpeningProfiles {
+        input_preparations: Default::default(),
         root_id: root_id.to_owned(),
         roster: serde_json::from_str(roster_json).map_err(py_error)?,
         fingerprint: agent_profiles::fingerprint(roster_json, root_id).map_err(py_error)?,
@@ -4825,6 +4957,7 @@ fn _agent_profiles_operation_source(
     turn_id: &str,
 ) -> PyResult<String> {
     let opening = agent_profiles::OpeningProfiles {
+        input_preparations: Default::default(),
         root_id: root_id.to_owned(),
         roster: serde_json::from_str(roster_json).map_err(py_error)?,
         fingerprint: agent_profiles::fingerprint(roster_json, root_id).map_err(py_error)?,

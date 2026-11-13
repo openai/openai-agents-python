@@ -144,10 +144,10 @@ class CustomStorage:
 
     This preview supports root Sessions with automatic Python tools and
     provider-hosted search, file search, code interpreter and image generation.
-    Standalone native tools, environments, goals, child agents, portable state
-    and manual tools are unsupported. Keep credentials and tool bindings in current application
-    code. Backend errors
-    fail the Session; they never select another store.
+    An idle Session can export its settled conversation with save_state() when no item TTL applies.
+    Open the copy with the current Agent and without storage. Keep credentials
+    and tool bindings in current application code. A backend error fails the
+    Session and leaves the backend selection intact.
     """
 
     backend: SessionStore

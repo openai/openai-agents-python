@@ -6,14 +6,10 @@ import pytest
 
 from agents import Agent, LocalStorage, NativeProvider
 from tests.native_fixtures import assistant_output, responses as responses
-
-
-def assert_native_opening_context(items):
-    assert [item["type"] for item in items] == ["message", "message"]
-    assert [item["role"] for item in items] == ["developer", "developer"]
-    assert [
-        item["internal_chat_message_metadata_passthrough"]["content_item_kinds"] for item in items
-    ] == [["collaboration_mode.instructions"], ["sdk_application.accepted"]]
+from tests.test_native_original_eligibility import (
+    assert_only_collaboration_rows,
+    assert_original_prefix,
+)
 
 
 async def test_raw_pop_empty_stale_and_exact_original(responses):
@@ -21,7 +17,7 @@ async def test_raw_pop_empty_stale_and_exact_original(responses):
     async with NativeProvider(base_url=responses.url, api_key="synthetic-pop") as provider:
         async with Agent(instructions="Answer.", provider=provider).session() as session:
             opening = await session.history_snapshot()
-            assert_native_opening_context(opening.items)
+            assert_only_collaboration_rows(opening.items)
             await session.transact_history(expected_revision=opening.revision, keep=0)
             empty = await session.history_snapshot()
             assert empty.items == () and empty.total == 0
@@ -83,9 +79,11 @@ async def test_raw_pop_tool_output_cold_restore_repair_and_stored_sibling(respon
             )
         async with agent.session(storage=storage, resume=identity) as restored:
             cold = await restored.history_snapshot()
-            assert cold.items[: len(popped.items)] == popped.items
-            assert_native_opening_context(cold.items[len(popped.items) :])
-            assert cold.revision != popped.revision
+            assert_original_prefix(cold, popped.items)
+            if cold.items == popped.items:
+                assert cold.revision == popped.revision
+            else:
+                assert cold.revision != popped.revision
             assert not any(
                 item.get("call_id") == "pop-pair" for item in (await restored.model_context()).items
             )
@@ -110,9 +108,7 @@ async def test_raw_pop_tool_output_cold_restore_repair_and_stored_sibling(respon
             assert [item["type"] for item in repaired] == ["function_call", "function_call_output"]
             assert repaired[-1]["output"] == output["output"]
         async with agent.session(storage=storage, resume=sibling_id) as sibling:
-            sibling_items = (await sibling.history_snapshot()).items
-            assert sibling_items[: len(before.items)] == before.items
-            assert_native_opening_context(sibling_items[len(before.items) :])
+            assert_original_prefix(await sibling.history_snapshot(), before.items)
     assert len(responses.requests) == 2
 
 
@@ -162,11 +158,20 @@ async def test_raw_pop_covered_summary_requires_explicit_rebuild(responses):
     assert len(responses.requests) == 1
 
 
-async def test_raw_pop_keeps_summary_through_successive_cold_pops(responses):
+@pytest.mark.parametrize("update_after_compaction", [False, True])
+async def test_raw_pop_keeps_summary_through_successive_cold_pops(
+    responses, update_after_compaction
+):
     responses.respond(assistant_output("late answer to remove"))
     responses.respond(assistant_output("continued after pop"))
     async with NativeProvider(base_url=responses.url, api_key="synthetic-post-summary") as provider:
         agent = Agent(instructions="Answer.", provider=provider)
+        instructions = "New SDK configuration after compaction."
+        restoring_agent = (
+            Agent(instructions=instructions, provider=provider)
+            if update_after_compaction
+            else agent
+        )
         async with agent.session() as source:
             initial = await source.history_snapshot()
             await source.transact_history(
@@ -181,12 +186,14 @@ async def test_raw_pop_keeps_summary_through_successive_cold_pops(responses):
                 ],
             )
             await source.compact(summary="preserved compaction summary")
+            if update_after_compaction:
+                await source.update(instructions=instructions)
             completed = await (await source.submit("late user input to keep")).get_result()
             assert completed.final_output == "late answer to remove"
             before = await source.history_snapshot()
             assert before.items[-1]["role"] == "assistant"
             state = await source.save_state()
-        async with agent.session(state=state) as restored:
+        async with restoring_agent.session(state=state) as restored:
             assert await restored.history_snapshot() == before
             removed = await restored.pop_history(expected_revision=before.revision)
             assert removed.item == before.items[-1]
@@ -199,7 +206,7 @@ async def test_raw_pop_keeps_summary_through_successive_cold_pops(responses):
             assert "late user input to keep" in json.dumps(late_user)
             second_state = await restored.save_state()
         assert len(responses.requests) == 1
-        async with agent.session(state=second_state) as twice_restored:
+        async with restoring_agent.session(state=second_state) as twice_restored:
             assert await twice_restored.history_snapshot() == after
             removed_user = await twice_restored.pop_history(expected_revision=after.revision)
             assert removed_user.item == late_user

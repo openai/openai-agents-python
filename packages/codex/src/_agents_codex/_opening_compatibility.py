@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._function_tools import FunctionTool, Tool
 from .canonical_storage import CustomStorage
+from .executor import Environment
 from .mcp import _MCP
 from .native_agents import NativeAgents
 from .recovery import ReconciledCall
@@ -14,6 +15,7 @@ from .state import LocalStorage
 from .tools import WebSearch
 
 if TYPE_CHECKING:
+    from .executor import EnvironmentSource
     from .state import SessionState
 
 
@@ -48,17 +50,31 @@ def _validate_custom_storage_capabilities(
     programmatic_tool_calling: bool,
     checklist: bool,
     mcp_tools: Sequence[_MCP[Any]],
-    has_environment: bool,
+    environment: EnvironmentSource[Any] | None,
     available: Sequence[Tool[Any]],
     tools: Sequence[FunctionTool[Any, Any, Any]],
 ) -> None:
-    if isinstance(storage, CustomStorage) and (
+    if not isinstance(storage, CustomStorage):
+        return
+    # These remote searches return data without a process or workspace write.
+    # Other executor routes still need durable effect and continuation receipts.
+    unsupported_environment = environment is not None and (
+        not isinstance(environment, Environment)
+        or environment._is_local
+        or not environment.read_only
+        or not environment.tools
+        or any(name not in ("project_glob", "project_grep") for name in environment.tools)
+        or bool(environment.capability_directories)
+    )
+    # Do not retain a caller-owned environment in the rejection traceback.
+    del environment
+    if (
         native_agents is not None
         or goals
         or programmatic_tool_calling
         or checklist
         or mcp_tools
-        or has_environment
+        or unsupported_environment
         or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
         or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
     ):

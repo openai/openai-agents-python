@@ -1,0 +1,340 @@
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -32,7 +32,20 @@
+
+ /// The original native publication remains the projection boundary after idle updates.
+ #[derive(Clone)]
+-struct HandoffPresentationAnchor(ResponseItem);
++struct HandoffPresentationAnchor(ResponseItem, Arc<std::sync::atomic::AtomicBool>);
++
++impl HandoffPresentationAnchor {
++    fn new(item: ResponseItem) -> Self {
++        Self(item, Arc::new(std::sync::atomic::AtomicBool::new(true)))
++    }
++}
++
++pub(super) fn handoff_presentation_is_live(profile: &AgentProfile) -> bool {
++    profile
++        .data
++        .get::<HandoffPresentationAnchor>()
++        .is_none_or(|anchor| anchor.1.load(std::sync::atomic::Ordering::Acquire))
++}
+
+ pub(super) fn handoff_presentation_anchor(profile: &AgentProfile) -> ResponseItem {
+     profile
+@@ -126,6 +139,9 @@
+     {
+         return Arc::clone(captured);
+     }
++    if let Some(anchor) = captured.profile.data.get::<HandoffPresentationAnchor>() {
++        anchor.1.store(false, std::sync::atomic::Ordering::Release);
++    }
+     let mut profile = captured.profile.as_ref().clone();
+     profile.data.remove::<AgentProfileHandoffPresentation>();
+     profile.data.remove::<HandoffPresentationAnchor>();
+@@ -151,13 +167,24 @@
+             if matches!(
+                 checkpoint.sdk_originals.as_ref(),
+                 Some(codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::Replace(_))
+-            ) && let Some(replacement) = checkpoint.replacement_history.as_ref()
++            ) || (matches!(
++                checkpoint.sdk_originals.as_ref(),
++                Some(
++                    codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::Preserve {
++                        preserve: true
++                    }
++                )
++            ) && checkpoint.window_number.is_some()
++                && checkpoint.window_id.is_some())
++            {
++                if let Some(replacement) = checkpoint.replacement_history.as_ref()
+                 && let Some(profile) = latest.as_mut()
+                 && let Some(anchor) = profile.presentation_anchor
+                 && !retains_publication(replacement, anchor)
+             {
+                 profile.record.presentation = None;
+                 profile.presentation_anchor = None;
++                }
+             }
+             continue;
+         }
+@@ -234,6 +261,58 @@
+ }
+
+ impl Session {
++    pub(crate) async fn project_handoff_compaction_input(
++        &self,
++        input: Vec<ResponseItem>,
++    ) -> CodexResult<(Vec<ResponseItem>, bool)> {
++        let Some(captured) = self.captured_agent_profile().await? else {
++            return Ok((input, false));
++        };
++        let Some(presentation) = captured
++            .profile
++            .data
++            .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++            .filter(|_| handoff_presentation_is_live(&captured.profile))
++        else {
++            return Ok((input, false));
++        };
++        self.validate_handoff_input_retention(true)?;
++        let original = crate::client_common::Prompt {
++            input,
++            ..Default::default()
++        };
++        let projected = crate::prepared_request::apply_handoff_presentation(
++            &original,
++            &presentation,
++            &presentation.destination,
++            &handoff_presentation_anchor(&captured.profile),
++        )
++        .map_err(invalid)?;
++        let changed = !original
++            .input
++            .iter()
++            .filter(|item| {
++                !matches!(item,
++            ResponseItem::Message { role, .. } if role != "user" && role != "assistant")
++            })
++            .eq(projected.input.iter().filter(|item| {
++                !matches!(item,
++                ResponseItem::Message { role, .. } if role != "user" && role != "assistant")
++            }));
++        Ok((projected.input, changed))
++    }
++
++    pub(crate) async fn validate_native_compaction_view(&self) -> CodexResult<()> {
++        let input = self.clone_history().await.raw_items().cloned().collect();
++        let (_, filtered) = self.project_handoff_compaction_input(input).await?;
++        if filtered {
++            return Err(invalid(
++                "Native compaction cannot combine with a filtered handoff presentation",
++            ));
++        }
++        Ok(())
++    }
++
+     pub(crate) fn validate_handoff_input_retention(&self, enabled: bool) -> CodexResult<()> {
+         if enabled
+             && self
+@@ -602,7 +681,9 @@
+                     let mut restored_target = (*target).clone();
+                     restored_target.data.insert(presentation);
+                     if let Some(anchor) = presentation_anchor {
+-                        restored_target.data.insert(HandoffPresentationAnchor(anchor.clone()));
++                        restored_target
++                            .data
++                            .insert(HandoffPresentationAnchor::new(anchor.clone()));
+                     }
+                     Arc::new(restored_target)
+                 } else {
+@@ -690,7 +771,7 @@
+             if let Some(anchor) = inherited {
+                 Arc::make_mut(&mut target)
+                     .data
+-                    .insert(HandoffPresentationAnchor(anchor.clone()));
++                    .insert(HandoffPresentationAnchor::new(anchor.clone()));
+             } else if !expected_transfer {
+                 return Err(invalid("Handoff presentation differs from committed destination"));
+             }
+@@ -955,7 +1036,12 @@
+         let mut input = values(&items[..frontier.root_count])?;
+         let mut previous = values(&items[frontier.root_count..frontier.sample_count])?;
+         if let Some(source) = source {
+-            if let Some(presentation) = source.profile.data.get::<AgentProfileHandoffPresentation>() {
++            if let Some(presentation) = source
++                .profile
++                .data
++                .get::<AgentProfileHandoffPresentation>()
++                .filter(|_| handoff_presentation_is_live(&source.profile))
++            {
+                 let publication = handoff_presentation_anchor(&source.profile);
+                 let publication = &publication;
+                 let anchors: Vec<_> = items.iter().enumerate().filter_map(|(index,item)|
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4877,6 +4877,19 @@
+         // Retirement can take the active slot after admission. It joins finalization
+         // before settling the task, and steering remains free during the writer wait.
+         drop(active_turn);
++        let compaction_profile = state
++            .session_configuration
++            .agent_profile
++            .as_ref()
++            .filter(|captured| {
++                captured
++                    .profile
++                    .data
++                    .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++                    .is_some()
++                    && agent_profile::handoff_presentation_is_live(&captured.profile)
++            })
++            .cloned();
+         let (compacted_item, window_ids) = {
+             let mut state = state;
+             let (window_number, window_ids) = metadata.window.unwrap_or_else(|| {
+@@ -4964,6 +4977,15 @@
+         let persisted = self.persist_rollout_items(&rollout_items).await;
+         // Once admitted, the task owns this checkpoint through the writer's
+         // durability barrier. Abort waits on the same gate before retiring it.
++        // Only an admitted live view adds the idle durability barrier.
++        if registered_turn.is_none()
++            && compaction_profile.is_some()
++            && (!persisted || self.flush_rollout().await.is_err())
++        {
++            return Err(CodexErr::Fatal(
++                "Canonical compaction commit outcome is uncertain".into(),
++            ));
++        }
+         if let (Some(turn), Some(source)) = (registered_turn, source_step_context) {
+             let flushed = self
+                 .flush_rollout()
+@@ -5002,6 +5024,25 @@
+                         turn_id: source.turn.sub_id.clone(),
+                         metadata: image,
+                     });
++            }
++        }
++        if let Some(expected) = compaction_profile {
++            let replacement = rollout_items
++                .iter()
++                .find_map(|record| match record {
++                    RolloutItem::Compacted(checkpoint) => checkpoint.replacement_history.as_deref(),
++                    _ => None,
++                })
++                .expect("Native compaction has a replacement");
++            let mut state = self.state.lock().await;
++            if let Some(current) = state.session_configuration.agent_profile.as_ref()
++                && current.receipt == expected.receipt
++                && agent_profile::handoff_presentation_anchor(&current.profile)
++                    == agent_profile::handoff_presentation_anchor(&expected.profile)
++            {
++                state.session_configuration.agent_profile = Some(
++                    agent_profile::profile_after_history_replacement(current, replacement),
++                );
+             }
+         }
+         if persisted && let Some(revision) = mcp_revision {
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2350,6 +2350,9 @@
+                         .profile
+                         .data
+                         .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++                        .filter(|_| {
++                            super::agent_profile::handoff_presentation_is_live(&profile.profile)
++                        })
+                         .map(|presentation| (profile, presentation))
+                 })
+                 .map(|(profile, presentation)| {
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -406,9 +406,13 @@
+     }
+     sess.ensure_rollout_durable().await?;
+     let history = sess.clone_retained_history().await?;
+-    let items = history
+-        .clone()
+-        .for_prompt(&step_context.settings.model_info.input_modalities);
++    let (items, filtered_handoff) = sess
++        .project_handoff_compaction_input(
++            history
++                .clone()
++                .for_prompt(&step_context.settings.model_info.input_modalities),
++        )
++        .await?;
+     let candidate_indexes = compaction_candidate_indexes(&items);
+     let input = codex_extension_api::CompactionInput {
+         step_store: Some(&step_context.extension_data),
+@@ -425,9 +429,12 @@
+         automatic: true,
+         optional: true,
+         candidate_indexes: &candidate_indexes,
+-        provider_response: sess
+-            .provider_response_for_window(&step_context, &history)
+-            .await,
++        provider_response: if filtered_handoff {
++            None
++        } else {
++            sess.provider_response_for_window(&step_context, &history)
++                .await
++        },
+         items: &items,
+     };
+     for contributor in contributors {
+@@ -510,9 +517,15 @@
+     let input = match captured_input {
+         Some(input) => input,
+         None => {
+-            items = history
+-                .clone()
+-                .for_prompt(&source_step_context.settings.model_info.input_modalities);
++            let projected = sess
++                .project_handoff_compaction_input(
++                    history
++                        .clone()
++                        .for_prompt(&source_step_context.settings.model_info.input_modalities),
++                )
++                .await?;
++            items = projected.0;
++            let filtered_handoff = projected.1;
+             indexes = compaction_candidate_indexes(&items);
+             current_input = codex_extension_api::CompactionInput {
+                 step_store: Some(&source_step_context.extension_data),
+@@ -529,9 +542,12 @@
+                 automatic: matches!(metadata.trigger(), CompactionTrigger::Auto),
+                 optional: matches!(metadata.phase(), CompactionPhase::PostTurn),
+                 candidate_indexes: &indexes,
+-                provider_response: sess
+-                    .provider_response_for_window(source_step_context, history)
+-                    .await,
++                provider_response: if filtered_handoff {
++                    None
++                } else {
++                    sess.provider_response_for_window(source_step_context, history)
++                        .await
++                },
+                 items: &items,
+             };
+             &current_input
+@@ -668,7 +684,21 @@
+         .as_ref()
+         .and_then(|_| turn_context.model_info().comp_hash.clone());
+     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
+-    let user_messages = collect_annotated_user_messages(history_items);
++    let (_, filtered_handoff) = sess
++        .project_handoff_compaction_input(
++            history_items
++                .iter()
++                .map(|envelope| envelope.item.clone())
++                .collect(),
++        )
++        .await?;
++    // A custom summary of a filtered view is a detached replacement. Keeping
++    // canonical user records here would reintroduce data the callback never saw.
++    let user_messages = if filtered_handoff {
++        Vec::new()
++    } else {
++        collect_annotated_user_messages(history_items)
++    };
+
+     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
+     if let Some(summary_item) = new_history.last_mut() {
+@@ -811,6 +841,7 @@
+             "Admitted application compaction did not return a replacement".into(),
+         ));
+     }
++    sess.validate_native_compaction_view().await?;
+     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+
+     let mut history = history.clone();
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -39,6 +39,7 @@
+     compaction_metadata: CompactionTurnMetadata,
+     analytics_details: &mut CompactionAnalyticsDetails,
+ ) -> CodexResult<RemoteCompactV2Attempt> {
++    sess.validate_native_compaction_view().await?;
+     let turn_context = &step_context.turn;
+     let mut history = sess.clone_retained_history().await?;
+     let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());

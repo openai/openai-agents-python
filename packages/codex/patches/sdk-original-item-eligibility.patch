@@ -1,0 +1,169 @@
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index c07fdcaf..d6d6d69b 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1136,6 +1136,33 @@ pub(crate) fn is_provider_compaction_boundary(envelope: &ResponseItemEnvelope) -
+         }
+ }
+
++/// SDK originals omit native developer configuration without changing model context.
++/// Explicit SDK-original entries retain their admitted values independently of this native-row filter.
++pub(crate) fn is_sdk_original_item(
++    item: &ResponseItem,
++    metadata: Option<&CodexHarnessMetadata>,
++) -> bool {
++    if let ResponseItem::Message {
++        role,
++        internal_chat_message_metadata_passthrough: Some(message_metadata),
++        ..
++    } = item
++        && role == "developer"
++        && !metadata.is_some_and(|metadata| metadata.client_authored)
++        && message_metadata
++            .content_item_kinds
++            .as_ref()
++            .is_some_and(|kinds| {
++                kinds
++                    .iter()
++                    .any(|kind| !kind.0.is_empty() && kind.0 != "unknown")
++            })
++    {
++        return false;
++    }
++    is_api_message(item, metadata)
++}
++
+ /// Configuration updates require harness provenance; raw system messages are never retained.
+ pub(crate) fn is_api_message(
+     message: &ResponseItem,
+@@ -1677,3 +1704,56 @@ mod sdk_retention_tests {
+         assert!(Arc::ptr_eq(&history.items, &projected.items));
+     }
+ }
++
++#[cfg(test)]
++mod sdk_original_eligibility_tests {
++    use super::*;
++    use serde_json::json;
++
++    fn message(role: &str, kind: Option<&str>) -> ResponseItem {
++        let mut value = json!({
++            "type": "message", "role": role,
++            "content": [{"type":"input_text", "text":"developer data"}],
++        });
++        if let Some(kind) = kind {
++            value["internal_chat_message_metadata_passthrough"] =
++                json!({"content_item_kinds":[kind]});
++        }
++        serde_json::from_value(value).unwrap()
++    }
++
++    #[test]
++    fn native_configuration_remains_in_model_context_but_not_sdk_originals() {
++        for kind in [
++            "collaboration_mode.instructions",
++            "sdk_application.accepted",
++        ] {
++            let item = message("developer", Some(kind));
++            assert!(is_api_message(&item, None));
++            assert!(!is_sdk_original_item(&item, None));
++        }
++    }
++
++    #[test]
++    fn caller_developer_and_ordinary_messages_remain_originals() {
++        let caller = CodexHarnessMetadata {
++            client_authored: true,
++            ..Default::default()
++        };
++        assert!(is_sdk_original_item(&message("developer", None), None));
++        assert!(is_sdk_original_item(
++            &message("developer", Some("unknown")),
++            None
++        ));
++        assert!(is_sdk_original_item(
++            &message("developer", Some("sdk_application.accepted")),
++            Some(&caller)
++        ));
++        assert!(is_sdk_original_item(
++            &message("user", Some("additional_content.user")),
++            None
++        ));
++        assert!(is_sdk_original_item(&message("assistant", None), None));
++        assert!(!is_sdk_original_item(&message("system", None), None));
++    }
++}
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index 3106756a..4a9d726f 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -11,6 +11,7 @@ pub(crate) use history::is_provider_compaction_boundary;
+ pub(crate) use history::is_user_turn_boundary;
+
+ pub(crate) use history::is_api_message;
++pub(crate) use history::is_sdk_original_item;
+
+ pub(crate) use history::rollback_context_update;
+ pub(crate) use history::rollback_retained_item;
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 354ce54e..c0363d14 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -397,6 +397,9 @@ impl Session {
+         let originals = codex_history::sdk_originals::SdkOriginalHistory::replay(
+             &persisted.items,
+             |row| {
++                if !crate::context_manager::is_sdk_original_item(&row.item, row.metadata.as_ref()) {
++                    return None;
++                }
+                 let mut projected = crate::context_manager::ContextManager::new();
+                 // Captured per-record limits take precedence over the scalar legacy restore policy.
+                 let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index bacbd003..8c50e5e3 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2029,7 +2029,12 @@ impl Session {
+             state.sdk_originals =
+                 codex_history::sdk_originals::SdkOriginalHistoryCache::replay_metadata(
+                     rollout_items,
+-                    |row| crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()),
++                    |row| {
++                        crate::context_manager::is_sdk_original_item(
++                            &row.item,
++                            row.metadata.as_ref(),
++                        )
++                    },
+                 );
+             state.replace_annotated_history(
+                 history,
+diff --git a/codex-rs/core/src/session/original_history_read.rs b/codex-rs/core/src/session/original_history_read.rs
+index 0934fcb3..ee1c691b 100644
+--- a/codex-rs/core/src/session/original_history_read.rs
++++ b/codex-rs/core/src/session/original_history_read.rs
+@@ -148,6 +148,9 @@ impl SnapshotReader {
+     }
+
+     fn native_projection(&self, row: &ResponseItemEnvelope) -> Option<ResponseItemEnvelope> {
++        if !crate::context_manager::is_sdk_original_item(&row.item, row.metadata.as_ref()) {
++            return None;
++        }
+         let mut projected = ContextManager::new();
+         let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
+             let mut normalized = row.clone();
+diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
+index d2f64f35..e5cf1060 100644
+--- a/codex-rs/core/src/state/session.rs
++++ b/codex-rs/core/src/state/session.rs
+@@ -162,7 +162,10 @@ impl SessionState {
+         for envelope in items {
+             self.history
+                 .record_annotated_items(std::slice::from_mut(envelope), policy);
+-            if crate::context_manager::is_api_message(&envelope.item, envelope.metadata.as_ref()) {
++            if crate::context_manager::is_sdk_original_item(
++                &envelope.item,
++                envelope.metadata.as_ref(),
++            ) {
+                 self.sdk_originals.append(
+                     serde_json::to_string(&envelope.item).expect("response items serialize"),
+                 );

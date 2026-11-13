@@ -7,6 +7,8 @@ from ._public import preserve_module_identity as _preserve_module_identity
 _HOSTED_RESPONSE_ITEM_FIELDS = {
     "mcp_list_tools": ("server_label", "tools", "error"),
     "mcp_call": ("server_label", "name", "arguments", "output", "error"),
+    "program": ("call_id", "code", "fingerprint"),
+    "program_output": ("call_id", "result"),
     "file_search_call": ("queries", "results"),
     "code_interpreter_call": ("container_id", "code", "outputs"),
     "shell_call": ("call_id", "action"),
@@ -29,7 +31,9 @@ def project_hosted_response_item(
     resolved_id = raw.get("id") or item_id
     if fields is None or not resolved_id:
         return None
-    if kind in {"shell_call", "shell_call_output"}:
+    if kind == "program":
+        status = raw.get("status", "completed")
+    elif kind in {"shell_call", "shell_call_output"}:
         status = raw.get("status") or "unknown"
     elif kind in {"mcp_list_tools", "mcp_call"}:
         status = raw.get("status", "failed" if raw.get("error") is not None else "completed")

@@ -120,10 +120,11 @@ def test_invalid_handoff_declaration_is_rejected_at_construction():
 
 
 @pytest.mark.parametrize("output", [NativeOutput(str), PromptedOutput(str)])
-def test_graph_rejects_incompatible_output_encoding_before_native_open(output):
+def test_text_graph_captures_distinct_output_encodings(output):
     target = Agent(instructions="Target", name="Target", output_type=output)
-    with pytest.raises(ValueError, match="output mode, schema and wrapping"):
-        _capture_agent_graph(Agent(instructions="Route", handoffs=[target]))
+    root, destination = _capture_agent_graph(Agent(instructions="Route", handoffs=[target]))
+    assert root.declaration.output_type is None
+    assert destination.declaration.output_type == output
 
 
 def test_graph_preserves_agent_specific_retry_policy_with_shared_output_encoding():
@@ -152,15 +153,24 @@ def test_graph_rejects_differing_child_roles_but_accepts_identical_configuration
     assert [profile.agent for profile in _capture_agent_graph(root)] == [root, target]
 
 
-def test_graph_rejects_different_runtime_provider_and_code_mode():
+def test_graph_accepts_distinct_native_providers_and_rejects_different_code_mode():
     from agents import NativeProvider
 
     shared = NativeProvider(api_key="synthetic")
     other = NativeProvider(api_key="synthetic")
     target = Agent(instructions="B", name="B", provider=other)
     source = Agent(instructions="A", provider=shared, handoffs=[target])
-    with pytest.raises(ValueError, match="share the Session provider"):
-        _capture_agent_graph(source)
+    assert [profile.native_provider_id for profile in _capture_agent_graph(source)] == [
+        None,
+        "sdk_profile_1",
+    ]
+    target = Agent(
+        instructions="B",
+        name="B",
+        provider=NativeProvider(api_key="synthetic", response_mode="buffered"),
+    )
+    with pytest.raises(ValueError, match="compatible text inference providers"):
+        _capture_agent_graph(Agent(instructions="A", provider=shared, handoffs=[target]))
     target = Agent(instructions="B", name="B", programmatic_tool_calling=True)
     with pytest.raises(ValueError, match="programmatic"):
         _capture_agent_graph(Agent(instructions="A", handoffs=[target]))

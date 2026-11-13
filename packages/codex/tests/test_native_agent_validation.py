@@ -110,7 +110,7 @@ def test_validate_rejects_invalid_handoff_declarations(target_problem):
         name=None if target_problem == "name" else "B",
         instructions="Target.",
         tools=[manual("exec_command")] if target_problem == "tools" else [],
-        output_type=Output if target_problem == "output" else None,
+        output_type=dict[str, int] if target_problem == "output" else None,
     )
     with pytest.raises((TypeError, ValueError)):
         Agent(instructions="Root.", handoffs=[target]).validate()

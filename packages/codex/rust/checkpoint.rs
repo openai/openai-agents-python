@@ -435,6 +435,8 @@ pub(crate) fn validate_manual_descendants(state: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+type LocalCheckpointReader<'a> = crate::storage::CheckpointReader<'a>;
+
 pub(crate) type CodeStates = std::collections::HashMap<ThreadId, codex_code_mode::CodeModeSnapshot>;
 
 pub(crate) async fn code_state(
@@ -447,6 +449,14 @@ pub(crate) async fn code_state(
 pub(crate) async fn code_state_for_thread(
     engine: &EngineState,
     id: ThreadId,
+) -> anyhow::Result<Option<codex_code_mode::CodeModeSnapshot>> {
+    code_state_for_thread_with_reader(engine, id, None).await
+}
+
+async fn code_state_for_thread_with_reader(
+    engine: &EngineState,
+    id: ThreadId,
+    reader: Option<&LocalCheckpointReader<'_>>,
 ) -> anyhow::Result<Option<codex_code_mode::CodeModeSnapshot>> {
     if let Some(snapshot) = engine.interception.pending_code_state(id) {
         return Ok(Some(snapshot.as_ref().clone()));
@@ -487,7 +497,7 @@ pub(crate) async fn code_state_for_thread(
     }
     // Establish the empty namespace before fork or compaction replaces history.
     // A missing runtime alone cannot prove that a resumed namespace is empty.
-    let history = engine.load_checkpoint_history(id).await?;
+    let history = capture_history(engine, id, reader).await?;
     crate::manual_checkpoint::check_unused_code_history(id, &history)?;
     Ok(Some(codex_code_mode::CodeModeSnapshot {
         format_version: 1,
@@ -498,6 +508,13 @@ pub(crate) async fn code_state_for_thread(
 }
 
 pub(crate) async fn capture_code_states(state: &ThreadState) -> anyhow::Result<CodeStates> {
+    capture_code_states_with_reader(state, None).await
+}
+
+async fn capture_code_states_with_reader(
+    state: &ThreadState,
+    reader: Option<&LocalCheckpointReader<'_>>,
+) -> anyhow::Result<CodeStates> {
     let mut snapshots = CodeStates::new();
     for id in std::iter::once(state.id).chain(
         crate::subagents::list(state)
@@ -505,7 +522,8 @@ pub(crate) async fn capture_code_states(state: &ThreadState) -> anyhow::Result<C
             .into_iter()
             .map(|child| child.id),
     ) {
-        if let Some(snapshot) = code_state(state, id).await? {
+        if let Some(snapshot) = code_state_for_thread_with_reader(&state.engine, id, reader).await?
+        {
             snapshots.insert(id, snapshot);
         }
     }
@@ -542,21 +560,64 @@ async fn export_inner(
         }
         None
     };
+    let before = crate::subagents::list(state).await?;
+    let reader = if let Some(store) = &state.engine.local_checklist_store {
+        Some(
+            store
+                .checkpoint_reader(
+                    std::iter::once(state.id)
+                        .chain(before.iter().map(|child| child.id))
+                        .collect(),
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
     let code_states = match captured_code {
         Some(snapshot) => snapshot.clone(),
-        None => capture_code_states(state).await?,
+        None => capture_code_states_with_reader(state, reader.as_ref()).await?,
     };
-    let before = crate::subagents::list(state).await?;
     let mut interrupted_thread_ids = Vec::new();
-    let (history, root_metadata) =
-        capture(&state.engine, state.id, &mut interrupted_thread_ids).await?;
-    let root_memory_mode = memory_mode(state, state.id).await?;
-    let root_checklist = checklist(state, state.id).await?;
+    let (history, root_metadata) = capture(
+        &state.engine,
+        state.id,
+        &mut interrupted_thread_ids,
+        reader.as_ref(),
+    )
+    .await?;
+    let canonical = state
+        .engine
+        .store
+        .as_any()
+        .is::<crate::canonical_storage::CanonicalStore>();
+    // Canonical storage admits one root, with no native checklist or pending effects.
+    let (root_memory_mode, root_checklist) = if canonical {
+        ensure!(
+            before.is_empty()
+                && pending.is_none()
+                && !suspended
+                && interrupted_thread_ids.is_empty(),
+            "canonical checkpoints require an idle root without descendants"
+        );
+        (None, None)
+    } else {
+        (
+            memory_mode(state, state.id).await?,
+            capture_checklist(state, state.id, &history, reader.as_ref()).await?,
+        )
+    };
     let root_goal = goal(state, state.id).await?;
     let mut descendants = Vec::new();
     for child in &before {
-        let (history, metadata) =
-            capture(&state.engine, child.id, &mut interrupted_thread_ids).await?;
+        let (history, metadata) = capture(
+            &state.engine,
+            child.id,
+            &mut interrupted_thread_ids,
+            reader.as_ref(),
+        )
+        .await?;
+        let checklist = capture_checklist(state, child.id, &history, reader.as_ref()).await?;
         descendants.push(Descendant {
             thread_id: child.id,
             parent_thread_id: child.parent_agent_id,
@@ -565,7 +626,7 @@ async fn export_inner(
             history,
             metadata,
             memory_mode: memory_mode(state, child.id).await?,
-            checklist: checklist(state, child.id).await?,
+            checklist,
             goal: goal(state, child.id).await?,
             code_mode: code_states.get(&child.id).cloned(),
         });
@@ -577,6 +638,14 @@ async fn export_inner(
     // Native cancellation can retire a pending executor while history flushes.
     if let Some(key) = pending {
         check_capture(state, key)?;
+    }
+    let mut history = history;
+    // An idle persistent export keeps these approvals as historical data.
+    if (canonical || reader.is_some()) && pending.is_none() && !suspended {
+        archive_exported_mcp_approvals(&mut history)?;
+        for child in &mut descendants {
+            archive_exported_mcp_approvals(&mut child.history)?;
+        }
     }
     Ok(serde_json::to_value(Checkpoint {
         format_version: if code_states.is_empty() { 2 } else { 4 },
@@ -668,10 +737,34 @@ fn graph_edges(
         .collect()
 }
 
+async fn capture_history(
+    engine: &EngineState,
+    id: ThreadId,
+    reader: Option<&LocalCheckpointReader<'_>>,
+) -> anyhow::Result<Vec<RolloutItem>> {
+    match reader {
+        Some(reader) => Ok(reader.history(id).await?),
+        None => Ok(engine.load_checkpoint_history(id).await?),
+    }
+}
+
+async fn capture_checklist(
+    state: &ThreadState,
+    id: ThreadId,
+    history: &[RolloutItem],
+    reader: Option<&LocalCheckpointReader<'_>>,
+) -> anyhow::Result<Option<crate::storage::ChecklistState>> {
+    match reader {
+        Some(reader) => Ok(reader.checklist(id, history).await?),
+        None => checklist(state, id).await,
+    }
+}
+
 async fn capture(
     engine: &EngineState,
     id: ThreadId,
     interrupted: &mut Vec<ThreadId>,
+    reader: Option<&LocalCheckpointReader<'_>>,
 ) -> anyhow::Result<(Vec<RolloutItem>, StoredThread)> {
     if let Ok(thread) = engine.manager.get_thread(id).await {
         ensure!(
@@ -688,7 +781,7 @@ async fn capture(
         }
     }
     let mut metadata = engine.read_stored_thread(id).await?;
-    let history = engine.load_checkpoint_history(id).await?;
+    let history = capture_history(engine, id, reader).await?;
     if history_unfinished(&history) {
         interrupted.push(id);
     }
@@ -768,6 +861,58 @@ pub(crate) fn validate_external_response_item(item: &ResponseItem) -> anyhow::Re
         ),
         "Imported hosted MCP approvals require live SDK approval authority"
     );
+    Ok(())
+}
+
+// Portable copies retain approval JSON as history, never as a live decision.
+fn archive_exported_mcp_approvals(history: &mut [RolloutItem]) -> anyhow::Result<()> {
+    use codex_history::sdk_originals::{SdkOriginalHistoryCheckpoint, input_projections};
+
+    let mut envelopes = Vec::new();
+    for record in history {
+        match record {
+            RolloutItem::ResponseItem(envelope) => envelopes.push(envelope),
+            RolloutItem::Compacted(compacted) => {
+                if let Some(items) = &mut compacted.replacement_history {
+                    envelopes.extend(items.iter_mut());
+                }
+                if let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) =
+                    &mut compacted.sdk_originals
+                {
+                    envelopes.extend(
+                        originals
+                            .items
+                            .iter_mut()
+                            .filter_map(|item| item.projection.as_mut()),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    envelopes.retain(|envelope| {
+        matches!(
+            &envelope.item,
+            ResponseItem::McpApprovalRequest { .. } | ResponseItem::McpApprovalResponse { .. }
+        )
+    });
+    if !envelopes.iter().any(|envelope| {
+        matches!(
+            &envelope.item,
+            ResponseItem::McpApprovalResponse { approve: true, .. }
+        )
+    }) {
+        return Ok(());
+    }
+    let originals = envelopes
+        .iter()
+        .map(|envelope| serde_json::to_string(&envelope.item))
+        .collect::<Result<Vec<_>, _>>()?;
+    let projections = input_projections(&originals)
+        .map_err(|_| anyhow::anyhow!("Invalid historical MCP approval presentation"))?;
+    for (envelope, projection) in envelopes.into_iter().zip(projections) {
+        envelope.item = projection.context("Missing historical MCP approval presentation")?;
+    }
     Ok(())
 }
 

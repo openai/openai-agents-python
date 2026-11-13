@@ -87,8 +87,8 @@ async def test_settled_store_reopen_starts_a_fresh_budget(responses, tmp_path: P
             identity = session.id
             first = await session.submit("first", budget=RunBudget(max_requests=1))
             assert (await first.get_result()).final_output == "First"
-            with pytest.raises(CapabilityError, match="Persistent storage"):
-                await session.save_state()
+            state = await session.save_state()
+            assert state.source_session_id == identity and state.native_continuation is None
         async with agent.session(storage=storage, resume=identity) as reopened:
             assert reopened.id == identity
             second = await reopened.submit("second", budget=RunBudget(max_requests=1))

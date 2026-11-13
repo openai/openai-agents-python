@@ -1,0 +1,32 @@
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index c7f633b9ca4c926d7656db4ea89f864d3b91fdb6..ee219966fcd7fb7f588cda7ae10ea6cd4de81f2c 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -54,6 +54,17 @@ fn invalid(message: impl Into<String>) -> CodexErr {
+     CodexErr::InvalidRequest(message.into())
+ }
+
++fn restored_profile_identity(
++    settings: &codex_extension_api::AgentProfileModelSettings,
++) -> codex_extension_api::AgentProfileModelSettings {
++    let mut identity = settings.for_persistence();
++    // The host has rebound these settings from the current declaration.
++    identity.request_controls.retry = None;
++    identity.request_controls.attempt_timeout_ms = None;
++    identity.invocation_timeout_ms = None;
++    identity
++}
++
+ fn persistence_failure() -> CodexErr {
+     CodexErr::Fatal(
+         "Canonical Agent profile persistence failed; execution stopped pending recovery"
+@@ -569,7 +580,8 @@ impl Session {
+         if restored {
+             if let Some(RestoredProfile { envelope, record, presentation_anchor }) = previous {
+                 if record.profile_id != target.profile_id
+-                    || record.model.for_persistence() != target.model.for_persistence()
++                    || restored_profile_identity(&record.model)
++                        != restored_profile_identity(&target.model)
+                     || envelope.item != target.application_instructions.item
+                     || envelope
+                         .metadata

@@ -32,12 +32,17 @@ pub(crate) struct OpeningProfiles {
     pub(crate) root_id: String,
     pub(crate) roster: Vec<ProfileSpec>,
     pub(crate) fingerprint: String,
+    // Fresh presentation callbacks never participate in the effect-authority fingerprint.
+    #[serde(default)]
+    pub(crate) input_preparations: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProfileSpec {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_provider_id: Option<String>,
     model: AgentProfileModelSettings,
     instructions: String,
     tools: ToolDeclarations,
@@ -70,6 +75,16 @@ pub(crate) struct ProfileSpec {
     #[serde(default)]
     selecting_steps: bool,
     output_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wire_output_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    wire_output_plain: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wire_output_guidance: Option<String>,
+    // The current SDK derives uniform guidance from the fingerprinted output schema.
+    // This field carries it at runtime without changing existing checkpoint identity.
+    #[serde(default, skip_serializing)]
+    runtime_output_guidance: Option<String>,
     #[serde(default)]
     mcp_servers: BTreeMap<String, Value>,
     #[serde(default)]
@@ -87,6 +102,12 @@ pub(crate) struct ProfileSpec {
 struct DecisionHandoffSpec {
     slot: usize,
     targets: Vec<String>,
+}
+
+impl ProfileSpec {
+    fn output_guidance(&self) -> Option<&String> {
+        self.wire_output_guidance.as_ref().or(self.runtime_output_guidance.as_ref())
+    }
 }
 
 /// Selection authority exists only for one admitted callback executor.
@@ -282,10 +303,7 @@ impl OpeningProfiles {
             if manual.contains(&original) {
                 slots.push(slot);
             }
-            rebound.push(
-                declarations[original].clone(),
-                declarations.caller_limits(original),
-            );
+            rebound.append_captured(&declarations, original);
         }
         Ok((rebound, slots))
     }
@@ -321,6 +339,25 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
         ensure!(
             !profile.id.is_empty() && !profile.output_fingerprint.is_empty(),
             "Incomplete captured Agent declaration"
+        );
+        ensure!(
+            profile
+                .wire_output_schema
+                .as_ref()
+                .is_none_or(Value::is_object),
+            "Captured Agent wire output schema must be an object"
+        );
+        ensure!(
+            !profile.wire_output_plain || profile.wire_output_schema.is_none(),
+            "Captured Agent cannot declare both plain and structured wire output"
+        );
+        ensure!(
+            profile
+                .output_guidance()
+                .is_none_or(|guidance| {
+                    !guidance.is_empty() && profile.wire_output_schema.is_none()
+                }),
+            "Captured Agent prompted output requires text wire output and guidance"
         );
         let mut all_declarations = profile.tools.clone();
         for name in profile.handoffs.keys() {
@@ -457,6 +494,29 @@ pub(crate) fn install_opening(
             .is_none(),
         "Captured Agent graph is already installed"
     );
+    for (id, names) in &opening.input_preparations {
+        let source = opening
+            .roster
+            .iter()
+            .find(|profile| &profile.id == id)
+            .context("Handoff input source is outside the captured graph")?;
+        let unique: HashSet<_> = names.iter().collect();
+        ensure!(
+            unique.len() == names.len()
+                && names.iter().all(|name| (source.handoffs.contains_key(name)
+                    || source.decision_handoffs.contains_key(name))),
+            "Handoff input callback is outside its exact captured declarations"
+        );
+    }
+    if opening
+        .input_preparations
+        .values()
+        .any(|names| !names.is_empty())
+    {
+        startup
+            .thread_extension_init
+            .insert(codex_protocol::agent_profile::AgentProfileHandoffInputCapture);
+    }
     startup.thread_extension_init.insert(OpeningFiles(files));
     startup.thread_extension_init.insert(opening);
     Ok(())
@@ -468,6 +528,24 @@ struct PersistedProfile {
     profile_id: String,
     epoch: u64,
     model: AgentProfileModelSettings,
+    #[serde(default)]
+    presentation: Option<codex_protocol::agent_profile::AgentProfileHandoffPresentation>,
+}
+
+impl PersistedProfile {
+    fn validate_presentation(&self) -> Result<()> {
+        // An idle update may retain an earlier admitted presentation. Core
+        // validates the complete publication chain before it can use that view.
+        ensure!(
+            self.presentation.as_ref().is_none_or(|value| {
+                value.destination.profile_id == self.profile_id
+                    && value.destination.epoch <= self.epoch
+                    && value.belongs_to(&value.destination)
+            }),
+            "Restored presentation belongs to another Agent destination"
+        );
+        Ok(())
+    }
 }
 
 fn rebind_runtime_controls(
@@ -490,6 +568,7 @@ fn rebind_runtime_controls(
 pub(crate) fn profile_receipt(value: &Value) -> Result<AgentProfileReceipt> {
     let source: PersistedProfile = serde_json::from_value(value.clone())
         .map_err(|_| anyhow::anyhow!("Invalid restored Agent receipt"))?;
+    source.validate_presentation()?;
     Ok(AgentProfileReceipt {
         profile_id: source.profile_id,
         epoch: source.epoch,
@@ -529,6 +608,7 @@ fn restored_envelope<'a>(
             .context("Missing restored Agent receipt")?,
     )
     .map_err(|_| anyhow::anyhow!("Invalid restored Agent receipt"))?;
+    receipt.validate_presentation()?;
     ensure!(
         opening
             .roster
@@ -701,6 +781,63 @@ struct VoiceGraphAdmission {
     previous: Option<Arc<AgentProfiles>>,
 }
 
+pub(crate) struct PendingProviderKeys(pub BTreeMap<String, String>);
+
+pub(crate) struct ProfileProviders(BTreeMap<String, codex_core::SdkAgentProfileProvider>);
+
+pub(crate) async fn bind_profile_providers(startup: &mut StartThreadOptions) -> Result<()> {
+    let Some(keys) = startup.thread_extension_init.remove::<PendingProviderKeys>() else {
+        return Ok(());
+    };
+    let mut providers = BTreeMap::new();
+    for (id, key) in &keys.0 {
+        ensure!(
+            id.strip_prefix("sdk_profile_")
+                .is_some_and(|index| {
+                    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+                }),
+            "Invalid captured Agent provider route"
+        );
+        let info = startup
+            .config
+            .model_providers
+            .get(id)
+            .context("Captured Agent provider route is unavailable")?;
+        let auth_manager = crate::auth::manager(&startup.config, Some(key.clone()), false).await?;
+        providers.insert(
+            id.clone(),
+            codex_core::SdkAgentProfileProvider {
+                id: Arc::from(id.as_str()),
+                info: info.clone(),
+                auth_manager,
+            },
+        );
+    }
+    startup
+        .thread_extension_init
+        .insert(Arc::new(ProfileProviders(providers)));
+    Ok(())
+}
+
+fn insert_profile_provider(
+    thread: &CodexThread,
+    descriptor: &ProfileSpec,
+    data: &mut ExtensionDataInit,
+) -> Result<()> {
+    if let Some(id) = &descriptor.native_provider_id {
+        let providers = thread
+            .thread_extension_data()
+            .get::<Arc<ProfileProviders>>()
+            .context("Captured Agent providers are unavailable")?;
+        let provider = providers
+            .0
+            .get(id)
+            .context("Captured Agent provider route is unavailable")?;
+        data.insert(provider.clone());
+    }
+    Ok(())
+}
+
 fn set_profiles(thread: &CodexThread, profiles: Option<Arc<AgentProfiles>>) {
     match profiles {
         Some(profiles) => {
@@ -845,6 +982,7 @@ pub(crate) async fn admit_realtime_graph(
     let opening = match &current {
         Some(current) => current.opening.clone(),
         None => Arc::new(OpeningProfiles {
+            input_preparations: Default::default(),
             root_id: root_id.to_owned(),
             roster: roster.clone(),
             fingerprint: roster_fingerprint(&roster, root_id)?,
@@ -1006,9 +1144,22 @@ impl AgentProfiles {
             .get_or_insert_with(Default::default)
             .sdk_agent_graph = Some(self.opening.fingerprint.clone());
         let mut data = ExtensionDataInit::new();
+        insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
+        if let Some(guidance) = prepared.declaration.output_guidance() {
+            data.insert(codex_extension_api::AgentProfileOutputGuidance(
+                guidance.clone(),
+            ));
+        }
+        if prepared.declaration.wire_output_plain
+            || prepared.declaration.wire_output_schema.is_some()
+        {
+            data.insert(codex_extension_api::AgentProfileOutputSchema(
+                prepared.declaration.wire_output_schema.clone(),
+            ));
+        }
         data.insert(accepted);
         data.insert(prepared.catalog.clone());
         data.insert(prepared.plugins.clone());
@@ -1256,9 +1407,22 @@ pub(crate) async fn configure(
         catalog.handoff_defaults = handoff_defaults(&prepared.declaration, default_handoffs)?;
         let generation = catalog.generation.id;
         let mut data = ExtensionDataInit::new();
+        insert_profile_provider(thread, &prepared.declaration, &mut data)?;
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
+        if let Some(guidance) = prepared.declaration.output_guidance() {
+            data.insert(codex_extension_api::AgentProfileOutputGuidance(
+                guidance.clone(),
+            ));
+        }
+        if prepared.declaration.wire_output_plain
+            || prepared.declaration.wire_output_schema.is_some()
+        {
+            data.insert(codex_extension_api::AgentProfileOutputSchema(
+                prepared.declaration.wire_output_schema.clone(),
+            ));
+        }
         data.insert(accepted);
         data.insert(catalog);
         data.insert(codex_extension_api::AgentProfileDecisionHandoffTools {
@@ -1288,10 +1452,18 @@ pub(crate) async fn configure(
                 .collect(),
         });
         let mut model = receipt.model;
+        // Startup has already rebound these runtime controls against the current declaration.
+        // The restored profile must retain them when an idle update copies its model.
+        model
+            .request_controls
+            .retry
+            .clone_from(&settings.request_controls.retry);
+        model.request_controls.attempt_timeout_ms = settings.request_controls.attempt_timeout_ms;
         model
             .request_controls
             .request_transport
             .clone_from(&settings.request_controls.request_transport);
+        model.invocation_timeout_ms = settings.invocation_timeout_ms;
         let mut target = AgentProfile {
             profile_id: receipt.profile_id,
             model,
@@ -1416,6 +1588,11 @@ pub(crate) async fn update_active(
         if let Some(personality) = settings.personality {
             target.model.personality = Some(personality);
         }
+    }
+    // An identical settings reset keeps the already committed publication and view.
+    // Instruction and catalog updates still pass through the native publication owner.
+    if instructions.is_none() && catalog.is_none() && target.model == captured.profile.model {
+        return Ok(true);
     }
     let accepted = captured
         .profile
@@ -1575,6 +1752,21 @@ pub(crate) fn restore_handoff(
                 .is_some_and(|targets| targets.contains(&receipt.target_profile_id)),
         "Restored handoff is outside its source declaration"
     );
+    if profiles
+        .opening
+        .input_preparations
+        .get(&receipt.source.profile_id)
+        .is_some_and(|names| names.iter().any(|name| name == &tool_name.name))
+    {
+        state.thread.thread_extension_data().insert(
+            codex_protocol::agent_profile::AgentProfileHandoffInputRequest {
+                turn_id: turn.to_owned(),
+                tool_name: tool_name.name.clone(),
+                handoff: receipt.clone(),
+                restored: true,
+            },
+        );
+    }
     let mut pending = profiles
         .reservation
         .lock()
@@ -1681,9 +1873,41 @@ impl TurnLifecycleContributor for Contributor {
                 .thread
                 .upgrade()
                 .ok_or("Native Agent thread is closed")?;
-            let target = profiles
+            let mut target = profiles
                 .candidate(&thread, &target_id)
                 .map_err(|error| error.to_string())?;
+            if let Some(request) = input
+                .turn_store
+                .get::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>(
+            ) {
+                let proposed = input
+                    .turn_store
+                    .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
+                    .ok_or("Handoff input lacks its native grouped proposal")?;
+                if proposed.handoff != request.handoff || request.turn_id != input.turn_id {
+                    return Err("Handoff input proposal belongs to another accepted call".into());
+                }
+                let captured = thread
+                    .captured_agent_profile()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or("Handoff source profile closed")?;
+                let prepared = profiles
+                    .tools
+                    .prepare_handoff_input(
+                        input.turn_store,
+                        input.thread_store.level_id(),
+                        input.turn_id,
+                        &captured,
+                        &request,
+                        &proposed,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let mut with_input = (*target).clone();
+                with_input.data.insert(prepared);
+                target = Arc::new(with_input);
+            }
             Ok(Some(AgentProfileActivation { expected, target }))
         })
     }
@@ -1841,6 +2065,26 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
                 call_id: call_id.into(),
             })
         })();
+        if let Some(handoff) = &handoff {
+            if self
+                .profiles
+                .opening
+                .input_preparations
+                .get(&self.source.profile_id)
+                .is_some_and(|names| names.contains(&self.name))
+            {
+                if let Some(thread) = self.profiles.thread.upgrade() {
+                    thread.thread_extension_data().insert(
+                        codex_protocol::agent_profile::AgentProfileHandoffInputRequest {
+                            turn_id: turn_id.to_owned(),
+                            tool_name: self.name.clone(),
+                            handoff: handoff.clone(),
+                            restored: false,
+                        },
+                    );
+                }
+            }
+        }
         // This wrapper alone owns the transfer receipt; retain other accepted metadata.
         outcome.handoff = handoff;
         outcome
@@ -2117,6 +2361,7 @@ mod tests {
         let open = |raw: Value| {
             let raw = raw.to_string();
             OpeningProfiles {
+                input_preparations: Default::default(),
                 root_id: "a".into(),
                 roster: serde_json::from_str(&raw).unwrap(),
                 fingerprint: fingerprint(&raw, "a").unwrap(),
@@ -2204,6 +2449,7 @@ mod tests {
         raw[0]["handoffs"] = json!({});
         raw[0]["decision_handoffs"] = json!({"lookup":{"slot":0,"targets":["b"]}});
         let opening = OpeningProfiles {
+            input_preparations: Default::default(),
             root_id: "a".into(),
             roster: serde_json::from_value(raw.clone()).unwrap(),
             fingerprint: fingerprint(&raw.to_string(), "a").unwrap(),
@@ -2245,6 +2491,7 @@ mod tests {
     fn queued_operation_origin_is_distinct_from_admitted_and_restored_actor() {
         let raw = roster().to_string();
         let opening = OpeningProfiles {
+            input_preparations: Default::default(),
             root_id: "a".into(),
             roster: serde_json::from_str(&raw).unwrap(),
             fingerprint: fingerprint(&raw, "a").unwrap(),
@@ -2377,4 +2624,18 @@ mod tests {
         invalid["unrecognized_authority"] = json!(true);
         assert!(profile_receipt(&invalid).is_err());
     }
+}
+
+/// Native MCP replay cannot rerun host MCP callbacks from a checkpoint.
+pub(crate) fn native_mcp_checkpoint_source(source: &CapturedAgentProfile) -> bool {
+    source
+        .profile
+        .data
+        .get::<crate::native_interception::ProfileMcpPolicy>()
+        .is_some_and(|policy| !policy.has_callbacks())
+        && source
+            .profile
+            .data
+            .get::<crate::mcp_result_control::Selection>()
+            .is_some_and(|selection| !selection.has_callbacks())
 }

@@ -1,0 +1,651 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 495692e3..ae390525 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -349,10 +349,10 @@ where
+         Some(ProviderHistorySelection::Conversation { id }) => {
+             map.serialize_entry("conversation", id)?;
+         }
+-        Some(ProviderHistorySelection::PreviousResponse { id: Some(id) }) => {
++        Some(ProviderHistorySelection::PreviousResponse { id: Some(id), .. }) => {
+             map.serialize_entry("previous_response_id", id)?;
+         }
+-        Some(ProviderHistorySelection::PreviousResponse { id: None }) | None => {}
++        Some(ProviderHistorySelection::PreviousResponse { id: None, .. }) | None => {}
+     }
+     map.end()
+ }
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index a4fea21c..744d582a 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -69,7 +69,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             .map_err(|message| invalid(&message))?;
+         let (resource, id) = match selection {
+             ProviderHistorySelection::Conversation { id } => ("conversations", id),
+-            ProviderHistorySelection::PreviousResponse { id: Some(id) } => {
++            ProviderHistorySelection::PreviousResponse { id: Some(id), .. } => {
+                 if stored_response == Some(false) {
+                     return Err(invalid(
+                         "Unstored provider history requires its live WebSocket owner",
+@@ -77,7 +77,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+                 }
+                 ("responses", id)
+             }
+-            ProviderHistorySelection::PreviousResponse { id: None } => {
++            ProviderHistorySelection::PreviousResponse { id: None, .. } => {
+                 return Err(invalid(
+                     "Cold provider history requires an exact response anchor",
+                 ));
+@@ -118,6 +118,32 @@ impl<T: HttpTransport> ResponsesClient<T> {
+                 "Provider history anchor is unconfirmed or mismatched",
+             ));
+         }
++        if !selection.item_ids().is_empty() {
++            let output = body
++                .get("output")
++                .and_then(Value::as_array)
++                .filter(|output| output.len() <= 4096)
++                .ok_or_else(|| invalid("Provider item references require bounded anchor output"))?;
++            let wanted = selection
++                .item_ids()
++                .iter()
++                .map(String::as_str)
++                .collect::<std::collections::HashSet<_>>();
++            let mut confirmed = std::collections::HashSet::new();
++            for item in output {
++                if let Some(id) = item.get("id").and_then(Value::as_str)
++                    && wanted.contains(id)
++                    && !confirmed.insert(id)
++                {
++                    return Err(invalid("Provider anchor repeats a selected item ID"));
++                }
++            }
++            if confirmed.len() != wanted.len() {
++                return Err(invalid(
++                    "Provider anchor does not own every selected item ID",
++                ));
++            }
++        }
+         Ok(())
+     }
+ 
+diff --git a/codex-rs/codex-api/src/request_input.rs b/codex-rs/codex-api/src/request_input.rs
+index e61dbab9..29923ad6 100644
+--- a/codex-rs/codex-api/src/request_input.rs
++++ b/codex-rs/codex-api/src/request_input.rs
+@@ -219,4 +219,23 @@ mod tests {
+             expected
+         );
+     }
++    #[test]
++    fn opaque_provider_prefix_preserves_the_original_cache_occurrence() {
++        let item = input("msg_local", "cached content");
++        let cached = annotation(&item);
++        let original = CacheAnnotatedInput::with_annotations(vec![item.clone()], vec![cached]);
++        let projected = original.with_items(vec![
++            ResponseItem::ItemReference {
++                id: "msg_remote".into(),
++            },
++            item,
++        ]);
++        let wire = serde_json::to_value(&projected).unwrap();
++        assert_eq!(wire[0], json!({"type":"item_reference","id":"msg_remote"}));
++        assert_eq!(
++            wire[1]["content"][0]["prompt_cache_breakpoint"],
++            json!({"mode":"explicit"})
++        );
++        assert_eq!(original.len(), 1);
++    }
+ }
+diff --git a/codex-rs/codex-api/tests/provider_history.rs b/codex-rs/codex-api/tests/provider_history.rs
+index 10f575ef..0a8afd6a 100644
+--- a/codex-rs/codex-api/tests/provider_history.rs
++++ b/codex-rs/codex-api/tests/provider_history.rs
+@@ -35,6 +35,7 @@ fn history_selection_projects_one_wire_member_without_changing_storage() {
+         (
+             ProviderHistorySelection::PreviousResponse {
+                 id: Some("resp_external".into()),
++                item_ids: None,
+             },
+             "previous_response_id",
+             "resp_external",
+@@ -57,8 +58,10 @@ fn history_selection_projects_one_wire_member_without_changing_storage() {
+             assert!(wire.get("provider_history").is_none());
+         }
+     }
+-    request.request_controls.provider_history =
+-        Some(ProviderHistorySelection::PreviousResponse { id: None });
++    request.request_controls.provider_history = Some(ProviderHistorySelection::PreviousResponse {
++        id: None,
++        item_ids: None,
++    });
+     let wire = serde_json::to_value(&request).unwrap();
+     assert!(wire.get("previous_response_id").is_none());
+     assert!(wire.get("conversation").is_none());
+@@ -127,6 +130,7 @@ async fn cold_anchor_lookup_uses_current_account_without_generation() {
+         .await;
+     let selected = ProviderHistorySelection::PreviousResponse {
+         id: Some("resp_anchor".into()),
++        item_ids: None,
+     };
+     history_client(&server, "Bearer current-account")
+         .verify_history_anchor(&selected, Some(true), http::HeaderMap::new())
+@@ -155,7 +159,7 @@ async fn cold_anchor_lookup_rejects_unstored_and_missing_socket_anchors() {
+         assert!(
+             client
+                 .verify_history_anchor(
+-                    &ProviderHistorySelection::PreviousResponse { id },
++                    &ProviderHistorySelection::PreviousResponse { id, item_ids: None },
+                     stored,
+                     http::HeaderMap::new()
+                 )
+@@ -211,6 +215,7 @@ async fn cold_response_lookup_rejects_unfinished_anchors() {
+     let client = history_client(&server, "Bearer current-account");
+     let selection = ProviderHistorySelection::PreviousResponse {
+         id: Some("resp_anchor".into()),
++        item_ids: None,
+     };
+     for status in ["in_progress", "incomplete"] {
+         let _reply = Mock::given(method("GET"))
+@@ -231,3 +236,37 @@ async fn cold_response_lookup_rejects_unfinished_anchors() {
+     }
+     assert_eq!(server.received_requests().await.unwrap().len(), 2);
+ }
++
++#[tokio::test]
++async fn item_references_require_unique_owned_output_in_the_current_anchor() {
++    use wiremock::matchers::{header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++    for (output, accepted) in [
++        (json!([{"id":"msg_first"},{"id":"msg_second"}]), true),
++        (json!([{"id":"msg_first"}]), false),
++        (
++            json!([{"id":"msg_first"},{"id":"msg_second"},{"id":"msg_first"}]),
++            false,
++        ),
++    ] {
++        let server = MockServer::start().await;
++        Mock::given(method("GET"))
++            .and(path("/responses/resp_anchor"))
++            .and(header("authorization", "Bearer current-account"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                "id":"resp_anchor", "status":"completed", "output":output
++            })))
++            .expect(1)
++            .mount(&server)
++            .await;
++        let selected = ProviderHistorySelection::PreviousResponse {
++            id: Some("resp_anchor".into()),
++            item_ids: Some(vec!["msg_second".into(), "msg_first".into()]),
++        };
++        let result = history_client(&server, "Bearer current-account")
++            .verify_history_anchor(&selected, Some(true), http::HeaderMap::new())
++            .await;
++        assert_eq!(result.is_ok(), accepted);
++        assert_eq!(server.received_requests().await.unwrap().len(), 1);
++    }
++}
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index f92ae078..366b5c7a 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3107,15 +3107,20 @@ impl ModelClientSession {
+                     cursor.bind_websocket(connection)?;
+                 }
+                 if !warmup
+-                    && let Some(attempt) = prompt.tool_admission.as_ref().and_then(|admission| admission.model_attempt())
++                    && let Some(attempt) = prompt
++                        .tool_admission
++                        .as_ref()
++                        .and_then(|admission| admission.model_attempt())
+                 {
+                     let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
+                     let (previous, conversation) = match payload.request_controls.provider_history.as_ref() {
+-                        Some(codex_protocol::provider_history::ProviderHistorySelection::PreviousResponse { id }) => (id.as_deref(), None),
++                        Some(codex_protocol::provider_history::ProviderHistorySelection::PreviousResponse { id, .. }) => (id.as_deref(), None),
+                         Some(codex_protocol::provider_history::ProviderHistorySelection::Conversation { id }) => (None, Some(id.as_str())),
+                         None => (payload.previous_response_id.as_deref(), None),
+                     };
+-                    attempt.observe_request("responses_ws", previous, conversation).map_err(CodexErr::Fatal)?;
++                    attempt
++                        .observe_request("responses_ws", previous, conversation)
++                        .map_err(CodexErr::Fatal)?;
+                 }
+                 let connection = self.websocket_session.connection.as_ref().ok_or_else(|| {
+                     self.client.state.provider.map_api_error(ApiError::Stream(
+diff --git a/codex-rs/core/src/client/provider_history.rs b/codex-rs/core/src/client/provider_history.rs
+index 4aaa1e19..48d54c0d 100644
+--- a/codex-rs/core/src/client/provider_history.rs
++++ b/codex-rs/core/src/client/provider_history.rs
+@@ -535,18 +535,30 @@ impl Cursor {
+     pub(crate) fn needs_live_websocket(&self) -> bool {
+         let state = self.state.lock().unwrap();
+         state.reference.stored_response == Some(false)
+-            && matches!(state.reference.selection, ProviderHistorySelection::PreviousResponse { id: Some(_) })
++            && matches!(
++                state.reference.selection,
++                ProviderHistorySelection::PreviousResponse { id: Some(_), .. }
++            )
+     }
+ 
+     pub(crate) fn bind_websocket(&self, connection: &Arc<()>) -> Result<()> {
+         let mut state = self.state.lock().unwrap();
+         let requires_live = state.reference.stored_response == Some(false)
+-            && matches!(state.reference.selection, ProviderHistorySelection::PreviousResponse { id: Some(_) });
+-        let pending = state.pending.as_mut()
++            && matches!(
++                state.reference.selection,
++                ProviderHistorySelection::PreviousResponse { id: Some(_), .. }
++            );
++        let pending = state
++            .pending
++            .as_mut()
+             .ok_or_else(|| invalid("Provider history has no admitted dispatch"))?;
+         let current = Arc::downgrade(connection);
+-        if requires_live && pending.scope.connection.as_ref()
+-            .is_none_or(|expected| !Weak::ptr_eq(expected, &current))
++        if requires_live
++            && pending
++                .scope
++                .connection
++                .as_ref()
++                .is_none_or(|expected| !Weak::ptr_eq(expected, &current))
+         {
+             return Err(invalid("Unstored provider history requires its live WebSocket connection"));
+         }
+@@ -577,7 +589,7 @@ impl Cursor {
+         history_transport: HistoryTransport<'_>,
+     ) -> Result<Option<codex_api::CacheAnnotatedInput<Vec<ResponseItem>>>> {
+         check_items(request.input.iter())?;
+-        let canonical_input = request
++        let mut canonical_input = request
+             .request_controls
+             .canonical_history_input
+             .take()
+@@ -615,18 +627,41 @@ impl Cursor {
+                 ));
+             }
+             if state.reference.stored_response == Some(false)
+-                && matches!(state.reference.selection, ProviderHistorySelection::PreviousResponse { id: Some(_) })
++                && matches!(
++                    state.reference.selection,
++                    ProviderHistorySelection::PreviousResponse { id: Some(_), .. }
++                )
+                 && (scope.connection.is_none() || state.live_scope.as_ref() != Some(&scope))
+             {
+-                return Err(invalid("Unstored provider history requires its live WebSocket connection"));
++                return Err(invalid(
++                    "Unstored provider history requires its live WebSocket connection",
++                ));
+             }
+             (
+                 state.reference.clone(),
+                 state.live_scope.as_ref() != Some(&scope),
+             )
+         };
+-        let full_len = request.input.len();
+-        let full_digest = input_digest(request.input.as_ref())?;
++        saved
++            .selection
++            .validate_shape()
++            .map_err(CodexErr::InvalidRequest)?;
++        if !saved.selection.item_ids().is_empty() {
++            if !request.store {
++                return Err(invalid("Provider item references require store=True"));
++            }
++            if request
++                .input
++                .iter()
++                .any(|item| matches!(item, ResponseItem::ItemReference { .. }))
++            {
++                return Err(invalid(
++                    "Provider item references cannot be mixed with input references",
++                ));
++            }
++        }
++        let mut full_len = request.input.len();
++        let mut full_digest = input_digest(request.input.as_ref())?;
+         let unsent = if let Some(window) = &saved.window {
+             let canonical = if let Some(canonical) = canonical_window(window) {
+                 if canonical_input.prefix_len + canonical_input.wire_input_indices.len() != full_len
+@@ -732,19 +767,51 @@ impl Cursor {
+         if needs_read
+             && !matches!(
+                 saved.selection,
+-                ProviderHistorySelection::PreviousResponse { id: None }
++                ProviderHistorySelection::PreviousResponse { id: None, .. }
+             )
+         {
++            let mut lookup = saved.selection.clone();
++            if saved.window.is_some()
++                && let ProviderHistorySelection::PreviousResponse { item_ids, .. } = &mut lookup
++            {
++                // The current response already owns the acknowledged references.
++                *item_ids = None;
++            }
+             ApiResponsesClient::new(
+                 transport,
+                 setup.api_provider.clone(),
+                 setup.api_auth.clone(),
+             )
+             .with_request_transport(request_transport.cloned())
+-            .verify_history_anchor(&saved.selection, saved.stored_response, headers)
++            .verify_history_anchor(&lookup, saved.stored_response, headers)
+             .await
+             .map_err(|error| self_error(error))?;
+         }
++        let imported_items = if saved.window.is_none() {
++            saved.selection.item_ids()
++        } else {
++            &[]
++        };
++        let imported_budget = if imported_items.is_empty() {
++            None
++        } else {
++            // Only an authenticated current anchor can mint this request-only
++            // prefix. Canonical history keeps its existing item representation.
++            HistoryBudget::check_count(full_len + imported_items.len())?;
++            let mut items = Vec::with_capacity(full_len + imported_items.len());
++            items.extend(
++                imported_items
++                    .iter()
++                    .map(|id| ResponseItem::ItemReference { id: id.clone() }),
++            );
++            items.extend(request.input.iter().cloned());
++            let budget = check_items(items.iter())?;
++            request.input = request.input.with_items(items);
++            canonical_input.prefix_len += imported_items.len();
++            full_len = request.input.len();
++            full_digest = input_digest(request.input.as_ref())?;
++            Some(budget)
++        };
+         {
+             let mut state = self.state.lock().unwrap();
+             if state.reference.pending {
+@@ -766,7 +833,7 @@ impl Cursor {
+                 mcp_rewrites: Vec::new(),
+                 attempt: attempt.as_ref().map(std::sync::Arc::downgrade),
+                 stored: request.store,
+-                wire_budget: history_budget,
++                wire_budget: imported_budget.unwrap_or(history_budget),
+                 scope,
+             });
+         }
+@@ -990,7 +1057,7 @@ impl Cursor {
+                 .pending
+                 .take()
+                 .ok_or_else(|| invalid("Provider history has no admitted dispatch"))?;
+-            if let ProviderHistorySelection::PreviousResponse { id } =
++            if let ProviderHistorySelection::PreviousResponse { id, .. } =
+                 &mut state.reference.selection
+             {
+                 *id = Some(response.response_id);
+diff --git a/codex-rs/core/tests/provider_history.rs b/codex-rs/core/tests/provider_history.rs
+index 2851adb8..54cf0ce4 100644
+--- a/codex-rs/core/tests/provider_history.rs
++++ b/codex-rs/core/tests/provider_history.rs
+@@ -44,8 +44,10 @@ async fn websocket_history_advances_on_the_same_socket_with_only_new_input() ->
+         ])
+         .await;
+         let mut builder = test_codex().with_config(move |config| {
+-            config.sdk_provider_history =
+-                Some(ProviderHistorySelection::PreviousResponse { id: None });
++            config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
++                id: None,
++                item_ids: None,
++            });
+             config.sdk_request_controls.store = Some(Some(store));
+             config.model_provider.request_max_retries = Some(0);
+             config.model_provider.stream_max_retries = Some(0);
+@@ -91,6 +93,7 @@ async fn websocket_history_advances_on_the_same_socket_with_only_new_input() ->
+             reference.selection,
+             ProviderHistorySelection::PreviousResponse {
+                 id: Some("resp_after".into()),
++                item_ids: None
+             }
+         );
+         let rollout = test.codex.rollout_path().unwrap();
+@@ -107,6 +110,7 @@ async fn websocket_history_advances_on_the_same_socket_with_only_new_input() ->
+             let mut config = test.config.clone();
+             config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
+                 id: Some("resp_after".into()),
++                item_ids: None,
+             });
+             let resumed = test
+                 .thread_manager
+@@ -150,7 +154,10 @@ async fn websocket_unacknowledged_dispatch_never_resends() -> Result<()> {
+     ])
+     .await;
+     let mut builder = test_codex().with_config(|config| {
+-        config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse { id: None });
++        config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
++            id: None,
++            item_ids: None,
++        });
+         config.sdk_request_controls.store = Some(Some(true));
+         config.model_provider.request_max_retries = Some(2);
+         config.model_provider.stream_max_retries = Some(2);
+@@ -218,7 +225,10 @@ async fn cold_resume_requires_current_anchor_and_only_sends_new_input() -> Resul
+         .mount(&server)
+         .await;
+     let mut builder = test_codex().with_config(|config| {
+-        config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse { id: None });
++        config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
++            id: None,
++            item_ids: None,
++        });
+         config.sdk_request_controls.store = Some(Some(true));
+     });
+     let test = builder.build_with_auto_env(&server).await?;
+@@ -250,6 +260,7 @@ async fn cold_resume_requires_current_anchor_and_only_sends_new_input() -> Resul
+         None,
+         Some(ProviderHistorySelection::PreviousResponse {
+             id: Some("resp_wrong".into()),
++            item_ids: None,
+         }),
+     ] {
+         let mut config = test.config.clone();
+@@ -273,6 +284,7 @@ async fn cold_resume_requires_current_anchor_and_only_sends_new_input() -> Resul
+     let mut config = test.config.clone();
+     config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
+         id: Some("resp_before".into()),
++        item_ids: None,
+     });
+     let resumed = test
+         .thread_manager
+@@ -321,7 +333,8 @@ async fn cold_resume_requires_current_anchor_and_only_sends_new_input() -> Resul
+     assert_eq!(
+         reference.selection,
+         ProviderHistorySelection::PreviousResponse {
+-            id: Some("resp_after".into())
++            id: Some("resp_after".into()),
++            item_ids: None
+         }
+     );
+     resumed.thread.submit(Op::Shutdown).await?;
+@@ -374,6 +387,7 @@ async fn response_chain_advances_with_only_unsent_tool_results() -> Result<()> {
+     let mut builder = test_codex().with_config(|config| {
+         config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
+             id: Some("resp_external".into()),
++            item_ids: None,
+         });
+         config.sdk_request_controls.store = Some(Some(true));
+     });
+@@ -463,7 +477,8 @@ async fn response_chain_advances_with_only_unsent_tool_results() -> Result<()> {
+     assert_eq!(
+         reference.selection,
+         ProviderHistorySelection::PreviousResponse {
+-            id: Some("resp_three".into())
++            id: Some("resp_three".into()),
++            item_ids: None
+         }
+     );
+     assert!(!reference.pending);
+@@ -503,6 +518,7 @@ impl ThreadStore for RejectAcceptedCheckpoint {
+                         && reference.selection
+                             == (ProviderHistorySelection::PreviousResponse {
+                                 id: Some("resp_accepted".into()),
++                                item_ids: None,
+                             })
+                 })
+         });
+@@ -586,8 +602,10 @@ async fn accepted_response_journal_failure_blocks_live_and_cold_replay() -> Resu
+     let configured_store = store.clone();
+     let mut builder = test_codex()
+         .with_config(move |config| {
+-            config.sdk_provider_history =
+-                Some(ProviderHistorySelection::PreviousResponse { id: None });
++            config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
++                id: None,
++                item_ids: None,
++            });
+             config.sdk_request_controls.store = Some(Some(true));
+             assert!(
+                 configured_store
+@@ -636,7 +654,8 @@ async fn accepted_response_journal_failure_blocks_live_and_cold_replay() -> Resu
+     assert_eq!(
+         live.selection,
+         ProviderHistorySelection::PreviousResponse {
+-            id: Some("resp_accepted".into())
++            id: Some("resp_accepted".into()),
++            item_ids: None
+         }
+     );
+     assert!(
+@@ -674,6 +693,7 @@ async fn accepted_response_journal_failure_blocks_live_and_cold_replay() -> Resu
+     let mut config = test.config.clone();
+     config.sdk_provider_history = Some(ProviderHistorySelection::PreviousResponse {
+         id: Some("resp_accepted".into()),
++        item_ids: None,
+     });
+     let result = test
+         .thread_manager
+diff --git a/codex-rs/protocol/src/provider_history.rs b/codex-rs/protocol/src/provider_history.rs
+index d71f6fdb..32a61dd9 100644
+--- a/codex-rs/protocol/src/provider_history.rs
++++ b/codex-rs/protocol/src/provider_history.rs
+@@ -16,6 +16,10 @@ pub enum ProviderHistorySelection {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         id: Option<String>,
++        /// Ordered output pointers imported once under the current stored anchor.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        item_ids: Option<Vec<String>>,
+     },
+ }
+ 
+@@ -23,13 +27,43 @@ impl ProviderHistorySelection {
+     pub fn validate_shape(&self) -> Result<(), String> {
+         let id = match self {
+             Self::Conversation { id } => Some(id),
+-            Self::PreviousResponse { id } => id.as_ref(),
++            Self::PreviousResponse { id, .. } => id.as_ref(),
+         };
+         if id.is_some_and(|id| id.trim().is_empty()) {
+             return Err("Empty provider history ID".into());
+         }
++        if let Self::PreviousResponse {
++            id,
++            item_ids: Some(items),
++        } = self
++        {
++            if id.is_none() || items.is_empty() || items.len() > 4096 {
++                return Err("Provider item IDs require an exact anchor and 1..4096 items".into());
++            }
++            let mut bytes = 0usize;
++            let mut seen = std::collections::HashSet::new();
++            for item in items {
++                bytes = bytes
++                    .checked_add(item.len())
++                    .filter(|bytes| *bytes <= 8 * 1024 * 1024)
++                    .ok_or_else(|| "Provider item IDs exceed the history byte limit".to_string())?;
++                if item.trim().is_empty() || !seen.insert(item) {
++                    return Err("Provider item IDs must be nonempty and unique".into());
++                }
++            }
++        }
+         Ok(())
+     }
++
++    pub fn item_ids(&self) -> &[String] {
++        match self {
++            Self::PreviousResponse {
++                item_ids: Some(items),
++                ..
++            } => items,
++            _ => &[],
++        }
++    }
+ }
+ 
+ /// Canonical input before trusted request-only rows are inserted.
+diff --git a/codex-rs/protocol/tests/provider_history.rs b/codex-rs/protocol/tests/provider_history.rs
+index 7c049077..95bdd27c 100644
+--- a/codex-rs/protocol/tests/provider_history.rs
++++ b/codex-rs/protocol/tests/provider_history.rs
+@@ -20,7 +20,8 @@ fn selection_preserves_opaque_ids_and_rejects_conflicting_shapes() {
+     );
+     assert!(
+         ProviderHistorySelection::PreviousResponse {
+-            id: Some(" \t".into())
++            id: Some(" \t".into()),
++            item_ids: None
+         }
+         .validate_shape()
+         .is_err()
+@@ -93,3 +94,53 @@ fn acknowledged_occurrences_reject_rewrites_missing_and_repeated_outputs() {
+     assert!(receipt.unsent_input_indices(0, &prefix, &[]).is_err());
+     assert!(receipt.unsent_input_indices(4, &prefix, &[a, b]).is_err());
+ }
++
++#[test]
++fn item_references_require_bounded_unique_ids_and_an_exact_anchor() {
++    for value in [
++        json!({"type":"previous_response","item_ids":["msg_owned"]}),
++        json!({"type":"previous_response","id":"resp_owned","item_ids":[]}),
++        json!({"type":"previous_response","id":"resp_owned","item_ids":["same","same"]}),
++        json!({"type":"previous_response","id":"resp_owned","item_ids":[""]}),
++        json!({"type":"previous_response","id":"resp_owned","item_ids":vec!["id";4097]}),
++    ] {
++        let selected: ProviderHistorySelection = serde_json::from_value(value).unwrap();
++        assert!(selected.validate_shape().is_err());
++    }
++    let selected: ProviderHistorySelection = serde_json::from_value(json!({
++        "type":"previous_response","id":"resp_owned","item_ids":["msg_second","msg_first"]
++    }))
++    .unwrap();
++    selected.validate_shape().unwrap();
++    assert_eq!(selected.item_ids(), &["msg_second", "msg_first"]);
++}
++
++#[test]
++fn saved_item_references_supply_data_but_require_the_exact_current_selection() {
++    use codex_protocol::provider_history::ProviderHistoryReference;
++    let selected: ProviderHistorySelection = serde_json::from_value(json!({
++        "type":"previous_response","id":"resp_owned","item_ids":["msg_owned"]
++    }))
++    .unwrap();
++    let saved = ProviderHistoryReference {
++        selection: selected.clone(),
++        provider_route: "https://synthetic.invalid/v1".into(),
++        window: None,
++        pending: false,
++        stored_response: Some(true),
++    };
++    assert!(saved.validate_rebind(&selected).is_ok());
++    let unselected: ProviderHistorySelection = serde_json::from_value(json!({
++        "type":"previous_response","id":"resp_owned"
++    }))
++    .unwrap();
++    assert!(saved.validate_rebind(&unselected).is_err());
++    let changed: ProviderHistorySelection = serde_json::from_value(json!({
++        "type":"previous_response","id":"resp_owned","item_ids":["msg_other"]
++    }))
++    .unwrap();
++    assert!(saved.validate_rebind(&changed).is_err());
++    let data = serde_json::to_value(saved).unwrap();
++    assert!(data.get("headers").is_none());
++    assert!(data.get("authorized").is_none());
++}

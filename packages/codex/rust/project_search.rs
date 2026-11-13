@@ -195,6 +195,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for Search {
                 json!({"type":"integer", "minimum":0, "maximum":5, "default":0});
         }
         ToolSpec::Function(ResponsesApiTool {
+            allowed_callers: None,
             name: self.tool.name().into(),
             description: "Search the fixed project root without a shell. Includes hidden entries, ignores no ignore files, rejects symlinks. Scans at most 10000 entries, 1000 directories and depth 64; grep reads at most 1 MiB per file and 16 MiB total; response at most 64 KiB. Bounded scan and response; inspect truncated, truncation_reasons and errors. Narrow the pattern or subtree and rerun for partial results; no snapshot guarantee.".into(),
             strict: false, defer_loading: None,

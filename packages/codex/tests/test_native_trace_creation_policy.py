@@ -52,6 +52,8 @@ async def native_case(case):
 
     class PolicyRecorder(Recorder):
         def should_create_span(self, name, kind):
+            if kind != "model":
+                return True
             assert asyncio.get_running_loop() is loop
             parent = telemetry.current_context()
             assert parent is not None and parent.trace_id == trace_id
@@ -140,5 +142,71 @@ async def native_case(case):
                 assert tool not in visited and tool not in response_ids
                 visited.add(tool)
                 tool = parents[tool]
+    finally:
+        await telemetry.shutdown()
+
+
+def test_native_scope_creation_policy():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import asyncio; "
+                "from tests.test_native_trace_creation_policy import native_scope_case; "
+                "asyncio.run(native_scope_case())"
+            ),
+        ],
+        env=native_trace_child_env(),
+        capture_output=True,
+        text=True,
+        timeout=40,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def native_scope_case():
+    from _agents_codex.telemetry import _owned_span
+
+    calls = []
+
+    class PolicyRecorder(Recorder):
+        def should_create_span(self, name, kind):
+            calls.append((name, kind))
+            with telemetry.span("recursive") as recursive:
+                assert recursive.context.disabled
+            if name == "invalid":
+                return None
+            return name != "suppress"
+
+    recorder = PolicyRecorder()
+    await telemetry.configure(processors=[recorder])
+    try:
+        with telemetry.trace("workflow") as root:
+            with telemetry.span("suppress") as suppressed:
+                assert suppressed.context.disabled
+                with telemetry.span("child") as child:
+                    assert child.context.disabled
+            with _owned_span("callback", "callback") as callback:
+                assert (
+                    callback is not None and callback.context.parent_span_id == root.context.span_id
+                )
+            with (
+                pytest.raises(TypeError, match="creation policies must return bool"),
+                telemetry.span("invalid"),
+            ):
+                pytest.fail("The policy rejected the span")
+        with telemetry.trace("suppress") as suppressed_root:
+            assert suppressed_root.context.disabled
+
+        assert (await telemetry.force_flush()).status == "success"
+        assert calls == [
+            ("workflow", "workflow"),
+            ("suppress", "custom"),
+            ("callback", "callback"),
+            ("invalid", "custom"),
+            ("suppress", "workflow"),
+        ]
+        assert {row["name"] for row in recorder.events} == {"workflow", "callback"}
     finally:
         await telemetry.shutdown()

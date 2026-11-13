@@ -1,0 +1,11 @@
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index caf2cda4..a4cbd429 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -31,5 +31,6 @@ use crate::unified_exec::PendingLocalExec;
+ use codex_history::CodexHarnessMetadata;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::error::CodexErr;
++use codex_protocol::models::ResponseItem;
+ use codex_protocol::models::ResponseInputItem;
+ use codex_protocol::models::ToolResultMetadata;

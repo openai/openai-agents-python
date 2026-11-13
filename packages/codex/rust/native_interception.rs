@@ -428,6 +428,10 @@ pub(crate) struct ProfileMcpPolicy {
     realtime: bool,
 }
 impl ProfileMcpPolicy {
+    pub(crate) fn has_callbacks(&self) -> bool {
+        !self.rules.is_empty()
+    }
+
     fn identities(binding: &codex_mcp::McpBinding) -> HashMap<ToolName, (String, String)> {
         binding
             .tools()
@@ -494,6 +498,26 @@ pub(crate) struct ProfileMcpSource {
     pub(crate) receipt: Option<codex_extension_api::AgentProfileReceipt>,
     pub(crate) policy: Option<Arc<ProfileMcpPolicy>>,
 }
+/// Use only the immutable policy captured for the admitted sampling step.
+pub(crate) fn native_mcp_checkpoint_source(step: &ExtensionData) -> bool {
+    let Some(source) = step.get::<ProfileMcpSource>() else {
+        return false;
+    };
+    let selection = if source.receipt.is_some() {
+        step.get::<crate::mcp_result_control::Selection>()
+    } else {
+        source.result_selection.clone()
+    };
+    source
+        .policy
+        .as_ref()
+        .is_some_and(|policy| !policy.has_callbacks())
+        && (source.receipt.is_none() || selection.is_some())
+        && selection
+            .as_ref()
+            .is_none_or(|selection| !selection.has_callbacks())
+}
+
 fn capture_mcp_source(
     step: Option<&ExtensionData>,
 ) -> Result<Option<Arc<ProfileMcpSource>>, String> {
@@ -2421,13 +2445,24 @@ impl ThreadLifecycleContributor<Config> for Boundary {
 }
 
 impl TurnLifecycleContributor for Boundary {
+    fn hold_assistant_completion(
+        &self,
+        thread: &codex_extension_api::ExtensionData,
+        step: &codex_extension_api::ExtensionData,
+    ) -> bool {
+        thread
+            .get::<crate::python_tools::PythonTools>()
+            .is_some_and(|tools| tools.holds_assistant_completion(step))
+    }
+
     fn before_turn_complete<'a>(
         &'a self,
         input: codex_extension_api::TurnCompletionInput<'a>,
-    ) -> ExtensionFuture<'a, std::result::Result<Option<String>, String>> {
+    ) -> ExtensionFuture<'a, std::result::Result<codex_extension_api::TurnCompletionDecision, String>>
+    {
         Box::pin(async move {
             let Some(tools) = input.thread_store.get::<crate::python_tools::PythonTools>() else {
-                return Ok(None);
+                return Ok(codex_extension_api::TurnCompletionDecision::Accept);
             };
             tools
                 .before_complete(input)

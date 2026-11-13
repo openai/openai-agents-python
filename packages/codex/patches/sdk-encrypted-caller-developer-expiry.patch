@@ -1,0 +1,92 @@
+--- a/codex-rs/core/src/sdk_history_retention.rs
++++ b/codex-rs/core/src/sdk_history_retention.rs
+@@ -18,7 +18,7 @@
+     pub fn stamp_new_items(&self, items: &mut [ResponseItemEnvelope]) {
+         let created_at = crate::session::session::Session::response_item_create_time();
+         for envelope in items {
+-            if expires(&envelope.item) && envelope.item.create_time().is_none() {
++            if expires(envelope) && envelope.item.create_time().is_none() {
+                 envelope
+                     .metadata
+                     .get_or_insert_default()
+@@ -32,7 +32,7 @@
+     pub fn stamp_imported_items(&self, items: &mut [ResponseItemEnvelope]) {
+         let admitted_at = crate::session::session::Session::response_item_create_time();
+         for envelope in items {
+-            if !expires(&envelope.item) {
++            if !expires(envelope) {
+                 continue;
+             }
+             let created_at = envelope
+@@ -53,7 +53,7 @@
+         let Some(ttl) = self.ttl_seconds else {
+             return Ok(true);
+         };
+-        if !expires(&envelope.item) {
++        if !expires(envelope) {
+             return Ok(true);
+         }
+         let sdk_created_at = envelope
+@@ -76,11 +76,13 @@
+     }
+ }
+ 
+-fn expires(item: &ResponseItem) -> bool {
+-    match item {
+-        ResponseItem::Message { role, .. } if matches!(role.as_str(), "system" | "developer") => {
+-            false
+-        }
++fn expires(envelope: &ResponseItemEnvelope) -> bool {
++    match &envelope.item {
++        ResponseItem::Message { role, .. } if role == "developer" => envelope
++            .metadata
++            .as_ref()
++            .is_some_and(|metadata| metadata.client_authored),
++        ResponseItem::Message { role, .. } if role == "system" => false,
+         ResponseItem::AdditionalTools { .. }
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::CompactionTrigger { .. } => false,
+@@ -154,6 +156,31 @@
+         for role in ["developer", "system"] {
+             assert!(policy.retain(&message(role, None), &100.into()).unwrap());
+         }
++    }
++
++    #[test]
++    fn client_developer_history_expires_without_changing_native_instruction_lifetime() {
++        let policy = SdkHistoryRetention::new(Some(10));
++        let native = message("developer", None);
++        let mut caller = message("developer", Some(50));
++        caller.metadata.get_or_insert_default().client_authored = true;
++        assert!(policy.retain(&native, &100.into()).unwrap());
++        assert!(policy.retain(&caller, &60.into()).unwrap());
++        assert!(!policy.retain(&caller, &61.into()).unwrap());
++    }
++
++    #[test]
++    fn older_client_developer_history_requires_an_age_without_renewal() {
++        let policy = SdkHistoryRetention::new(Some(10));
++        let mut caller = message("developer", None);
++        caller.metadata.get_or_insert_default().client_authored = true;
++        assert!(policy.retain(&caller, &100.into()).is_err());
++        assert!(caller.metadata.as_ref().unwrap().sdk_created_at.is_none());
++        assert!(
++            SdkHistoryRetention::new(None)
++                .retain(&caller, &100.into())
++                .unwrap()
++        );
+     }
+ 
+     #[test]
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -533,6 +533,9 @@
+                     let projection = projection.map(|mut item| {
+                         Self::assign_missing_response_item_id(&mut item);
+                         let mut envelope = self.annotate_client_response_item(item);
++                        if matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "developer") {
++                            envelope.metadata.get_or_insert_default().client_authored = true;
++                        }
+                         if let Some(policy) = self
+                             .services
+                             .thread_extension_data

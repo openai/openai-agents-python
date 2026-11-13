@@ -1,0 +1,26 @@
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index c4c30992..caf2cda4 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -360,7 +360,7 @@ impl ToolCallRuntime {
+                     .expect("unpublished tool progress poisoned")
+                     .as_ref()
+                 {
+-                    progress.send_modify(|version| *version = version.wrapping_add(1));
++                    progress();
+                 }
+             }
+             Ok(DirectToolResult {
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index ae1fdb0a..1af8bc2f 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -198,7 +198,7 @@ pub struct HeldToolCompletionResults {
+     /// Final Core envelopes waiting for the ordered result drain, never terminal policy candidates.
+     pub unpublished_outputs: std::sync::Mutex<Vec<(codex_history::ResponseItemEnvelope, bool)>>,
+     /// The admitted SDK owner's existing finite readiness counter.
+-    pub unpublished_progress: std::sync::Mutex<Option<tokio::sync::watch::Sender<u64>>>,
++    pub unpublished_progress: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+     pub outputs: std::sync::Mutex<Vec<(codex_history::ResponseItemEnvelope, bool)>>,
+     pub suspending: std::sync::atomic::AtomicBool,
+ }

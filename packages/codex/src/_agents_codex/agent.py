@@ -71,6 +71,7 @@ from .compaction import ResponsesCompaction, _BeforeCompact
 from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
+from .handoffs import _PrepareHandoffInput
 from .history import _InputStoragePolicy
 from .hosted_mcp import HostedMCP
 from .initial_messages import _capture_initial_messages, _initial_messages_json
@@ -112,6 +113,7 @@ if TYPE_CHECKING:
         _EnvironmentLease,
         _InteractionHandler,
         _OpeningOwner,
+        _RunErrorHandler,
     )
     from .state import LocalStorage, SessionState
     from .telemetry import TraceOptions
@@ -143,6 +145,7 @@ class HostedToolChoice(TypedDict, total=False, closed=True):
             "shell",
             "apply_patch",
             "tool_search",
+            "programmatic_tool_calling",
             "mcp",
         ]
     ]
@@ -215,6 +218,7 @@ class ModelSettings(TypedDict, total=False, closed=True):
     store: bool | None
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
+    prompt_cache_mode: Literal["explicit"] | None
     invocation_timeout_ms: int | None
     attempt_timeout_ms: int | None
     retry: ModelRetrySettings | None
@@ -953,6 +957,9 @@ class Agent(Generic[ContextT, OutputT]):
     Targets are resolved once when the Session captures the graph; subsequent
     model handoffs select from those captured declarations.
 
+    ``tool_name_collision_policy="warn"`` keeps the last eager bare function or
+    handoff with a given name. A handoff takes precedence over a function.
+
     ``transform_context`` runs before each model request, including children,
     output repair, and model-based compaction. Return replacement input items
     or None to keep the original input. The callback does not edit saved history.
@@ -1006,6 +1013,8 @@ class Agent(Generic[ContextT, OutputT]):
     tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     hosted_prompt: HostedPromptSource | None
     compaction: ResponsesCompaction[ContextT] | None
+    prepare_handoff_input: _PrepareHandoffInput[ContextT] | None
+    tool_name_collision_policy: Literal["error", "warn"]
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -1036,6 +1045,7 @@ class Agent(Generic[ContextT, OutputT]):
             | None = None,
             output_type: None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
             tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1059,6 +1069,7 @@ class Agent(Generic[ContextT, OutputT]):
             ]
             | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
             tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1098,6 +1109,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1106,6 +1118,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1133,6 +1146,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1140,6 +1154,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1164,6 +1179,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1172,6 +1188,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     @overload
@@ -1197,6 +1214,7 @@ class Agent(Generic[ContextT, OutputT]):
         decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1204,6 +1222,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         realtime: RealtimeAgentConfig | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None: ...
 
     def __init__(
@@ -1227,6 +1246,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        prepare_handoff_input: _PrepareHandoffInput[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
         tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
@@ -1235,6 +1255,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
         hosted_prompt: HostedPromptSource | None = None,
         compaction: ResponsesCompaction[ContextT] | dict[str, Any] | None = None,
+        tool_name_collision_policy: Literal["error", "warn"] = "error",
     ) -> None:
         if isinstance(instructions, _OmittedInstructions):
             instructions = None
@@ -1249,6 +1270,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("name must be a string or None")
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
+        if prepare_handoff_input is not None and not callable(prepare_handoff_input):
+            raise TypeError("prepare_handoff_input must be callable or None")
         if transform_context is not None and not callable(transform_context):
             raise TypeError("transform_context must be callable or None")
         if before_compact is not None and not callable(before_compact):
@@ -1303,7 +1326,11 @@ class Agent(Generic[ContextT, OutputT]):
         )
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
+        if tool_name_collision_policy not in ("error", "warn"):
+            raise ValueError("tool_name_collision_policy must be error or warn")
+        object.__setattr__(self, "tool_name_collision_policy", tool_name_collision_policy)
         object.__setattr__(self, "transform_context", transform_context)
+        object.__setattr__(self, "prepare_handoff_input", prepare_handoff_input)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
         object.__setattr__(self, "tool_batch_completion", tool_batch_completion)
@@ -1391,6 +1418,7 @@ class Agent(Generic[ContextT, OutputT]):
         only be checked when a Session opens. This never reads credentials or
         connects to a provider, executor or MCP server.
         """
+        from ._agent_profiles import _capture_agent_graph, _resolve_tool_name_collisions
         from .schema import _prepare_spec
         from .session import _OpeningTools
 
@@ -1418,9 +1446,12 @@ class Agent(Generic[ContextT, OutputT]):
             _prepare_spec(declaration.output_type)
 
         if self.handoffs:
-            from ._agent_profiles import _capture_agent_graph
-
             declarations = tuple(profile.declaration for profile in _capture_agent_graph(self))
+        elif self.tool_name_collision_policy == "warn" and getattr(
+            self, "_hosted_tools_provided", True
+        ):
+            tools, _ = _resolve_tool_name_collisions(self.tools, ())
+            declarations = (replace(self, tools=tools),)
         else:
             declarations = (self,)
         for declaration in declarations:
@@ -1842,8 +1873,11 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("tool_error_formatter must be callable or None")
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
+        from ._cache_affinity import _claim_cache_affinity
         from .session import Completed, Session
         from .telemetry import _capture, get_default_agent_harness_id
+
+        prompt_cache_key = _claim_cache_affinity(self)
 
         try:
             parent_trace = _trace_context(parent_trace)
@@ -1894,6 +1928,7 @@ class Agent(Generic[ContextT, OutputT]):
                 _completed_input=_completed_input,
                 _private_text_run=_private_text_run,
                 _tracing_context_policy_only=captured.policy_only,
+                _prompt_cache_key=prompt_cache_key,
                 **cast(
                     "_TracingOpeningOptions",
                     {"_tracing_context": captured.context} if captured.context is not None else {},
@@ -1956,6 +1991,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1994,6 +2030,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2032,6 +2069,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2074,6 +2112,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2155,6 +2194,13 @@ class Agent(Generic[ContextT, OutputT]):
         Portable manual checkpoints have been retaining captured caller input.
         Restores without that origin have been reporting input=None and incomplete=True.
         Read the snapshot from RunDiagnosticError.details. The original error is its cause.
+
+        error_handler receives a settled run failure and its captured diagnostics.
+        Return RecoverRun to supply schema-validated output, or None to propagate
+        the failure. The replacement can be added as an assistant history item.
+        Provider refusal, final output validation and the request budget are
+        eligible. Output guardrails check the replacement before it is returned
+        or saved. Uncertain cleanup prevents recovery.
         """
         provider_history = _capture_provider_history(provider_history)
         if input_storage_policy is not None:
@@ -2163,10 +2209,11 @@ class Agent(Generic[ContextT, OutputT]):
             if input is None:
                 raise TypeError("Cannot add input_storage_policy when resuming a run")
             input = deepcopy(input)
+        if error_handler is not None and not callable(error_handler):
+            raise TypeError("error_handler must be callable or None")
         capture_error_details = capture_error_details is True
-        error_input = (
-            deepcopy(input) if capture_error_details and input_storage_policy is None else None
-        )
+        observe_failure = capture_error_details or error_handler is not None
+        error_input = deepcopy(input) if observe_failure and input_storage_policy is None else None
         if error_input is not None:
             input = error_input
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
@@ -2184,7 +2231,7 @@ class Agent(Generic[ContextT, OutputT]):
             if not isinstance(input, str) and input_storage_policy is None:
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
-        if capture_error_details:
+        if observe_failure:
             options["include_raw_provider_events"] = True
         raw_usage_token = None
         produced_items_token = None
@@ -2196,7 +2243,6 @@ class Agent(Generic[ContextT, OutputT]):
                 CapabilityError,
                 InteractionRequired,
                 NativeError,
-                RunDiagnosticError,
                 _handoff_default_names,
                 _produced_items_restore,
                 _raw_usage_restore,
@@ -2372,6 +2418,7 @@ class Agent(Generic[ContextT, OutputT]):
                 and budget is None
                 and not input_guardrails
                 and not output_guardrails
+                and error_handler is None
             ):
                 # Only the built-in one-shot opening may defer its initial
                 # instruction receipt to the first ordinary submission.
@@ -2402,15 +2449,19 @@ class Agent(Generic[ContextT, OutputT]):
             if return_raw_usage and resume_manual:
                 assert state is not None
                 raw_usage_token = _raw_usage_restore.set((self, state, asyncio.current_task()))
-            if (return_items or capture_error_details) and resume_manual:
+            if (return_items or observe_failure) and resume_manual:
                 assert state is not None
                 produced_items_token = _produced_items_restore.set(
                     (self, state, asyncio.current_task())
                 )
-            async with session_factory(
-                context=cast(SessionContextT, context),
-                **options,
-            ) as session:
+            from ._cache_affinity import _cache_affinity_opening, _cache_key
+            from .telemetry import _options as _trace_options
+
+            group = _trace_options(trace_options).group_id if trace_options is not None else None
+            async with (
+                _cache_affinity_opening(self, _cache_key("group", group)),
+                session_factory(context=cast(SessionContextT, context), **options) as session,
+            ):
                 from .session import Completed
 
                 if raw_usage_token is not None:
@@ -2555,7 +2606,7 @@ class Agent(Generic[ContextT, OutputT]):
                 session._fail_unhandled_configured_children = session._interaction_handler is None
                 if return_raw_usage:
                     session._start_raw_usage()
-                if return_items or capture_error_details:
+                if return_items or observe_failure:
                     session._start_produced_items()
                 if resume_manual:
                     restored = session.restored_turn
@@ -2581,7 +2632,7 @@ class Agent(Generic[ContextT, OutputT]):
                         submission = await session.submit(
                             input, tools=tools, before_step=before_step, **submit_options
                         )
-                if capture_error_details and input is not None and input_storage_policy is None:
+                if observe_failure and input is not None and input_storage_policy is None:
                     session._remember_run_error_input(submission, error_input)
                 if session._interaction_handler is None and pause_manual:
                     return await session._run_with_interactions(
@@ -2592,25 +2643,23 @@ class Agent(Generic[ContextT, OutputT]):
                         return_raw_usage=return_raw_usage,
                         return_items=return_items,
                         capture_error_details=capture_error_details,
+                        error_handler=error_handler,
                         error_input=error_input,
                         pause_manual=pause_manual,
                     )
-                try:
-                    result = await submission.get_result()
-                except Exception as error:
-                    if capture_error_details:
-                        details = await session._capture_run_error_details(submission, error_input)
-                        if details is not None:
-                            raise RunDiagnosticError(details) from error
-                    raise
+                result = await session._one_shot_result(
+                    submission, error_handler, capture_error_details, error_input
+                )
                 if return_state:
                     result = replace(result, state=await session.save_state())
                 if return_history:
                     result = replace(result, history=await session._run_history())
                 if return_raw_usage:
                     result = replace(result, raw_usage=session._take_raw_usage(result.turn))
-                if return_items:
+                if return_items and result.items is None:
                     result = replace(result, items=session._take_produced_items(result.turn))
+                if not return_items and result.items is not None:
+                    result = replace(result, items=None)
                 return result
         finally:
             if raw_usage_token is not None:
@@ -2645,6 +2694,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2683,6 +2733,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2721,6 +2772,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2763,6 +2815,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages: Sequence[InitialMessage] | None = None,
         return_items: bool = False,
         capture_error_details: bool = False,
+        error_handler: _RunErrorHandler | None = None,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2815,6 +2868,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["return_items"] = return_items
                 if capture_error_details is True:
                     options["capture_error_details"] = True
+                if error_handler is not None:
+                    options["error_handler"] = error_handler
                 if return_state is not False:
                     options["return_state"] = return_state
                 if return_history is not False:

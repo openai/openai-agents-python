@@ -167,9 +167,15 @@ async def test_retirement_rollover_preserves_running_guardrail():
 
 async def test_terminal_request_byte_pressure_releases_only_terminal_reservations(monkeypatch):
     realtime = owner()
-    monkeypatch.setattr(realtime, "_BUFFER_BYTES_LIMIT", 600)
-    # This shared limit also bounds history; isolate request reservations here.
-    monkeypatch.setattr(realtime, "_record_function_history", lambda *args: None)
+    reserve_request = realtime._reserve_request
+
+    def reserve_with_byte_pressure(request_id: str, *values: str) -> None:
+        # Request pressure with normal capacity for retained history.
+        with monkeypatch.context() as reservation:
+            reservation.setattr(realtime, "_BUFFER_BYTES_LIMIT", 600)
+            reserve_request(request_id, *values)
+
+    monkeypatch.setattr(realtime, "_reserve_request", reserve_with_byte_pressure)
     request(realtime, "active")
     for index in range(12):
         call_id = f"terminal-{index}" + "x" * 12

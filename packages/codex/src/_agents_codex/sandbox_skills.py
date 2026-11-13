@@ -194,6 +194,10 @@ class _SkillLease:
         if _grant_stamp(session.state.manifest) != grants:
             raise RuntimeError("Skill staging requires its current sandbox environment and grants")
 
+    def _validate_borrowed_manifest(self, session: SandboxSession, manifest: Manifest) -> None:
+        if _grant_stamp(session.state.manifest) != _grant_stamp(manifest):
+            raise RuntimeError("Skill loading requires its current sandbox environment and grants")
+
     async def activate(
         self,
         session: SandboxSession,
@@ -201,10 +205,8 @@ class _SkillLease:
         *,
         borrowed_manifest: Manifest | None = None,
     ) -> str | None:
-        if borrowed_manifest is not None and (
-            _grant_stamp(session.state.manifest) != _grant_stamp(borrowed_manifest)
-        ):
-            raise RuntimeError("Skill loading requires its current sandbox environment and grants")
+        if borrowed_manifest is not None:
+            self._validate_borrowed_manifest(session, borrowed_manifest)
         self.session = session
         self.environment = environment
         self.grants = _grant_stamp(session.state.manifest)

@@ -77,6 +77,7 @@ from .tools import (
     Checklist as Checklist,
     CodeInterpreter as CodeInterpreter,
     FileSearch as FileSearch,
+    HostedProgrammaticToolCalling as HostedProgrammaticToolCalling,
     HostedShell as HostedShell,
     ImageGeneration as ImageGeneration,
     NativeGoals as NativeGoals,
@@ -573,16 +574,21 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             if (
                 not callers
                 or any(
-                    not isinstance(caller, str) or caller not in ("direct", "code")
+                    not isinstance(caller, str) or caller not in ("direct", "code", "programmatic")
                     for caller in callers
                 )
                 or len(callers) != len(set(callers))
             ):
                 raise ValueError(
-                    "FunctionTool allowed_callers must select distinct direct or code routes"
+                    "FunctionTool allowed_callers must select distinct "
+                    "direct, code, or programmatic callers"
                 )
+            if self._custom_format is not None and "programmatic" in callers:
+                raise ValueError("Custom string tools do not support programmatic callers")
             object.__setattr__(
-                self, "allowed_callers", ("direct", "code") if len(callers) == 2 else callers
+                self,
+                "allowed_callers",
+                tuple(value for value in ("direct", "code", "programmatic") if value in callers),
             )
         if not isinstance(self.input_type, type) or not issubclass(self.input_type, BaseModel):
             raise TypeError("FunctionTool input_type must be a Pydantic BaseModel type")
@@ -873,6 +879,7 @@ Tool: TypeAlias = (
     | FileSearch
     | CodeInterpreter
     | HostedShell
+    | HostedProgrammaticToolCalling
     | ImageGeneration
     | HostedMCP[ToolContextT]
     | ToolSearch

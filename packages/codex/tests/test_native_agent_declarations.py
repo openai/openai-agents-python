@@ -45,6 +45,8 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "tool_batch_completion",
         "hosted_prompt",
         "compaction",
+        "prepare_handoff_input",
+        "tool_name_collision_policy",
     )
     assert tuple(field.name for field in fields(Agent)) == expected_fields
     assert Agent.__match_args__ == expected_fields
@@ -72,6 +74,7 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "output_type",
         "programmatic_tool_calling",
         "transform_context",
+        "prepare_handoff_input",
         "before_compact",
         "before_complete",
         "tool_batch_completion",
@@ -80,6 +83,7 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "output_guardrails",
         "hosted_prompt",
         "compaction",
+        "tool_name_collision_policy",
     )
     assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters)
 

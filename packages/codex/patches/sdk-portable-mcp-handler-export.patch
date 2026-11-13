@@ -1,0 +1,17 @@
+diff --git a/codex-rs/core/src/mcp_approval_recovery.rs b/codex-rs/core/src/mcp_approval_recovery.rs
+--- a/codex-rs/core/src/mcp_approval_recovery.rs
++++ b/codex-rs/core/src/mcp_approval_recovery.rs
+@@ -57,5 +57,5 @@
+     tool: &str,
+ ) -> bool {
+-    runtime.type_id() == std::any::TypeId::of::<crate::tools::handlers::mcp::McpHandler>()
++    runtime.type_id() == std::any::TypeId::of::<crate::tools::handlers::McpHandler>()
+         && runtime.mcp_server_name() == Some(server)
+         && runtime.mcp_tool_name() == Some(tool)
+@@ -328,5 +328,5 @@
+             plugin_display_names: Vec::new(),
+         };
+-        let runtime = crate::tools::handlers::mcp::McpHandler::new(info).unwrap();
++        let runtime = crate::tools::handlers::McpHandler::new(info).unwrap();
+         assert!(matches_native_runtime(&runtime, "docs", "find-record"));
+         assert!(!matches_native_runtime(&runtime, "docs", "reviewed"));

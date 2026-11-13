@@ -522,7 +522,10 @@ async def test_invalid_continuation_preserves_pending_answer(tmp_path, responses
 
 
 @pytest.mark.parametrize("opening", ["none", "shared", "same-name"])
-async def test_handoff_manual_answer_uses_the_issuing_profile(tmp_path, responses, opening):
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_handoff_manual_answer_uses_the_issuing_profile(
+    tmp_path, responses, opening, prepared
+):
     approval = FunctionTool(
         name="approve", description="Choose.", input_type=Approval, output_type=str
     )
@@ -556,6 +559,22 @@ async def test_handoff_manual_answer_uses_the_issuing_profile(tmp_path, response
         provider=provider,
         tools=source_tools,
         handoffs=[target],
+        prepare_handoff_input=(
+            lambda value: replace(
+                value,
+                input=(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "filtered A2A input"}],
+                    },
+                ),
+                previous=(),
+                generated=(),
+            )
+        )
+        if prepared
+        else None,
     )
     executor = NativeA2AExecutor(
         store=HostStore(tmp_path),
@@ -569,22 +588,31 @@ async def test_handoff_manual_answer_uses_the_issuing_profile(tmp_path, response
         proposal = MessageToDict(waiting.task.status.message.parts[0].data)
         binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
         saved = executor.store.read(binding)
+        if prepared:
+            executor = NativeA2AExecutor(
+                store=HostStore(tmp_path),
+                agent_factory=lambda binding, context: NativeA2AAgent(agent=source),
+            )
         answer = {
             "challenge": proposal["challenge"],
             "generation": proposal["generation"],
             "result": False,
         }
-        with pytest.raises(InvalidParamsError, match="manual answer"):
-            await invoke(executor, request_context(reply=answer, current=waiting.task))
-        assert executor.store.read(binding) == saved
-        assert len(responses.requests) == 2
-        assert len(opened) == 2 and opened == closed
+        if not prepared:
+            with pytest.raises(InvalidParamsError, match="manual answer"):
+                await invoke(executor, request_context(reply=answer, current=waiting.task))
+            assert executor.store.read(binding) == saved
+            assert len(responses.requests) == 2
+            assert len(opened) == 2 and opened == closed
         answer["result"] = "approved"
         responses.respond(assistant_output("accepted"))
         done, _ = await invoke(executor, request_context(reply=answer, current=waiting.task))
         assert done.task.status.state == p.TASK_STATE_COMPLETED
         assert done.task.artifacts[0].parts[0].text == "accepted"
         assert tool_output(responses.requests[2], "approval") == "approved"
+        if prepared:
+            wire = json.dumps(responses.requests[2]["input"])
+            assert "filtered A2A input" in wire and "Do this task" not in wire
     finally:
         await provider.aclose()
 
@@ -1457,3 +1485,115 @@ async def test_official_cancel_preserves_canceled_outcome_within_snapshot_limit(
     assert all(len(snapshot) <= 512 for snapshot in executor.store.saved)
     assert await executor.recover(binding, call_context()) == saved
     assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("mutation", ["checkpoint", "missing-digest"])
+async def test_prepared_handoff_a2a_checkpoint_requires_its_saved_digest(
+    tmp_path, responses, mutation
+):
+    from hashlib import sha256
+
+    approval = FunctionTool(
+        name="approve", description="Choose.", input_type=Approval, output_type=str
+    )
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-a2a-integrity"
+    ) as provider:
+        target = Agent(name="B", instructions="Ask for approval.", tools=[approval])
+        source = Agent(
+            name="A",
+            instructions="Handoff to B.",
+            model="gpt-5.5",
+            provider=provider,
+            handoffs=[target],
+            prepare_handoff_input=lambda value: replace(
+                value,
+                input=(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "filtered stored context"}],
+                    },
+                ),
+                previous=(),
+                generated=(),
+            ),
+        )
+        executor = NativeA2AExecutor(
+            store=HostStore(tmp_path),
+            agent_factory=lambda binding, context: NativeA2AAgent(agent=source),
+        )
+        responses.respond(function_call("transfer_to_b", {}, "transfer"))
+        responses.respond(function_call("approve", {"reason": "synthetic"}, "approval"))
+        waiting, _ = await invoke(executor, request_context())
+        proposal = MessageToDict(waiting.task.status.message.parts[0].data)
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        original = executor.store.read(binding)
+        assert original.checkpoint_sha256 == sha256(original.checkpoint.encode()).hexdigest()
+        if mutation == "checkpoint":
+            changed = original.checkpoint.replace(
+                "filtered stored context", "altered stored context"
+            )
+            assert changed != original.checkpoint
+            edited = replace(original, checkpoint=changed)
+        else:
+            edited = replace(original, checkpoint_sha256=None)
+        async with executor.store.own(binding) as lease:
+            await lease.commit(edited, expected_generation=original.generation)
+        answer = {
+            "challenge": proposal["challenge"],
+            "generation": proposal["generation"],
+            "result": "approved",
+        }
+        with pytest.raises(InvalidParamsError, match="manual answer"):
+            await invoke(executor, request_context(reply=answer, current=waiting.task))
+        assert executor.store.read(binding) == edited
+        assert len(responses.requests) == 2
+        async with executor.store.own(binding) as lease:
+            await lease.commit(original, expected_generation=original.generation)
+        responses.respond(assistant_output("accepted"))
+        done, _ = await invoke(executor, request_context(reply=answer, current=waiting.task))
+        assert done.task.status.state == p.TASK_STATE_COMPLETED
+        assert executor.store.read(binding).checkpoint_sha256 is None
+        wire = json.dumps(responses.requests[2]["input"])
+        assert "filtered stored context" in wire and "Do this task" not in wire
+
+
+async def test_legacy_a2a_unfiltered_manual_checkpoint_can_resume_without_digest(
+    tmp_path, responses
+):
+    approval = FunctionTool(
+        name="approve", description="Choose.", input_type=Approval, output_type=str
+    )
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-a2a-legacy") as provider:
+        agent = Agent(
+            instructions="Ask for approval.", model="gpt-5.5", provider=provider, tools=[approval]
+        )
+        executor = NativeA2AExecutor(
+            store=HostStore(tmp_path),
+            agent_factory=lambda binding, context: NativeA2AAgent(agent=agent),
+        )
+        responses.respond(function_call("approve", {"reason": "synthetic"}, "approval"))
+        waiting, _ = await invoke(executor, request_context())
+        proposal = MessageToDict(waiting.task.status.message.parts[0].data)
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        saved = executor.store.read(binding)
+        async with executor.store.own(binding) as lease:
+            await lease.commit(
+                replace(saved, checkpoint_sha256=None), expected_generation=saved.generation
+            )
+        responses.respond(assistant_output("legacy accepted"))
+        done, _ = await invoke(
+            executor,
+            request_context(
+                reply={
+                    "challenge": proposal["challenge"],
+                    "generation": proposal["generation"],
+                    "result": "approved",
+                },
+                current=waiting.task,
+            ),
+        )
+        assert done.task.status.state == p.TASK_STATE_COMPLETED
+        assert done.task.artifacts[0].parts[0].text == "legacy accepted"
+        assert len(responses.requests) == 2

@@ -37,13 +37,19 @@ class EncryptedSessionStore:
     password: HKDF does not harden passwords. Keep the key outside the backend.
 
     Each adapter uses one master key for canonical snapshots. Snapshot
-    retention follows the backend record lifecycle. `read_legacy_history`
-    applies the v0 item TTL during import.
+    retention follows the backend record lifecycle. Pass `ttl` in seconds to
+    exclude expired items from model context. The original audit records remain
+    encrypted in the store. `read_legacy_history` applies the v0 item TTL during import.
     """
 
-    def __init__(self, backend: SessionStore, *, encryption_key: str) -> None:
+    def __init__(
+        self, backend: SessionStore, *, encryption_key: str, ttl: int | None = None
+    ) -> None:
         if not isinstance(backend, SessionStore):
             raise TypeError("backend must implement SessionStore")
+        if ttl is not None and (type(ttl) is not int or not 0 <= ttl < 2**64):
+            raise ValueError("ttl must be a nonnegative integer number of seconds or None")
+        self._native_history_ttl_seconds = ttl
         self._key = _master_key_bytes(encryption_key)
         # Import the optional encryption dependency only when selecting this adapter.
         from cryptography.fernet import Fernet

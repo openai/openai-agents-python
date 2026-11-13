@@ -1,9 +1,7 @@
 //! JSON adapters for native operations that contain Rust-only channels or values.
 use crate::config::{decode, optional};
 use anyhow::{Context, Result, bail, ensure};
-use codex_core::context::{
-    ContextualUserFragment, InternalContextSource, InternalModelContextFragment,
-};
+use codex_core::context::{ContextualUserFragment, InternalContextSource, InternalModelContextFragment};
 use codex_core_api::{AbsolutePathBuf, CodexThread, WithTurnExtensionData};
 use codex_extension_api::{ExtensionDataInit, ToolNotFoundBehavior};
 use codex_protocol::config_types::{
@@ -475,6 +473,8 @@ impl Default for Mode {
 params!(TurnParams {
     input: Value,
     #[serde(default)]
+    profile_output_override: bool,
+    #[serde(default)]
     raise_on_unknown_tool: bool,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     observation_submission_id: Option<String>,
@@ -874,6 +874,8 @@ params!(RecoveryOptions {
     observation_submission_id: Option<String>,
     #[serde(default)]
     output_schema: Option<serde_json::Map<String, Value>>,
+    #[serde(default)]
+    profile_output_override: bool,
 });
 
 pub async fn recover_prepared(
@@ -883,6 +885,7 @@ pub async fn recover_prepared(
     value: Value,
     terminal: Option<crate::python_tools::RecoveredToolCompletionSeed>,
     staged_input: Option<codex_extension_api::StagedInputBatch>,
+    native_mcp: Option<codex_core::NativeMcpRecovery>,
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
     if let Some(model) = p.model_override.as_deref() {
@@ -907,6 +910,13 @@ pub async fn recover_prepared(
     }
     let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;
+    if let Some(native_mcp) = native_mcp {
+        anyhow::ensure!(
+            terminal.is_none(),
+            "Native MCP recovery cannot inherit function completion authority"
+        );
+        init.insert(native_mcp);
+    }
     init.insert(if p.raise_on_unknown_tool {
         ToolNotFoundBehavior::RaiseError
     } else {
@@ -920,6 +930,10 @@ pub async fn recover_prepared(
     init.insert(crate::agent_profiles::OperationDeclarationSource(
         p.operation_declaration_source,
     ));
+    init.insert(codex_extension_api::AgentProfileOutputControl {
+        thread_id: state.id.to_string(),
+        preserve_turn_output: p.profile_output_override,
+    });
     crate::recovery_guard::Seed::attach(&mut init, &turn_id, original_call_ids);
     if let Some(staged) = staged_input {
         init.insert(staged);
@@ -1010,9 +1024,30 @@ async fn start_with_params<'a>(
         );
         turn_init
     };
+    let turn_init = if let Some((state, _)) = managed.as_ref() {
+        if matches!(p.mode, Mode::Steer) {
+            turn_init
+        } else {
+            let mut init = match turn_init {
+                Some(init) => init,
+                None => thread.config_snapshot().await.turn_extension_init,
+            };
+            init.insert(codex_extension_api::AgentProfileOutputControl {
+                thread_id: state.id.to_string(),
+                preserve_turn_output: p.profile_output_override,
+            });
+            Some(init)
+        }
+    } else {
+        turn_init
+    };
+    let mut prompt_cache_breakpoints = Vec::new();
     let input = if p.input.is_array() {
+        let captured = decode::<Vec<codex_protocol::prompt_cache::PromptCacheUserInput>>(p.input)?;
+        let (content, breakpoints) = codex_protocol::prompt_cache::split_user_input(captured);
+        prompt_cache_breakpoints = breakpoints;
         TurnInput::UserInput {
-            content: decode::<Vec<UserInput>>(p.input)?,
+            content,
             client_id: p.client_id,
         }
     } else {
@@ -1023,6 +1058,7 @@ async fn start_with_params<'a>(
     };
     let mut request = TurnInputRequest {
         input,
+        prompt_cache_breakpoints,
         thread_settings: p.thread_settings,
         start: p.start,
         additional_context: p

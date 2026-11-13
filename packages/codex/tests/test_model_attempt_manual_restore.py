@@ -122,6 +122,8 @@ class CapturedState:
     def from_json(cls, raw):
         return cls(json.loads(raw))
 
+    _from_native_capture = from_json
+
     def to_json(self):
         return json.dumps(self.value)
 

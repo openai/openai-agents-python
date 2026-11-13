@@ -29,6 +29,7 @@ from _agents_codex.history import (
     ReceivedInputTokensDetails as ReceivedInputTokensDetails,
     ReceivedOutputTokensDetails as ReceivedOutputTokensDetails,
     ReceivedTokenUsage as ReceivedTokenUsage,
+    RecordedRequestUsage as RecordedRequestUsage,
     RecordedResponse as RecordedResponse,
     RecordedResponseFact as RecordedResponseFact,
     RecordedResponseFactSummary as RecordedResponseFactSummary,

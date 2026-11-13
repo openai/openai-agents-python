@@ -21,7 +21,7 @@ Choose storage before opening the Session. Start with an ordinary Session for a 
 The storage choices have these limits:
 
 - Portable checkpoints can retain settled native stored values and terminal code-cell observations. They do not copy workspace files, live processes, or arbitrary JavaScript heap state.
-- A Session using persistent storage (`LocalStorage` or `CustomStorage`) has one writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`. Retain `session.id` and reopen with the same storage backend.
+- Persistent sessions have one writer at a time. Call `save_state()` on an idle `LocalStorage` or supported `CustomStorage` session to copy its conversation into portable state. To keep writing to the original store after close, retain `session.id` and reopen with the same backend. Use a session without persistent storage for `suspend()` or `fork()`.
 - Do not combine `storage` or `resume` with portable `state`.
 - Each restore method requires current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
 
@@ -108,9 +108,11 @@ The SDK rejects later reuse of a reconciled call ID. A new call ID can still req
 
 ## Store history in an application backend
 
-`CustomStorage` supports root Sessions with automatic Python tools in `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md). It rejects standalone native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
+`CustomStorage` supports root Sessions with automatic Python tools. It also supports an authenticated remote `Environment` with `read_only=True` that grants only `project_glob` or `project_grep` and has no capability directories. Process tools, writable environments, child agents, goals, checklists, code mode, and manual tools remain unsupported. Use a [matching preview wheel](installation.md).
 
 Import `CustomStorage` and `SessionStore` from `agents`. Set `storage = CustomStorage(backend)` with an application backend implementing `SessionStore`, then open with `agent.session(storage=storage)`. Retain `session.id` and reopen with the same backend and `resume=saved_id`. The [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage) provides a persistent SQLite adapter and a two-process walkthrough.
+
+An idle `CustomStorage` session can copy its settled conversation with `await session.save_state()`. Open the copy with `agent.session(state=saved)` and supply current tools and credentials. The source keeps its writer lease until it closes. For encrypted stores with an item lifetime, retain the session ID and reopen through the original backend so that it supplies the lifetime. Store the portable JSON securely because it contains the conversation history.
 
 A custom-store reopen with unresolved root calls raises `LocalRecoveryRequired` before the native runtime starts. Inspect `error.calls`, `error.turns`, and `error.items`; the SDK reads this metadata under the canonical writer lease. This works even when the process stopped before application code recorded the native call IDs. Verify the external outcome, then use `CustomStorage.reconcile()` with those IDs and a truthful result. Keep local-profile `reconciled_calls` separate from custom-store reconciliation.
 
@@ -227,6 +229,8 @@ To run a Windows named-pipe command after restore, supply the current `Environme
 ### Store and trust checkpoint data
 
 To store a checkpoint across processes, serialize it with `state.to_json()` and load it with `SessionState.from_json()` from `agents.state`.
+
+A checkpoint with a prepared handoff also needs an independently trusted SHA-256 digest. At capture, compute `hashlib.sha256(encoded.encode("utf-8")).hexdigest()` from the exact string returned by `state.to_json()`. Store the digest in a trusted record that a caller cannot edit alongside the checkpoint. At restore, pass the original string and the trusted digest to `SessionState.from_json(encoded, expected_sha256=digest)`. The SDK checks the digest before decoding and checks again that the loaded state has not changed before restoring the presentation. An unmodified checkpoint object returned directly by the SDK can restore in the same process without supplying a digest.
 
 The read-only `state.instructions` accessor returns the latest accepted instructions and validates stored history. Use it only when your application trusts checkpoint storage as its instruction source:
 

@@ -1,0 +1,276 @@
+diff --git a/codex-rs/core/src/session/model_attempts.rs b/codex-rs/core/src/session/model_attempts.rs
+index 313bd7a935c64fc682a44cc86d5a890422c5ab4a..a259f7a0054078657c89f7604bbb3a919eec85df 100644
+--- a/codex-rs/core/src/session/model_attempts.rs
++++ b/codex-rs/core/src/session/model_attempts.rs
+@@ -1,6 +1,6 @@
+ //! Logical-generation identity and accounting in the existing native turn store.
+ //! No transport or retry executor lives here; the sampling loop owns both.
+-use codex_extension_api::{ModelAttemptAdmission, TurnSamplingStop};
++use codex_extension_api::{ModelAttemptAdmission, ProviderRequestAccounting, TurnSamplingStop};
+ use codex_protocol::model_retry::{ModelAttemptSnapshot, ModelProducerFailure, ModelRetryBackoff};
+ use codex_protocol::protocol::TokenUsage;
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -16,6 +16,7 @@ struct LedgerState {
+     snapshot: ModelAttemptSnapshot,
+     current: Option<Weak<Attempt>>,
+     last_settled: Option<String>,
++    open_provider_request: Option<String>,
+ }
+
+ #[derive(Debug)]
+@@ -46,6 +47,7 @@ pub(crate) struct RequestState {
+ #[derive(Debug, Default)]
+ struct Measurement {
+     settled: bool,
++    provider_managed: bool,
+     usage: Option<TokenUsage>,
+     failure: Option<ModelProducerFailure>,
+ }
+@@ -189,10 +191,10 @@ impl Attempt {
+
+     fn with_measurement<T>(
+         &self,
+-        update: impl FnOnce(&LedgerState, &mut Measurement) -> Result<T, String>,
++        update: impl FnOnce(&mut LedgerState, &mut Measurement) -> Result<T, String>,
+     ) -> Result<T, String> {
+         let ledger = &self.ledger;
+-        let state = ledger
++        let mut state = ledger
+             .0
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+@@ -211,7 +213,7 @@ impl Attempt {
+         if measurement.settled {
+             return Err("Native model usage owner is settled".into());
+         }
+-        update(&state, &mut measurement)
++        update(&mut state, &mut measurement)
+     }
+
+     pub(crate) fn failure(&self) -> Option<ModelProducerFailure> {
+@@ -318,7 +320,9 @@ impl ModelAttemptAdmission for Attempt {
+             if measurement.failure.is_some() {
+                 return Err("Native model failure already recorded".into());
+             }
+-            if let Some(usage) = &failure.usage {
++            if !measurement.provider_managed
++                && let Some(usage) = &failure.usage
++            {
+                 add_usage(&state.snapshot.usage.token_usage, usage)?;
+                 measurement.usage = Some(usage.clone());
+             }
+@@ -330,6 +334,9 @@ impl ModelAttemptAdmission for Attempt {
+     fn report_usage(&self, usage: TokenUsage) -> Result<(), String> {
+         validate_usage(&usage)?;
+         self.with_measurement(|state, measurement| {
++            if measurement.provider_managed {
++                return Ok(());
++            }
+             add_usage(&state.snapshot.usage.token_usage, &usage)?;
+             // Replaces only this attempt's measurement. Snapshot projection and
+             // final settlement never add repeated reports a second time.
+@@ -337,6 +344,64 @@ impl ModelAttemptAdmission for Attempt {
+             Ok(())
+         })
+     }
++
++    fn account_provider_request(
++        &self,
++        operation: ProviderRequestAccounting,
++    ) -> Result<Option<String>, String> {
++        self.with_measurement(|state, measurement| {
++            let usage = &mut state.snapshot.usage;
++            match operation {
++                ProviderRequestAccounting::Manage => {
++                    if measurement.provider_managed
++                        || measurement.usage.is_some()
++                        || measurement.failure.is_some()
++                    {
++                        return Err("Native model usage already has an owner".into());
++                    }
++                    // The sampler admitted a logical attempt. Only the transport
++                    // can tell whether it opens a new physical provider request.
++                    usage.requests -= 1;
++                    usage.requests_without_token_usage -= 1;
++                    measurement.provider_managed = true;
++                    Ok(None)
++                }
++                ProviderRequestAccounting::Create if measurement.provider_managed => {
++                    let requests = usage
++                        .requests
++                        .checked_add(1)
++                        .ok_or("Native provider request counter overflow")?;
++                    let missing = usage
++                        .requests_without_token_usage
++                        .checked_add(1)
++                        .ok_or("Native provider missing-usage counter overflow")?;
++                    let lineage = uuid::Uuid::new_v4().to_string();
++                    // A replacement abandons the preceding incomplete physical
++                    // request. Its counted request remains missing usage.
++                    state.open_provider_request = Some(lineage.clone());
++                    usage.requests = requests;
++                    usage.requests_without_token_usage = missing;
++                    Ok(Some(lineage))
++                }
++                ProviderRequestAccounting::Terminal {
++                    lineage,
++                    usage: measured,
++                } if measurement.provider_managed => {
++                    if state.open_provider_request.as_deref() != Some(lineage.as_str()) {
++                        return Err("Native provider request owner mismatch".into());
++                    }
++                    if let Some(measured) = measured {
++                        validate_usage(&measured)?;
++                        usage.token_usage = add_usage(&usage.token_usage, &measured)?;
++                        usage.requests_without_token_usage -= 1;
++                    }
++                    state.open_provider_request = None;
++                    Ok(None)
++                }
++                _ => Err("Native model attempt has no managed provider transport".into()),
++            }
++        })
++    }
+ }
+
+ fn validate_usage(usage: &TokenUsage) -> Result<(), String> {
+@@ -595,6 +660,92 @@ mod tests {
+         assert_eq!(usage.requests_without_token_usage, 0);
+     }
+
++    #[test]
++    fn managed_provider_request_retains_its_lineage_across_logical_attempts() {
++        use ProviderRequestAccounting::{Create, Manage, Terminal};
++
++        let ledger = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let first = begin(&ledger, &parent);
++        assert!(first.account_provider_request(Create).is_err());
++        first.account_provider_request(Manage).unwrap();
++        assert!(first.account_provider_request(Manage).is_err());
++        let lineage = first.account_provider_request(Create).unwrap().unwrap();
++        ledger.settle(&first).unwrap();
++        assert!(first.account_provider_request(Create).is_err());
++
++        let second = begin(&ledger, &parent);
++        second.account_provider_request(Manage).unwrap();
++        assert_eq!(ledger.snapshot().usage.requests, 1);
++        assert_eq!(ledger.snapshot().usage.requests_without_token_usage, 1);
++        let foreign = Arc::new(AttemptLedger::default());
++        let unrelated = begin(&foreign, &parent);
++        unrelated.account_provider_request(Manage).unwrap();
++        assert!(
++            unrelated
++                .account_provider_request(Terminal {
++                    lineage: lineage.clone(),
++                    usage: None,
++                })
++                .is_err()
++        );
++        second
++            .account_provider_request(Terminal {
++                lineage: lineage.clone(),
++                usage: Some(TokenUsage {
++                    input_tokens: 3,
++                    output_tokens: 2,
++                    total_tokens: 5,
++                    ..Default::default()
++                }),
++            })
++            .unwrap();
++        assert!(
++            second
++                .account_provider_request(Terminal {
++                    lineage,
++                    usage: None
++                })
++                .is_err()
++        );
++        second.report_usage(TokenUsage::default()).unwrap();
++        ledger.settle(&second).unwrap();
++        let usage = ledger.snapshot().usage;
++        assert_eq!(usage.requests, 1);
++        assert_eq!(usage.requests_without_token_usage, 0);
++        assert_eq!(usage.token_usage.total_tokens, 5);
++    }
++
++    #[test]
++    fn managed_replacement_retains_preceding_unmeasured_request() {
++        use ProviderRequestAccounting::{Create, Manage, Terminal};
++
++        let ledger = Arc::new(AttemptLedger::default());
++        let parent = Arc::new(TurnSamplingStop::default());
++        let attempt = begin(&ledger, &parent);
++        attempt.account_provider_request(Manage).unwrap();
++        let abandoned = attempt.account_provider_request(Create).unwrap().unwrap();
++        let lineage = attempt.account_provider_request(Create).unwrap().unwrap();
++        assert!(
++            attempt
++                .account_provider_request(Terminal {
++                    lineage: abandoned,
++                    usage: Some(TokenUsage::default()),
++                })
++                .is_err()
++        );
++        attempt
++            .account_provider_request(Terminal {
++                lineage,
++                usage: Some(TokenUsage::default()),
++            })
++            .unwrap();
++        ledger.settle(&attempt).unwrap();
++        let usage = ledger.snapshot().usage;
++        assert_eq!(usage.requests, 2);
++        assert_eq!(usage.requests_without_token_usage, 1);
++    }
++
+     #[test]
+     fn fresh_restored_owner_does_not_recount_the_historical_attempt() {
+         let ledger = Arc::new(AttemptLedger::default());
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 9efcd6082c264ca937d86a66d54b7b239842456e..7f457f78dc715403aeb37b50ad2c420cef69f189 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -165,6 +165,7 @@ pub use model_request::ModelResponseError;
+ pub use model_request::ModelResponseInterceptor;
+ pub use model_request::ModelResponseStream;
+ pub use model_request::ModelToolAdmission;
++pub use model_request::ProviderRequestAccounting;
+ pub use model_request::ProviderResponseAnchor;
+ pub use model_request::ResponseEvent;
+ pub use model_request::SdkProviderResponseSpanAdmission;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 87cd419ed11dee6bfec3fbda6ec6f1b212c61f54..a7718440d796bb8feff120106454acea7880add6 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -465,6 +465,18 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+     }
+ }
+
++/// A private transport can continue one physical provider response across logical attempts.
++#[derive(Debug, Deserialize)]
++#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
++pub enum ProviderRequestAccounting {
++    Manage,
++    Create,
++    Terminal {
++        lineage: String,
++        usage: Option<codex_protocol::protocol::TokenUsage>,
++    },
++}
++
+ /// Measurement can settle during joined cleanup after executable reply authority expires.
+ /// Implementations reject mismatched identity and reports after physical settlement.
+ pub trait ModelAttemptAdmission: Send + Sync + std::fmt::Debug {
+@@ -487,6 +499,11 @@ pub trait ModelAttemptAdmission: Send + Sync + std::fmt::Debug {
+         failure: codex_protocol::model_retry::ModelProducerFailure,
+     ) -> Result<(), String>;
+     fn report_usage(&self, usage: codex_protocol::protocol::TokenUsage) -> Result<(), String>;
++    /// Admit physical request accounting through the current transport receipt.
++    fn account_provider_request(
++        &self,
++        operation: ProviderRequestAccounting,
++    ) -> Result<Option<String>, String>;
+     /// Only the native stream and admitted tool dispatcher publish these fences.
+     fn mark_response_started(&self);
+     fn mark_unsafe_output(&self);

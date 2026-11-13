@@ -380,6 +380,7 @@ async def test_deferred_start_preserves_request_budget_through_session_hook(
         responses.respond(assistant_output("finished"))
     agent = Agent(instructions="Render and answer.", tools=[manual], provider=provider(responses))
     hook_states = []
+    restored_turns = []
     async with timeout(20), agent.session() as original:
         limits = RunBudget(
             max_requests=max_requests if kind != "tokens" else None,
@@ -393,17 +394,26 @@ async def test_deferred_start_preserves_request_budget_through_session_hook(
         async def hook(*, state, context):
             hook_states.append(state)
             async with session_factory(state=state, context=context) as restored:
+                restored_turns.append(restored.restored_turn)
                 yield restored
 
         monkeypatch.setattr(agent, "session", hook)
-        async with jobs.start(original, request) as (_, resumed):
-            assert isinstance(resumed, Turn)
-            if max_requests == 1:
-                with pytest.raises(NativeError) as stopped:
-                    await resumed.get_result()
-                assert stopped.value.code == "run_budget_exceeded"
-            else:
-                assert (await resumed.get_result()).final_output == "finished"
+        try:
+            async with jobs.start(original, request) as (_, resumed):
+                assert isinstance(resumed, Turn)
+                if max_requests == 1:
+                    with pytest.raises(NativeError) as stopped:
+                        await resumed.get_result()
+                else:
+                    assert (await resumed.get_result()).final_output == "finished"
+        except ValueError as error:
+            # Budget retirement during delivery, before start's first yield.
+            assert max_requests == 1
+            assert str(error) == "Deferred job operation could not be completed"
+            with pytest.raises(NativeError) as stopped:
+                await restored_turns[0].get_result()
+        if max_requests == 1:
+            assert stopped.value.code == "run_budget_exceeded"
     assert len(hook_states) == 1
     assert hook_states[0].run_budget.max_requests == (max_requests if kind != "tokens" else None)
     assert hook_states[0].run_budget.admitted_requests == (1 if kind != "tokens" else None)

@@ -1,0 +1,193 @@
+diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
+index 601aa5902ec2f8b8c7af2c6892e930cd27d18590..4fe6ac28f80a754b931287c34d4a23363246cf3a 100644
+--- a/codex-rs/core/src/prepared_request.rs
++++ b/codex-rs/core/src/prepared_request.rs
+@@ -250,6 +250,7 @@ pub(crate) fn apply_handoff_presentation(
+     presentation: &codex_protocol::agent_profile::AgentProfileHandoffPresentation,
+     committed: &codex_extension_api::AgentProfileReceipt,
+     publication: &ResponseItem,
++    current_publication: &ResponseItem,
+ ) -> Result<Prompt, String> {
+     if !presentation.belongs_to(committed) {
+         return Err("Handoff presentation belongs to another committed destination".into());
+@@ -270,10 +271,29 @@ pub(crate) fn apply_handoff_presentation(
+     if anchors.len() != 1 || original.input[anchors[0]] != *publication {
+         return Err("Handoff destination publication is missing, ambiguous or changed".into());
+     }
++    // The view boundary can predate a same-profile instruction update. Only
++    // the actual current publication owns SDK application instructions.
++    let current_id = current_publication
++        .id()
++        .ok_or("Handoff current instruction publication lacks identity")?;
++    let current: Vec<_> = original
++        .input
++        .iter()
++        .filter(|item| item.id() == Some(current_id))
++        .collect();
++    if current.len() != 1 || current[0] != current_publication {
++        return Err(
++            "Handoff current instruction publication is missing, ambiguous or changed".into(),
++        );
++    }
+     let mut input: Vec<_> = original
+         .input
+         .iter()
+-        .filter(|item| protected_handoff_item(item))
++        .filter(|item| {
++            protected_handoff_item(item)
++                && (!crate::context_manager::is_sdk_model_only_instruction(item, None)
++                    || *item == current_publication)
++        })
+         .cloned()
+         .collect();
+     if projected.iter().any(|item| {
+@@ -355,7 +375,7 @@ mod tests {
+     fn handoff_sampling_keeps_publication_and_settled_pair_across_steps() {
+         let (original, presentation, receipt, publication) = handoff_case();
+         let projected =
+-            apply_handoff_presentation(&original, &presentation, &receipt, &publication).unwrap();
++            apply_handoff_presentation(&original, &presentation, &receipt, &publication, &publication).unwrap();
+         assert_eq!(projected.input[0], publication);
+         for (index, group) in [
+             &presentation.input,
+@@ -384,7 +404,7 @@ mod tests {
+         let mut later = original.clone();
+         later.input.push(parse_preserving(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"later input"}]})).unwrap());
+         let second =
+-            apply_handoff_presentation(&later, &presentation, &receipt, &publication).unwrap();
++            apply_handoff_presentation(&later, &presentation, &receipt, &publication, &publication).unwrap();
+         assert_eq!(&second.input[4..], &later.input[2..]);
+         assert!(
+             serde_json::to_string(&original.input)
+@@ -410,12 +430,88 @@ mod tests {
+             ]);
+             assert!(validate_handoff_presentation(&rejected).is_err());
+             assert!(
+-                apply_handoff_presentation(&original, &rejected, &receipt, &publication).is_err()
++                apply_handoff_presentation(&original, &rejected, &receipt, &publication, &publication).is_err()
+             );
+         }
+         assert!(validate_handoff_presentation(&presentation).is_ok());
+     }
+ 
++    #[test]
++    fn handoff_keeps_current_sdk_instructions_and_ordinary_protected_policy() {
++        let (mut original, presentation, receipt, _) = handoff_case();
++        let sdk = |id: &str, text: &str, kind: &str| {
++            let mut item = parse_preserving(json!({
++                "type":"message", "id":id, "role":"developer",
++                "content":[{"type":"input_text","text":text}]
++            }))
++            .unwrap();
++            if let ResponseItem::Message {
++                internal_chat_message_metadata_passthrough,
++                ..
++            } = &mut item
++            {
++                let mut metadata = internal_chat_message_metadata_passthrough
++                    .take()
++                    .unwrap_or_default();
++                metadata.content_item_kinds = Some(serde_json::from_value(json!([kind])).unwrap());
++                *internal_chat_message_metadata_passthrough = Some(metadata);
++            }
++            assert!(crate::context_manager::is_sdk_model_only_instruction(
++                &item, None
++            ));
++            item
++        };
++        let old_source = sdk(
++            "msg_source",
++            "old source instructions",
++            "sdk_application.accepted",
++        );
++        let old_projection = sdk(
++            "msg_source_projection",
++            "old source instructions",
++            "sdk_application.instructions",
++        );
++        let anchor = sdk(
++            "msg_destination",
++            "old destination instructions",
++            "sdk_application.accepted",
++        );
++        let current = sdk(
++            "msg_current",
++            "current destination instructions",
++            "sdk_application.accepted",
++        );
++        let policy = parse_preserving(json!({
++            "type":"message", "id":"msg_policy", "role":"developer",
++            "content":[{"type":"input_text","text":"ordinary protected policy"}],
++            "content_item_kinds":["application.policy"]
++        }))
++        .unwrap();
++        let effects = original.input[2..].to_vec();
++        original.input = vec![old_source, old_projection, policy.clone(), anchor.clone()];
++        original.input.extend(effects.clone());
++        original.input.push(current.clone());
++        let before = original.input.clone();
++        let projected =
++            apply_handoff_presentation(&original, &presentation, &receipt, &anchor, &current)
++                .unwrap();
++        assert_eq!(projected.input[0], policy);
++        assert_eq!(projected.input[1], current);
++        assert_eq!(&projected.input[5..], effects.as_slice());
++        let wire = serde_json::to_string(&projected.input).unwrap();
++        assert!(!wire.contains("old source instructions"));
++        assert!(!wire.contains("old destination instructions"));
++        assert!(wire.contains("current destination instructions"));
++        assert_eq!(projected.tools, original.tools);
++        assert_eq!(original.input, before);
++        let mut missing = original.clone();
++        missing.input.pop();
++        assert!(
++            apply_handoff_presentation(&missing, &presentation, &receipt, &anchor, &current,)
++                .is_err()
++        );
++    }
++
+     #[test]
+     fn handoff_rejects_invalid_or_over_budget_snapshot_before_sampling() {
+         let (original, presentation, receipt, publication) = handoff_case();
+@@ -431,7 +527,7 @@ mod tests {
+         stale.destination.epoch = 2;
+         let mut provider_calls = 0;
+         for rejected in [invalid, discarded, over_count, over_bytes, stale] {
+-            let result = apply_handoff_presentation(&original, &rejected, &receipt, &publication)
++            let result = apply_handoff_presentation(&original, &rejected, &receipt, &publication, &publication)
+                 .map(|_| {
+                     provider_calls += 1;
+                 });
+@@ -440,7 +536,7 @@ mod tests {
+         let mut missing = original.clone();
+         missing.input.remove(1);
+         assert!(
+-            apply_handoff_presentation(&missing, &presentation, &receipt, &publication).is_err()
++            apply_handoff_presentation(&missing, &presentation, &receipt, &publication, &publication).is_err()
+         );
+         assert_eq!(provider_calls, 0);
+     }
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 63858a4c0663ffebfdc2b8aef9a43eaba32816d8..b3fda9ab2d9811957e719cdbb7bd527e67fe444d 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -295,6 +295,7 @@ impl Session {
+             &presentation,
+             &presentation.destination,
+             &handoff_presentation_anchor(&captured.profile),
++            &captured.profile.application_instructions.item,
+         )
+         .map_err(invalid)?;
+         let changed = !original
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 6090e0ce7478403cb7d60c4b846e9e1426c096d2..ba3307b7b2eb55574c12822bea9bbd748ab2a5c3 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2342,6 +2342,7 @@ async fn run_sampling_request(
+                         &presentation,
+                         &presentation.destination,
+                         &super::agent_profile::handoff_presentation_anchor(&profile.profile),
++                        &profile.profile.application_instructions.item,
+                     )
+                 })
+                 .transpose()

@@ -1,0 +1,395 @@
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index 658f821d..6451a1e6 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -67,6 +67,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                 | ResponseItem::CompactionTrigger { .. }
+                 | ResponseItem::ContextCompaction { .. }
+                 | ResponseItem::ItemReference { .. }
++                | ResponseItem::Program { .. }
++                | ResponseItem::ProgramOutput { .. }
+                 | ResponseItem::Other => {}
+             }
+             ServerNotification::RawResponseItemCompleted(notification)
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index abcdab1b..7ca40966 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -83,6 +83,8 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+         | ResponseItem::ContextCompaction { .. }
+         | ResponseItem::AdditionalTools { .. }
+         | ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::Other => false,
+     }) {
+         return Err(invalid_request(REMOTE_IMAGE_URL_ERROR));
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 8fa09453..89fecbf5 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -131,6 +131,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => false,
+         },
+         RolloutItem::RealtimeItem(_)
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 5a86fcc1..732189aa 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -209,6 +209,8 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => {}
+         }
+     }
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 8ce64c45..c30f06ee 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1136,6 +1136,8 @@ pub(crate) fn is_api_message(
+         | ResponseItem::WebSearchCall { .. }
+         | ResponseItem::McpListTools { .. }
+         | ResponseItem::McpCall { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::McpApprovalRequest { .. }
+         | ResponseItem::McpApprovalResponse { .. }
+         | ResponseItem::FileSearchCall { .. }
+@@ -1383,6 +1385,8 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+             encrypted_content: None,
+             ..
+         } => 0,
++        ResponseItem::Program { code, .. } => text_bytes(code),
++        ResponseItem::ProgramOutput { result, .. } => text_bytes(result),
+         // Plaintext reasoning is excluded from replay accounting.
+         ResponseItem::Reasoning {
+             encrypted_content: None,
+@@ -1560,6 +1564,8 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         | ResponseItem::McpApprovalResponse { .. }
+         | ResponseItem::AgentMessage { .. }
+         | ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
+index 51ea0673..0d021023 100644
+--- a/codex-rs/core/src/image_preparation.rs
++++ b/codex-rs/core/src/image_preparation.rs
+@@ -298,6 +298,8 @@ pub(crate) async fn prepare_response_items(
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => None,
+         };
+         prepared_items.push(item);
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 751dd1b0..493e6c09 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4423,6 +4423,51 @@ fn sdk_cold_recovery_classifies_provider_effect_capabilities() {
+ 
+ // Provider actions have no local accepted-call deduplication owner. Unknown
+ // output has lost its raw type, so its replay safety cannot be established.
++fn admit_hosted_program_item(
++    prompt: &Prompt,
++    calls: &mut HashMap<String, bool>,
++    item: &ResponseItem,
++) -> CodexResult<()> {
++    if !prompt.tools.iter().any(|tool| {
++        matches!(tool, codex_tools::ToolSpec::ProviderOnly(tool)
++            if tool.tool_type() == "programmatic_tool_calling")
++    }) {
++        return Err(CodexErr::InvalidRequest(
++            "Provider returned a program without an offered programmatic tool".into(),
++        ));
++    }
++    match item {
++        ResponseItem::Program { call_id, .. } => {
++            if call_id.is_empty() || calls.insert(call_id.clone(), false).is_some() {
++                return Err(CodexErr::InvalidRequest("Invalid provider program call ID".into()));
++            }
++        }
++        ResponseItem::ProgramOutput { call_id, status, .. } => {
++            let prior = calls.entry(call_id.clone()).or_insert_with(|| {
++                // A different response can finish a program admitted in the retained input.
++                prompt.input.iter().rev().find_map(|item| match item {
++                    ResponseItem::ProgramOutput { call_id: existing, status, .. }
++                        if existing == call_id => Some(matches!(
++                            status, codex_protocol::models::ProgramOutputStatus::Completed
++                        )),
++                    ResponseItem::Program { call_id: existing, .. } if existing == call_id => {
++                        Some(false)
++                    }
++                    _ => None,
++                }).unwrap_or(true)
++            });
++            if *prior {
++                return Err(CodexErr::InvalidRequest(
++                    "Provider program output has no unfinished program with this call ID".into(),
++                ));
++            }
++            *prior = matches!(status, codex_protocol::models::ProgramOutputStatus::Completed);
++        }
++        _ => unreachable!("program admission only handles program items"),
++    }
++    Ok(())
++}
++
+ fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::ToolSpec]) -> bool {
+     match event {
+         ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item) => match item {
+@@ -4445,6 +4490,8 @@ fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::McpCall { .. }
+             | ResponseItem::ShellCallOutput { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => true,
+             _ => false,
+         },
+@@ -4659,6 +4706,8 @@ async fn try_run_sampling_request(
+         let mut response_fact_budget =
+             codex_protocol::response_facts::ResponseFactBudget::default();
+         let mut response_fact_response_id: Option<String> = None;
++        // Admission is local to the provider request; nothing here executes its program.
++        let mut program_calls = HashMap::new();
+         loop {
+             let handle_responses = trace_span!(
+                 parent: &receiving_span,
+@@ -4786,6 +4835,12 @@ async fn try_run_sampling_request(
+                     }
+                 }
+                 ResponseEvent::OutputItemDone(mut item) => {
++                    if matches!(item, ResponseItem::Program { .. } | ResponseItem::ProgramOutput { .. }) {
++                        admit_hosted_program_item(prompt, &mut program_calls, &item)?;
++                        if let Some(attempt) = &model_attempt {
++                            attempt.mark_unsafe_output();
++                        }
++                    }
+                     if matches!(&item, ResponseItem::Message { role, content, .. } if role == "assistant" && !content.is_empty())
+                     {
+                         if let Some(attempt) = &model_attempt {
+@@ -4900,6 +4955,8 @@ async fn try_run_sampling_request(
+                         | ResponseItem::CompactionTrigger { .. }
+                         | ResponseItem::ContextCompaction { .. }
+                         | ResponseItem::ItemReference { .. }
++                        | ResponseItem::Program { .. }
++                        | ResponseItem::ProgramOutput { .. }
+                         | ResponseItem::Other => false,
+                     };
+ 
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index b817d2fd..407e5b58 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -591,6 +591,8 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::CompactionTrigger { .. } => "compaction_trigger",
+         ResponseItem::ContextCompaction { .. } => "context_compaction",
+         ResponseItem::ItemReference { .. } => "item_reference",
++        ResponseItem::Program { .. } => "program",
++        ResponseItem::ProgramOutput { .. } => "program_output",
+         ResponseItem::Other => "other",
+     };
+     debug!(
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index b1c11d9a..c1d70c8a 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -462,6 +462,8 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         | ResponseItem::McpApprovalResponse { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index a8d6d582..97b1d730 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -540,6 +540,8 @@ fn recent_images(
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => {}
+         }
+         for image in image_references {
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index 127bfe1b..b7429581 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -371,6 +371,8 @@ pub fn collect_transcript(
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => continue,
+         };
+ 
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index eeaf0d96..977f877d 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1435,6 +1435,8 @@ impl SessionTelemetry {
+             ResponseItem::CompactionTrigger { .. } => "compaction_trigger".into(),
+             ResponseItem::ContextCompaction { .. } => "context_compaction".into(),
+             ResponseItem::ItemReference { .. } => "item_reference".into(),
++            ResponseItem::Program { .. } => "program".into(),
++            ResponseItem::ProgramOutput { .. } => "program_output".into(),
+             ResponseItem::Other => "other".into(),
+         }
+     }
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 71488c50..6045b884 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1478,10 +1478,38 @@ pub enum ResponseItem {
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+     },
++    /// Provider-executed program. Its code is conversation data.
++    Program {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        id: Option<ResponseItemId>,
++        call_id: String,
++        code: String,
++        #[serde(flatten)]
++        provider_fields: std::collections::BTreeMap<String, serde_json::Value>,
++    },
++    /// Result of the provider-owned program with the same call ID.
++    ProgramOutput {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        id: Option<ResponseItemId>,
++        call_id: String,
++        status: ProgramOutputStatus,
++        result: String,
++        #[serde(flatten)]
++        provider_fields: std::collections::BTreeMap<String, serde_json::Value>,
++    },
+     #[serde(other)]
+     Other,
+ }
+ 
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum ProgramOutputStatus {
++    Completed,
++    Incomplete,
++}
++
+ impl ResponseItem {
+     /// Returns whether this item is an ordinary user-role message.
+     pub fn is_user_message(&self) -> bool {
+@@ -1503,6 +1531,8 @@ impl ResponseItem {
+             | Self::ComputerCall { id, .. }
+             | Self::McpListTools { id, .. }
+             | Self::McpCall { id, .. }
++            | Self::Program { id, .. }
++            | Self::ProgramOutput { id, .. }
+             | Self::McpApprovalRequest { id, .. }
+             | Self::McpApprovalResponse { id, .. }
+             | Self::ComputerCallOutput { id, .. }
+@@ -1540,6 +1570,8 @@ impl ResponseItem {
+             | Self::ComputerCall { id, .. }
+             | Self::McpListTools { id, .. }
+             | Self::McpCall { id, .. }
++            | Self::Program { id, .. }
++            | Self::ProgramOutput { id, .. }
+             | Self::McpApprovalRequest { id, .. }
+             | Self::McpApprovalResponse { id, .. }
+             | Self::ComputerCallOutput { id, .. }
+@@ -1578,6 +1610,8 @@ impl ResponseItem {
+             Self::ComputerCall { .. } => Some("cc"),
+             Self::McpListTools { .. } => Some("mcpl"),
+             Self::McpCall { .. } => Some("mcp"),
++            Self::Program { .. } => Some("program"),
++            Self::ProgramOutput { .. } => Some("program_output"),
+             Self::McpApprovalRequest { .. } => Some("mcpr"),
+             Self::McpApprovalResponse { .. } => Some("mcpa"),
+             Self::ComputerCallOutput { .. } => Some("cco"),
+@@ -1793,6 +1827,8 @@ impl ResponseItem {
+             | Self::CompactionTrigger { .. }
+             | Self::AdditionalTools { .. }
+             | Self::ItemReference { .. }
++            | Self::Program { .. }
++            | Self::ProgramOutput { .. }
+             | Self::Other => None,
+         }
+     }
+@@ -1909,6 +1945,8 @@ impl ResponseItem {
+             | Self::CompactionTrigger { .. }
+             | Self::AdditionalTools { .. }
+             | Self::ItemReference { .. }
++            | Self::Program { .. }
++            | Self::ProgramOutput { .. }
+             | Self::Other => None,
+         }
+     }
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index 6c05c4da..86e6803c 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -349,6 +349,8 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+         ResponseItem::CompactionTrigger { .. } => "response.compaction_trigger",
+         ResponseItem::ContextCompaction { .. } => "response.context_compaction",
+         ResponseItem::ItemReference { .. } => "response.item_reference",
++        ResponseItem::Program { .. } => "response.program",
++        ResponseItem::ProgramOutput { .. } => "response.program_output",
+         ResponseItem::Other => "response.other",
+     }
+ }
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index c7d1eb2f..aaebb48c 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -109,7 +109,9 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ContextCompaction { .. } => true,
+-        ResponseItem::ItemReference { .. } => true,
++        ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. } => true,
+         ResponseItem::CompactionTrigger { .. } | ResponseItem::Other => false,
+     }
+ }
+@@ -148,6 +150,8 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+         | ResponseItem::CompactionTrigger { .. }
+         | ResponseItem::ContextCompaction { .. }
+         | ResponseItem::ItemReference { .. }
++        | ResponseItem::Program { .. }
++        | ResponseItem::ProgramOutput { .. }
+         | ResponseItem::Other => false,
+     }
+ }
+diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
+index 532ac54e..4eb8434a 100644
+--- a/codex-rs/utils/audio/src/lib.rs
++++ b/codex-rs/utils/audio/src/lib.rs
+@@ -97,6 +97,8 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+             | ResponseItem::CompactionTrigger { .. }
+             | ResponseItem::ContextCompaction { .. }
+             | ResponseItem::ItemReference { .. }
++            | ResponseItem::Program { .. }
++            | ResponseItem::ProgramOutput { .. }
+             | ResponseItem::Other => {}
+         }
+     }

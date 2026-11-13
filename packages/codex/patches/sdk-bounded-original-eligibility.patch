@@ -1,0 +1,146 @@
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index d6d6d69bd65855f757f00ac7b1c2e3ad12fcf03d..2432a193fc5794e119fa1667b5a790d251dbed79 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1136,14 +1136,15 @@ pub(crate) fn is_provider_compaction_boundary(envelope: &ResponseItemEnvelope) -
+         }
+ }
+
+-/// SDK originals omit native developer configuration without changing model context.
+-/// Explicit SDK-original entries retain their admitted values independently of this native-row filter.
++/// SDK originals omit the instruction receipts validated by the SDK admission paths.
++/// Unknown, mixed, or caller-authored developer content remains visible in originals.
+ pub(crate) fn is_sdk_original_item(
+     item: &ResponseItem,
+     metadata: Option<&CodexHarnessMetadata>,
+ ) -> bool {
+     if let ResponseItem::Message {
+         role,
++        content,
+         internal_chat_message_metadata_passthrough: Some(message_metadata),
+         ..
+     } = item
+@@ -1153,9 +1154,14 @@ pub(crate) fn is_sdk_original_item(
+             .content_item_kinds
+             .as_ref()
+             .is_some_and(|kinds| {
+-                kinds
+-                    .iter()
+-                    .any(|kind| !kind.0.is_empty() && kind.0 != "unknown")
++                !kinds.is_empty()
++                    && kinds.len() == content.len()
++                    && kinds.iter().all(|kind| {
++                        matches!(
++                            kind.0.as_str(),
++                            "sdk_application.accepted" | "sdk_application.instructions"
++                        )
++                    })
+             })
+     {
+         return false;
+@@ -1725,7 +1731,7 @@ mod sdk_original_eligibility_tests {
+     #[test]
+     fn native_configuration_remains_in_model_context_but_not_sdk_originals() {
+         for kind in [
+-            "collaboration_mode.instructions",
++            "sdk_application.instructions",
+             "sdk_application.accepted",
+         ] {
+             let item = message("developer", Some(kind));
+@@ -1745,6 +1751,25 @@ mod sdk_original_eligibility_tests {
+             &message("developer", Some("unknown")),
+             None
+         ));
++        assert!(is_sdk_original_item(
++            &message("developer", Some("unrecognized.application.instructions")),
++            None
++        ));
++        let mut mixed = serde_json::to_value(message(
++            "developer",
++            Some("sdk_application.instructions"),
++        ))
++        .unwrap();
++        mixed["content"]
++            .as_array_mut()
++            .unwrap()
++            .push(json!({"type":"input_text","text":"untrusted text"}));
++        mixed["internal_chat_message_metadata_passthrough"]["content_item_kinds"] =
++            json!(["sdk_application.instructions", "unrecognized.application.instructions"]);
++        assert!(is_sdk_original_item(
++            &serde_json::from_value(mixed).unwrap(),
++            None
++        ));
+         assert!(is_sdk_original_item(
+             &message("developer", Some("sdk_application.accepted")),
+             Some(&caller)
+diff --git a/codex-rs/core/src/session/original_history_read.rs b/codex-rs/core/src/session/original_history_read.rs
+index ee1c691b721128f538cfd046a489b9efd490c027..007084d87f48660a16ee70f0f189ff1fce460ddc 100644
+--- a/codex-rs/core/src/session/original_history_read.rs
++++ b/codex-rs/core/src/session/original_history_read.rs
+@@ -15,6 +15,6 @@ use codex_thread_store::{
+ use codex_utils_output_truncation::TruncationPolicy;
+
+ use crate::context_manager::{
+-    ContextManager, is_api_message, is_user_turn_boundary, rollback_context_update,
++    ContextManager, is_sdk_original_item, is_user_turn_boundary, rollback_context_update,
+     rollback_retained_item,
+ };
+@@ -148,7 +148,7 @@ impl SnapshotReader {
+     }
+
+     fn native_projection(&self, row: &ResponseItemEnvelope) -> Option<ResponseItemEnvelope> {
+-        if !crate::context_manager::is_sdk_original_item(&row.item, row.metadata.as_ref()) {
++        if !is_sdk_original_item(&row.item, row.metadata.as_ref()) {
+             return None;
+         }
+         let mut projected = ContextManager::new();
+@@ -526,7 +526,10 @@ impl OriginalSource for MemorySource<'_> {
+                             };
+                             Entry {
+                                 original: position,
+-                                projection: if is_api_message(&row.item, row.metadata.as_ref()) {
++                                projection: if is_sdk_original_item(
++                                    &row.item,
++                                    row.metadata.as_ref(),
++                                ) {
+                                     position
+                                 } else {
+                                     Position::default()
+@@ -549,7 +552,7 @@ impl OriginalSource for MemorySource<'_> {
+             match record {
+                 RolloutItem::ResponseItem(row) if scan == Scan::Entries => {
+                     self.record += 1;
+-                    if is_api_message(&row.item, row.metadata.as_ref()) {
++                    if is_sdk_original_item(&row.item, row.metadata.as_ref()) {
+                         return Ok(Some(Action::Append(Entry {
+                             original: base,
+                             projection: base,
+diff --git a/codex-rs/core/src/session/original_history_stream.rs b/codex-rs/core/src/session/original_history_stream.rs
+index 5a8c9e1554f23d5a74d6cacfe685879283ad547c..4b71eedd29c19a5338183324dbc7f4d7395defe1 100644
+--- a/codex-rs/core/src/session/original_history_stream.rs
++++ b/codex-rs/core/src/session/original_history_stream.rs
+@@ -1,5 +1,6 @@
+ //! Selective local JSONL source. Replacement catalogs never become a whole line or Vec.
+ use super::{Action, Entry, FoldWriter, OriginalSource, Position, Scan, SnapshotReader, invalid};
++use crate::context_manager::is_sdk_original_item;
+ use codex_history::ResponseItemEnvelope;
+ use codex_history::sdk_originals::SdkOriginalSnapshotFold;
+ use codex_thread_store::OriginalHistorySegment;
+@@ -302,7 +303,7 @@ impl OriginalSource for LocalSource<'_> {
+                         item: item.start,
+                     };
+                     let row = self.envelope(position, reader)?.ok_or_else(invalid)?;
+-                    if !crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
++                    if !is_sdk_original_item(&row.item, row.metadata.as_ref()) {
+                         continue;
+                     }
+                     return Ok(Some(Action::Append(Entry {
+@@ -375,7 +376,7 @@ impl OriginalSource for LocalSource<'_> {
+                         item: position,
+                     };
+                     let row = self.native(position, reader)?;
+-                    if crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
++                    if is_sdk_original_item(&row.item, row.metadata.as_ref()) {
+                         return Ok(Some(Action::Append(Entry {
+                             original: position,
+                             projection: position,

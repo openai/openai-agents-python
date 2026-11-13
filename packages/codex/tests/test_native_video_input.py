@@ -51,8 +51,27 @@ def test_invalid_video_url_diagnostics_do_not_retain_the_reference(url: str) -> 
     assert error.value.__context__ is None
 
 
+@pytest.mark.parametrize("adapter", ["chat", "litellm"])
 @pytest.mark.parametrize("stream", [False, True])
-async def test_native_video_keeps_its_position_across_turns_and_restore(stream: bool) -> None:
+async def test_native_video_keeps_its_position_across_turns_and_restore(
+    stream: bool, adapter: str, monkeypatch
+) -> None:
+    def backend(client):
+        if adapter == "chat":
+            return ChatCompletionsModel(client, "video-model", stream=stream)
+        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+        litellm = pytest.importorskip("litellm")
+        monkeypatch.setattr(litellm, "telemetry", False)
+        from agents import LitellmModel
+
+        class Borrowed:
+            async def acompletion(self, **options):
+                return await litellm.acompletion(
+                    client=client, api_base=str(client.base_url), api_key=client.api_key, **options
+                )
+
+        return LitellmModel(Borrowed(), "openai/gpt-4.1", stream=stream)
+
     requests: list[dict[str, Any]] = []
     effects: list[str] = []
 
@@ -119,9 +138,7 @@ async def test_native_video_keeps_its_position_across_turns_and_restore(stream: 
         endpoint = str(server.make_url("/v1"))
         async with (
             AsyncOpenAI(base_url=endpoint, api_key="synthetic-video", max_retries=0) as client,
-            NativeProvider(
-                model_backend=ChatCompletionsModel(client, "video-model", stream=stream)
-            ) as provider,
+            NativeProvider(model_backend=backend(client)) as provider,
         ):
             agent = Agent(
                 model="video-model",
@@ -153,7 +170,7 @@ async def test_native_video_keeps_its_position_across_turns_and_restore(stream: 
     assert len(requests) == 4
     assert effects == ["inspected"]
     for body in requests:
-        assert body["stream"] is stream
+        assert body.get("stream", False) is stream
         assert next(item["content"] for item in body["messages"] if item["role"] == "user") == WIRE
 
 

@@ -1,0 +1,934 @@
+diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
+index e19d63cb7ca8d5dbed4f3bbf0407f15ba309a900..dd789fb059e3d7e172ed7727dd6627fbe6477cf2 100644
+--- a/codex-rs/core/src/prepared_request.rs
++++ b/codex-rs/core/src/prepared_request.rs
+@@ -155,11 +155,231 @@ pub(crate) fn apply(original: &Prompt, data: PreparedRequestData) -> Result<Prom
+     Ok(result)
+ }
+
++pub(crate) fn check_handoff_budget<'a, T: Serialize + 'a>(
++    values: impl IntoIterator<Item = &'a T>,
++) -> Result<(), String> {
++    let mut budget = crate::client::provider_history::HistoryBudget::default();
++    for value in values {
++        budget.observe(value).map_err(|error| error.to_string())?;
++    }
++    Ok(())
++}
++
++fn protected_handoff_item(item: &ResponseItem) -> bool {
++    matches!(item, ResponseItem::Message { role, .. } if role != "user" && role != "assistant")
++}
++
++fn handoff_input(
++    presentation: &codex_protocol::agent_profile::AgentProfileHandoffPresentation,
++) -> Result<Vec<ResponseItem>, String> {
++    // Reuse the native original/provider-history aggregate admission ceiling.
++    // Count borrowed JSON before cloning or parsing any application item.
++    check_handoff_budget(
++        presentation
++            .input
++            .iter()
++            .chain(&presentation.previous)
++            .chain(&presentation.generated),
++    )?;
++    presentation
++        .input
++        .iter()
++        .chain(&presentation.previous)
++        .chain(&presentation.generated)
++        .map(|value| {
++            let item: ResponseItem = parse_preserving(value.clone())?;
++            if protected_handoff_item(&item) {
++                return Err("Handoff presentation cannot supply protected message roles".into());
++            }
++            Ok(item)
++        })
++        .collect()
++}
++
++pub(crate) fn validate_handoff_presentation(
++    presentation: &codex_protocol::agent_profile::AgentProfileHandoffPresentation,
++) -> Result<(), String> {
++    handoff_input(presentation).map(|_| ())
++}
++
++/// Build a sampling copy; canonical effect history and tool admission remain unchanged.
++pub(crate) fn apply_handoff_presentation(
++    original: &Prompt,
++    presentation: &codex_protocol::agent_profile::AgentProfileHandoffPresentation,
++    committed: &codex_extension_api::AgentProfileReceipt,
++    publication: &ResponseItem,
++) -> Result<Prompt, String> {
++    if !presentation.belongs_to(committed) {
++        return Err("Handoff presentation belongs to another committed destination".into());
++    }
++    if original.canonical_history_input.is_some() {
++        return Err("Handoff presentation does not support provider-owned opaque history".into());
++    }
++    let projected = handoff_input(presentation)?;
++    let publication_id = publication
++        .id()
++        .ok_or("Handoff destination publication lacks identity")?;
++    let anchors: Vec<_> = original
++        .input
++        .iter()
++        .enumerate()
++        .filter_map(|(index, item)| (item.id() == Some(publication_id)).then_some(index))
++        .collect();
++    if anchors.len() != 1 || original.input[anchors[0]] != *publication {
++        return Err("Handoff destination publication is missing, ambiguous or changed".into());
++    }
++    let mut input: Vec<_> = original
++        .input
++        .iter()
++        .filter(|item| protected_handoff_item(item))
++        .cloned()
++        .collect();
++    if projected.iter().any(|item| {
++        item.id()
++            .is_some_and(|id| input.iter().any(|protected| protected.id() == Some(id)))
++    }) {
++        return Err("Handoff presentation reuses protected publication identity".into());
++    }
++    input.extend(projected);
++    // New native effects and subsequent user input follow the actual committed
++    // destination publication. Keep this suffix through every sampling step.
++    input.extend(
++        original.input[anchors[0] + 1..]
++            .iter()
++            .filter(|item| !protected_handoff_item(item))
++            .cloned(),
++    );
++    check_handoff_budget(&input)?;
++    let mut result = original.clone();
++    result.input = input;
++    Ok(result)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+     use serde_json::json;
+
++    fn handoff_case() -> (
++        Prompt,
++        codex_protocol::agent_profile::AgentProfileHandoffPresentation,
++        codex_extension_api::AgentProfileReceipt,
++        ResponseItem,
++    ) {
++        use codex_protocol::agent_profile::{AgentProfileHandoff, AgentProfileHandoffPresentation};
++        let publication: ResponseItem = parse_preserving(json!({
++            "type":"message", "id":"msg_destination", "role":"developer",
++            "content":[{"type":"input_text","text":"actual destination instructions"}]
++        }))
++        .unwrap();
++        let receipt = codex_extension_api::AgentProfileReceipt {
++            profile_id: "b".into(),
++            epoch: 1,
++        };
++        let presentation = AgentProfileHandoffPresentation {
++            handoff: AgentProfileHandoff {
++                source: codex_extension_api::AgentProfileReceipt {
++                    profile_id: "a".into(),
++                    epoch: 0,
++                },
++                target_profile_id: "b".into(),
++                call_id: "accepted-transfer".into(),
++            },
++            destination: receipt.clone(),
++            input: vec![
++                json!({"type":"message","role":"user","content":[{"type":"input_text","text":"allowed input"}]}),
++            ],
++            previous: vec![
++                json!({"type":"message","role":"user","content":[{"type":"input_text","text":"allowed previous"}]}),
++            ],
++            generated: vec![
++                json!({"type":"message","role":"user","content":[{"type":"input_text","text":"allowed current"}]}),
++            ],
++        };
++        let original = Prompt {
++            input: vec![
++                parse_preserving(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"old source secret"}]})).unwrap(),
++                publication.clone(),
++                parse_preserving(json!({"type":"function_call","name":"effect","arguments":"{}","call_id":"settled-effect"})).unwrap(),
++                parse_preserving(json!({"type":"function_call_output","call_id":"settled-effect","output":"accepted once"})).unwrap(),
++            ],
++            tools:vec![ToolSpec::Function(function("effect"))].into(),
++            ..Default::default()
++        };
++        (original, presentation, receipt, publication)
++    }
++
++    #[test]
++    fn handoff_sampling_keeps_publication_and_settled_pair_across_steps() {
++        let (original, presentation, receipt, publication) = handoff_case();
++        let projected =
++            apply_handoff_presentation(&original, &presentation, &receipt, &publication).unwrap();
++        assert_eq!(projected.input[0], publication);
++        for (index, group) in [
++            &presentation.input,
++            &presentation.previous,
++            &presentation.generated,
++        ]
++        .iter()
++        .enumerate()
++        {
++            assert_eq!(
++                serde_json::to_value(&projected.input[index + 1]).unwrap(),
++                group[0]
++            );
++        }
++        assert_eq!(&projected.input[4..], &original.input[2..]);
++        assert!(
++            !serde_json::to_string(&projected.input)
++                .unwrap()
++                .contains("old source secret")
++        );
++        assert_eq!(projected.tools, original.tools);
++        assert_eq!(
++            projected.base_instructions.text,
++            original.base_instructions.text
++        );
++        let mut later = original.clone();
++        later.input.push(parse_preserving(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"later input"}]})).unwrap());
++        let second =
++            apply_handoff_presentation(&later, &presentation, &receipt, &publication).unwrap();
++        assert_eq!(&second.input[4..], &later.input[2..]);
++        assert!(
++            serde_json::to_string(&original.input)
++                .unwrap()
++                .contains("old source secret")
++        );
++    }
++
++    #[test]
++    fn handoff_rejects_invalid_or_over_budget_snapshot_before_sampling() {
++        let (original, presentation, receipt, publication) = handoff_case();
++        let mut invalid = presentation.clone();
++        invalid.input[0] = json!({"type":"message","role":"developer","content":[]});
++        let mut discarded = presentation.clone();
++        discarded.input[0]["unknown"] = Value::Null;
++        let mut over_count = presentation.clone();
++        over_count.input = vec![presentation.input[0].clone(); 4097];
++        let mut over_bytes = presentation.clone();
++        over_bytes.input[0]["content"][0]["text"] = Value::String("é".repeat(4 * 1024 * 1024 + 1));
++        let mut stale = presentation.clone();
++        stale.destination.epoch = 2;
++        let mut provider_calls = 0;
++        for rejected in [invalid, discarded, over_count, over_bytes, stale] {
++            let result = apply_handoff_presentation(&original, &rejected, &receipt, &publication)
++                .map(|_| {
++                    provider_calls += 1;
++                });
++            assert!(result.is_err());
++        }
++        let mut missing = original.clone();
++        missing.input.remove(1);
++        assert!(
++            apply_handoff_presentation(&missing, &presentation, &receipt, &publication).is_err()
++        );
++        assert_eq!(provider_calls, 0);
++    }
++
+     #[test]
+     fn native_text_function_and_mcp_items_preserve_submitted_fields() {
+         for item in [
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 59a73c0d2dd36b464345fa33d7689ddc74490861..b69e1fd263e4b1c20454373605036bbd7237652e 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -26,6 +26,8 @@ struct PersistedProfile {
+     profile_id: String,
+     epoch: u64,
+     model: AgentProfileModelSettings,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    presentation: Option<codex_protocol::agent_profile::AgentProfileHandoffPresentation>,
+ }
+
+ struct TaskFence {
+@@ -61,14 +63,77 @@ fn validate_envelope(profile: &AgentProfile) -> CodexResult<()> {
+     }
+ }
+
++fn retains_publication(items: &[ResponseItemEnvelope], publication: &ResponseItem) -> bool {
++    let Some(id) = publication.id() else {
++        return false;
++    };
++    let mut matching = items.iter().filter(|item| item.item.id() == Some(id));
++    matching
++        .next()
++        .is_some_and(|item| item.item == *publication)
++        && matching.next().is_none()
++}
++
++/// Retire a derived view only after its native publication leaves canonical context.
++pub(super) fn profile_after_history_replacement(
++    captured: &Arc<CapturedAgentProfile>,
++    replacement: &[ResponseItemEnvelope],
++) -> Arc<CapturedAgentProfile> {
++    use codex_protocol::agent_profile::AgentProfileHandoffPresentation;
++    if captured
++        .profile
++        .data
++        .get::<AgentProfileHandoffPresentation>()
++        .is_none()
++        || retains_publication(replacement, &captured.profile.application_instructions.item)
++    {
++        return Arc::clone(captured);
++    }
++    let mut profile = captured.profile.as_ref().clone();
++    profile.data.remove::<AgentProfileHandoffPresentation>();
++    Arc::new(CapturedAgentProfile {
++        receipt: captured.receipt.clone(),
++        profile: Arc::new(profile),
++    })
++}
++
+ fn persisted_profile(
+     items: &[RolloutItem],
+ ) -> CodexResult<Option<(&ResponseItemEnvelope, PersistedProfile)>> {
+-    let mut latest = None;
++    let mut latest: Option<(&ResponseItemEnvelope, PersistedProfile)> = None;
++    let mut accepted_handoffs = Vec::new();
+     for item in items {
++        if let RolloutItem::Compacted(checkpoint) = item {
++            // An explicit canonical edit commits the originals and model projection together.
++            // Keep the original publication as an audit fact; replay only retires its view.
++            if matches!(
++                checkpoint.sdk_originals.as_ref(),
++                Some(codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::Replace(_))
++            ) && let Some(replacement) = checkpoint.replacement_history.as_ref()
++                && let Some((envelope, record)) = latest.as_mut()
++                && !retains_publication(replacement, &envelope.item)
++            {
++                record.presentation = None;
++            }
++            continue;
++        }
+         let RolloutItem::ResponseItem(envelope) = item else {
+             continue;
+         };
++        if let Some(handoff) = envelope
++            .metadata
++            .as_ref()
++            .and_then(|metadata| metadata.sdk_agent_handoff.as_ref())
++        {
++            if !matches!(&envelope.item,
++                ResponseItem::FunctionCallOutput { call_id, .. } if call_id.as_deref() == Some(handoff.call_id.as_str()))
++            {
++                return Err(invalid(
++                    "Accepted presentation has no canonical handoff result",
++                ));
++            }
++            accepted_handoffs.push(handoff);
++        }
+         let Some(value) = envelope
+             .metadata
+             .as_ref()
+@@ -81,6 +146,24 @@ fn persisted_profile(
+         if record.profile_id.is_empty() || record.model.model.is_empty() {
+             return Err(invalid("Invalid persisted Agent profile identity"));
+         }
++        if let Some(presentation) = &record.presentation {
++            crate::prepared_request::validate_handoff_presentation(presentation)
++                .map_err(invalid)?;
++            let destination = AgentProfileReceipt {
++                profile_id: record.profile_id.clone(),
++                epoch: record.epoch,
++            };
++            if !presentation.belongs_to(&destination)
++                || !accepted_handoffs.contains(&&presentation.handoff)
++                || latest.as_ref().is_none_or(|(_, previous)| {
++                    let previous: &PersistedProfile = previous;
++                    presentation.handoff.source.profile_id != previous.profile_id
++                        || presentation.handoff.source.epoch != previous.epoch
++                })
++            {
++                return Err(invalid("Persisted handoff presentation has another owner"));
++            }
++        }
+         if let Some((_, previous)) = &latest {
+             let previous: &PersistedProfile = previous;
+             if record.epoch
+@@ -192,6 +275,21 @@ impl Session {
+                 "Accepted handoff belongs to another native profile source",
+             ));
+         }
++        context.extension_data.remove::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
++        context.extension_data.remove::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>();
++        let preparation = self.services.thread_extension_data
++            .remove::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>()
++            .filter(|request| request.turn_id == context.sub_id
++                && Some(&request.handoff.source) == receipt);
++        if let Some(request) = &preparation {
++            if accepted_handoff.is_some_and(|accepted| accepted != &request.handoff)
++                || (accepted_handoff.is_none() && !request.restored) {
++                return Err(invalid("Handoff preparation belongs to another accepted call"));
++            }
++            let prepared = self.prepare_handoff_input(context, current.agent_profile.as_ref(), &request.handoff).await?;
++            context.extension_data.insert(prepared);
++            context.extension_data.insert(request.as_ref().clone());
++        }
+         let mut candidate = None;
+         for contributor in self.services.extensions.turn_lifecycle_contributors() {
+             let activation = contributor
+@@ -217,12 +315,31 @@ impl Session {
+         let Some(candidate) = candidate else {
+             return Ok(None);
+         };
++        if let Some(presentation) = candidate
++            .target
++            .data
++            .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>(
++        ) {
++            if accepted_handoff.or_else(|| preparation.as_ref().map(|request| &request.handoff)) != Some(&presentation.handoff) {
++                return Err(invalid(
++                    "Handoff presentation requires this accepted transfer",
++                ));
++            }
++        }
+         if let Some(scope) = current.agent_profile.as_ref().and_then(|profile| {
+             profile
+                 .profile
+                 .data
+                 .get::<crate::realtime_conversation::VoiceProfileScope>()
+         }) {
++            if candidate
++                .target
++                .data
++                .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++                .is_some()
++            {
++                return Err(invalid("Handoff presentation does not support Realtime"));
++            }
+             if cancellation.is_cancelled() {
+                 return Err(CodexErr::TurnAborted);
+             }
+@@ -406,6 +523,29 @@ impl Session {
+                     profile_id: record.profile_id,
+                     epoch: record.epoch,
+                 };
++                let target = if let Some(presentation) = record.presentation {
++                    if target
++                        .data
++                        .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++                        .is_some_and(|admitted| admitted.as_ref() != &presentation)
++                    {
++                        return Err(invalid(
++                            "Restored presentation differs from its admitted binding",
++                        ));
++                    }
++                    let mut restored_target = (*target).clone();
++                    restored_target.data.insert(presentation);
++                    Arc::new(restored_target)
++                } else {
++                    if target
++                        .data
++                        .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++                        .is_some()
++                    {
++                        return Err(invalid("Restored Agent has no canonical presentation"));
++                    }
++                    target
++                };
+                 let profile = Arc::new(CapturedAgentProfile {
+                     receipt: receipt.clone(),
+                     profile: target,
+@@ -463,6 +603,22 @@ impl Session {
+             profile_id: target.profile_id.clone(),
+             epoch,
+         };
++        let presentation = target
++            .data
++            .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>();
++        if presentation.as_ref().is_some_and(|presentation| {
++            task_fence.is_none()
++                || !presentation.belongs_to(&receipt)
++                || expected.as_ref() != Some(&presentation.handoff.source)
++        }) {
++            return Err(invalid(
++                "Handoff presentation differs from committed destination",
++            ));
++        }
++        if let Some(presentation) = &presentation {
++            crate::prepared_request::validate_handoff_presentation(presentation)
++                .map_err(invalid)?;
++        }
+         let mut envelope = target.application_instructions.clone();
+         if saved.items.iter().any(|item| matches!(item, RolloutItem::ResponseItem(prior) if prior.item.id() == envelope.item.id())) {
+             return Err(invalid("Agent activation requires a fresh instruction publication identity"));
+@@ -472,6 +628,7 @@ impl Session {
+                 profile_id: receipt.profile_id.clone(),
+                 epoch,
+                 model: target.model.for_persistence(),
++                presentation: presentation.as_deref().cloned(),
+             })
+             .map_err(|error| invalid(error.to_string()))?,
+         );
+@@ -575,6 +732,145 @@ impl Session {
+     }
+ }
+
++
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct HandoffInputFrontiers {
++    root_count: usize,
++    root_sha256: String,
++    sample_count: usize,
++    sample_sha256: String,
++}
++#[derive(Default)]
++struct HandoffInputFrontierOwner(std::sync::Mutex<Option<HandoffInputFrontiers>>);
++
++pub(crate) fn forget_handoff_sampling_frontier(store: &codex_extension_api::ExtensionData) {
++    store.remove::<HandoffInputFrontierOwner>();
++}
++
++pub(crate) fn handoff_sampling_frontier(store: &codex_extension_api::ExtensionData) -> Option<serde_json::Value> {
++    let owner = store.get::<HandoffInputFrontierOwner>()?;
++    let frontier = owner.0.lock().ok()?.clone()?;
++    serde_json::to_value(frontier).ok()
++}
++
++fn handoff_prefix_digest(items: &[&ResponseItem]) -> CodexResult<String> {
++    use sha2::{Digest, Sha256};
++    let bytes = serde_json::to_vec(items).map_err(|error| invalid(error.to_string()))?;
++    Ok(format!("{:x}", Sha256::digest(bytes)))
++}
++
++impl Session {
++    pub(crate) async fn record_handoff_input_frontier(&self, context: &Arc<TurnContext>) -> CodexResult<()> {
++        if self.services.thread_extension_data.get::<
++            codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
++        >().is_none() { return Ok(()); }
++        let history = self.clone_history().await;
++        crate::prepared_request::check_handoff_budget(history.raw_items()).map_err(invalid)?;
++        let items: Vec<_> = history.raw_items().collect();
++        let owner = context.extension_data.get_or_init(HandoffInputFrontierOwner::default);
++        let mut prior = owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))?.clone();
++        if prior.is_none() {
++            prior = self.restored_handoff_input_frontier(context).await?;
++        }
++        let (root_count, root_sha256) = if let Some(prior) = prior {
++            if prior.root_count > items.len() || handoff_prefix_digest(&items[..prior.root_count])? != prior.root_sha256 {
++                return Err(invalid("Handoff original input prefix changed"));
++            }
++            (prior.root_count, prior.root_sha256)
++        } else { (items.len(), handoff_prefix_digest(&items)?) };
++        let frontier = HandoffInputFrontiers { root_count, root_sha256,
++            sample_count:items.len(), sample_sha256:handoff_prefix_digest(&items)? };
++        *owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))? = Some(frontier);
++        Ok(())
++    }
++
++    async fn restored_handoff_input_frontier(
++        &self, context: &Arc<TurnContext>,
++    ) -> CodexResult<Option<HandoffInputFrontiers>> {
++        let saved = self.live_thread().ok_or_else(|| invalid("Handoff input requires retained history"))?
++            .load_history(true).await.map_err(|_| persistence_failure())?;
++        let receipt = saved.items.iter().rev().find_map(|row| match row {
++            RolloutItem::TurnContext(row) if row.turn_id.as_deref() == Some(context.sub_id.as_str()) => row.sdk_receipt.as_ref(),
++            _ => None,
++        });
++        receipt.map(|receipt| serde_json::from_value(receipt.get("handoff_input_frontiers")
++            .ok_or_else(|| invalid("Restored handoff input lacks original native frontiers"))?.clone())
++            .map_err(|_| invalid("Invalid restored handoff input frontiers"))).transpose()
++    }
++
++    async fn prepare_handoff_input(
++        &self, context: &Arc<TurnContext>,
++        source: Option<&Arc<codex_extension_api::CapturedAgentProfile>>,
++        handoff: &codex_protocol::agent_profile::AgentProfileHandoff,
++    ) -> CodexResult<codex_protocol::agent_profile::AgentProfileHandoffPresentation> {
++        use codex_protocol::agent_profile::AgentProfileHandoffPresentation;
++        if self.services.model_client.provider_history_selection().is_some() {
++            return Err(invalid("Handoff preparation does not support provider-owned opaque history"));
++        }
++        if self.services.extensions.model_request_contributors().iter()
++            .any(|contributor| contributor.prepares_request(&context.extension_data)) {
++            return Err(invalid("Handoff preparation cannot combine with prepare_request"));
++        }
++        if source.is_some_and(|source| source.profile.data.get::<
++            crate::realtime_conversation::VoiceProfileScope,
++        >().is_some()) {
++            return Err(invalid("Handoff preparation does not support Realtime"));
++        }
++        let retained = context.extension_data.get::<HandoffInputFrontierOwner>()
++            .map(|owner| owner.0.lock().map_err(|_| invalid("Handoff frontier owner poisoned"))
++                .map(|frontier| frontier.clone())).transpose()?.flatten();
++        let frontier = match retained {
++            Some(frontier) => frontier,
++            None => self.restored_handoff_input_frontier(context).await?
++                .ok_or_else(|| invalid("Accepted handoff lacks native input frontiers"))?,
++        };
++        let history = self.clone_history().await;
++        crate::prepared_request::check_handoff_budget(history.raw_items()).map_err(invalid)?;
++        let items: Vec<_> = history.raw_items().collect();
++        if frontier.root_count > frontier.sample_count || frontier.sample_count > items.len()
++            || handoff_prefix_digest(&items[..frontier.root_count])? != frontier.root_sha256
++            || handoff_prefix_digest(&items[..frontier.sample_count])? != frontier.sample_sha256 {
++            return Err(invalid("Accepted handoff input frontiers changed"));
++        }
++        let values = |items: &[&ResponseItem]| -> CodexResult<Vec<serde_json::Value>> {
++            items.iter().filter(|item| !matches!(item, ResponseItem::Message { role, .. }
++                if role != "user" && role != "assistant"))
++                .map(|item| serde_json::to_value(item).map_err(|error| invalid(error.to_string()))).collect()
++        };
++        let mut input = values(&items[..frontier.root_count])?;
++        let mut previous = values(&items[frontier.root_count..frontier.sample_count])?;
++        if let Some(source) = source {
++            if let Some(presentation) = source.profile.data.get::<AgentProfileHandoffPresentation>() {
++                if !presentation.belongs_to(&source.receipt) { return Err(invalid("Source handoff presentation is stale")); }
++                let publication = &source.profile.application_instructions.item;
++                let anchors: Vec<_> = items.iter().enumerate().filter_map(|(index,item)|
++                    (item.id() == publication.id()).then_some(index)).collect();
++                if anchors.len() != 1 || *items[anchors[0]] != *publication || anchors[0] >= frontier.sample_count {
++                    return Err(invalid("Source handoff publication is missing or changed"));
++                }
++                let anchor = anchors[0] + 1;
++                input = presentation.input.clone();
++                if anchor > frontier.root_count {
++                    previous = presentation.previous.iter().chain(&presentation.generated).cloned().collect();
++                    previous.extend(values(&items[anchor..frontier.sample_count])?);
++                } else {
++                    input.extend(presentation.previous.iter().chain(&presentation.generated).cloned());
++                    input.extend(values(&items[anchor..frontier.root_count])?);
++                }
++            }
++        }
++        let presentation = AgentProfileHandoffPresentation {
++            handoff:handoff.clone(), destination:AgentProfileReceipt {
++                profile_id:handoff.target_profile_id.clone(),
++                epoch:handoff.source.epoch.checked_add(1).ok_or_else(|| invalid("Agent profile epoch exhausted"))?,
++            }, input, previous, generated:values(&items[frontier.sample_count..])?,
++        };
++        crate::prepared_request::validate_handoff_presentation(&presentation).map_err(invalid)?;
++        Ok(presentation)
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::super::tests::{
+@@ -622,6 +918,122 @@ mod tests {
+         })
+     }
+
++    #[tokio::test]
++    async fn persisted_presentation_has_exact_source_and_destination_ownership() {
++        use codex_protocol::agent_profile::{AgentProfileHandoff, AgentProfileHandoffPresentation};
++        let (_, context) = make_session_and_context().await;
++        let source = profile(&context, "a", "presentation-a");
++        let destination = profile(&context, "b", "presentation-b");
++        let presentation = AgentProfileHandoffPresentation {
++            handoff: AgentProfileHandoff {
++                source: AgentProfileReceipt {
++                    profile_id: "a".into(),
++                    epoch: 0,
++                },
++                target_profile_id: "b".into(),
++                call_id: "accepted-transfer".into(),
++            },
++            destination: AgentProfileReceipt {
++                profile_id: "b".into(),
++                epoch: 1,
++            },
++            input: vec![
++                serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":"input-1"}]}),
++            ],
++            previous: vec![],
++            generated: vec![
++                serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":"generated-0"}]}),
++            ],
++        };
++        let envelope = |profile: &AgentProfile, epoch, presentation| {
++            let mut envelope = profile.application_instructions.clone();
++            envelope.metadata.get_or_insert_default().sdk_agent_profile = Some(
++                serde_json::to_value(PersistedProfile {
++                    profile_id: profile.profile_id.clone(),
++                    epoch,
++                    model: profile.model.for_persistence(),
++                    presentation,
++                })
++                .unwrap(),
++            );
++            RolloutItem::ResponseItem(envelope)
++        };
++        let mut accepted_result = destination.application_instructions.clone();
++        accepted_result.item = serde_json::from_value(serde_json::json!({
++            "type":"function_call_output", "call_id":"accepted-transfer", "output":"accepted"
++        }))
++        .unwrap();
++        accepted_result
++            .metadata
++            .get_or_insert_default()
++            .sdk_agent_handoff = Some(presentation.handoff.clone());
++        let history = vec![
++            envelope(&source, 0, None),
++            RolloutItem::ResponseItem(accepted_result.clone()),
++            envelope(&destination, 1, Some(presentation.clone())),
++        ];
++        let (_, restored) = persisted_profile(&history).unwrap().unwrap();
++        assert_eq!(restored.presentation, Some(presentation.clone()));
++        assert_eq!(history.len(), 3); // No effect item has been replaced.
++        let mut with_presentation = destination.as_ref().clone();
++        with_presentation.data.insert(presentation.clone());
++        let captured = Arc::new(CapturedAgentProfile {
++            receipt: presentation.destination.clone(),
++            profile: Arc::new(with_presentation),
++        });
++        let mut changed = destination.application_instructions.clone();
++        changed.item = source.application_instructions.item.clone();
++        for (replacement, retained) in [
++            (vec![destination.application_instructions.clone()], true),
++            (Vec::new(), false),
++            (vec![changed], false),
++            (vec![destination.application_instructions.clone(); 2], false),
++        ] {
++            let live = profile_after_history_replacement(&captured, &replacement);
++            assert_eq!(live.receipt, captured.receipt);
++            assert_eq!(
++                live.profile.application_instructions,
++                captured.profile.application_instructions
++            );
++            assert_eq!(
++                live.profile
++                    .data
++                    .get::<AgentProfileHandoffPresentation>()
++                    .is_some(),
++                retained
++            );
++            assert_eq!(Arc::ptr_eq(&live, &captured), retained);
++            let checkpoint: codex_history::CompactedItem =
++                serde_json::from_value(serde_json::json!({
++                    "message": "",
++                    "replacement_history": replacement,
++                    "sdk_originals": codex_history::sdk_originals::SdkOriginalHistory::default(),
++                }))
++                .unwrap();
++            let mut edited = history.clone();
++            edited.push(RolloutItem::Compacted(checkpoint));
++            let (_, restored) = persisted_profile(&edited).unwrap().unwrap();
++            assert_eq!(restored.presentation.is_some(), retained);
++            // The original admitted transfer and presentation remain audit facts.
++            assert_eq!(edited[..history.len()], history);
++        }
++        for mutation in ["source", "target", "epoch", "call"] {
++            let mut rejected = presentation.clone();
++            match mutation {
++                "source" => rejected.handoff.source.profile_id = "unrelated".into(),
++                "target" => rejected.destination.profile_id = "unrelated".into(),
++                "call" => rejected.handoff.call_id = "unrelated".into(),
++                _ => rejected.destination.epoch = 2,
++            }
++            let wrong = vec![
++                envelope(&source, 0, None),
++                RolloutItem::ResponseItem(accepted_result.clone()),
++                envelope(&destination, 1, Some(rejected)),
++            ];
++            assert!(persisted_profile(&wrong).is_err(), "{mutation}");
++        }
++    }
++
+     #[tokio::test]
+     async fn child_inherits_clean_captured_profile_instructions_before_role_overrides() {
+         let (mut session, context) = make_session_and_context().await;
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 1a9e2ce5c3aa5ae266e07ea974d2309e33fc2a98..c677a0077415401d45a4153a175ebd080fcab723 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -616,6 +616,13 @@ impl Session {
+         self.flush_rollout()
+             .await
+             .map_err(|_| CodexErr::Fatal("Canonical history commit outcome is uncertain".into()))?;
++        // Publish invalidation under the same state lock only after the checkpoint is durable.
++        // Retained exact publication anchors keep their admitted destination presentation.
++        if let Some(captured) = state.session_configuration.agent_profile.as_ref() {
++            state.session_configuration.agent_profile = Some(
++                super::agent_profile::profile_after_history_replacement(captured, &envelopes),
++            );
++        }
+         state.replace_annotated_history(envelopes, None, HistoryReplacement::Reset);
+         state.sdk_originals =
+             codex_history::sdk_originals::SdkOriginalHistoryCache::from(&originals);
+diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
+index 2827183a02c341a8959a52e375b19f358cf05cef..92a88f78c8f15203bce8f44391d610561e030bb5 100644
+--- a/codex-rs/core/src/session/step_context.rs
++++ b/codex-rs/core/src/session/step_context.rs
+@@ -162,6 +162,9 @@ impl StepContext {
+             "strict_executor_writes": seed.strict_executor_writes && !executors.is_empty(),
+             "executors": executors,
+         });
++        if let Some(frontier) = super::agent_profile::handoff_sampling_frontier(&self.turn.extension_data) {
++            receipt["handoff_input_frontiers"] = frontier;
++        }
+         if let Some(source) = &seed.operation_declaration_source {
+             receipt["operation_declaration_source"] = serde_json::to_value(source)
+                 .expect("Agent profile receipt contains only JSON primitives");
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index bff341e9234e235f4e9ded52437d33d929d66ade..d8f44f03e85f8c132849157e020082028e7c288a 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2320,6 +2320,32 @@ async fn run_sampling_request(
+                         .get_or_init(codex_extension_api::TurnSamplingStop::default),
+                 );
+             }
++            // Missing old grouping receipts disable only opted-in handoff preparation.
++            // Ordinary transfers continue under their existing native authority.
++            if sess.record_handoff_input_frontier(&turn_context).await.is_err() {
++                super::agent_profile::forget_handoff_sampling_frontier(&turn_context.extension_data);
++            }
++            let handoff_prompt = step_context
++                .settings
++                .agent_profile
++                .as_ref()
++                .and_then(|profile| {
++                    profile
++                        .profile
++                        .data
++                        .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
++                        .map(|presentation| (profile, presentation))
++                })
++                .map(|(profile, presentation)| {
++                    crate::prepared_request::apply_handoff_presentation(
++                        &prompt,
++                        &presentation,
++                        &profile.receipt,
++                        &profile.profile.application_instructions.item,
++                    )
++                })
++                .transpose()
++                .map_err(CodexErr::Fatal)?;
+             let responses_metadata = sess
+                 .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
+                 .await;
+@@ -2331,6 +2357,11 @@ async fn run_sampling_request(
+                 .filter(|contributor| contributor.prepares_request(&turn_context.extension_data))
+                 .collect();
+             if !editors.is_empty() {
++                if handoff_prompt.is_some() {
++                    return Err(CodexErr::Fatal(
++                        "Handoff presentation cannot combine with prepare_request".into(),
++                    ));
++                }
+                 if editors.len() != 1
+                     || turn_context.provider.info().supports_websockets
+                     || step_context.settings.model_info.use_responses_lite
+@@ -2394,7 +2425,7 @@ async fn run_sampling_request(
+                 )
+                 .await?;
+                 // The original prompt remains authoritative for history and retry bookkeeping.
+-                let mut sampling_prompt = Cow::Borrowed(&prompt);
++                let mut sampling_prompt = Cow::Borrowed(handoff_prompt.as_ref().unwrap_or(&prompt));
+                 if !editors.is_empty() {
+                     let data =
+                         crate::prepared_request::snapshot(&prompt).map_err(CodexErr::Fatal)?;
+diff --git a/codex-rs/ext/extension-api/src/state.rs b/codex-rs/ext/extension-api/src/state.rs
+index 7d6e79dc5872968147c1aba00b4aa08d1efdae4c..5af8193e59c586a14a9bc81ae2647bbaf4d7220c 100644
+--- a/codex-rs/ext/extension-api/src/state.rs
++++ b/codex-rs/ext/extension-api/src/state.rs
+@@ -34,6 +34,14 @@ impl ExtensionDataInit {
+             .map(downcast_data)
+     }
+
++    /// Removes and returns the initial attachment of type `T`, if one exists.
++    pub fn remove<T>(&mut self) -> Option<Arc<T>>
++    where
++        T: Any + Send + Sync,
++    {
++        self.entries.remove(&TypeId::of::<T>()).map(downcast_data)
++    }
++
+     /// Returns a host-supplied initial attachment without creating a mutable scope.
+     pub fn get<T>(&self) -> Option<Arc<T>>
+     where
+diff --git a/codex-rs/protocol/src/agent_profile.rs b/codex-rs/protocol/src/agent_profile.rs
+index 6fb4c2d2f8bb9fcd8c5f8563cbb41af9537e2c00..5339e989e748501ce0a96e1c25384280058e385d 100644
+--- a/codex-rs/protocol/src/agent_profile.rs
++++ b/codex-rs/protocol/src/agent_profile.rs
+@@ -18,3 +18,83 @@ pub struct AgentProfileHandoff {
+     pub target_profile_id: String,
+     pub call_id: String,
+ }
++
++impl AgentProfileHandoff {
++    /// The accepted transfer consumes exactly the next epoch of its destination.
++    pub fn matches_destination(&self, committed: &AgentProfileReceipt) -> bool {
++        self.target_profile_id == committed.profile_id
++            && self.source.epoch.checked_add(1) == Some(committed.epoch)
++    }
++}
++
++/// An accepted destination presentation, separate from canonical effect history.
++/// This source prototype has not been connected to public input or persistence.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++pub struct AgentProfileHandoffPresentation {
++    pub handoff: AgentProfileHandoff,
++    pub destination: AgentProfileReceipt,
++    pub input: Vec<serde_json::Value>,
++    pub previous: Vec<serde_json::Value>,
++    pub generated: Vec<serde_json::Value>,
++}
++
++impl AgentProfileHandoffPresentation {
++    /// The destination publication has to consume this exact source epoch.
++    pub fn belongs_to(&self, committed: &AgentProfileReceipt) -> bool {
++        self.destination == *committed && self.handoff.matches_destination(committed)
++    }
++}
++
++#[cfg(test)]
++mod presentation_tests {
++    use super::*;
++
++    #[test]
++    fn accepted_presentation_remains_bound_to_exact_destination_epoch() {
++        let handoff = AgentProfileHandoff {
++            source: AgentProfileReceipt {
++                profile_id: "a".into(),
++                epoch: 2,
++            },
++            target_profile_id: "b".into(),
++            call_id: "accepted-call".into(),
++        };
++        let destination = AgentProfileReceipt {
++            profile_id: "b".into(),
++            epoch: 3,
++        };
++        let accepted = AgentProfileHandoffPresentation {
++            handoff,
++            destination: destination.clone(),
++            input: vec![serde_json::json!({"occurrence":"input-1"})],
++            previous: vec![],
++            generated: vec![serde_json::json!({"occurrence":"generated-0"})],
++        };
++        let restored: AgentProfileHandoffPresentation =
++            serde_json::from_str(&serde_json::to_string(&accepted).unwrap()).unwrap();
++        assert_eq!(restored, accepted);
++        assert!(restored.belongs_to(&destination));
++        assert!(!restored.belongs_to(&AgentProfileReceipt {
++            profile_id: "a".into(),
++            epoch: 3
++        }));
++        assert!(!restored.belongs_to(&AgentProfileReceipt {
++            profile_id: "b".into(),
++            epoch: 4
++        }));
++    }
++}
++
++/// Opt-in capture of native grouping frontiers for accepted handoff preparation.
++#[derive(Clone, Debug)]
++pub struct AgentProfileHandoffInputCapture;
++
++/// A native selected handoff requests presentation preparation without changing transfer authority.
++#[derive(Clone, Debug)]
++pub struct AgentProfileHandoffInputRequest {
++    pub turn_id: String,
++    pub tool_name: String,
++    pub handoff: AgentProfileHandoff,
++    pub restored: bool,
++}

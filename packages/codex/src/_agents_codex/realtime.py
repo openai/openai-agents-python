@@ -30,13 +30,17 @@ from weakref import WeakKeyDictionary
 from pydantic import AnyUrl
 from typing_extensions import NotRequired, TypedDict
 
-from ._lifecycle import _close_after_error, _join, _retain_cleanup_error
+from ._lifecycle import (
+    _clear_error_frames as _clear_adapter_error_frames,
+    _close_after_error,
+    _join,
+    _retain_cleanup_error,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from .realtime_adapter import (
     NativeRealtimeAdapter as NativeRealtimeAdapter,
     NativeRealtimeConnection as NativeRealtimeConnection,
     RealtimeAdapterContext as RealtimeAdapterContext,
-    _clear_adapter_error_frames,
     _RealtimeAdapterDriver,
 )
 from .realtime_agents import (
@@ -3688,9 +3692,9 @@ class RealtimeSession:
                 call_id, "completed" if value["succeeded"] else "failed", value.get("output")
             )
             self._finished_functions.add(call_id)
-            batch = self._functions.get(call_id)
-            if batch is not None and batch.automatic_order is not None:
-                settled = batch.automatic_order.get(call_id)
+            function_call = self._functions.get(call_id)
+            if function_call is not None and function_call.automatic_order is not None:
+                settled = function_call.automatic_order.get(call_id)
                 if settled is not None:
                     settled.set()
             if call_id not in self._functions and call_id not in self._pending_functions:
