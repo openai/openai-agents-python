@@ -6,6 +6,7 @@ These records contain provider data, not completion or replay authority.
 from _agents_codex.response_facts import (
     CaptureTruncatedFact as CaptureTruncatedFact,
     HostedAgentAttributionFact as HostedAgentAttributionFact,
+    HostedAgentAttributionSummary as HostedAgentAttributionSummary,
     MalformedProbabilitiesFact as MalformedProbabilitiesFact,
     ProbabilityAlternative as ProbabilityAlternative,
     ProbabilityToken as ProbabilityToken,
