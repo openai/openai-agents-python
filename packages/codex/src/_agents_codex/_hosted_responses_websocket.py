@@ -22,6 +22,7 @@ from ._responses_websocket import (
     ResponsesWebSocketOptions,
     _connect,
     _decode_socket_frame,
+    _limited,
     _socket_frame_size,
 )
 from .models import (
@@ -69,6 +70,7 @@ class _Run:
     active: _Active | None = None
     request: ModelRequest | None = None
     account: Callable[[dict[str, Any]], str | None] | None = None
+    recovered: deque[_ResponsesWebSocketFrame] = field(default_factory=deque)
 
 
 class HostedResponsesWebSocketModel:
@@ -215,6 +217,23 @@ def _hosted_usage(value: Any) -> dict[str, Any] | None:
     raise ValueError("Hosted Responses received invalid usage") from None
 
 
+def _response_configuration(frame: dict[str, Any]) -> tuple[dict[str, Any], list[Any]]:
+    # Native client metadata and history pointers describe the request, not the Agent.
+    config = {
+        key: value
+        for key, value in frame.items()
+        if key not in {"input", "previous_response_id", "stream", "betas", "client_metadata"}
+    }
+    developer = [
+        item.get("content")
+        for item in frame.get("input", ())
+        if isinstance(item, dict)
+        and item.get("type") == "message"
+        and item.get("role") == "developer"
+    ]
+    return config, developer
+
+
 class _Socket:
     def __init__(
         self, socket: Any, run: _Run, config: dict[str, Any], max_size: int | None
@@ -323,16 +342,11 @@ class _Socket:
             del self, active, frame, outputs, completed, next_frame, replay
             del acknowledged, terminal_output, item, result, anchored_users, call_id, messages
 
-    async def send(self, payload: str) -> None:
-        frame = active = items = input_items = original_user_ids = ids = None
+    def _continuation(
+        self, active: _Active, frame: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        items = input_items = original_user_ids = ids = None
         try:
-            frame = json.loads(payload)
-            frame.pop("stream", None)
-            frame.pop("betas", None)
-            active = self._run.active
-            if active is None:
-                await self._create(frame)
-                return
             original_user_ids = {
                 item.get("id")
                 for item in active.create.get("input", [])
@@ -356,6 +370,85 @@ class _Socket:
             ids = {item["call_id"] for item in items if item["type"] == "function_call_output"}
             if not active.response_id or not ids or active.pending - ids:
                 raise ValueError("Hosted response requires the matching local function outputs")
+            return items, ids
+        finally:
+            del self, frame, active, items, input_items, original_user_ids, ids
+
+    async def _replace_before_send(self, frame: dict[str, Any], replacing: bool) -> bool:
+        active = None
+        try:
+            active = self._run.active
+            if active is None:
+                return replacing
+            changed = _response_configuration(active.create) != _response_configuration(frame)
+            if not replacing and not changed:
+                return False
+            self._continuation(active, frame)
+            if replacing and active.terminal is None:
+                await self._reconcile_terminal(active)
+            if changed:
+                # A synthetic tool pause is not a provider response pointer.
+                # Start from the new native input and captured destination config.
+                if frame.get("previous_response_id") == active.response_id:
+                    previous = active.create.get("previous_response_id")
+                    if isinstance(previous, str):
+                        frame["previous_response_id"] = previous
+                    else:
+                        frame.pop("previous_response_id", None)
+                self._run.active = None
+            return True
+        finally:
+            del self, frame, active
+
+    async def _drain_terminal(self, active: _Active) -> None:
+        event = item = None
+        try:
+            while active.terminal is None:
+                event = await self._read(active)
+                kind = event.get("type")
+                if kind in _TERMINAL:
+                    self._terminal(active, event)
+                elif kind == "response.output_item.done":
+                    item = event.get("item")
+                    if (
+                        isinstance(item, dict)
+                        and item.get("type") == "function_call"
+                        and item.get("call_id") not in active.emitted
+                    ):
+                        raise ValueError("Closed hosted response contains an unadmitted call")
+                elif kind in {"response.inject.failed", "response.error", "error"}:
+                    raise ValueError("Closed hosted response did not settle")
+                if self._run.request is not None and getattr(
+                    self._run.request, "_observe_raw_provider_events", False
+                ):
+                    self._run.recovered.append(_ResponsesWebSocketFrame(event, raw=True))
+        except BaseException as error:
+            _clear_error_frames(error)
+            raise
+        finally:
+            del self, active, event, item
+
+    async def _reconcile_terminal(self, active: _Active) -> None:
+        try:
+            await _limited(self._drain_terminal(active), 1)
+        except (asyncio.CancelledError, ValueError):
+            raise
+        except Exception as error:
+            raise ValueError("Closed hosted response has no genuine terminal") from error
+        finally:
+            del self, active
+
+    async def send(self, payload: str) -> None:
+        frame = active = items = ids = None
+        try:
+            frame = json.loads(payload)
+            frame.pop("stream", None)
+            frame.pop("betas", None)
+            active = self._run.active
+            if active is None:
+                await self._create(frame)
+                return
+            items, ids = self._continuation(active, frame)
             if active.terminal is not None:
                 await self._fallback(active, frame, items)
                 return
@@ -369,26 +462,34 @@ class _Socket:
                 {"type": "response.inject", "response_id": active.response_id, "input": items}
             )
         finally:
-            del self, payload, frame, active, items, input_items, original_user_ids, ids
+            del self, payload, frame, active, items, ids
+
+    async def _read(self, active: _Active) -> dict[str, Any]:
+        payload = event = None
+        try:
+            payload = await self._socket.recv()
+            remaining = _MAX_RESPONSE_BYTES - active.size
+            limit = remaining if self._max_size is None else min(remaining, self._max_size)
+            frame_size = _socket_frame_size(payload, limit)
+            event = _decode_socket_frame(payload, self._max_size)
+            active.size += frame_size
+            if "response" in event:
+                _provider_object(event["response"], "Hosted Responses response must be an object")
+            return event
+        finally:
+            del self, active, payload, event
 
     async def recv(self) -> _ResponsesWebSocketFrame:
-        payload = event = response = output = saved = item = active = calls = supported = None
+        event = response = saved = item = active = calls = supported = None
         acknowledged_call = None
         try:
+            if self._run.recovered:
+                return self._run.recovered.popleft()
             while not self._queue:
-                payload = await self._socket.recv()
                 active = self._run.active
                 if active is None:
                     raise RuntimeError("Hosted response has no active owner")
-                remaining = _MAX_RESPONSE_BYTES - active.size
-                limit = remaining if self._max_size is None else min(remaining, self._max_size)
-                frame_size = _socket_frame_size(payload, limit)
-                event = _decode_socket_frame(payload, self._max_size)
-                active.size += frame_size
-                if "response" in event:
-                    _provider_object(
-                        event["response"], "Hosted Responses response must be an object"
-                    )
+                event = await self._read(active)
                 if self._run.request is not None and getattr(
                     self._run.request, "_observe_raw_provider_events", False
                 ):
@@ -444,28 +545,7 @@ class _Socket:
                 elif kind in {"response.inject.failed", "response.error", "error"}:
                     raise RuntimeError("Hosted response rejected the provider operation")
                 elif kind in _TERMINAL:
-                    if active.terminal_reported:
-                        raise ValueError("Hosted response received more than one terminal")
-                    response = _provider_object(
-                        event.get("response"), "Hosted terminal response must be an object"
-                    )
-                    output = response.get("output", [])
-                    if not isinstance(output, list):
-                        raise ValueError("Hosted terminal output must contain objects")
-                    if len(output) > _MAX_RESPONSE_ITEMS:
-                        raise ValueError("Hosted response exceeds the native output-item limit")
-                    if not all(isinstance(item, dict) for item in output):
-                        raise ValueError("Hosted terminal output must contain objects")
-                    usage = _hosted_usage(response.get("usage"))
-                    self._account(
-                        {
-                            "operation": "terminal",
-                            "lineage": active.lineage,
-                            **({"usage": usage} if usage is not None else {}),
-                        }
-                    )
-                    active.terminal_reported = True
-                    active.terminal = deepcopy(event)
+                    self._terminal(active, event)
                 if (
                     active.terminal is not None
                     and active.fallback_input
@@ -525,7 +605,35 @@ class _Socket:
             return self._queue.popleft()
 
         finally:
-            del payload, event, response, output, saved, item, active, calls, supported, self
+            del event, response, saved, item, active, calls, supported, self
+
+    def _terminal(self, active: _Active, event: dict[str, Any]) -> None:
+        response = output = usage = None
+        try:
+            if active.terminal_reported:
+                raise ValueError("Hosted response received more than one terminal")
+            response = _provider_object(
+                event.get("response"), "Hosted terminal response must be an object"
+            )
+            output = response.get("output", [])
+            if not isinstance(output, list):
+                raise ValueError("Hosted terminal output must contain objects")
+            if len(output) > _MAX_RESPONSE_ITEMS:
+                raise ValueError("Hosted response exceeds the native output-item limit")
+            if not all(isinstance(item, dict) for item in output):
+                raise ValueError("Hosted terminal output must contain objects")
+            usage = _hosted_usage(response.get("usage"))
+            self._account(
+                {
+                    "operation": "terminal",
+                    "lineage": active.lineage,
+                    **({"usage": usage} if usage is not None else {}),
+                }
+            )
+            active.terminal_reported = True
+            active.terminal = deepcopy(event)
+        finally:
+            del self, active, event, response, output, usage
 
     def _enqueue(self, event: dict[str, Any]) -> None:
         self._queue.append(_ResponsesWebSocketFrame(event))

@@ -36,8 +36,6 @@ async def test_attribution_stays_with_selected_handoff_owner_across_reused_provi
 
     async def route(request: web.Request) -> web.WebSocketResponse:
         nonlocal runs
-        run = runs
-        runs += 1
         socket = web.WebSocketResponse()
         await socket.prepare(request)
         injections = 0
@@ -50,60 +48,66 @@ async def test_attribution_stays_with_selected_handoff_owner_across_reused_provi
             "agent": {"agent_name": "/remote-owner"},
             "phase": "analysis",
         }
-        lookup = {
-            "type": "function_call",
-            "id": "fc_reused",
-            "call_id": "call_reused",
-            "name": "lookup",
-            "arguments": "{}",
-            **(
-                {
-                    "agent": {"agent_name": "/worker-one" if run == 0 else "/worker-two"},
-                    "phase": "analysis" if run == 0 else "commentary",
-                }
-                if run < 2
-                else {}
-            ),
-        }
         async for message in socket:
             frame = json.loads(message.data)
             frames.append(frame)
+            lookup = {
+                "type": "function_call",
+                "id": "fc_reused",
+                "call_id": "call_reused",
+                "name": "lookup",
+                "arguments": "{}",
+                **(
+                    {
+                        "agent": {"agent_name": "/worker-one" if runs == 1 else "/worker-two"},
+                        "phase": "analysis" if runs == 1 else "commentary",
+                    }
+                    if runs <= 2
+                    else {}
+                ),
+            }
             if frame["type"] == "response.create":
                 await socket.send_json(
                     {"type": "response.created", "response": {"id": "resp_reused", "output": []}}
                 )
+                transferred = any(
+                    item.get("call_id") == "call_handoff"
+                    and item.get("type") == "function_call_output"
+                    for item in frame["input"]
+                )
+                if not transferred:
+                    runs += 1
                 await socket.send_json(
-                    {"type": "response.output_item.done", "output_index": 0, "item": handoff}
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": lookup if transferred else handoff,
+                    }
                 )
             else:
                 assert frame["type"] == "response.inject"
                 injections += 1
+                assert injections == 1
                 await socket.send_json(
                     {"type": "response.inject.created", "response_id": "resp_reused"}
                 )
-                if injections == 1:
-                    await socket.send_json(
-                        {"type": "response.output_item.done", "output_index": 1, "item": lookup}
-                    )
-                else:
-                    assert injections == 2
-                    hidden = {
-                        **final,
-                        "id": "msg_private",
-                        "agent": {"agent_name": "/other"},
-                        "content": [{"type": "output_text", "text": "not final user text"}],
+                hidden = {
+                    **final,
+                    "id": "msg_private",
+                    "agent": {"agent_name": "/other"},
+                    "content": [{"type": "output_text", "text": "not final user text"}],
+                }
+                await socket.send_json(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_reused",
+                            "status": "completed",
+                            "output": [lookup, hidden, final],
+                            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+                        },
                     }
-                    await socket.send_json(
-                        {
-                            "type": "response.completed",
-                            "response": {
-                                "id": "resp_reused",
-                                "status": "completed",
-                                "output": [handoff, lookup, hidden, final],
-                                "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
-                            },
-                        }
-                    )
+                )
         return socket
 
     @function_tool(name="lookup")
@@ -148,6 +152,6 @@ async def test_attribution_stays_with_selected_handoff_owner_across_reused_provi
     ]
     assert [frame["type"] for frame in frames] == [
         "response.create",
-        "response.inject",
+        "response.create",
         "response.inject",
     ] * 3

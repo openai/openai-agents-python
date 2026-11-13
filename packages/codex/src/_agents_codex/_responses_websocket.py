@@ -445,7 +445,7 @@ class ResponsesWebSocketModel(ResponsesModel):
         snapshot: Any = None
         payload: Any = None
         event: Any = None
-        key = sending = response_id = candidate = None
+        key = sending = response_id = candidate = socket = None
         sent, terminal = False, False
         try:
             self._check_video_input(request)
@@ -466,11 +466,18 @@ class ResponsesWebSocketModel(ResponsesModel):
                     }
                 ).encode()
             ).hexdigest()
-            if state.connection is not None and (
-                state.connection.key != key or _socket_closed(state.connection.socket)
-            ):
-                await _join(state.connection.close())
-                state.connection = None
+            if state.connection is not None:
+                socket = state.connection.socket
+                replace_connection = state.connection.key != key or _socket_closed(socket)
+                # Only the SDK-owned hosted wrapper needs to reconcile a pause
+                # before retiring its connection or sending a new configuration.
+                from ._hosted_responses_websocket import _Socket
+
+                if isinstance(socket, _Socket):
+                    replace_connection = await socket._replace_before_send(body, replace_connection)
+                if replace_connection:
+                    await _join(state.connection.close())
+                    state.connection = None
             if state.connection is None:
                 snapshot = replace(request, body=deepcopy(request.body))
 
@@ -588,7 +595,7 @@ class ResponsesWebSocketModel(ResponsesModel):
                 if state.connection is connection:
                     state.connection = None
             del request, body, selected, options, snapshot, payload, event, connection
-            del key, sending, response_id, candidate
+            del key, sending, response_id, candidate, socket
 
 
 _preserve_module_identity(globals(), "agents.models")
