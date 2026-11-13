@@ -111,6 +111,7 @@ if TYPE_CHECKING:
         InputImage as InputImage,
         InputImageFile as InputImageFile,
         InputText as InputText,
+        InputVideo as InputVideo,
         UserInput as UserInput,
         UserMessage as UserMessage,
     )
@@ -457,6 +458,7 @@ _MODULES = {
     "InputFile": ".input",
     "ImageDetail": ".input",
     "InputText": ".input",
+    "InputVideo": ".input",
     "UserMessage": ".input",
     "UserInput": ".input",
     "MCPResultContext": ".mcp",

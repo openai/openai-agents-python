@@ -19,6 +19,7 @@ from typing_extensions import NotRequired, TypedDict
 from agents.config import JsonValue
 
 from ._compat import cancellation_requested
+from ._media import _capture_video
 from ._public import preserve_module_identity as _preserve_module_identity
 from .retry import RetryAdvice
 
@@ -670,6 +671,7 @@ class ChatCompletionsModel:
         tool: Any = None
         tools: Any = None
         value: Any = None
+        video: dict[str, Any] | None = None
         try:
             messages = []
             native_tools = list(request.body.get("tools") or [])
@@ -718,6 +720,11 @@ class ChatCompletionsModel:
                                         **({"detail": part["detail"]} if "detail" in part else {}),
                                     },
                                 }
+                            )
+                        elif part.get("type") == "input_video" and item["role"] == "user":
+                            video = _capture_video({"video_url": part.get("video_url")})
+                            content.append(
+                                {"type": "video_url", "video_url": {"url": video["video_url"]}}
                             )
                         else:
                             raise ValueError(
@@ -984,6 +991,7 @@ class ChatCompletionsModel:
                 tool,
                 tools,
                 value,
+                video,
             )
 
     def _completed_response(
@@ -1641,6 +1649,7 @@ class ResponsesModel:
         client: Any = None
         create: Any = None
         try:
+            self._check_video_input(request)
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
             if request.disable_provider_retries:
@@ -1661,6 +1670,16 @@ class ResponsesModel:
             return await create(stream=stream, extra_body=body, **_client_request_options(selected))
         finally:
             del request, body, selected, client, create
+
+    @staticmethod
+    def _check_video_input(request: ModelRequest) -> None:
+        if any(
+            part.get("type") == "input_video"
+            for item in request.body.get("input", [])
+            if item.get("type") == "message"
+            for part in item.get("content", [])
+        ):
+            raise ValueError("Video input requires a compatible Chat Completions model")
 
     @asynccontextmanager
     async def _opened_stream(self, response: Any) -> AsyncIterator[AsyncIterator[Any]]:
@@ -1792,6 +1811,7 @@ class _AnyLLMResponsesModel(ResponsesModel):
         body = {}
         create: Any = None
         try:
+            self._check_video_input(request)
             if request.disable_provider_retries:
                 raise TypeError("AnyLLMModel cannot suppress borrowed client retries per request")
             create = self.client.aresponses

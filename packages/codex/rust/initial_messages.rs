@@ -66,6 +66,7 @@ impl Batch {
                             let allowed: &[&str] = match kind {
                                 "input_text" => &["type", "text"],
                                 "input_audio" => &["type", "audio_url"],
+                                "input_video" => &["type", "video_url"],
                                 "input_image" => &["type", "image_url", "file_id", "detail"],
                                 "input_file" => {
                                     &["type", "file_id", "file_data", "file_url", "filename"]
@@ -84,6 +85,8 @@ impl Batch {
                             } else {
                                 let sources: &[&str] = if kind == "input_audio" {
                                     &["audio_url"]
+                                } else if kind == "input_video" {
+                                    &["video_url"]
                                 } else if kind == "input_image" {
                                     &["image_url", "file_id"]
                                 } else {
