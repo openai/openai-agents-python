@@ -722,7 +722,11 @@ class RealtimeConversationItemDeleted:
 
 @dataclass(frozen=True)
 class RealtimeHistoryItem:
-    """A projection of a Core-owned canonical history item."""
+    """A voice history item from canonical history or accepted native function facts.
+
+    Interruption alone has not been establishing a terminal result. Provider
+    deletion has not been removing accepted call facts from this local audit.
+    """
 
     id: str
     session_id: str
@@ -735,6 +739,11 @@ class RealtimeHistoryItem:
     presentation: str | None = None
     presentation_index: int | None = None
     provider_item_id: str | None = None
+    call_id: str | None = None
+    name: str | None = None
+    arguments: str | None = None
+    output: str | None = None
+    status: Literal["in_progress", "completed", "failed"] | None = None
 
 
 @dataclass(frozen=True)
@@ -1106,6 +1115,7 @@ class RealtimeSession:
                 raise ValueError("call_id must be a nonempty string")
         elif config.transport is not None:
             raise TypeError("transport must be RealtimeWebRTC, RealtimeSIP, or None")
+        self._realtime_session_id: str | None = None
         self._generation = uuid4().hex
         self._start: asyncio.Task[None] | None = None
         self._credentials: asyncio.Task[str | None] | None = None
@@ -1215,8 +1225,8 @@ class RealtimeSession:
 
     @property
     def history(self) -> tuple[RealtimeHistoryItem, ...]:
-        """Current canonical history projection, separate from native text history."""
-        return tuple(self._history.values())
+        """Current voice history from native facts, separate from native text history."""
+        return tuple(item for item in self._history.values() if item.session_id)
 
     @property
     def call_id(self) -> str | None:
@@ -3521,6 +3531,7 @@ class RealtimeSession:
                 namespace=value.get("namespace"),
                 response_id=value.get("response_id"),
             )
+            self._record_function_history(call_id, "in_progress")
         elif name == "FunctionCallRejected":
             call_id, function_name = value.get("call_id"), value.get("name")
             if not isinstance(call_id, str) or not isinstance(function_name, str):
@@ -3540,6 +3551,9 @@ class RealtimeSession:
             identity = self._function_names.get(call_id)
             if identity is None:
                 raise RuntimeError("Realtime result has no registered function call")
+            self._record_function_history(
+                call_id, "completed" if value["succeeded"] else "failed", value.get("output")
+            )
             self._finished_functions.add(call_id)
             if call_id not in self._functions and call_id not in self._pending_functions:
                 self._finish_request(call_id)
@@ -3732,6 +3746,27 @@ class RealtimeSession:
             self._history_text_work += work
             self._emit(RealtimeHistory(updated_transcript, False))
 
+    def _record_function_history(
+        self,
+        call_id: str,
+        status: Literal["in_progress", "completed", "failed"],
+        output: str | None = None,
+    ) -> None:
+        call = self._function_names[call_id]
+        item = RealtimeHistoryItem(
+            id=f"function_call:{call_id}",
+            session_id=self._realtime_session_id or "",
+            kind="function_call",
+            item_id=call.item_id,
+            provider_item_id=call.item_id,
+            call_id=call_id,
+            name=call.name,
+            arguments=call.arguments,
+            output=output,
+            status=status,
+        )
+        self._record_history(item)
+
     def _record_history(self, item: RealtimeHistoryItem) -> None:
         previous = self._history.get(item.id)
         size = self._history_bytes + self._buffer_size(item)
@@ -3741,6 +3776,12 @@ class RealtimeSession:
             raise RuntimeError("Realtime history byte capacity exceeded")
         self._history_bytes = size
         self._history[item.id] = item
+        if self._realtime_session_id is None and item.session_id:
+            self._realtime_session_id = item.session_id
+            # Keep early function facts bounded and private until Core supplies identity.
+            for pending in tuple(self._history.values()):
+                if not pending.session_id:
+                    self._record_history(replace(pending, session_id=item.session_id))
 
 
 _preserve_module_identity(globals(), "agents.realtime")
