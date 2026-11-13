@@ -76,7 +76,7 @@ def _condition(expression: str, values: dict[str, str]) -> bool:
     return bool(
         eval(
             expression.replace("&&", " and ").replace("||", " or ").replace("!cancelled()", "True"),
-            {"__builtins__": {}},
+            {"__builtins__": {}, "startsWith": str.startswith},
         )
     )
 
@@ -509,6 +509,7 @@ def test_native_publication_is_a_global_barrier() -> None:
         ("pull_request", "feat/codex-harness", "true", True, False),
         ("merge_group", "feat/codex-harness", "true", True, False),
         ("push", "feat/codex-harness", "true", False, True),
+        ("push", "ci/hillclimb/probe", "true", False, True),
         ("push", "feat/codex-harness", "false", False, False),
         ("pull_request", "feat/codex-harness", "false", False, False),
         ("pull_request", "main", "true", False, False),

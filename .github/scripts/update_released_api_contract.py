@@ -320,15 +320,17 @@ def public_api() -> dict[str, Any]:
     # Follow only imports used by retained declarations. A typing alias reports
     # its runtime owner as typing, so its source binding defines this boundary.
     required: dict[str, set[str]] = {name: set() for name in public_modules | {"agents"}}
+    previous: dict[str, set[str]] = {}
+    contracts: dict[str, dict[str, Any]] = {}
     while True:
-        contracts = {
-            name: _module_contract(
+        for name, names in sorted(required.items()):
+            if previous.get(name) == names:
+                continue
+            contracts[name] = _module_contract(
                 importlib.import_module(name),
                 explicit_exports.get(name, None if name in public_modules else set()),
                 include=names,
             )
-            for name, names in sorted(required.items())
-        }
         expanded = {name: names.copy() for name, names in required.items()}
         for contract in contracts.values():
             for reference in contract["references"].values():
@@ -336,7 +338,7 @@ def public_api() -> dict[str, Any]:
                 expanded.setdefault(owner, set()).add(name)
         if expanded == required:
             break
-        required = expanded
+        previous, required = required, expanded
     root = contracts.pop("agents")
     modules = {name: contracts.pop(name) for name in sorted(public_modules)}
     # The version value advances during release preparation; its import remains public.
@@ -357,7 +359,7 @@ def public_api() -> dict[str, Any]:
         "root_imports": root["imports"],
         "root_declarations": root["declarations"],
         "modules": modules,
-        "root_definitions": contracts,
+        "root_definitions": dict(sorted(contracts.items())),
     }
 
 
