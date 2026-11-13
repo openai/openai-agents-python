@@ -7,10 +7,10 @@ import pytest
 
 from agents import (
     Agent,
+    CapabilityError,
     CustomStorage,
     EncryptedSessionStore,
     NativeProvider,
-    SessionState,
     SQLiteSessionStore,
 )
 from tests._asyncio import timeout
@@ -59,47 +59,19 @@ async def test_custom_storage_idle_snapshot_detaches_from_live_source(responses,
     assert "source only" in reopened_input and "restored only" not in reopened_input
 
 
-async def test_custom_checkpoint_restores_encrypted_ttl_without_exposing_expired_items(
-    responses, tmp_path
-):
-    expired = "EXPIRED_CHECKPOINT_ITEM"
-    fresh = "FRESH_CHECKPOINT_ITEM"
-    old_item = {
-        "type": "message",
-        "id": "msg_export_old",
-        "role": "user",
-        "content": [{"type": "input_text", "text": expired}],
-        "internal_chat_message_metadata_passthrough": {"create_time": 1},
-    }
+async def test_idle_export_refuses_to_detach_encrypted_retention(responses, tmp_path):
     backend = SQLiteSessionStore(tmp_path / "encrypted.sqlite")
     storage = CustomStorage(EncryptedSessionStore(backend, encryption_key="checkpoint-key", ttl=60))
-    for output in ("first", "restored"):
-        responses.respond(assistant_output(output))
+    responses.respond(assistant_output("first"))
+    responses.respond(assistant_output("continues"))
     async with (
         timeout(20),
         NativeProvider(base_url=responses.url, api_key="synthetic-retention") as provider,
     ):
         agent = Agent(instructions="Continue the conversation.", provider=provider)
         async with agent.session(storage=storage) as source:
-            initial = await source.history_snapshot()
-            await source.transact_history(
-                expected_revision=initial.revision, keep=0, items=[old_item]
-            )
-            assert (await (await source.submit(fresh)).get_result()).final_output == "first"
-            saved = await source.save_state()
-
-        payload = saved.to_json()
-        assert expired in payload
-        parsed = SessionState.from_json(payload)
-        assert parsed.agent_options["_sdk_history_ttl_seconds"] == 60
-        async with agent.session(state=parsed) as restored:
-            assert expired in json.dumps((await restored.history_snapshot()).items)
-            retained = json.dumps((await restored.model_context()).items)
-            assert expired not in retained and fresh in retained
-            assert (
-                await (await restored.submit("continue")).get_result()
-            ).final_output == "restored"
-            assert (await restored.save_state()).agent_options["_sdk_history_ttl_seconds"] == 60
-
-    assert expired not in json.dumps(responses.requests[1]["input"])
-    assert fresh in json.dumps(responses.requests[1]["input"])
+            assert (await (await source.submit("before")).get_result()).final_output == "first"
+            assert (await source.checkpoint_status(kind="idle")).status == "not_ready"
+            with pytest.raises(CapabilityError, match="Encrypted history retention"):
+                await source.save_state()
+            assert (await (await source.submit("after")).get_result()).final_output == "continues"
