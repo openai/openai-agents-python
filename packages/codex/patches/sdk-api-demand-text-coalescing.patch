@@ -87,10 +87,10 @@ index 5ec63a3e19ab2cbd8e020e6cf1daaa837121bb15..7b68b0415144b408c213e24bc16c56d4
      let events: Events = events.collect().await;
      assert!(default_header_reset(events.first()));
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18fb0267f68 100644
+index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..1bfab715e336777ebc1973e4fbd09bbe0433b9fc 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-@@ -296,6 +296,7 @@ impl ResponsesWebsocketConnection {
+@@ -296,6 +296,7 @@
              turn_state,
              observe_raw_provider_events,
              None,
@@ -98,7 +98,7 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
          )
          .await
      }
-@@ -314,6 +315,7 @@ impl ResponsesWebsocketConnection {
+@@ -314,6 +315,7 @@
          turn_state: Option<Arc<OnceLock<String>>>,
          observe_raw_provider_events: bool,
          send_observer: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -106,7 +106,7 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
      ) -> Result<ResponseStream, ApiError> {
          let (tx_event, rx_event) =
              mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
-@@ -408,6 +410,7 @@ impl ResponsesWebsocketConnection {
+@@ -408,6 +410,7 @@
                              rx_interrupt,
                              observe_raw_provider_events && !timing_log_context.warmup,
                              send_observer.as_deref(),
@@ -114,7 +114,7 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
                          ) => result,
                          _ = &mut stopped => Err(ApiError::Stream("local response invocation stopped".into())),
                          _ = tx_event.closed() => Err(ApiError::Stream(
-@@ -892,6 +895,7 @@ async fn run_websocket_response_stream(
+@@ -892,6 +895,7 @@
      interrupt: oneshot::Receiver<()>,
      observe_raw_provider_events: bool,
      send_observer: Option<&(dyn Fn() + Send + Sync)>,
@@ -122,7 +122,7 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
  ) -> Result<(), ApiError> {
      let mut last_server_model: Option<String> = None;
      let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
-@@ -910,10 +914,23 @@ async fn run_websocket_response_stream(
+@@ -910,10 +914,23 @@
      // A response owns its interrupt, and create must be sent before interrupt.
      let mut interrupt = interrupt.fuse();
      let mut response_id = None;
@@ -149,7 +149,7 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
                  response.map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()))
              }
              Ok(()) = &mut interrupt, if response_id.is_some() => {
-@@ -929,9 +946,11 @@ async fn run_websocket_response_stream(
+@@ -929,9 +946,11 @@
                      timing_log_context.connection_reused,
                  )
                  .await?;
@@ -162,7 +162,7 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
          if let Some(t) = telemetry.as_ref() {
              t.on_ws_event(&response, poll_start.elapsed());
          }
-@@ -982,9 +1001,11 @@ async fn run_websocket_response_stream(
+@@ -982,9 +1001,11 @@
                              payload_bytes = text.len(),
                              "Failed to parse WebSocket event"
                          );
@@ -174,7 +174,7 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
                  emit_responses_websocket_timing_event(
                      event.kind(),
                      text.as_str(),
-@@ -1113,6 +1134,12 @@ async fn run_websocket_response_stream(
+@@ -1113,6 +1134,12 @@
      }
  
      Ok(())
@@ -187,7 +187,16 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
  }
  
  fn emit_responses_websocket_timing_event(
-@@ -1685,6 +1712,7 @@ mod tests {
+@@ -1678,13 +1705,15 @@
+             &mut stream,
+             tx_event,
+             "{}".to_string(),
+-            Duration::from_secs(1),
++            Some(Duration::from_secs(1)),
++            Some(Duration::from_secs(1)),
+             None,
+             None,
+             &context,
              rx_interrupt,
              /*observe_raw_provider_events*/ false,
              /*send_observer*/ None,
@@ -195,7 +204,16 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
          )
          .await
          .unwrap_err();
-@@ -2100,6 +2128,7 @@ mod tests {
+@@ -2093,13 +2122,15 @@
+                 &mut stream,
+                 tx_event,
+                 "{}".to_string(),
+-                Duration::from_secs(1),
++                Some(Duration::from_secs(1)),
++                Some(Duration::from_secs(1)),
+                 None,
+                 None,
+                 &context,
                  rx_interrupt,
                  /*observe_raw_provider_events*/ false,
                  /*send_observer*/ None,
@@ -203,7 +221,7 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
              )
              .await
              .unwrap_err();
-@@ -2129,3 +2158,172 @@ mod tests {
+@@ -2129,3 +2160,206 @@
          }
      }
  }
@@ -255,7 +273,8 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
 +            &mut stream,
 +            tx,
 +            "{}".into(),
-+            Duration::from_secs(1),
++            Some(Duration::from_secs(1)),
++            Some(Duration::from_secs(1)),
 +            None,
 +            None,
 +            &context,
@@ -295,6 +314,15 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
 +    }
 +    #[tokio::test(start_paused = true)]
 +    async fn demand_wakes_pending_websocket_without_restarting_idle_deadline() {
++        assert_pending_websocket_text_demand(Some(Duration::from_secs(10))).await;
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn demand_wakes_pending_websocket_with_receive_deadline_disabled() {
++        assert_pending_websocket_text_demand(None).await;
++    }
++
++    async fn assert_pending_websocket_text_demand(receive_timeout: Option<Duration>) {
 +        let (tx_command, mut rx_command) = mpsc::channel(1);
 +        let (tx_message, rx_message) = mpsc::unbounded_channel();
 +        let pump_task = tokio::spawn(async move {
@@ -338,7 +366,8 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
 +                &mut stream,
 +                tx,
 +                "{}".into(),
-+                Duration::from_secs(10),
++                Some(Duration::from_secs(10)),
++                receive_timeout,
 +                None,
 +                None,
 +                &context,
@@ -366,13 +395,36 @@ index 6ba608c2ebfa20205f6b47b09c9e5283aeb08234..f4b5df5f43caeab78d46da15ffd4f18f
 +        );
 +        tokio::time::advance(Duration::from_secs(5)).await;
 +        tokio::task::yield_now().await;
-+        assert!(
-+            producer.is_finished(),
-+            "observation demand restarted the idle deadline"
-+        );
-+        assert!(
-+            matches!(producer.await.unwrap(), Err(ApiError::Stream(message)) if message.contains("idle timeout"))
-+        );
++        if receive_timeout.is_some() {
++            assert!(
++                producer.is_finished(),
++                "observation demand restarted the idle deadline"
++            );
++            assert!(
++                matches!(producer.await.unwrap(), Err(ApiError::Stream(message)) if message.contains("idle timeout"))
++            );
++        } else {
++            assert!(
++                !producer.is_finished(),
++                "disabled receive deadline expired after observation demand"
++            );
++            tx_message
++                .send(Ok(Message::Text(
++                    serde_json::json!({"type":"response.completed", "response":{"id":"r", "status":"completed"}})
++                        .to_string()
++                        .into(),
++                )))
++                .unwrap();
++            assert!(matches!(
++                rx.recv().await.unwrap().unwrap(),
++                ResponseEvent::ResponseObserved(_)
++            ));
++            assert!(matches!(
++                rx.recv().await.unwrap().unwrap(),
++                ResponseEvent::Completed { response_id, .. } if response_id == "r"
++            ));
++            assert!(producer.await.unwrap().is_ok());
++        }
 +        drop(tx_message);
 +    }
 +}
