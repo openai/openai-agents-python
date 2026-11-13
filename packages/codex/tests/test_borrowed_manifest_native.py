@@ -6,15 +6,17 @@ import pytest
 
 from agents import Agent, Environment
 from agents.classic.sandbox.entries import File
-from agents.classic.sandbox.sandboxes.unix_local import (
-    UnixLocalSandboxClient,
-    UnixLocalSandboxClientOptions,
-)
 from agents.sandbox import Manifest, sandbox_environment
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_environment_leases_checklist import trust
 from tests.test_native_agent import provider
+
+if sys.platform in ("linux", "darwin"):
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
 
 pytestmark = pytest.mark.skipif(
     sys.platform not in ("linux", "darwin"), reason="UnixLocal resource"

@@ -10,10 +10,6 @@ import pytest
 from agents import Agent, Environment
 from agents.classic.sandbox.entries import File, LocalFile
 from agents.classic.sandbox.errors import LocalFileReadError
-from agents.classic.sandbox.sandboxes.unix_local import (
-    UnixLocalSandboxClient,
-    UnixLocalSandboxClientOptions,
-)
 from agents.classic.sandbox.workspace_paths import SandboxPathGrant
 from agents.classic.tracing import set_tracing_disabled
 from agents.sandbox import Manifest, SandboxConcurrencyLimits, sandbox_environment
@@ -21,6 +17,12 @@ from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_environment_leases_checklist import trust
 from tests.test_native_agent import provider
+
+if sys.platform in ("linux", "darwin"):
+    from agents.classic.sandbox.sandboxes.unix_local import (
+        UnixLocalSandboxClient,
+        UnixLocalSandboxClientOptions,
+    )
 
 pytestmark = pytest.mark.skipif(
     sys.platform not in ("linux", "darwin"), reason="UnixLocal resource"
