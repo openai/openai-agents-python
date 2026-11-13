@@ -1,0 +1,13 @@
+diff --git a/codex-rs/protocol/src/model_request_transport.rs b/codex-rs/protocol/src/model_request_transport.rs
+index 41fa6f27dc2c5729d7413bf502164258ee9a904c..0cef71c4929365c7f9b388ad50ba6f412badfd7d 100644
+--- a/codex-rs/protocol/src/model_request_transport.rs
++++ b/codex-rs/protocol/src/model_request_transport.rs
+@@ -17,7 +17,7 @@ pub enum RequestTransportMode {
+ #[serde(deny_unknown_fields)]
+ pub struct RequestTransportOverrides {
+     #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
+-    #[ts(optional = nullable)]
++    #[ts(optional = nullable, as = "Option<RequestTransportMode>")]
+     #[schemars(with = "Option<RequestTransportMode>")]
+     pub mode: Option<Option<RequestTransportMode>>,
+     #[serde(

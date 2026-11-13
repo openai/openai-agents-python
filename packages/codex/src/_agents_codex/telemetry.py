@@ -672,6 +672,21 @@ def _generated_scope_ids(
 _default_agent_harness_id: str | None = None
 
 
+def _native_provider_response_span_id(context: str) -> dict[str, str | None] | None:
+    """Allocate on the host loop under a borrowed owner, without another span."""
+    parent = None
+    options = TraceOptions()
+    try:
+        with _activate(context):
+            parent = current_context()
+            if _tracing_disabled or _in_processor.get() or parent is None or parent.disabled:
+                return None
+            ids = _generated_scope_ids(options, parent, parent, (), _native_tracing())
+            return {"span_id": ids.get("span_id")}
+    finally:
+        del context, parent, options
+
+
 def _normalize_agent_harness_id(value: str | None) -> str | None:
     if value is None:
         return None

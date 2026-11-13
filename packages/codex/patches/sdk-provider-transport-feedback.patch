@@ -1,0 +1,103 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 1ff83cbce84c8ce011138871c153253a01160b87..751dd1b076102f8e947a9e39ca01580451ef4772 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -5416,9 +5416,6 @@ async fn try_run_sampling_request(
+     if let Some(span) = provider_response_span {
+         let completed = match &outcome {
+             Ok(_) => Some(codex_otel::sdk_trace::ProviderResponseOutcome::Ok),
+-            Err(error) if matches!(error.details(), CodexErrorDetails::TurnAborted) => {
+-                Some(codex_otel::sdk_trace::ProviderResponseOutcome::Cancelled)
+-            }
+             _ => None,
+         };
+         if let Some(completed) = completed {
+diff --git a/codex-rs/protocol/src/model_request_transport.rs b/codex-rs/protocol/src/model_request_transport.rs
+index 0cef71c4929365c7f9b388ad50ba6f412badfd7d..2a2b06d2d10039bb1a0f61204e070d879a01d655 100644
+--- a/codex-rs/protocol/src/model_request_transport.rs
++++ b/codex-rs/protocol/src/model_request_transport.rs
+@@ -156,20 +156,80 @@ pub struct WebsocketOptions {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[ts(optional = nullable, type = "number | null")]
+     pub ping_timeout_ms: Option<std::num::NonZeroU64>,
+-    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "nullable_websocket_option")]
+     #[ts(optional = nullable, type = "number | null")]
+     #[schemars(with = "Option<usize>")]
+     pub max_message_bytes: Option<Option<usize>>,
+-    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "nullable_websocket_option")]
+     #[ts(optional = nullable, type = "number | null")]
+     #[schemars(with = "Option<u64>")]
+     pub send_timeout_ms: Option<Option<u64>>,
+-    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "nullable_websocket_option")]
+     #[ts(optional = nullable, type = "number | null")]
+     #[schemars(with = "Option<u64>")]
+     pub connect_timeout_ms: Option<Option<u64>>,
+-    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_with::rust::double_option")]
++    #[serde(default, skip_serializing_if = "Option::is_none", with = "nullable_websocket_option")]
+     #[ts(optional = nullable, type = "number | null")]
+     #[schemars(with = "Option<u64>")]
+     pub receive_timeout_ms: Option<Option<u64>>,
+ }
++
++// TOML config has no null; preserve explicit disabled overrides with a named value.
++mod nullable_websocket_option {
++    use serde::Deserialize;
++    pub use serde_with::rust::double_option::serialize;
++
++    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
++    where
++        D: serde::Deserializer<'de>,
++        T: serde::Deserialize<'de>,
++    {
++        #[derive(serde::Deserialize)]
++        #[serde(untagged)]
++        enum Limit<T> {
++            Value(T),
++            Disabled(String),
++        }
++        match Option::<Limit<T>>::deserialize(deserializer)? {
++            None => Ok(Some(None)),
++            Some(Limit::Value(value)) => Ok(Some(Some(value))),
++            Some(Limit::Disabled(value)) if value == "disabled" => Ok(Some(None)),
++            Some(Limit::Disabled(_)) => Err(serde::de::Error::custom(
++                "expected an integer, null, or disabled",
++            )),
++        }
++    }
++}
++
++#[cfg(test)]
++mod websocket_option_config_tests {
++    use super::WebsocketOptions;
++    #[test]
++    fn omission_inherits_but_null_and_config_disabled_clear_phase_limits() {
++        let omitted: WebsocketOptions = serde_json::from_str("{}").unwrap();
++        assert_eq!(omitted.connect_timeout_ms, None);
++        assert_eq!(omitted.max_message_bytes, None);
++        let null: WebsocketOptions =
++            serde_json::from_str(r#"{"connect_timeout_ms":null,"max_message_bytes":null}"#)
++                .unwrap();
++        let disabled: WebsocketOptions = serde_json::from_str(
++            r#"{"connect_timeout_ms":"disabled","max_message_bytes":"disabled"}"#,
++        )
++        .unwrap();
++        assert_eq!(null, disabled);
++        assert_eq!(null.connect_timeout_ms, Some(None));
++        assert_eq!(null.max_message_bytes, Some(None));
++        let configured: WebsocketOptions =
++            serde_json::from_str(r#"{"connect_timeout_ms":7,"max_message_bytes":256}"#).unwrap();
++        assert_eq!(configured.connect_timeout_ms, Some(Some(7)));
++        assert_eq!(configured.max_message_bytes, Some(Some(256)));
++        assert!(
++            serde_json::from_str::<WebsocketOptions>(r#"{"connect_timeout_ms":"inherit"}"#)
++                .is_err()
++        );
++        assert_eq!(
++            serde_json::to_value(null).unwrap()["connect_timeout_ms"],
++            serde_json::Value::Null
++        );
++    }
++}
