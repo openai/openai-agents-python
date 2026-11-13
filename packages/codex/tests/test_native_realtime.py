@@ -2513,3 +2513,77 @@ async def test_entered_realtime_body_orders_later_response_callback(
         await later_entered.wait()
         await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "first")
         await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "later")
+
+
+async def test_deferred_media_release_allows_small_active_subscriber_to_drain(
+    realtime_peer: RealtimePeer,
+) -> None:
+    from agents.realtime import RealtimeAudio
+
+    entered, release, media_queued = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        entered.set()
+        await release.wait()
+        return "finished"
+
+    peer = realtime_peer
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-voice-drain", supports_websockets=False
+        ) as provider,
+        Agent(
+            instructions="Wait for the tool.", provider=provider, tools=[hold]
+        ).session() as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", defer_media_while_tool_runs=True)
+        ) as voice,
+    ):
+        await peer.function("hold", {}, "held")
+        await entered.wait()
+        async with aclosing(voice.subscribe(max_events=2)) as observations:
+            received = []
+
+            async def consume() -> None:
+                async for event in observations:
+                    if isinstance(event, RealtimeResponse) and event.response_id == "deferred":
+                        if event.status == "done":
+                            media_queued.set()
+                    elif isinstance(event, RealtimeAudio):
+                        received.append(event.data)
+                        if len(received) == 3:
+                            return
+
+            reader = asyncio.create_task(consume())
+            try:
+                assert peer.socket is not None
+                await peer.socket.send_json(
+                    {"type": "response.created", "response": {"id": "deferred"}}
+                )
+                for encoded in ("AAA=", "AQA=", "AgA="):
+                    await peer.socket.send_json(
+                        {
+                            "type": "response.output_audio.delta",
+                            "response_id": "deferred",
+                            "item_id": "fixture-audio",
+                            "content_index": 0,
+                            "output_index": 0,
+                            "delta": encoded,
+                        }
+                    )
+                await peer.socket.send_json(
+                    {"type": "response.done", "response": {"id": "deferred"}}
+                )
+                # Completion observation proves all three preceding deltas reached
+                # the native reader while the application callback remained held.
+                await media_queued.wait()
+                assert received == []
+                release.set()
+                await reader
+                assert received == [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+            finally:
+                release.set()
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)

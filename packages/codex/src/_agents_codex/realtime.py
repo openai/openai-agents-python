@@ -1155,6 +1155,7 @@ class RealtimeSession:
         self._inline_tool_bodies = 0
         self._deferred_media: deque[tuple[RealtimeAudio | RealtimeText, int]] = deque()
         self._deferred_media_bytes = 0
+        self._deferred_media_release: asyncio.Handle | None = None
         self._changed = asyncio.Event()
         self._subscribers: set[_ObservationBuffer] = set()
         self._passive_observation = False
@@ -1292,14 +1293,26 @@ class RealtimeSession:
 
     def _tool_body_ended(self) -> None:
         self._inline_tool_bodies -= 1
-        if self._inline_tool_bodies:
+        if not self._inline_tool_bodies and self._deferred_media_release is None:
+            self._release_deferred_media()
+
+    def _release_deferred_media(self) -> None:
+        self._deferred_media_release = None
+        if self._inline_tool_bodies or not self._deferred_media or self._terminal.done():
             return
-        while self._deferred_media:
-            event, size = self._deferred_media.popleft()
-            self._deferred_media_bytes -= size
-            self._publish_observation(event, size)
+        event, size = self._deferred_media.popleft()
+        self._deferred_media_bytes -= size
+        self._publish_observation(event, size)
+        if self._deferred_media:
+            # Wake waiting readers before publishing the next queued delta.
+            self._deferred_media_release = asyncio.get_running_loop().call_soon(
+                self._release_deferred_media
+            )
 
     def _clear_deferred_media(self) -> None:
+        if self._deferred_media_release is not None:
+            self._deferred_media_release.cancel()
+            self._deferred_media_release = None
         self._deferred_media.clear()
         self._deferred_media_bytes = 0
 
@@ -2219,7 +2232,9 @@ class RealtimeSession:
         if self._terminal.done():
             return
         size = self._buffer_size(event)
-        if self._inline_tool_bodies and isinstance(event, (RealtimeAudio, RealtimeText)):
+        if (self._inline_tool_bodies or self._deferred_media) and isinstance(
+            event, (RealtimeAudio, RealtimeText)
+        ):
             if (
                 len(self._deferred_media) >= self._EVENT_LIMIT
                 or self._deferred_media_bytes + size > self._BUFFER_BYTES_LIMIT
