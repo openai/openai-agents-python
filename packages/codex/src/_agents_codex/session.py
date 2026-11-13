@@ -5993,6 +5993,27 @@ class Session(Generic[ContextT, OutputT]):
         assert self._opening_agent is not None
         return self._opening_agent
 
+    def _select_voice_tools(
+        self, tools: Sequence[Tool[Any] | ToolRef]
+    ) -> tuple[Tool[Any] | ToolRef, ...]:
+        self._check_open()
+        source = self._effective_agent()
+        current, _, _ = _split_tools(
+            tools,
+            source.programmatic_tool_calling,
+            available=self._bindings,
+            ceiling=source.tools,
+            environment=self._executor,
+            native_agents=self._native_agents,
+            handoffs=self._effective_handoffs(),
+        )
+        # Resolve only after the original selector passes exact source checks.
+        # Submission still rejects a binding superseded by a racing mutation.
+        bindings = {tool.ref: tool for tool in current}
+        return tuple(
+            bindings[tool.ref] if isinstance(tool, FunctionTool) else tool for tool in tools
+        )
+
     def _profile_operation_tools(
         self,
         state: _Submission,
