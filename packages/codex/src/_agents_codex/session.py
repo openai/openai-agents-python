@@ -11052,8 +11052,8 @@ class Session(Generic[ContextT, OutputT]):
                     project = policy if run_policy is None else run_policy.project
                     try:
                         history = await self._read_canonical_history(None, for_replay=True)
-                    except RuntimeError as error:
-                        if str(error) != (
+                    except RuntimeError as history_error:
+                        if str(history_error) != (
                             "Run completed, but its one-shot conversation history "
                             "exceeds the result size limit"
                         ):
@@ -11061,7 +11061,7 @@ class Session(Generic[ContextT, OutputT]):
                         raise NativeError(
                             "Input storage policy history exceeds the admission size limit "
                             "(4096 records or 8 MiB)"
-                        ) from error
+                        ) from history_error
 
                     def active() -> bool:
                         return (
