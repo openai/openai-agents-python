@@ -42,11 +42,16 @@ async def test_external_model_retries_only_with_explicit_safe_response_evidence(
 
         def get_retry_advice(self, _request):
             return RetryAdvice(
-                suggested=True, replay_safety=replay_safety, response_started=response_started
+                suggested=True,
+                replay_safety=replay_safety,
+                response_started=response_started,
+                normalized={"status_code": 429, "request_id": "provider-fact", "is_abort": False},
             )
 
     def policy(context):
         seen.append(context)
+        assert context.normalized.status_code == 429
+        assert context.normalized.request_id == "provider-fact"
         return RetryDecision(
             retry=not context.response_started and context.provider_advice.response_started is False
         )

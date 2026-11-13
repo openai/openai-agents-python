@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import inspect
 import math
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+from ._captured_values import _CapturedValues
 from ._public import preserve_module_identity as _preserve_module_identity
 from .usage import TokenUsage
 
@@ -71,8 +72,28 @@ class RetryAdvice:
     replay_safety: Literal["safe", "unsafe", "unknown"] = "unknown"
     reason: str | None = None
     response_started: bool | None = None
+    normalized: Mapping[str, object] | None = field(default=None, hash=False)
 
     def __post_init__(self) -> None:
+        if self.normalized is not None:
+            if not isinstance(self.normalized, Mapping):
+                raise TypeError("normalized must be a mapping or None")
+            captured = dict(self.normalized)
+            for name, value in captured.items():
+                if name not in NormalizedError.__dataclass_fields__:
+                    raise TypeError("Unsupported normalized retry field")
+                if name in {"is_abort", "is_network_error", "is_timeout"}:
+                    valid = type(value) is bool
+                elif name == "status_code":
+                    valid = value is None or type(value) is int
+                elif name == "retry_after_ms":
+                    _delay(cast("float | None", value), name)
+                    continue
+                else:
+                    valid = isinstance(value, str) or (name != "message" and value is None)
+                if not valid:
+                    raise TypeError("Invalid normalized retry field")
+            object.__setattr__(self, "normalized", _CapturedValues(captured))
         if self.response_started is not None and type(self.response_started) is not bool:
             raise TypeError("response_started must be a bool or None")
         if self.suggested is not None and type(self.suggested) is not bool:
