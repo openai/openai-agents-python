@@ -2609,7 +2609,25 @@ def _needs_before_complete(
 
 def _distinct_profile_wire_outputs(outputs: Sequence[_PreparedOutput]) -> bool:
     return any(output.mode == "native" for output in outputs) and any(
-        output.schema != outputs[0].schema for output in outputs[1:]
+        output.mode != outputs[0].mode or output.schema != outputs[0].schema
+        for output in outputs[1:]
+    )
+
+
+def _profile_prompted_output(outputs: Sequence[_PreparedOutput]) -> bool:
+    return any(output.mode == "prompted" for output in outputs) and any(
+        output.mode != outputs[0].mode or output.schema != outputs[0].schema
+        for output in outputs[1:]
+    )
+
+
+def _prompted_output_guidance(output: _PreparedOutput) -> str:
+    return (
+        "Return only JSON that matches this output schema: "
+        + json.dumps(output.schema, sort_keys=True, separators=(",", ":"))
+        + "\nUse this format only for this request, including its automatic "
+        "continuations and tool results. This output format instruction "
+        "does not apply to later requests."
     )
 
 
@@ -2623,9 +2641,9 @@ def _capture_profile_runtimes(
     *,
     run_error_formatter: bool = False,
 ) -> tuple[dict[str, _ProfileRuntime], list[dict[str, Any]]]:
-    distinct_wire_outputs = _distinct_profile_wire_outputs(
-        tuple(_prepare_spec(profile.declaration.output_type) for profile in profiles)
-    )
+    outputs = tuple(_prepare_spec(profile.declaration.output_type) for profile in profiles)
+    distinct_wire_outputs = _distinct_profile_wire_outputs(outputs)
+    profile_prompted_output = _profile_prompted_output(outputs)
     captured: dict[str, _ProfileRuntime] = {}
     roster: list[dict[str, Any]] = []
     for index, profile in enumerate(profiles):
@@ -2740,6 +2758,11 @@ def _capture_profile_runtimes(
                     if distinct_wire_outputs and output.mode == "native"
                     else {"wire_output_plain": True}
                     if distinct_wire_outputs
+                    else {}
+                ),
+                **(
+                    {"wire_output_guidance": _prompted_output_guidance(output)}
+                    if profile_prompted_output and output.mode == "prompted"
                     else {}
                 ),
                 # Fingerprinting uses admitted MCP identities, not credentials.
@@ -6304,6 +6327,11 @@ class Session(Generic[ContextT, OutputT]):
             for ref in allowed.intersection(state.operation_refs)
         }
 
+    def _uses_profile_output_guidance(self) -> bool:
+        return _profile_prompted_output(
+            tuple(profile.output for profile in self._profiles.values())
+        )
+
     def _effective_handoffs(self) -> Mapping[str, str] | None:
         if self._profile_current is None:
             return None
@@ -7216,17 +7244,10 @@ class Session(Generic[ContextT, OutputT]):
                 roots = _writable_roots(writable_roots)
                 if self._executor.read_only and roots:
                     raise CapabilityError("Read-only execution does not accept writable roots")
-            if output.mode == "prompted":
-                parts.append(
-                    {
-                        "type": "text",
-                        "text": "Return only JSON that matches this output schema: "
-                        + json.dumps(output.schema, sort_keys=True, separators=(",", ":"))
-                        + "\nUse this format only for this request, including its automatic "
-                        "continuations and tool results. This output format instruction "
-                        "does not apply to later requests.",
-                    }
-                )
+            if output.mode == "prompted" and (
+                output_type is not None or not self._uses_profile_output_guidance()
+            ):
+                parts.append({"type": "text", "text": _prompted_output_guidance(output)})
             captured_input = deepcopy(input)
             return await self._start(
                 parts,
@@ -11600,7 +11621,9 @@ class Session(Generic[ContextT, OutputT]):
                     projected = deepcopy(selected)
                     capture = _native_input if run_policy is None else run_policy.capture
                     parts = [] if projected is None else capture(projected)
-                    if state.output.mode == "prompted":
+                    if state.output.mode == "prompted" and (
+                        state.output_override or not self._uses_profile_output_guidance()
+                    ):
                         parts.extend(input[-1:])
                     input = parts
                     state.original_input = projected

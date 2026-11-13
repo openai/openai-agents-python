@@ -59,15 +59,15 @@ def test_transfer_callback_rejects_incompatible_execution_modes(options, message
         Handoff(Agent(instructions="Resolve"), route)
 
 
-def test_callback_handoff_rejects_a_mixed_prompted_output_mode():
+def test_callback_handoff_accepts_a_mixed_prompted_output_mode():
     @function_tool
     def route() -> str:
         return "routed"
 
     target = Agent(instructions="Number", output_type=PromptedOutput(int))
     source = Agent(instructions="Text", handoffs=[Handoff(target, route)])
-    with pytest.raises(ValueError, match="share output mode"):
-        _capture_agent_graph(source)
+    (opening, _) = _capture_agent_graph(source)
+    assert opening.handoffs == {"route": "agent_1"}
 
 
 def test_plain_handoff_retains_its_generated_name_without_a_callback():

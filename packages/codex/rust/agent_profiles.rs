@@ -77,6 +77,8 @@ pub(crate) struct ProfileSpec {
     wire_output_schema: Option<Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     wire_output_plain: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wire_output_guidance: Option<String>,
     #[serde(default)]
     mcp_servers: BTreeMap<String, Value>,
     #[serde(default)]
@@ -340,6 +342,15 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
             !profile.wire_output_plain || profile.wire_output_schema.is_none(),
             "Captured Agent cannot declare both plain and structured wire output"
         );
+        ensure!(
+            profile
+                .wire_output_guidance
+                .as_ref()
+                .is_none_or(|guidance| {
+                    !guidance.is_empty() && profile.wire_output_schema.is_none()
+                }),
+            "Captured Agent prompted output requires text wire output and guidance"
+        );
         let mut all_declarations = profile.tools.clone();
         for name in profile.handoffs.keys() {
             if profile.handoff_callbacks.contains_key(name) {
@@ -476,17 +487,27 @@ pub(crate) fn install_opening(
         "Captured Agent graph is already installed"
     );
     for (id, names) in &opening.input_preparations {
-        let source = opening.roster.iter().find(|profile| &profile.id == id)
+        let source = opening
+            .roster
+            .iter()
+            .find(|profile| &profile.id == id)
             .context("Handoff input source is outside the captured graph")?;
         let unique: HashSet<_> = names.iter().collect();
-        ensure!(unique.len() == names.len() && names.iter().all(|name|
-            (source.handoffs.contains_key(name) || source.decision_handoffs.contains_key(name))),
-            "Handoff input callback is outside its exact captured declarations");
-    }
-    if opening.input_preparations.values().any(|names| !names.is_empty()) {
-        startup.thread_extension_init.insert(
-            codex_protocol::agent_profile::AgentProfileHandoffInputCapture,
+        ensure!(
+            unique.len() == names.len()
+                && names.iter().all(|name| (source.handoffs.contains_key(name)
+                    || source.decision_handoffs.contains_key(name))),
+            "Handoff input callback is outside its exact captured declarations"
         );
+    }
+    if opening
+        .input_preparations
+        .values()
+        .any(|names| !names.is_empty())
+    {
+        startup
+            .thread_extension_init
+            .insert(codex_protocol::agent_profile::AgentProfileHandoffInputCapture);
     }
     startup.thread_extension_init.insert(OpeningFiles(files));
     startup.thread_extension_init.insert(opening);
@@ -1061,6 +1082,11 @@ impl AgentProfiles {
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
+        if let Some(guidance) = &prepared.declaration.wire_output_guidance {
+            data.insert(codex_extension_api::AgentProfileOutputGuidance(
+                guidance.clone(),
+            ));
+        }
         if prepared.declaration.wire_output_plain
             || prepared.declaration.wire_output_schema.is_some()
         {
@@ -1318,6 +1344,11 @@ pub(crate) async fn configure(
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
+        if let Some(guidance) = &prepared.declaration.wire_output_guidance {
+            data.insert(codex_extension_api::AgentProfileOutputGuidance(
+                guidance.clone(),
+            ));
+        }
         if prepared.declaration.wire_output_plain
             || prepared.declaration.wire_output_schema.is_some()
         {
@@ -1654,12 +1685,18 @@ pub(crate) fn restore_handoff(
                 .is_some_and(|targets| targets.contains(&receipt.target_profile_id)),
         "Restored handoff is outside its source declaration"
     );
-    if profiles.opening.input_preparations.get(&receipt.source.profile_id)
-        .is_some_and(|names| names.iter().any(|name| name == &tool_name.name)) {
+    if profiles
+        .opening
+        .input_preparations
+        .get(&receipt.source.profile_id)
+        .is_some_and(|names| names.iter().any(|name| name == &tool_name.name))
+    {
         state.thread.thread_extension_data().insert(
             codex_protocol::agent_profile::AgentProfileHandoffInputRequest {
-                turn_id:turn.to_owned(), tool_name:tool_name.name.clone(),
-                handoff:receipt.clone(), restored:true,
+                turn_id: turn.to_owned(),
+                tool_name: tool_name.name.clone(),
+                handoff: receipt.clone(),
+                restored: true,
             },
         );
     }
@@ -1772,20 +1809,34 @@ impl TurnLifecycleContributor for Contributor {
             let mut target = profiles
                 .candidate(&thread, &target_id)
                 .map_err(|error| error.to_string())?;
-            if let Some(request) = input.turn_store.get::<
-                codex_protocol::agent_profile::AgentProfileHandoffInputRequest,
-            >() {
-                let proposed = input.turn_store.get::<
-                    codex_protocol::agent_profile::AgentProfileHandoffPresentation,
-                >().ok_or("Handoff input lacks its native grouped proposal")?;
+            if let Some(request) = input
+                .turn_store
+                .get::<codex_protocol::agent_profile::AgentProfileHandoffInputRequest>(
+            ) {
+                let proposed = input
+                    .turn_store
+                    .get::<codex_protocol::agent_profile::AgentProfileHandoffPresentation>()
+                    .ok_or("Handoff input lacks its native grouped proposal")?;
                 if proposed.handoff != request.handoff || request.turn_id != input.turn_id {
                     return Err("Handoff input proposal belongs to another accepted call".into());
                 }
-                let captured = thread.captured_agent_profile().await
-                    .map_err(|error| error.to_string())?.ok_or("Handoff source profile closed")?;
-                let prepared = profiles.tools.prepare_handoff_input(
-                    input.turn_store, input.thread_store.level_id(), input.turn_id, &captured, &request, &proposed,
-                ).await.map_err(|error| error.to_string())?;
+                let captured = thread
+                    .captured_agent_profile()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or("Handoff source profile closed")?;
+                let prepared = profiles
+                    .tools
+                    .prepare_handoff_input(
+                        input.turn_store,
+                        input.thread_store.level_id(),
+                        input.turn_id,
+                        &captured,
+                        &request,
+                        &proposed,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
                 let mut with_input = (*target).clone();
                 with_input.data.insert(prepared);
                 target = Arc::new(with_input);
@@ -1948,13 +1999,20 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
             })
         })();
         if let Some(handoff) = &handoff {
-            if self.profiles.opening.input_preparations.get(&self.source.profile_id)
-                .is_some_and(|names| names.contains(&self.name)) {
+            if self
+                .profiles
+                .opening
+                .input_preparations
+                .get(&self.source.profile_id)
+                .is_some_and(|names| names.contains(&self.name))
+            {
                 if let Some(thread) = self.profiles.thread.upgrade() {
                     thread.thread_extension_data().insert(
                         codex_protocol::agent_profile::AgentProfileHandoffInputRequest {
-                            turn_id:turn_id.to_owned(), tool_name:self.name.clone(),
-                            handoff:handoff.clone(), restored:false,
+                            turn_id: turn_id.to_owned(),
+                            tool_name: self.name.clone(),
+                            handoff: handoff.clone(),
+                            restored: false,
                         },
                     );
                 }

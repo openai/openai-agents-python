@@ -111,11 +111,11 @@ def _capture_agent_graph(
         if declaration.programmatic_tool_calling != opening.programmatic_tool_calling:
             raise ValueError("Handoff profiles must share programmatic tool calling mode")
         output = _prepare_spec(declaration.output_type)
-        if output.mode == "prompted" or root_output.mode == "prompted":
-            if output.mode != root_output.mode or output.schema != root_output.schema:
-                raise ValueError("Prompted handoff profiles must share output mode and schema")
-        if opening.realtime is not None and output.mode != root_output.mode:
-            raise ValueError("Realtime handoff profiles must share output mode")
+        if opening.realtime is not None and (
+            output.mode != root_output.mode
+            or (output.mode == "prompted" and output.schema != root_output.schema)
+        ):
+            raise ValueError("Realtime handoff profiles must share output mode and prompted schema")
         roles = tuple(tool for tool in declaration.tools if isinstance(tool, NativeAgents))
         if roles != root_roles:
             raise ValueError("Handoff profiles must share native child-role configuration")
