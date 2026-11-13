@@ -36,19 +36,9 @@ def _diagnostics(error: BaseException) -> str:
                 or "_agents_codex" in Path(frame.f_code.co_filename).parts
             ):
                 output.extend(
-                    repr(frame.f_locals[key])
-                    for key in (
-                        "doc",
-                        "o",
-                        "s",
-                        "payload",
-                        "body",
-                        "event",
-                        "request",
-                        "snapshot",
-                        "selected",
-                    )
-                    if key in frame.f_locals
+                    repr(value)
+                    for value in frame.f_locals.values()
+                    if isinstance(value, (str, bytes, bytearray, dict, list, tuple))
                 )
             trace = trace.tb_next
         pending.extend(
@@ -259,3 +249,33 @@ async def test_invalid_response_shape_has_fixed_public_native_diagnostic_without
                     "".join(traceback.format_exception(caught.value)),
                 )
                 assert socket.closed == 1 and not client.is_closed()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("shape", ["array", "string"])
+async def test_nonobject_event_releases_all_native_traceback_payloads(streaming, shape) -> None:
+    class Socket:
+        async def send(self, value: str) -> None:
+            pass
+
+        async def recv(self) -> str:
+            return json.dumps([_PRIVATE] if shape == "array" else _PRIVATE)
+
+        async def close(self) -> None:
+            pass
+
+    async def connect(request: ModelRequest, options: Any) -> Socket:
+        return Socket()
+
+    async with timeout(20), AsyncOpenAI(api_key="synthetic") as client:
+        model = ResponsesWebSocketModel(client, socket_factory=connect)
+        async with NativeProvider(model_backend=model) as provider:
+            async with Agent(instructions="Complete once.", provider=provider).session() as session:
+                turn = await session.submit("Synthetic request.")
+                with pytest.raises(Exception) as caught:
+                    if streaming:
+                        async for _ in turn.events():
+                            pass
+                    await turn.get_result()
+    assert "invalid JSON frame" in "".join(traceback.format_exception(caught.value))
+    assert _PRIVATE not in _diagnostics(caught.value)

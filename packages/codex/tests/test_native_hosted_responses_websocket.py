@@ -447,3 +447,131 @@ async def test_hosted_invalid_frame_does_not_retain_peer_diagnostic_objects(inva
                 await agent.run("Synthetic request.")
     assert private not in _diagnostics(failure.value)
     assert len(closes) == 1
+
+
+async def test_hosted_initial_connect_failure_reaches_result_and_event_reader() -> None:
+    attempts = 0
+
+    async def connect(_request, _options):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("synthetic hosted connection failure")
+
+    async with timeout(20), AsyncOpenAI(api_key="synthetic") as client:
+        model = HostedResponsesWebSocketModel(client, socket_factory=connect)
+        async with NativeProvider(model_backend=model) as provider:
+            async with Agent(instructions="Complete once.", provider=provider).session() as session:
+                turn = await session.submit("Synthetic request.")
+                with pytest.raises(Exception, match="synthetic hosted connection failure"):
+                    await turn.get_result()
+                assert [event async for event in turn.events()]
+        assert attempts == 1
+        assert not client.is_closed()
+
+
+@pytest.mark.parametrize("terminal_first", [True, False])
+async def test_hosted_nonstored_fallback_replays_all_injected_outputs(terminal_first) -> None:
+    frames: list[dict[str, Any]] = []
+    first, second = [
+        {
+            "type": "function_call",
+            "id": f"fc_{key}",
+            "namespace": "functions",
+            "call_id": f"call_{key}",
+            "name": "lookup",
+            "arguments": json.dumps({"key": key}),
+        }
+        for key in ("one", "two")
+    ]
+    effects: list[str] = []
+
+    async def route(request: web.Request) -> web.WebSocketResponse:
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        async for message in socket:
+            frame = json.loads(message.data)
+            frames.append(frame)
+            if len(frames) == 1:
+                await socket.send_json(
+                    {"type": "response.created", "response": {"id": "first", "output": []}}
+                )
+                await socket.send_json({"type": "response.output_item.done", "item": first})
+            elif len(frames) == 2:
+                await socket.send_json({"type": "response.inject.created", "response_id": "first"})
+                await socket.send_json({"type": "response.output_item.done", "item": second})
+            elif len(frames) == 3:
+                terminal = {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "first",
+                        "store": False,
+                        "status": "completed",
+                        "output": [first, second],
+                    },
+                }
+                rejected = {
+                    "type": "response.inject.failed",
+                    "error": {"code": "response_already_completed"},
+                }
+                for event in (terminal, rejected) if terminal_first else (rejected, terminal):
+                    await socket.send_json(event)
+            else:
+                await socket.send_json(
+                    {"type": "response.created", "response": {"id": "second", "output": []}}
+                )
+                await socket.send_json(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "second",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "id": "msg_two",
+                                    "role": "assistant",
+                                    "status": "completed",
+                                    "phase": "final_answer",
+                                    "agent": {"agent_name": "/root"},
+                                    "content": [{"type": "output_text", "text": "finished"}],
+                                }
+                            ],
+                        },
+                    }
+                )
+        return socket
+
+    @function_tool
+    def lookup(key: str) -> str:
+        effects.append(key)
+        return f"result for {key}"
+
+    app = web.Application()
+    app.router.add_get("/v1/responses", route)
+    async with timeout(20), TestServer(app) as server:
+        async with AsyncOpenAI(api_key="synthetic", base_url=str(server.make_url("/v1"))) as client:
+            backend = HostedResponsesWebSocketModel(client)
+            async with NativeProvider(model_backend=backend) as provider:
+                result = await Agent(
+                    model="gpt-5.5",
+                    instructions="Use lookup.",
+                    tools=[lookup],
+                    provider=provider,
+                    model_settings={"store": False},
+                ).run("start")
+    assert result.final_output == "finished"
+    assert effects == ["one", "two"]
+    assert [frame["type"] for frame in frames] == [
+        "response.create",
+        "response.inject",
+        "response.inject",
+        "response.create",
+    ]
+    assert frames[-1]["input"] == [
+        *frames[0]["input"],
+        first,
+        *frames[1]["input"],
+        second,
+        *frames[2]["input"],
+    ]
+    assert result.run_usage.requests == 2

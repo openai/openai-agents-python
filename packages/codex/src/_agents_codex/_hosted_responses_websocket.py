@@ -46,6 +46,7 @@ class _Active:
     continuation: dict[str, Any] | None = None
     injection_input: list[dict[str, Any]] | None = None
     fallback_input: list[dict[str, Any]] | None = None
+    acknowledged_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
     template: dict[str, Any] | None = None
     response_id: str | None = None
     pending: set[str] = field(default_factory=set)
@@ -260,11 +261,16 @@ class _Socket:
         elif stored:
             next_frame["previous_response_id"] = completed["id"]
         else:
-            next_frame["input"] = [
-                *active.create.get("input", []),
-                *completed.get("output", []),
-                *outputs,
-            ]
+            replay = list(active.create.get("input", []))
+            acknowledged = active.acknowledged_outputs.copy()
+            terminal_output = completed.get("output", [])
+            for item in terminal_output:
+                replay.append(item)
+                if item.get("type") == "function_call":
+                    result = acknowledged.pop(item.get("call_id"), None)
+                    if result is not None:
+                        replay.append(result)
+            next_frame["input"] = [*replay, *acknowledged.values(), *outputs]
             original_previous = active.create.get("previous_response_id")
             if isinstance(original_previous, str):
                 next_frame["previous_response_id"] = original_previous
@@ -293,6 +299,9 @@ class _Socket:
         if active.terminal is not None:
             await self._fallback(active, frame, outputs)
             return
+        active.size += len(json.dumps(outputs, allow_nan=False).encode("utf-8"))
+        if active.size > _MAX_RESPONSE_BYTES:
+            raise ValueError("Hosted response exceeds the native retained-byte limit")
         active.continuation = frame
         active.injection_input = outputs
         active.injecting = ids
@@ -313,10 +322,7 @@ class _Socket:
                 )
                 if active.size > _MAX_RESPONSE_BYTES:
                     raise ValueError("Hosted response exceeds the native retained-byte limit")
-                event = _provider_object(
-                    _decode_socket_frame(payload, self._max_size),
-                    "Hosted Responses requires an object event",
-                )
+                event = _decode_socket_frame(payload, self._max_size)
                 if "response" in event:
                     _provider_object(
                         event["response"], "Hosted Responses response must be an object"
@@ -349,8 +355,13 @@ class _Socket:
                         active.pending.add(item["call_id"])
                         active.queued.append(deepcopy(item))
                 elif kind == "response.inject.created":
-                    active.pending.difference_update(active.injecting or ())
-                    active.injecting = None
+                    if active.injecting is not None:
+                        active.acknowledged_outputs.update(
+                            (result["call_id"], result) for result in active.injection_input or ()
+                        )
+                        active.pending.difference_update(active.injecting)
+                        active.injection_input = None
+                        active.injecting = None
                 elif (
                     kind == "response.inject.failed"
                     and isinstance(event.get("error"), dict)

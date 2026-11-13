@@ -155,8 +155,8 @@ class _UsageCollector:
         ):
             raise ValueError("Invalid native model usage counters")
         owner = snapshot.get("owner_attempt_id")
-        if (requests == 0 and owner is not None) or (
-            requests > 0 and (not isinstance(owner, str) or not owner)
+        if (owner is not None and (not isinstance(owner, str) or not owner)) or (
+            requests > 0 and owner is None
         ):
             raise ValueError("Invalid native model usage owner")
         terminal = snapshot.get("terminal_attempt_id")
@@ -172,6 +172,8 @@ class _UsageCollector:
             missing_usage_requests=missing,
         )
         with self.lock:
+            if requests == 0 and owner is not None and self._managed_model_owner != owner:
+                raise ValueError("Invalid native model usage owner")
             if self.model_final and not final:
                 return
             if self._managed_model_owner is not None:

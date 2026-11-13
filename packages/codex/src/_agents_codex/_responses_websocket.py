@@ -195,21 +195,24 @@ def _finite_json_float(value: str) -> float:
     return parsed
 
 
-def _decode_socket_frame(payload: Any, limit: int | None) -> Any:
+def _decode_socket_frame(payload: Any, limit: int | None) -> dict[str, Any]:
+    decoded: Any = None
     try:
         if limit is not None and isinstance(payload, (str, bytes, bytearray)):
             if len(payload) > limit or (
                 isinstance(payload, str) and len(payload.encode("utf-8")) > limit
             ):
                 raise ValueError("Responses WebSocket frame exceeds its receive limit")
-        return json.loads(
+        decoded = json.loads(
             payload, parse_constant=_reject_json_constant, parse_float=_finite_json_float
         )
+        if isinstance(decoded, dict):
+            return decoded
     except (ValueError, TypeError, RecursionError):
         # Decoder exceptions and their tracebacks can retain the input value.
         pass
     finally:
-        del payload
+        del payload, decoded
     raise ValueError("Responses WebSocket received an invalid JSON frame") from None
 
 
@@ -428,11 +431,9 @@ class ResponsesWebSocketModel(ResponsesModel):
                             yield event
                         continue
                 else:
-                    decoded = _decode_socket_frame(payload, self._websocket_options.get("max_size"))
-                    if not isinstance(decoded, dict):
-                        raise ValueError("Responses WebSocket requires object events")
-                    event = _ResponsesWebSocketFrame(decoded)
-                    del decoded
+                    event = _ResponsesWebSocketFrame(
+                        _decode_socket_frame(payload, self._websocket_options.get("max_size"))
+                    )
                 if "response" in event and not isinstance(event["response"], dict):
                     raise ValueError("Responses WebSocket response must be an object")
                 if not isinstance(payload, _ResponsesWebSocketFrame) and getattr(
