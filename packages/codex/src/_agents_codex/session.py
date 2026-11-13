@@ -8994,7 +8994,7 @@ class Session(Generic[ContextT, OutputT]):
             transport_settings = {
                 key: value
                 for key, value in self._effective_agent().model_settings.items()
-                if key in ("extra_headers", "extra_query")
+                if key in ("extra_headers", "extra_query", "request_transport")
             }
             if (
                 self._repair_transport_settings is not None
@@ -9941,7 +9941,7 @@ class Session(Generic[ContextT, OutputT]):
                     **{
                         key: value
                         for key, value in captured_update_settings.items()
-                        if key in ("extra_headers", "extra_query")
+                        if key in ("extra_headers", "extra_query", "request_transport")
                     },
                 }
                 if transport:
@@ -11998,7 +11998,7 @@ class Session(Generic[ContextT, OutputT]):
         transport_settings = {
             key: value
             for key, value in source_agent.model_settings.items()
-            if key in ("extra_headers", "extra_query")
+            if key in ("extra_headers", "extra_query", "request_transport")
         }
         source_profile = (
             (source_message["profile_id"], source_message["profile_epoch"])

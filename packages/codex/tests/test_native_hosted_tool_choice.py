@@ -227,3 +227,53 @@ async def test_provider_programmatic_selector_requires_its_hosted_declaration(re
         "container": "cntr_fixture",
         "allowed_callers": ["programmatic"],
     } in request["tools"]
+
+
+async def test_provider_program_and_result_replay_on_the_next_native_turn(responses):
+    from agents import CodeInterpreter, HostedProgrammaticToolCalling
+
+    program = {
+        "type": "program",
+        "id": "program_item",
+        "call_id": "program-call",
+        "code": "lookup()",
+        "fingerprint": "synthetic-fingerprint",
+    }
+    output = {
+        "type": "program_output",
+        "id": "program_output_item",
+        "call_id": "program-call",
+        "status": "completed",
+        "result": "native program result",
+    }
+    responses.respond(
+        {"type": "response.output_item.done", "item": program},
+        {"type": "response.output_item.done", "item": output},
+        assistant_output("provider completed"),
+    )
+    responses.respond(assistant_output("used previous program"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-provider-program-replay"
+    ) as provider:
+        agent = Agent(
+            model="gpt-5.5",
+            instructions="Use the provider program.",
+            provider=provider,
+            tools=[
+                CodeInterpreter(container="cntr_fixture", allowed_callers=["programmatic"]),
+                HostedProgrammaticToolCalling(),
+            ],
+        )
+        async with agent.session() as session:
+            assert (await (await session.submit("Run the program.")).get_result()).final_output == (
+                "provider completed"
+            )
+            assert (await (await session.submit("What happened?")).get_result()).final_output == (
+                "used previous program"
+            )
+    replay = [
+        item
+        for item in responses.requests[1]["input"]
+        if item["type"] in {"program", "program_output"}
+    ]
+    assert replay == [program, output]
