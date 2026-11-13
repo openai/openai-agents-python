@@ -417,3 +417,95 @@ async def test_native_cancel_does_not_enter_next_composed_context_callback(
     finally:
         release.set()
         await native.aclose()
+
+
+@pytest.mark.parametrize("trigger", ["manual", "automatic"])
+async def test_sandbox_context_composition_reaches_responses_compaction(
+    tmp_path, monkeypatch, responses, trigger
+):
+    from agents import ResponsesCompaction
+    from tests._asyncio import timeout
+    from tests.test_native_responses_compaction import client_for, window
+
+    calls, order = [], []
+
+    def item(text):
+        return {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": text}],
+        }
+
+    class Projection(SandboxCapability):
+        name = "compaction-projection"
+
+        async def transform_context(self, request):
+            order.append(("capability", request.purpose))
+            return (*request.items, item("CAPABILITY_" + request.purpose))
+
+    async def original(request):
+        order.append(("agent", request.purpose))
+        assert "CAPABILITY_" + request.purpose in json.dumps(request.items)
+        return (*request.items, item("AGENT_" + request.purpose))
+
+    async def compact(**body):
+        calls.append(body)
+        return window()
+
+    native = provider(responses)
+    client = Client([])
+    responses.respond(assistant_output("completed answer"))
+    try:
+        async with timeout(25), ExecutorPeer(tmp_path / "executor").serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+
+            @asynccontextmanager
+            async def connect(sandbox):
+                yield Environment(
+                    url=peer.url,
+                    headers={"Authorization": "Bearer " + peer.token},
+                    cwd=str(peer.root),
+                    tools=(),
+                    write_policy="legacy" if sys.platform == "win32" else "strict",
+                )
+                await peer.wait_disconnected()
+
+            source = sandbox_environment(
+                client,
+                manifest=Manifest(root=str(peer.root)),
+                options=Options(),
+                connect=connect,
+                capabilities=[Projection()],
+            )
+            agent = Agent(
+                instructions="Answer.",
+                provider=native,
+                transform_context=original,
+                compaction=ResponsesCompaction(
+                    client=client_for(compact),
+                    model="compact",
+                    mode="input",
+                    should_compact=lambda request: trigger == "automatic",
+                ),
+            )
+            async with agent.session(environment=source) as session:
+                result = await (await session.submit("Keep the source.")).get_result()
+                assert result.final_output == "completed answer"
+                if trigger == "manual":
+                    assert not calls
+                    await session.compact()
+                assert len(calls) == 1
+                outbound = json.dumps(calls[0]["input"])
+                assert "CAPABILITY_compaction" in outbound
+                assert "AGENT_compaction" in outbound
+                assert [entry for entry in order if entry[1] == "compaction"] == [
+                    ("capability", "compaction"),
+                    ("agent", "compaction"),
+                ]
+                assert any(
+                    row["type"] == "compacted" for row in (await session.save_state()).history
+                )
+            assert len(responses.requests) == 1
+        assert client.events == ["create", "start", "close", "delete"]
+    finally:
+        await native.aclose()

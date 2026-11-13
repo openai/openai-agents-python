@@ -13972,6 +13972,9 @@ class Session(Generic[ContextT, OutputT]):
             declaration = self._agent_for_message(message)
             factory = declaration.compaction
             callback = declaration.before_compact
+            transform = declaration.transform_context
+            if isinstance(transform, _SandboxContextTransforms):
+                transform = transform.bind(active)
             if factory is None and callback is None:
                 raise NativeError("Compaction callback has no application owner")
             request = _compaction_context(cast(ContextT, self._context), self.id, message)
@@ -14001,7 +14004,7 @@ class Session(Generic[ContextT, OutputT]):
                         factory,
                         request,
                         policy=policy,
-                        transform=declaration.transform_context,
+                        transform=transform,
                         provider_response=message.get("provider_response"),
                         candidate_indexes=message["candidate_indexes"],
                         model_omitted=message["model_omitted"],
