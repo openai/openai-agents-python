@@ -4062,6 +4062,13 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
+            hold_assistant_completion = bool(
+                output_guardrails
+                or agent.output_guardrails
+                or any(profile.declaration.output_guardrails for profile in profiles)
+            )
+            if provider_history is not None and hold_assistant_completion:
+                raise CapabilityError("Output guardrails require SDK-managed conversation history")
             history_ttl_seconds = _opening_history_ttl(storage)
             _check_history_retention_opening(history_ttl_seconds, provider_history, profiles)
             auth = agent.provider.auth if agent.provider is not None else None
@@ -4644,6 +4651,7 @@ class Session(Generic[ContextT, OutputT]):
                     "_before_complete": _needs_before_complete(
                         agent, input_guardrails, output_guardrails
                     ),
+                    "_hold_assistant_completion": hold_assistant_completion,
                     "_tool_batch_completion": agent.tool_batch_completion is not None,
                     **(
                         {"parent_trace": parent_trace.to_headers()}
@@ -13908,6 +13916,7 @@ class Session(Generic[ContextT, OutputT]):
         reject: Callable[[], None],
         *,
         synchronous_id_policy: bool = False,
+        withhold_output: Callable[[], None] | None = None,
     ) -> None:
         """Own a context or compaction callback through its final native reply."""
 
@@ -13951,6 +13960,14 @@ class Session(Generic[ContextT, OutputT]):
             reply(result)
             replied = True
         except BaseException as error:
+            if (
+                withhold_output is not None
+                and isinstance(error, GuardrailTripwire)
+                and error.record.kind == "output"
+            ):
+                with suppress(RuntimeError):
+                    withhold_output()
+                    replied = True
             if _native_callback_cancelled(state):
                 if not isinstance(error, asyncio.CancelledError):
                     state.retain_cleanup_error(error)
@@ -14774,7 +14791,14 @@ class Session(Generic[ContextT, OutputT]):
                 message["step_id"], None, message["thread"], message["instance"], error=True
             )
 
-        await self._run_owned_context_callback(state, message, prepare, reply, reject)
+        def withhold_output() -> None:
+            self._native._reply_completion(
+                message["step_id"], None, message["thread"], message["instance"], withhold=True
+            )
+
+        await self._run_owned_context_callback(
+            state, message, prepare, reply, reject, withhold_output=withhold_output
+        )
 
     async def _select_step(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("step callback", "callback", message.get("tracing_context")) as tracing:

@@ -235,6 +235,7 @@ pub struct PythonTools {
     before_compact_enabled: bool,
     post_turn_compact_enabled: bool,
     before_complete_enabled: bool,
+    hold_assistant_completion: bool,
     pub(crate) tool_batch_completion_enabled: bool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
     // None retires this native thread's selectors. Registration and retirement
@@ -244,6 +245,8 @@ pub struct PythonTools {
     #[cfg(test)]
     pub(crate) before_result: Mutex<Option<Arc<manual_checkpoint_tests::BeforeResult>>>,
 }
+
+pub(crate) struct HoldAssistantCompletion;
 
 pub(crate) enum ModelContextUpdate {
     Keep,
@@ -298,7 +301,7 @@ enum PreparationReply {
     CompactionPolicy(oneshot::Sender<std::result::Result<Option<bool>, ()>>),
     ManagedAgentResult(oneshot::Sender<std::result::Result<Option<String>, ()>>),
     Completion {
-        reply: oneshot::Sender<std::result::Result<Option<String>, ()>>,
+        reply: oneshot::Sender<std::result::Result<codex_extension_api::TurnCompletionDecision, ()>>,
         stop: crate::native_interception::CapturedTurnStop,
     },
 }
@@ -2262,6 +2265,10 @@ impl PythonTools {
             before_compact_enabled: before_compact,
             post_turn_compact_enabled: post_turn_compact,
             before_complete_enabled: before_complete,
+            hold_assistant_completion: startup
+                .thread_extension_init
+                .get::<HoldAssistantCompletion>()
+                .is_some(),
             tool_batch_completion_enabled: tool_batch_completion,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
@@ -2409,6 +2416,7 @@ impl PythonTools {
             before_compact_enabled: parent.before_compact_enabled,
             post_turn_compact_enabled: parent.post_turn_compact_enabled,
             before_complete_enabled: parent.before_complete_enabled,
+            hold_assistant_completion: parent.hold_assistant_completion,
             tool_batch_completion_enabled: parent.tool_batch_completion_enabled,
             step_defaults: RwLock::new(
                 parent
@@ -3122,20 +3130,30 @@ impl PythonTools {
             .map_err(|_| anyhow::anyhow!("Expired compaction callback"))
     }
 
+    pub(crate) fn holds_assistant_completion(
+        &self,
+        step: &codex_extension_api::ExtensionData,
+    ) -> bool {
+        self.hold_assistant_completion && self.completion_callback_enabled(Some(step))
+    }
+
+    pub(crate) fn completion_callback_enabled(
+        &self,
+        step: Option<&codex_extension_api::ExtensionData>,
+    ) -> bool {
+        self.before_complete_enabled
+            && step
+                .and_then(|step| step.get::<ProfileCatalog>())
+                .is_none_or(|catalog| catalog.before_complete)
+    }
+
     pub(crate) async fn before_complete(
         self: &Arc<Self>,
         input: codex_extension_api::TurnCompletionInput<'_>,
-    ) -> Result<Option<String>> {
+    ) -> Result<codex_extension_api::TurnCompletionDecision> {
         let source = self.source_metadata(input.step_store)?;
-        if input
-            .step_store
-            .and_then(|step| step.get::<ProfileCatalog>())
-            .is_some_and(|catalog| !catalog.before_complete)
-        {
-            return Ok(None);
-        }
-        if !self.before_complete_enabled {
-            return Ok(None);
+        if !self.completion_callback_enabled(input.step_store) {
+            return Ok(codex_extension_api::TurnCompletionDecision::Accept);
         }
         let owner = self.admission_ready(input.turn_id)?;
         let stop =
@@ -3182,7 +3200,7 @@ impl PythonTools {
     pub(crate) fn reply_completion(
         self: &Arc<Self>,
         id: u64,
-        instructions: std::result::Result<Option<String>, ()>,
+        decision: std::result::Result<codex_extension_api::TurnCompletionDecision, ()>,
         thread: Option<&str>,
         instance: Option<&str>,
     ) -> Result<()> {
@@ -3192,7 +3210,7 @@ impl PythonTools {
             anyhow::bail!("Invalid completion reply");
         };
         reply
-            .send(instructions)
+            .send(decision)
             .map_err(|_| anyhow::anyhow!("Expired completion callback"))
     }
 
@@ -9813,6 +9831,7 @@ pub(crate) mod managed_tests {
             before_compact_enabled: false,
             post_turn_compact_enabled: false,
             before_complete_enabled: false,
+            hold_assistant_completion: false,
             tool_batch_completion_enabled: false,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),

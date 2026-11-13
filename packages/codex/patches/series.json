@@ -1091,7 +1091,11 @@
     {
       "path": "sdk-imported-history-age-bound.patch",
       "sha256": "27f263f66e329f84c98c1d4cab2679626af705f8d1840b0f16019b5c07d9073f"
+    },
+    {
+      "path": "sdk-natural-output-guardrail-admission.patch",
+      "sha256": "d233c816b0f0023a1a269f99844b241c0a33b55552295370173b40d6b63832b6"
     }
   ],
-  "result_tree": "65463c35ac0248adc6bae152c2ac6da521dcaf1b"
+  "result_tree": "11bf10e2696c7f9af37f51985fda1f045c0c7a15"
 }

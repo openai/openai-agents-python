@@ -2883,7 +2883,7 @@ impl NativeThread {
             .map_err(py_error)
     }
 
-    #[pyo3(signature = (id, instructions, thread=None, instance=None, *, error=false))]
+    #[pyo3(signature = (id, instructions, thread=None, instance=None, *, error=false, withhold=false))]
     fn _reply_completion(
         &self,
         id: u64,
@@ -2891,6 +2891,7 @@ impl NativeThread {
         thread: Option<&str>,
         instance: Option<&str>,
         error: bool,
+        withhold: bool,
     ) -> PyResult<()> {
         let inner = self.current()?;
         let tools = inner
@@ -2898,13 +2899,22 @@ impl NativeThread {
             .thread_extension_data()
             .get::<python_tools::PythonTools>()
             .ok_or_else(|| py_error("Completion callbacks require Python tools"))?;
+        use codex_extension_api::TurnCompletionDecision;
+        let decision = if withhold {
+            if error || instructions.is_some() {
+                return Err(PyValueError::new_err("Invalid withheld completion reply"));
+            }
+            Ok(TurnCompletionDecision::Withhold)
+        } else if error {
+            Err(())
+        } else {
+            Ok(instructions.map_or(
+                TurnCompletionDecision::Accept,
+                TurnCompletionDecision::Continue,
+            ))
+        };
         tools
-            .reply_completion(
-                id,
-                if error { Err(()) } else { Ok(instructions) },
-                thread,
-                instance,
-            )
+            .reply_completion(id, decision, thread, instance)
             .map_err(py_error)
     }
 

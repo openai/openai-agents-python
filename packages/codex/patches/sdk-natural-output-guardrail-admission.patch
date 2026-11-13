@@ -1,0 +1,540 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index bcb00d42..20d70437 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -3463,6 +3463,14 @@ impl ModelClientSession {
+         }
+     }
+ 
++    /// A guarded candidate never owns a continuation, even if a successor's
++    /// newly authored input happens to equal the rejected provider text.
++    pub(crate) fn discard_unaccepted_response(&mut self) {
++        self.pending_http_response = None;
++        self.websocket_session.last_response_rx = None;
++        self.websocket_session.last_request = None;
++    }
++
+     pub(crate) fn has_acknowledged_response_candidate(&self) -> bool {
+         self.pending_http_response.is_some()
+     }
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 4a8b6f8c..850b1c96 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -14372,7 +14372,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+         cancellation_token: CancellationToken::new(),
+     };
+ 
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, /*held_response*/ None)
+         .await
+         .expect("tool call should be handled");
+ 
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 7a22624c..60f8bdf4 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -45,11 +45,13 @@ use crate::skills::emit_explicit_skill_invocations;
+ use crate::stream_events_utils::HandleOutputCtx;
+ use crate::stream_events_utils::InFlightFuture;
+ use crate::stream_events_utils::TurnItemContributorPolicy;
++use crate::stream_events_utils::HeldResponseItem;
+ use crate::stream_events_utils::finalize_non_tool_response_item;
+ use crate::stream_events_utils::handle_non_tool_response_item;
+ use crate::stream_events_utils::handle_output_item_done;
+ use crate::stream_events_utils::last_assistant_message_from_item;
+ use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
++use crate::stream_events_utils::publish_held_response_items;
+ use crate::stream_events_utils::raw_assistant_output_text_from_item;
+ use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
+ use crate::tasks::CompactionPromptRecording;
+@@ -753,6 +755,7 @@ pub(crate) async fn run_turn(
+                     accepted_handoff,
+                     needs_follow_up: model_needs_follow_up,
+                     last_agent_message: sampling_request_last_agent_message,
++                    held_response,
+                     settled_tools,
+                 } = sampling_request_output;
+                 record_tool_choice_use(
+@@ -774,7 +777,7 @@ pub(crate) async fn run_turn(
+                 drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ false).await;
+                 // Tool receipts and async hooks have settled. Policy sees only these
+                 // direct calls, never nested calls or historical observation text.
+-                if try_complete_tool_turn(
++                let tool_completion = try_complete_tool_turn(
+                     &sess,
+                     &step_context,
+                     &settled_tools,
+@@ -785,16 +788,19 @@ pub(crate) async fn run_turn(
+                     &mut client_session,
+                     &world_state,
+                 )
+-                .await?
+-                {
++                .await;
++                if !matches!(tool_completion, Ok(false)) {
++                    publish_held_response_items(&sess, &step_context, held_response).await?;
++                    tool_completion?;
+                     return Ok(None);
+                 }
+ 
+                 let has_pending_input = sess.input_queue.has_pending_input(&sess.active_turn).await;
+                 let mut needs_follow_up = model_needs_follow_up || has_pending_input;
++                let mut held_response = held_response;
+                 if !needs_follow_up {
+                     for contributor in sess.services.extensions.turn_lifecycle_contributors() {
+-                        let feedback = contributor
++                        let decision = contributor
+                             .before_turn_complete(codex_extension_api::TurnCompletionInput {
+                                 step_store: Some(&step_context.extension_data),
+                                 turn_id: &turn_context.sub_id,
+@@ -806,41 +812,68 @@ pub(crate) async fn run_turn(
+                                 turn_store: turn_context.extension_data.as_ref(),
+                             })
+                             .or_cancel(&cancellation_token)
+-                            .await?
+-                            .map_err(CodexErr::InvalidRequest)?;
++                            .await;
++                        let feedback = match decision {
++                            Ok(Ok(codex_extension_api::TurnCompletionDecision::Accept)) => continue,
++                            Ok(Ok(codex_extension_api::TurnCompletionDecision::Continue(feedback))) => feedback,
++                            Ok(Ok(codex_extension_api::TurnCompletionDecision::Withhold)) => {
++                                client_session.discard_unaccepted_response();
++                                sess.state.lock().await.acknowledged_provider_window = None;
++                                return Err(CodexErr::InvalidRequest(
++                                    "Assistant output withheld by an output guardrail".to_owned(),
++                                ));
++                            }
++                            Ok(Err(error)) => {
++                                publish_held_response_items(
++                                    &sess, &step_context, held_response,
++                                )
++                                .await?;
++                                return Err(CodexErr::InvalidRequest(error));
++                            }
++                            Err(_) => {
++                                publish_held_response_items(
++                                    &sess, &step_context, held_response,
++                                )
++                                .await?;
++                                return Err(CodexErr::TurnAborted);
++                            }
++                        };
++                        publish_held_response_items(
++                            &sess, &step_context, std::mem::take(&mut held_response),
++                        )
++                        .await?;
+                         if cancellation_token.is_cancelled() {
+                             return Err(CodexErr::TurnAborted);
+                         }
+-                        if let Some(feedback) = feedback {
+-                            let item = build_hook_prompt_message(&[
+-                                codex_protocol::items::HookPromptFragment::from_single_hook(
+-                                    feedback,
+-                                    uuid::Uuid::new_v4().to_string(),
+-                                ),
+-                            ])
+-                            .ok_or_else(|| {
+-                                CodexErr::InvalidRequest(
+-                                    "Completion feedback must not be empty".to_owned(),
+-                                )
+-                            })?;
+-                            sess.record_response_item_and_emit_turn_item(
+-                                &turn_context,
+-                                &step_context.settings.model_info,
+-                                item,
++                        let item = build_hook_prompt_message(&[
++                            codex_protocol::items::HookPromptFragment::from_single_hook(
++                                feedback,
++                                uuid::Uuid::new_v4().to_string(),
++                            ),
++                        ])
++                        .ok_or_else(|| {
++                            CodexErr::InvalidRequest(
++                                "Completion feedback must not be empty".to_owned(),
++                            )
++                        })?;
++                        sess.record_response_item_and_emit_turn_item(
++                            &turn_context,
++                            &step_context.settings.model_info,
++                            item,
++                        )
++                        .await;
++                        sess.input_queue
++                            .accept_mailbox_delivery_for_current_turn(
++                                &sess.active_turn,
++                                &turn_context.sub_id,
+                             )
+                             .await;
+-                            sess.input_queue
+-                                .accept_mailbox_delivery_for_current_turn(
+-                                    &sess.active_turn,
+-                                    &turn_context.sub_id,
+-                                )
+-                                .await;
+-                            completion_continuations += 1;
+-                            needs_follow_up = true;
+-                            break;
+-                        }
++                        completion_continuations += 1;
++                        needs_follow_up = true;
++                        break;
+                     }
+                 }
++                publish_held_response_items(&sess, &step_context, held_response).await?;
+                 let token_status = super::context_window::context_window_token_status(
+                     sess.as_ref(),
+                     turn_context.as_ref(),
+@@ -2886,6 +2919,7 @@ async fn run_sampling_request(
+                         settled_tools: SettledDirectTools::default(),
+                         needs_follow_up: true,
+                         last_agent_message: None,
++                        held_response: Vec::new(),
+                     },
+                     std::mem::take(original_input),
+                 ));
+@@ -3185,6 +3219,7 @@ struct SamplingRequestResult {
+     settled_tools: SettledDirectTools,
+     needs_follow_up: bool,
+     last_agent_message: Option<String>,
++    held_response: Vec<HeldResponseItem>,
+ }
+ 
+ /// Live authority created only by Core after validation and exact-turn reservation.
+@@ -4482,6 +4517,10 @@ async fn drain_in_flight(
+     Ok(())
+ }
+ 
++fn assistant_response_item(item: &ResponseItem) -> bool {
++    matches!(item, ResponseItem::Message { role, .. } if role == "assistant")
++}
++
+ fn assign_missing_streamed_response_item_id(
+     item: &mut ResponseItem,
+     active_item: Option<&TurnItem>,
+@@ -4714,6 +4753,15 @@ async fn try_run_sampling_request(
+     let mut needs_follow_up = false;
+     let mut last_agent_message: Option<String> = None;
+     let mut active_item: Option<TurnItem> = None;
++    let mut held_response = Vec::new();
++    let hold_assistant_completion = !client_session.has_provider_history()
++        && turn_context.mode() != ModeKind::Plan
++        && sess.services.extensions.turn_lifecycle_contributors().iter().any(|contributor| {
++            contributor.hold_assistant_completion(
++                &sess.services.thread_extension_data,
++                &step_context.extension_data,
++            )
++        });
+     let mut active_tool_argument_diff_consumer: Option<(
+         String,
+         Box<dyn ToolArgumentDiffConsumer>,
+@@ -4860,6 +4908,7 @@ async fn try_run_sampling_request(
+                         settled_tools: SettledDirectTools::default(),
+                         needs_follow_up: true,
+                         last_agent_message,
++                        held_response: std::mem::take(&mut held_response),
+                     });
+                 }
+                 Err(_) => break Err(CodexErr::TurnAborted),
+@@ -5053,7 +5102,14 @@ async fn try_run_sampling_request(
+ 
+                     let direct_call = item.clone();
+                     let output_result =
+-                        match handle_output_item_done(&mut ctx, item, previously_streamed_item)
++                        match handle_output_item_done(
++                            &mut ctx,
++                            item,
++                            previously_streamed_item,
++                            (hold_assistant_completion
++                                && (assistant_response_item(&direct_call) || !held_response.is_empty()))
++                            .then_some(&mut held_response),
++                        )
+                             .instrument(handle_responses)
+                             .await
+                         {
+@@ -5090,6 +5146,7 @@ async fn try_run_sampling_request(
+                             settled_tools: SettledDirectTools::default(),
+                             needs_follow_up: true,
+                             last_agent_message,
++                            held_response: std::mem::take(&mut held_response),
+                         });
+                     }
+                 }
+@@ -5121,7 +5178,9 @@ async fn try_run_sampling_request(
+                     .await
+                     {
+                         let mut turn_item = turn_item;
+-                        let stream_item_to_client = !defer_streamed_turn_items_for_contributors;
++                        let stream_item_to_client = !defer_streamed_turn_items_for_contributors
++                            && !(hold_assistant_completion
++                                && (assistant_response_item(&item) || !held_response.is_empty()));
+                         let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
+                         let mut seeded_item_id: Option<String> = None;
+                         if stream_item_to_client
+@@ -5390,6 +5449,7 @@ async fn try_run_sampling_request(
+                         settled_tools: SettledDirectTools::default(),
+                         needs_follow_up,
+                         last_agent_message,
++                        held_response: std::mem::take(&mut held_response),
+                     });
+                 }
+                 ResponseEvent::OutputTextDelta(delta) => {
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index b817d2fd..bfaf0653 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -275,12 +275,13 @@ pub(crate) enum TurnItemContributorPolicy<'a> {
+     Run(&'a ExtensionData),
+ }
+ 
++#[derive(Debug)]
+ pub(crate) struct FinalizedTurnItem {
+     pub(crate) turn_item: TurnItem,
+     pub(crate) facts: FinalizedTurnItemFacts,
+ }
+ 
+-#[derive(Clone, Default)]
++#[derive(Clone, Debug, Default)]
+ pub(crate) struct FinalizedTurnItemFacts {
+     pub(crate) memory_citation: Option<MemoryCitation>,
+     pub(crate) last_agent_message: Option<String>,
+@@ -381,14 +382,61 @@ fn observe_hosted_shell_pair(store: &ExtensionData, item: &ResponseItem, passive
+     })
+ }
+ 
++#[derive(Debug)]
++pub(crate) struct HeldResponseItem {
++    item: ResponseItem,
++    finalized: Option<FinalizedTurnItem>,
++}
++
++async fn publish_passive_response_item(
++    sess: &Session,
++    step: &StepContext,
++    item: &ResponseItem,
++    finalized: Option<FinalizedTurnItem>,
++    started: bool,
++) {
++    let facts = finalized.as_ref().map(|item| item.facts.clone());
++    if let Some(finalized) = finalized {
++        if !started {
++            sess.emit_turn_item_started(&step.turn, &finalized.turn_item)
++                .await;
++        }
++        sess.emit_turn_item_completed(&step.turn, finalized.turn_item)
++            .await;
++    }
++    record_completed_response_item_with_finalized_facts(
++        sess, step, item, facts.as_ref(), /*metadata*/ None,
++    )
++    .await;
++}
++
++pub(crate) async fn publish_held_response_items(
++    sess: &Session,
++    step: &StepContext,
++    held: Vec<HeldResponseItem>,
++) -> Result<()> {
++    if held.is_empty() {
++        return Ok(());
++    }
++    for HeldResponseItem { item, mut finalized } in held {
++        // The stream already deferred mailbox input when it observed the message.
++        // Repeating the operation after a follow-up has admitted mail would move it again.
++        if let Some(finalized) = finalized.as_mut() {
++            finalized.facts.defers_mailbox_delivery_to_next_turn = false;
++        }
++        publish_passive_response_item(sess, step, &item, finalized, /*started*/ false).await;
++    }
++    sess.ensure_rollout_durable().await
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) async fn handle_output_item_done(
+     ctx: &mut HandleOutputCtx,
+     item: ResponseItem,
+     previously_active_item: Option<TurnItem>,
++    mut held_response: Option<&mut Vec<HeldResponseItem>>,
+ ) -> Result<OutputItemResult> {
+     let mut output = OutputItemResult::default();
+-    let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
+     ctx.tool_runtime.observe_requested_item(&item);
+ 
+     if matches!(item, ResponseItem::McpApprovalResponse { .. }) {
+@@ -412,6 +460,13 @@ pub(crate) async fn handle_output_item_done(
+     if routed.is_err() && hosted_receipt {
+         routed = Ok(None);
+     }
++    // Application calls and their model-facing errors require a continuation.
++    // Settle the preceding passive items before recording or dispatching the call.
++    if matches!(routed, Ok(Some(_)) | Err(FunctionCallError::RespondToModel(_)))
++        && let Some(held) = held_response.as_mut()
++    {
++        publish_held_response_items(&ctx.sess, &ctx.step_context, std::mem::take(*held)).await?;
++    }
+     match routed {
+         // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
+         Ok(Some(call)) => {
+@@ -478,40 +533,38 @@ pub(crate) async fn handle_output_item_done(
+                 .services
+                 .executed_tool_calls
+                 .observe_non_dispatched_call(&item);
+-            let finalized_turn_item = finalize_non_tool_response_item(
+-                ctx.sess.as_ref(),
+-                TurnItemContributorPolicy::Run(ctx.turn_store.as_ref()),
++            let finalized = finalize_non_tool_response_item(
++                &ctx.sess,
++                TurnItemContributorPolicy::Run(&ctx.turn_store),
+                 &item,
+-                plan_mode,
++                ctx.step_context.turn.mode() == ModeKind::Plan,
+             )
+             .await;
+-            let finalized_facts = finalized_turn_item
++            output.last_agent_message = finalized
+                 .as_ref()
+-                .map(|finalized| finalized.facts.clone());
+-            if let Some(finalized_turn_item) = finalized_turn_item {
+-                if previously_active_item.is_none() {
++                .and_then(|item| item.facts.last_agent_message.clone());
++            if let Some(held) = held_response {
++                if finalized.as_ref().is_some_and(|item| {
++                    item.facts.defers_mailbox_delivery_to_next_turn
++                }) {
+                     ctx.sess
+-                        .emit_turn_item_started(
+-                            &ctx.step_context.turn,
+-                            &finalized_turn_item.turn_item,
++                        .input_queue
++                        .defer_mailbox_delivery_to_next_turn(
++                            &ctx.sess.active_turn, &ctx.step_context.turn.sub_id,
+                         )
+                         .await;
+                 }
+-
+-                ctx.sess
+-                    .emit_turn_item_completed(&ctx.step_context.turn, finalized_turn_item.turn_item)
+-                    .await;
++                held.push(HeldResponseItem { item, finalized });
++            } else {
++                publish_passive_response_item(
++                    &ctx.sess,
++                    &ctx.step_context,
++                    &item,
++                    finalized,
++                    previously_active_item.is_some(),
++                )
++                .await;
+             }
+-            record_completed_response_item_with_finalized_facts(
+-                ctx.sess.as_ref(),
+-                ctx.step_context.as_ref(),
+-                &item,
+-                finalized_facts.as_ref(),
+-                /*metadata*/ None,
+-            )
+-            .await;
+-
+-            output.last_agent_message = finalized_facts.and_then(|facts| facts.last_agent_message);
+         }
+         // The tool request should be answered directly (or was denied); push that response into the transcript.
+         Err(FunctionCallError::RespondToModel(message)) => {
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index 3df413f8..3c258064 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -322,7 +322,7 @@ async fn handle_output_item_done_returns_contributed_last_agent_message() {
+     let mut ctx = output_context(Arc::new(session), Arc::new(turn_context));
+     let item = assistant_output_text("original assistant text");
+ 
+-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
++    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None, /*held_response*/ None)
+         .await
+         .expect("assistant message should complete");
+ 
+@@ -355,7 +355,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+             "arguments": arguments.to_string(),
+         }))
+         .expect("direct input");
+-        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
++        let result = handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, /*held_response*/ None)
+             .await
+             .expect("direct call should be handled");
+         assert!(result.needs_follow_up);
+@@ -414,7 +414,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+         }))
+         .expect("direct input");
+         pending.push(
+-            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None)
++            handle_output_item_done(&mut ctx, call, /*previously_active_item*/ None, /*held_response*/ None)
+                 .await
+                 .expect("direct call should be handled")
+                 .tool_future
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index b878d363..5f1153af 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -83,6 +83,7 @@ pub use turn_lifecycle::ToolBatchCompletionResult;
+ pub use turn_lifecycle::ToolCompletionDecision;
+ pub use turn_lifecycle::ToolCompletionInput;
+ pub use turn_lifecycle::TurnAbortInput;
++pub use turn_lifecycle::TurnCompletionDecision;
+ pub use turn_lifecycle::TurnCompletionInput;
+ pub use turn_lifecycle::TurnErrorInput;
+ pub use turn_lifecycle::TurnStartInput;
+@@ -277,13 +278,22 @@ pub trait TurnLifecycleContributor: Send + Sync {
+         Box::pin(std::future::ready(Ok(None)))
+     }
+ 
+-    /// Accept natural completion, or return feedback to continue the same turn.
++    /// Hold a candidate assistant response until the captured completion callback settles.
++    fn hold_assistant_completion(
++        &self,
++        _thread_store: &ExtensionData,
++        _step_store: &ExtensionData,
++    ) -> bool {
++        false
++    }
++
++    /// Accept or withhold natural completion, or supply feedback to continue the turn.
+     /// Errors fail the turn; callback results never authorize tools or permissions.
+     fn before_turn_complete<'a>(
+         &'a self,
+         _input: TurnCompletionInput<'a>,
+-    ) -> ExtensionFuture<'a, Result<Option<String>, String>> {
+-        Box::pin(std::future::ready(Ok(None)))
++    ) -> ExtensionFuture<'a, Result<TurnCompletionDecision, String>> {
++        Box::pin(std::future::ready(Ok(TurnCompletionDecision::Accept)))
+     }
+ 
+     /// Selects the start phase using the current thread policy. Disabled callbacks
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 8c55f6bc..9b3b0130 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -89,6 +89,13 @@ pub struct TurnCompletionInput<'a> {
+     pub turn_store: &'a ExtensionData,
+ }
+ 
++/// Resolve the assistant message retained by the natural completion boundary.
++pub enum TurnCompletionDecision {
++    Accept,
++    Continue(String),
++    Withhold,
++}
++
+ /// Input supplied when the host completes a turn.
+ pub struct TurnStopInput<'a> {
+     /// Store scoped to the host session runtime.
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 8f4acbde..e75afe94 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -118,6 +118,7 @@ pub use contributors::ToolStartInput;
+ pub use contributors::ToolTimingBoundary;
+ pub use contributors::ToolTimingInput;
+ pub use contributors::TurnAbortInput;
++pub use contributors::TurnCompletionDecision;
+ pub use contributors::TurnCompletionInput;
+ pub use contributors::TurnContextContributionInput;
+ pub use contributors::TurnErrorInput;

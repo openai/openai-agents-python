@@ -97,6 +97,8 @@ pub struct ThreadOptions {
     pub(crate) post_turn_compact: bool,
     #[serde(rename = "_before_complete")]
     pub(crate) before_complete: bool,
+    #[serde(rename = "_hold_assistant_completion")]
+    hold_assistant_completion: bool,
     #[serde(rename = "_tool_batch_completion")]
     pub(crate) tool_batch_completion: bool,
     #[serde(rename = "_buffered_responses")]
@@ -301,6 +303,15 @@ impl ThreadOptions {
         }
         configuration.sdk_provider_history = self.provider_history;
         let mut options = StartThreadOptions::new(configuration);
+        if self.hold_assistant_completion {
+            anyhow::ensure!(
+                options.config.sdk_provider_history.is_none(),
+                "Output guardrails require SDK-managed conversation history"
+            );
+            options
+                .thread_extension_init
+                .insert(crate::python_tools::HoldAssistantCompletion);
+        }
         options
             .thread_extension_init
             .insert(codex_core::BufferedResponsesPreference(
