@@ -2819,7 +2819,7 @@
       },
       "_agents_codex.sandbox_memory": {
         "declarations": [
-          "@dataclass(frozen=True)\nclass SandboxMemoryOptions:\n    phase_one: Agent[None, Any]\n    phase_two: Agent[None, Any]\n    layout: MemoryLayoutConfig = field(default_factory=MemoryLayoutConfig)\n    max_raw_memories: int = 16"
+          "@dataclass(frozen=True)\nclass SandboxMemoryOptions:\n    phase_one: Agent[None, Any]\n    phase_two: Agent[None, Any]\n    layout: MemoryLayoutConfig = field(default_factory=MemoryLayoutConfig)\n    max_raw_memories: int = 16\n    include_media_content: bool = False"
         ],
         "exports": {},
         "imports": [

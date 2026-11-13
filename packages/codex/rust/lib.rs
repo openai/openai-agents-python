@@ -992,6 +992,33 @@ impl NativeThread {
         })
     }
 
+    fn _record_memory_input_admission<'py>(
+        &self,
+        py: Python<'py>,
+        turn_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            canonical_history::record_memory_input_admission(&inner, &turn_id)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _memory_history<'py>(
+        &self,
+        py: Python<'py>,
+        turn_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::memory_snapshot(&inner, &turn_id)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
     fn _stored_history<'py>(
         &self,
         py: Python<'py>,
