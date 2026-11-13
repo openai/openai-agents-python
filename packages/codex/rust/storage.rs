@@ -2056,7 +2056,9 @@ impl LocalChecklistStore {
             // Reconfirm an earlier recovery replacement after an interrupted
             // directory sync, without replacing the unchanged rollout again.
             tokio::task::block_in_place(|| {
-                std::fs::File::open(path)
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
                     .map_err(checklist_error)?
                     .sync_all()
                     .map_err(checklist_error)?;

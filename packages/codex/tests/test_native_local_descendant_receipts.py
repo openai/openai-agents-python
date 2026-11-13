@@ -267,6 +267,10 @@ async def worker() -> None:
                     )
                 return
             result = await (await session.submit("Run requested work.")).get_result()
+            if request["mode"] == "cold-followup":
+                [child] = await handles(session, 1)
+                await child.get_result()
+                result = await (await session.submit("Continue the child.")).get_result()
             root_items = [item async for item in session.items()]
             if request["mode"] == "cold-active" and request["depth"] == 2:
                 (spawn,) = [item for item in root_items if item["type"] == "create_subagent_call"]
@@ -775,6 +779,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
         (2, True, None, False),
         (1, False, "shell", False),
         (1, False, None, True),
+        (1, False, None, "followup"),
     ],
 )
 async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
@@ -787,17 +792,49 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
 
     def response():
         path = metadata(peer.requests[-1], peer.request_headers[-1])["agent_name"]
+        source_requests = [
+            body
+            for body, headers in zip(peer.requests, peer.request_headers, strict=True)
+            if headers["authorization"] == "Bearer source"
+            and metadata(body, headers)["agent_name"] == path
+        ]
+        if (
+            root_active == "followup"
+            and peer.request_headers[-1]["authorization"] == "Bearer source"
+            and path == "/root"
+            and len(source_requests) >= 3
+        ):
+            if not any(
+                item.get("call_id") == "cold-followup"
+                for item in source_requests[-1].get("input", [])
+            ):
+                return [
+                    collaboration(
+                        "followup_task",
+                        {"target": "/root/alpha", "message": "Continue."},
+                        "cold-followup",
+                    )
+                ]
+            message = assistant_output("held follow-up root")
+            message["item"]["id"] = "held-root-with-spawn"
+            return [message]
         if (
             peer.request_headers[-1]["authorization"] == "Bearer source"
             and path.count("/") - 1 == depth
         ):
+            if root_active == "followup" and len(source_requests) == 1:
+                return [assistant_output("first child turn finished")]
             # The child exists, but never attempts a function call. Hold only
             # its final message so it cannot finish before the process dies.
             message = assistant_output("leaf not yet settled")
             message["item"]["id"] = "held-leaf-without-tool"
             return [message]
         result = original_response()
-        if root_active and path == "/root" and result[0].get("item", {}).get("type") == "message":
+        if (
+            root_active is True
+            and path == "/root"
+            and result[0].get("item", {}).get("type") == "message"
+        ):
             result[0]["item"]["id"] = "held-root-with-spawn"
         return result
 
@@ -821,7 +858,13 @@ async def test_local_reopen_interrupts_cold_active_child_without_replaying_work(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         peer.url = str(server.make_url("/v1"))
-        source = await start(peer, executor, tmp_path, "cold-active", depth)
+        source = await start(
+            peer,
+            executor,
+            tmp_path,
+            "cold-followup" if root_active == "followup" else "cold-active",
+            depth,
+        )
         try:
             assert source.stdout is not None
             opened = json.loads(await source.stdout.readline())
