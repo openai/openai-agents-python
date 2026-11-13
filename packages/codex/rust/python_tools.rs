@@ -4238,7 +4238,9 @@ impl PythonTools {
             None,
             None,
             Some(&builtin_tools),
-        )?;
+
+                    None,
+)?;
         // Opening has not published the Thread or started its Python reader yet.
         self.pending
             .lock()
@@ -4317,7 +4319,9 @@ impl PythonTools {
             None,
             None,
             None,
-        )
+
+                    None,
+)
         .map(|(_, _, receiver)| receiver)
     }
 
@@ -4656,7 +4660,9 @@ impl PythonTools {
         self.enqueue_profile(
             thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
             media, None, None,
-        )
+
+                    None,
+)
     }
 
     fn enqueue_profile(
@@ -4675,6 +4681,7 @@ impl PythonTools {
         media: Option<NativeMediaContext>,
         realtime_tool_call: Option<Value>,
         builtin_tools: Option<&HashSet<ToolName>>,
+        provider_agent_metadata: Option<Value>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         let entry = &generation.entries[slot];
         let key = PendingKey {
@@ -4723,6 +4730,11 @@ impl PythonTools {
                 "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
         });
+        if matches!(source, ToolCallSource::Direct) {
+            if let Some(metadata) = provider_agent_metadata {
+                request["msg"]["_sdk_hosted_agent_metadata"] = metadata;
+            }
+        }
         if let Some(error) = argument_error {
             request["msg"]["_sdk_argument_error"] = json!(error);
         }
@@ -7077,7 +7089,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 self.builtin_tools
                     .as_ref()
                     .and_then(|receipt| receipt.names()),
-            );
+
+                    call.conversation_history.provider_agent_metadata().cloned(),
+);
             let (key, invocation, receiver) = match pending {
                 Ok(pending) => pending,
                 Err(error) => {

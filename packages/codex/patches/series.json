@@ -1051,7 +1051,27 @@
     {
       "path": "sdk-hosted-provider-dispatch-fence.patch",
       "sha256": "229ffa64282829572c164c9b5244e46b4acebe56c4ca4ee4b2de7f2ba34a15b2"
+    },
+    {
+      "path": "sdk-linear-prompt-cache-breakpoints.patch",
+      "sha256": "e01afc641b34792f1e1619e93651f5cc7fbaa2860530a6dd89df8372f7a7d7fd"
+    },
+    {
+      "path": "sdk-managed-history-attempts.patch",
+      "sha256": "c6630843af2aa01b6a059404d91aa72084c741f2750bc57e321082ffb8008e21"
+    },
+    {
+      "path": "sdk-hosted-provider-tool-attribution.patch",
+      "sha256": "19ba9ac29176cf551edd462f315aadfc5a36286f5021a137db36184748d55a66"
+    },
+    {
+      "path": "sdk-hosted-attribution-completion-call.patch",
+      "sha256": "e794c41e5dc8f0df9ccae6ed47e70fbf79a7d01b4e63b1ec3c0814fa4bb71977"
+    },
+    {
+      "path": "sdk-bounded-hosted-program-replay.patch",
+      "sha256": "46c1b0fe713389d2e3760d38858b6b7bd21e8345bca59787e5ce1e026089931d"
     }
   ],
-  "result_tree": "e0598686eef14a622e21fa8a8cd0b9c0b1b39041"
+  "result_tree": "2b19cfaeb45e8111f9db55af44f4b298b394bd2c"
 }

@@ -244,6 +244,10 @@ def _received_usage(raw: dict[str, Any] | None) -> ReceivedTokenUsage | None:
 def _request_usage_entries(
     facts: list[dict[str, Any]], owners: dict[str | None, _UsageCollector]
 ) -> tuple[list[RecordedRequestUsage], bool]:
+    if any(owner._managed_model_owner is not None for owner in owners.values()):
+        # Only cumulative physical totals are retained. Logical events cannot
+        # establish the number or attribution of individual provider requests.
+        return [], False
     entries: list[RecordedRequestUsage] = []
     totals: dict[str, tuple[int, dict[str, int], int]] = {}
     seen: dict[tuple[str, int], tuple[str, dict[str, Any]]] = {}

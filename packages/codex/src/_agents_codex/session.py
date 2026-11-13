@@ -16709,6 +16709,11 @@ class Session(Generic[ContextT, OutputT]):
                 nested_call_id=(code_origin["nested_call_id"] if code_origin is not None else None),
             )
 
+            if code_origin is None:
+                from ._hosted_agent_metadata import _bind_hosted_agent_metadata
+
+                _bind_hosted_agent_metadata(call, message.get("_sdk_hosted_agent_metadata"))
+
             def make_context(
                 effective_arguments: Mapping[str, Any],
             ) -> ToolContext[ContextT | None]:

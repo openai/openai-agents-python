@@ -1533,8 +1533,8 @@ class AnyLLMModel(ChatCompletionsModel):
     Inherited native cache hints are omitted for providers declaring them unsupported.
     Explicit adapter cache overrides, including empty strings, remain provider-validated.
     Generic completion requests omit the native ``store=False`` default.
-    Set ``api="responses"`` for an AnyLLM OpenAI, Azure OpenAI, or OpenRouter
-    provider with public ``aresponses(extra_body=...)`` support. Streaming
+    Set ``api="responses"`` for a supported AnyLLM OpenAI-compatible provider
+    with public ``aresponses(extra_body=...)`` support. Streaming
     Responses requires a stable ``any-llm-sdk`` release at or above 1.28.0
     for stream cleanup. ``api="auto"`` selects Responses when these requirements
     hold and otherwise uses Chat Completions. The default uses Chat Completions.
@@ -1562,6 +1562,9 @@ class AnyLLMModel(ChatCompletionsModel):
                 "openai",
                 "openrouter",
                 "azureopenai",
+                "gmi",
+                "deepseek",
+                "meta",
             )
             advertises_responses = getattr(client, "SUPPORTS_RESPONSES", False) is True
             if is_qualified and advertises_responses:
@@ -1576,7 +1579,7 @@ class AnyLLMModel(ChatCompletionsModel):
                         )
             if api == "responses" and not use_responses:
                 raise ValueError(
-                    "AnyLLM Responses requires an OpenAI, Azure OpenAI, or OpenRouter provider "
+                    "AnyLLM Responses requires a supported OpenAI-compatible provider "
                     "with public aresponses extra_body support"
                 )
             if (

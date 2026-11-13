@@ -387,7 +387,9 @@ async def test_native_chat_penalties_reach_borrowed_clients(adapter, monkeypatch
 
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("api", ["responses", "auto"])
-@pytest.mark.parametrize("provider_name", ["openai", "openrouter", "azureopenai"])
+@pytest.mark.parametrize(
+    "provider_name", ["openai", "openrouter", "azureopenai", "gmi", "deepseek", "meta"]
+)
 async def test_anyllm_responses_uses_native_tool_continuation(
     api, streaming, monkeypatch, provider_name
 ):
@@ -401,7 +403,9 @@ async def test_anyllm_responses_uses_native_tool_continuation(
     )
 
 
-@pytest.mark.parametrize("provider_name", ["openai", "openrouter", "azureopenai"])
+@pytest.mark.parametrize(
+    "provider_name", ["openai", "openrouter", "azureopenai", "gmi", "deepseek", "meta"]
+)
 async def test_anyllm_responses_cancel_keeps_borrowed_client_owned(monkeypatch, provider_name):
     await _exercise_borrowed_provider(
         "any_llm_responses",
@@ -428,7 +432,7 @@ def test_anyllm_responses_rejects_unqualified_provider_before_io(provider_name):
     )
     with pytest.raises(
         ValueError,
-        match="OpenAI, Azure OpenAI, or OpenRouter provider with public aresponses extra_body",
+        match="supported OpenAI-compatible provider with public aresponses extra_body",
     ):
         AnyLLMModel(provider, api="responses")
     assert AnyLLMModel(provider, api="auto") == AnyLLMModel(provider)

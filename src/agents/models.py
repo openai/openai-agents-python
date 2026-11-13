@@ -1,5 +1,9 @@
 """Application model producers for the native Core turn and tool loop."""
 
+from _agents_codex._hosted_agent_metadata import (
+    HostedAgentMetadata as HostedAgentMetadata,
+    get_hosted_agent_metadata as get_hosted_agent_metadata,
+)
 from _agents_codex._hosted_responses_websocket import (
     HostedResponsesWebSocketModel as HostedResponsesWebSocketModel,
 )

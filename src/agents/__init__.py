@@ -163,6 +163,8 @@ if TYPE_CHECKING:
         ModelRequestContext as ModelRequestContext,
     )
     from .models import (
+        HostedAgentMetadata as HostedAgentMetadata,
+        get_hosted_agent_metadata as get_hosted_agent_metadata,
         AnyLLMModel as AnyLLMModel,
         ChatCompletionsModel as ChatCompletionsModel,
         HostedResponsesWebSocketModel as HostedResponsesWebSocketModel,
@@ -320,6 +322,8 @@ if TYPE_CHECKING:
     )
 
 _MODULES = {
+    "HostedAgentMetadata": ".models",
+    "get_hosted_agent_metadata": ".models",
     "HostedResponsesWebSocketModel": ".models",
     "run_demo_loop": ".repl",
     "ChatCompletionsModel": ".models",

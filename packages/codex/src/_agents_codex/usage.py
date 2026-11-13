@@ -171,7 +171,16 @@ class _UsageCollector:
             requests=requests,
             missing_usage_requests=missing,
         )
+        provider_managed = snapshot.get("provider_managed")
+        if provider_managed is not None and provider_managed is not True:
+            raise ValueError("Invalid native physical accounting marker")
         with self.lock:
+            if provider_managed is True:
+                if owner is None or self.model_owner_attempt_id not in {None, owner}:
+                    raise ValueError("Invalid native physical accounting owner")
+                if self._managed_model_owner is None:
+                    self._managed_model_owner = owner
+                    self.model_usage = None
             if requests == 0 and owner is not None and self._managed_model_owner != owner:
                 raise ValueError("Invalid native model usage owner")
             if self.model_final and not final:

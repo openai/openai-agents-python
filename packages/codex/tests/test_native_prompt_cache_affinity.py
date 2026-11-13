@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -11,6 +12,7 @@ from aiohttp.test_utils import TestServer
 from pydantic import BaseModel
 
 from agents import Agent, ConversationsHistory, FunctionTool, InteractionRequired, NativeProvider
+from agents.models import ChatCompletionsModel, ResponsesModel
 from agents.state import SessionState
 from agents.telemetry import TraceOptions, configure
 from tests.native_fixtures import (
@@ -22,7 +24,7 @@ from tests.native_fixtures import (
 from tests.test_conversations_history import endpoint as endpoint
 
 
-@pytest.mark.parametrize("case", ["session", "manual"])
+@pytest.mark.parametrize("case", ["session", "manual", "chat", "responses"])
 def test_native_prompt_cache_trace_affinity(case: str, tmp_path: Path) -> None:
     # Native telemetry must be configured before the first SDK client in this process.
     env = {**os.environ, "CODEX_HOME": str(tmp_path)}
@@ -54,9 +56,10 @@ async def _trace_affinity_case(case: str) -> None:
         fixture.url = str(server.make_url("/v1"))
         if case == "session":
             await _session_affinity(fixture)
-        else:
-            assert case == "manual"
+        elif case == "manual":
             await _manual_affinity(fixture)
+        else:
+            await _borrowed_affinity(case)
 
 
 async def _session_affinity(responses: ResponsesFixture) -> None:
@@ -120,6 +123,43 @@ async def test_current_native_conversation_affinity(responses, endpoint) -> None
     keys = [request.get("prompt_cache_key") for request in responses.requests]
     assert all(isinstance(key, str) and key for key in keys)
     assert keys[0] == keys[1]
+
+
+async def _borrowed_affinity(route: str) -> None:
+    keys: list[str] = []
+
+    async def responses_create(**request):
+        keys.append(request["extra_body"]["prompt_cache_key"])
+        return {"status": "completed", "output": [assistant_output("accepted")["item"]]}
+
+    async def chat_create(**request):
+        keys.append(request["prompt_cache_key"])
+        return {
+            "id": "chat_synthetic_affinity",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "accepted"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+    if route == "responses":
+        client = SimpleNamespace(responses=SimpleNamespace(create=responses_create))
+        backend = ResponsesModel(client)
+    else:
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=chat_create))
+        )
+        backend = ChatCompletionsModel(client, stream=False)
+    async with NativeProvider(model_backend=backend) as provider:
+        agent = Agent(model="fixture", instructions="Answer.", provider=provider)
+        for group in ("shared-borrowed", "shared-borrowed", "separate-borrowed"):
+            result = await agent.run("Begin.", trace_options=TraceOptions(group_id=group))
+            assert result.final_output == "accepted"
+    assert len(keys) == 3 and all(key.startswith("agents-sdk:group:") for key in keys)
+    assert keys[0] == keys[1] != keys[2]
 
 
 class LookupArgs(BaseModel):

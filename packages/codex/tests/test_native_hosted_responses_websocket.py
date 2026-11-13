@@ -139,6 +139,12 @@ async def test_hosted_pause_inject_and_native_tool_owner(terminal_before_ack: bo
                         if isinstance(event, RawProviderEvent)
                     ]
                     result = await turn.get_result()
+                    history = [recorded async for recorded in session.turns()]
+                    assert len(history) == 1
+                    assert history[0]["run_usage"]["requests"] == 1
+                    assert history[0]["request_usage_entries"] == []
+                    assert not history[0]["request_usage_entries_complete"]
+                    assert [item async for item in session.items()]
                 assert [(event.source, event.transport, event.payload) for event in raw] == [
                     ("responses", "websocket", frame) for frame in incoming
                 ]
@@ -465,6 +471,12 @@ async def test_hosted_initial_connect_failure_reaches_result_and_event_reader() 
                 with pytest.raises(Exception, match="synthetic hosted connection failure"):
                     await turn.get_result()
                 assert [event async for event in turn.events()]
+                history = [recorded async for recorded in session.turns()]
+                assert len(history) == 1
+                assert history[0]["run_usage"]["requests"] == 0
+                assert history[0]["request_usage_entries"] == []
+                assert not history[0]["request_usage_entries_complete"]
+                assert [item async for item in session.items()]
         assert attempts == 1
         assert not client.is_closed()
 
@@ -729,3 +741,52 @@ async def test_hosted_reconnects_closed_peer_with_the_same_native_run_owner() ->
         await backend.cleanup_on_run_end(owner)
         assert [socket.sends for socket in sockets] == [1, 1]
         assert not client.is_closed()
+
+
+async def test_hosted_rejects_too_many_output_items_before_projection() -> None:
+    pending: asyncio.Queue[str] = asyncio.Queue()
+    private = "synthetic-provider-canary"
+
+    class Socket:
+        async def send(self, _value: str) -> None:
+            pending.put_nowait(
+                json.dumps({"type": "response.created", "response": {"id": "oversized-output"}})
+            )
+            pending.put_nowait(
+                json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "oversized-output",
+                            "status": "completed",
+                            "output": [{"note": private}, *([{}] * 4096)],
+                        },
+                    }
+                )
+            )
+
+        async def recv(self) -> str:
+            return await pending.get()
+
+        async def close(self) -> None:
+            pass
+
+    async def connect(_request, _options):
+        return Socket()
+
+    async with timeout(20), AsyncOpenAI(api_key="synthetic") as client:
+        model = HostedResponsesWebSocketModel(client, socket_factory=connect)
+        async with NativeProvider(model_backend=model) as provider:
+            agent = Agent(instructions="Answer once.", provider=provider)
+            with pytest.raises(
+                Exception, match="Responses WebSocket request failed after send"
+            ) as failure:
+                await agent.run("Start.")
+            assert isinstance(failure.value.__cause__, ValueError)
+            assert (
+                str(failure.value.__cause__)
+                == "Hosted response exceeds the native output-item limit"
+            )
+    from tests.test_native_responses_websocket_review import _diagnostics
+
+    assert private not in _diagnostics(failure.value)

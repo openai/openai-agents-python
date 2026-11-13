@@ -10,9 +10,10 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from traceback import clear_frames
-from typing import Any
+from typing import Any, cast
 from weakref import WeakKeyDictionary
 
+from ._compat import cancellation_requested
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._responses_websocket import (
     ResponsesSocketFactory,
@@ -35,6 +36,7 @@ from .models import (
 from .retry import RetryAdvice
 
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_RESPONSE_ITEMS = 4096
 _TERMINAL = {"response.completed", "response.failed", "response.incomplete"}
 _COLLABORATION = {"agent_message", "multi_agent_call", "multi_agent_call_output"}
 
@@ -123,9 +125,10 @@ class HostedResponsesWebSocketModel:
         run = self._runs.setdefault(request.run_owner, _Run())
         if run.request is not None:
             raise TypeError("Hosted Responses already has an active request")
-        account = getattr(request, "_account_provider_request", None)
-        if not callable(account):
+        callback = getattr(request, "_account_provider_request", None)
+        if not callable(callback):
             raise TypeError("Hosted transport requires native request accounting")
+        account = cast(Callable[[dict[str, Any]], str | None], callback)
         account({"operation": "manage"})
         run.request = request
         run.account = account
@@ -235,7 +238,7 @@ class _Socket:
         active = result = None
         try:
             task = asyncio.current_task()
-            if task is not None and task.cancelling():
+            if task is not None and cancellation_requested(task):
                 raise asyncio.CancelledError
             active = self._run.active
             if active is None:
@@ -379,8 +382,10 @@ class _Socket:
                         and item.get("type") == "function_call"
                         and isinstance(item.get("call_id"), str)
                         and item["call_id"] not in active.emitted
-                        and not any(known["call_id"] == item["call_id"] for known in active.queued)
+                        and item["call_id"] not in active.pending
                     ):
+                        if len(active.emitted) + len(active.queued) >= _MAX_RESPONSE_ITEMS:
+                            raise ValueError("Hosted response exceeds the native output-item limit")
                         active.pending.add(item["call_id"])
                         active.queued.append(deepcopy(item))
                 elif kind == "response.inject.created":
@@ -408,9 +413,11 @@ class _Socket:
                         event.get("response"), "Hosted terminal response must be an object"
                     )
                     output = response.get("output", [])
-                    if not isinstance(output, list) or not all(
-                        isinstance(item, dict) for item in output
-                    ):
+                    if not isinstance(output, list):
+                        raise ValueError("Hosted terminal output must contain objects")
+                    if len(output) > _MAX_RESPONSE_ITEMS:
+                        raise ValueError("Hosted response exceeds the native output-item limit")
+                    if not all(isinstance(item, dict) for item in output):
                         raise ValueError("Hosted terminal output must contain objects")
                     usage = _hosted_usage(response.get("usage"))
                     self._account(
