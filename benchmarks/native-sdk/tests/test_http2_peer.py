@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import io
 import json
 import ssl
 import subprocess
@@ -13,13 +14,22 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
+from unittest import mock
 
 from aiohttp import ClientSession, TCPConnector
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from owned_process import defer_cleanup_signals, read_ready_line, terminate_group
-from protocol_peer import final_text
+from protocol_peer import final_text, main as peer_main
 from worker import validate_transport
+
+
+class PeerModeArgumentTests(unittest.TestCase):
+    def test_h1_rejects_a_tls_port_its_readiness_does_not_report(self):
+        with mock.patch.object(sys, "argv", ["protocol_peer.py", "--tls-port", "0"]), mock.patch.object(sys, "stderr", io.StringIO()) as errors:
+            with self.assertRaises(SystemExit):
+                peer_main()
+            self.assertIn("A custom TLS port requires dual HTTP mode", errors.getvalue())
 
 
 @unittest.skipUnless(importlib.util.find_spec("hypercorn"), "Install requirements-http2-peer.txt")
@@ -39,7 +49,7 @@ class HTTP2PeerTests(unittest.IsolatedAsyncioTestCase):
             try:
                 with defer_cleanup_signals():
                     process = subprocess.Popen(
-                        [sys.executable, "-B", str(Path(__file__).resolve().parents[1] / "protocol_peer.py"),
+                        [sys.executable, "-I", "-B", str(Path(__file__).resolve().parents[1] / "protocol_peer.py"),
                          "--peer-http-mode", "dual", "--tls-port", "0",
                          "--tls-cert", str(cert), "--tls-key", str(key),
                          "--tools-per-round", "0", "--tool-rounds", "0",
@@ -115,8 +125,11 @@ class HTTP2PeerTests(unittest.IsolatedAsyncioTestCase):
                 if process is not None:
                     primary = sys.exception()
                     terminate_group(process, term_timeout=5)
+                    stderr = process.stderr.read(65536)
+                    if primary is not None and stderr:
+                        primary.add_note("Joined peer stderr: " + stderr)
                     if primary is None:
-                        self.assertEqual(process.returncode, 0)
+                        self.assertEqual(process.returncode, 0, stderr)
 
 
 if __name__ == "__main__":

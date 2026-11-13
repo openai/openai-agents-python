@@ -13,9 +13,11 @@ import hashlib
 import json
 import re
 import ssl
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 MARKER = re.compile(r"\bBENCH_RUN=([A-Za-z0-9-]+)(?![A-Za-z0-9-])")
@@ -615,6 +617,7 @@ async def serve(args: argparse.Namespace) -> None:
 
     peer = Peer(args)
     if args.peer_http_mode == "dual":
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
         from http2_peer import serve as serve_dual
 
         await serve_dual(args, peer, encode)
@@ -669,6 +672,8 @@ def main() -> None:
     parser.add_argument("--output-chars", type=int, default=256)
     parser.add_argument("--delay-ms", type=float, default=0)
     args = parser.parse_args()
+    if args.peer_http_mode == "h1" and args.tls_port != 443:
+        parser.error("A custom TLS port requires dual HTTP mode")
     if args.peer_http_mode == "dual" and not args.tls_cert:
         parser.error("Dual HTTP mode requires TLS certificate and key")
     if bool(args.tls_cert) != bool(args.tls_key):
