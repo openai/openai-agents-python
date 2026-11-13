@@ -327,6 +327,10 @@ class _MCP(Generic[ContextT_contra]):
     tool_name_overrides maps raw peer names to model-visible names for ordinary
     servers. Session still invokes the original raw names on the peer.
 
+    tool_approval_overrides selects native rules, a prompt, or preapproval
+    for selected raw names on ordinary servers. Core evaluates prompts under
+    the active permission policy. Application approval still applies.
+
     before receives MCPCallContext and the native input. Return Allow,
     ReplaceArguments or StopTurn. approval sees the effective NativeToolCall;
     False denies locally. before has a 30-second deadline, independent of
@@ -397,6 +401,7 @@ class _MCP(Generic[ContextT_contra]):
 
     _name_tools: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
     tool_name_overrides: Mapping[str, str] | None = None
+    tool_approval_overrides: Mapping[str, Literal["native", "prompt", "preapproved"]] | None = None
 
     def __post_init__(self) -> None:
         if self.cache_tools_list is not None and type(self.cache_tools_list) is not bool:
@@ -467,15 +472,21 @@ class _MCP(Generic[ContextT_contra]):
         if self._name_tools is None or not set(names).issubset(self._name_tools):
             object.__setattr__(self, "_name_tools", names)
         if self.tool_name_overrides is not None:
-            if not isinstance(self.tool_name_overrides, Mapping):
-                raise TypeError("MCP tool_name_overrides must be a mapping of strings")
-            overrides = dict(self.tool_name_overrides)
+            overrides = _capture_tool_name_overrides(self.tool_name_overrides)
             if overrides and self.name == "codex_apps":
                 raise ValueError("MCP tool_name_overrides requires an ordinary server")
-            for raw, public_name in overrides.items():
-                _launch_text(raw, "raw tool name override")
-                _launch_text(public_name, "public tool name override")
-            object.__setattr__(self, "tool_name_overrides", _McpValues(overrides))
+            object.__setattr__(self, "tool_name_overrides", overrides)
+        if self.tool_approval_overrides is not None:
+            if not isinstance(self.tool_approval_overrides, Mapping):
+                raise TypeError("MCP tool_approval_overrides must be a mapping")
+            approvals = dict(self.tool_approval_overrides)
+            if approvals and self.name == "codex_apps":
+                raise ValueError("MCP tool_approval_overrides requires an ordinary server")
+            for raw, mode in approvals.items():
+                _launch_text(raw, "raw tool name for approval override")
+                if mode not in ("native", "prompt", "preapproved"):
+                    raise ValueError("MCP tool approval mode must be native, prompt or preapproved")
+            object.__setattr__(self, "tool_approval_overrides", _McpValues(approvals))
         _tool_names((self,))
 
     @property
@@ -516,6 +527,9 @@ class _MCP(Generic[ContextT_contra]):
         object.__setattr__(ref, "_mcp_identity", (self.name, raw_name))
         return ref
 
+    def _effective_approval_mode(self, raw_name: str) -> Literal["native", "prompt", "preapproved"]:
+        return (self.tool_approval_overrides or {}).get(raw_name, self.approval_mode)
+
     def _config(self, environment: Environment[Any] | None = None) -> dict[str, object]:
         config: dict[str, object] = {
             "enabled_tools": list(self.tools),
@@ -526,11 +540,12 @@ class _MCP(Generic[ContextT_contra]):
         }
         if self.cache_tools_list is not None:
             config["sdk_cache_tools_list"] = self.cache_tools_list
-        tool_settings = {
-            name: {"approval_mode": "approve"}
-            for name in self.tools
-            if self.approval_mode == "preapproved"
-        }
+        approval_modes = {"preapproved": "approve", "prompt": "prompt"}
+        tool_settings = {}
+        for name in self.tools:
+            approval = approval_modes.get(self._effective_approval_mode(name))
+            if approval is not None:
+                tool_settings[name] = {"approval_mode": approval}
         for raw, public_name in (self.tool_name_overrides or {}).items():
             tool_settings.setdefault(raw, {})["name_override"] = public_name
         if tool_settings or self.approval_mode == "preapproved":
@@ -819,6 +834,16 @@ def _launch_text(value: object, name: str, *, allow_empty: bool = False) -> None
         value.encode("utf-8")
     except UnicodeError:
         raise ValueError(f"MCP {name} must contain valid Unicode") from None
+
+
+def _capture_tool_name_overrides(overrides: Mapping[str, str]) -> Mapping[str, str]:
+    if not isinstance(overrides, Mapping):
+        raise TypeError("MCP tool_name_overrides must be a mapping of strings")
+    names = _McpValues(overrides)
+    for raw, public_name in names.items():
+        _launch_text(raw, "raw tool name override")
+        _launch_text(public_name, "public tool name override")
+    return names
 
 
 async def _transform_and_extract_result(

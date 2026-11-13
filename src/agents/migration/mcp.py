@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
@@ -14,7 +14,7 @@ from pydantic import RootModel, TypeAdapter
 
 from _agents_codex._function_tools import FunctionTool, ToolContext
 from _agents_codex._mcp_names import _project_tool_names
-from _agents_codex.mcp import _launch_text
+from _agents_codex.mcp import _capture_tool_name_overrides, _launch_text
 from _agents_codex.native_interception import Allow, Deny
 from _agents_codex.tools import _CapturedFunction
 
@@ -122,6 +122,7 @@ async def select_mcp_tools(
     tool_names: Sequence[str] | None = None,
     filter_context: tuple[RunContextWrapper[ContextT], AgentBase[ContextT]] | None = None,
     approval: _Approval[ContextT] | None = None,
+    tool_name_overrides: Mapping[str, str] | None = None,
 ) -> tuple[FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]], ...]:
     """Authenticate, discover, and capture tools from one selected namespace.
 
@@ -135,7 +136,8 @@ async def select_mcp_tools(
 
     Native projected names for model-facing tools; each returned tool's ``ref``
     for native selection. Original peer names for ``tool_names`` and borrowed
-    dispatch. Namespace characters: ASCII letters, digits, underscores, or hyphens.
+    dispatch. Use tool_name_overrides to set model-visible names for raw peer tools.
+    Namespace characters: ASCII letters, digits, underscores, or hyphens.
     The discovered catalog is limited to 16,384 tools, 4,096 UTF-8 bytes per tool
     name, and 1 MiB of tool-name bytes in total, before native name projection.
 
@@ -174,6 +176,9 @@ async def select_mcp_tools(
             or not isinstance(agent, AgentBase)
         ):
             raise TypeError("MCP filter_context requires matching Classic run context and agent")
+    overrides = (
+        _capture_tool_name_overrides(tool_name_overrides) if tool_name_overrides is not None else {}
+    )
     if requested == ():
         return ()
 
@@ -246,7 +251,9 @@ async def select_mcp_tools(
     if any(name not in by_name for name in names):
         raise ValueError("Requested MCP tools were not discovered or were filtered out")
 
-    projected = _project_tool_names([(namespace.name, tuple(by_name))], prefix=False)
+    projected = _project_tool_names(
+        [(namespace.name, tuple(by_name))], prefix=False, overrides={namespace.name: overrides}
+    )
     return tuple(
         _capture_tool(
             namespace,

@@ -275,7 +275,7 @@ async def test_selected_mcp_projects_peer_identity(name: str) -> None:
         assert not peer.calls
 
 
-async def test_selected_mcp_defaults_missing_object_schema_type(
+async def test_selected_mcp_alias_dispatch_defaults_missing_object_schema_type(
     responses: ResponsesFixture,
 ) -> None:
     class ApplicationClient(MCPServerStreamableHttp):
@@ -285,16 +285,25 @@ async def test_selected_mcp_defaults_missing_object_schema_type(
             return [tool.model_copy(update={field_name: {}}) for tool in listed]
 
     peer = Peer(names=("search",))
-    call = function_call("search", {"key": "43"}, "empty-schema")
+    aliases = {"search": "catalog_search"}
+    call = function_call("catalog_search", {"key": "43"}, "empty-schema")
     call["item"]["namespace"] = "catalog"
     responses.respond(call)
     responses.respond(assistant_output("done"))
+
+    async def authenticate(_: None) -> None:
+        aliases["search"] = "changed_after_capture"
+
     async with (
         timeout(15),
         peer.serve() as url,
         ApplicationClient(params={"url": url}) as client,
     ):
-        selected = await select_mcp_tools(MCPNamespace("catalog", client), context=None)
+        selected = await select_mcp_tools(
+            MCPNamespace("catalog", client, authenticate=authenticate),
+            context=None,
+            tool_name_overrides=aliases,
+        )
         async with Agent(
             instructions="Use the selected borrowed tool.",
             provider=provider(responses),
@@ -304,7 +313,7 @@ async def test_selected_mcp_defaults_missing_object_schema_type(
         listing = await client.list_tools()
         assert tool_input_schema(listing[0]) == {}
 
-    parameters = declarations(responses.requests[0])["catalog", "search"]["parameters"]
+    parameters = declarations(responses.requests[0])["catalog", "catalog_search"]["parameters"]
     assert parameters["type"] == "object"
     assert parameters["properties"] == {}
     assert peer.calls == [{"name": "search", "arguments": {"key": "43"}}]
