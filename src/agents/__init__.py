@@ -163,10 +163,9 @@ if TYPE_CHECKING:
         ModelRequestContext as ModelRequestContext,
     )
     from .models import (
-        HostedAgentMetadata as HostedAgentMetadata,
-        get_hosted_agent_metadata as get_hosted_agent_metadata,
         AnyLLMModel as AnyLLMModel,
         ChatCompletionsModel as ChatCompletionsModel,
+        HostedAgentMetadata as HostedAgentMetadata,
         HostedResponsesWebSocketModel as HostedResponsesWebSocketModel,
         LitellmModel as LitellmModel,
         ModelProvider as ModelProvider,
@@ -186,6 +185,7 @@ if TYPE_CHECKING:
         ResponsesSocketOptions as ResponsesSocketOptions,
         ResponsesWebSocketModel as ResponsesWebSocketModel,
         ResponsesWebSocketOptions as ResponsesWebSocketOptions,
+        get_hosted_agent_metadata as get_hosted_agent_metadata,
     )
     from .native_agents import (
         ChildInvocation as ChildInvocation,

@@ -1,9 +1,9 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
-from agents import HostedAgentMetadata, ToolCallInfo, ToolRef, get_hosted_agent_metadata
 from _agents_codex._hosted_agent_metadata import _bind_hosted_agent_metadata
 from _agents_codex.response_facts import _response_fact_record, _summarize_response_fact
+from agents import HostedAgentMetadata, ToolCallInfo, ToolRef, get_hosted_agent_metadata
 
 
 def test_provider_items_expose_only_bounded_agent_name_and_phase():

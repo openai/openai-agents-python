@@ -183,9 +183,13 @@ async def test_hosted_pause_inject_and_native_tool_owner(terminal_before_ack: bo
                 )
 
 
+@pytest.mark.parametrize("steer", [False, True])
 @pytest.mark.parametrize("store", [True, False])
 @pytest.mark.parametrize("terminal_first", [True, False])
-async def test_hosted_terminal_fallback(store: bool, terminal_first: bool) -> None:
+async def test_hosted_terminal_fallback(store: bool, terminal_first: bool, steer: bool) -> None:
+    tool_entered = asyncio.Event()
+    release_tool = asyncio.Event()
+    followup = "Use the new instruction after lookup."
     frames: list[dict[str, Any]] = []
     effects: list[str] = []
     call = {
@@ -241,7 +245,10 @@ async def test_hosted_terminal_fallback(store: bool, terminal_first: bool) -> No
                 await socket.send_json({"type": "response.output_item.done", "item": call})
             elif len(frames) == 2:
                 assert frame["type"] == "response.inject"
-                assert len(frame["input"]) == 1
+                assert len(frame["input"]) == (2 if steer else 1)
+                if steer:
+                    assert json.dumps(frame["input"]).count(followup) == 1
+                    assert "start" not in json.dumps(frame["input"])
                 done = {"type": "response.completed", "response": first}
                 rejected = {
                     "type": "response.inject.failed",
@@ -290,8 +297,11 @@ async def test_hosted_terminal_fallback(store: bool, terminal_first: bool) -> No
         return socket
 
     @function_tool
-    def lookup() -> str:
+    async def lookup() -> str:
         effects.append("lookup")
+        if steer:
+            tool_entered.set()
+            await release_tool.wait()
         return "result"
 
     app = web.Application()
@@ -302,13 +312,22 @@ async def test_hosted_terminal_fallback(store: bool, terminal_first: bool) -> No
         ) as client:
             model = HostedResponsesWebSocketModel(client)
             async with NativeProvider(model_backend=model) as provider:
-                result = await Agent(
+                agent = Agent(
                     model="gpt-5.5",
                     instructions="Use lookup.",
                     tools=[lookup],
                     provider=provider,
                     model_settings={"store": store},
-                ).run("start")
+                )
+                async with agent.session() as session:
+                    turn = await session.submit("start")
+                    if steer:
+                        try:
+                            await tool_entered.wait()
+                            await turn.steer(followup)
+                        finally:
+                            release_tool.set()
+                    result = await turn.get_result()
             assert result.final_output == "done"
             assert effects == ["lookup"]
             assert [frame["type"] for frame in frames] == [
@@ -481,8 +500,14 @@ async def test_hosted_initial_connect_failure_reaches_result_and_event_reader() 
         assert not client.is_closed()
 
 
+@pytest.mark.parametrize("steer", [False, True])
 @pytest.mark.parametrize("terminal_first", [True, False])
-async def test_hosted_nonstored_fallback_replays_all_injected_outputs(terminal_first) -> None:
+async def test_hosted_nonstored_fallback_replays_all_injected_outputs(
+    terminal_first, steer
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    steering = "First tool is still running."
     frames: list[dict[str, Any]] = []
     first, second = [
         {
@@ -554,8 +579,11 @@ async def test_hosted_nonstored_fallback_replays_all_injected_outputs(terminal_f
         return socket
 
     @function_tool
-    def lookup(key: str) -> str:
+    async def lookup(key: str) -> str:
         effects.append(key)
+        if key == "one" and steer:
+            entered.set()
+            await release.wait()
         return f"result for {key}"
 
     app = web.Application()
@@ -564,13 +592,22 @@ async def test_hosted_nonstored_fallback_replays_all_injected_outputs(terminal_f
         async with AsyncOpenAI(api_key="synthetic", base_url=str(server.make_url("/v1"))) as client:
             backend = HostedResponsesWebSocketModel(client)
             async with NativeProvider(model_backend=backend) as provider:
-                result = await Agent(
+                agent = Agent(
                     model="gpt-5.5",
                     instructions="Use lookup.",
                     tools=[lookup],
                     provider=provider,
                     model_settings={"store": False},
-                ).run("start")
+                )
+                async with agent.session() as session:
+                    turn = await session.submit("start")
+                    if steer:
+                        try:
+                            await entered.wait()
+                            await turn.steer(steering)
+                        finally:
+                            release.set()
+                    result = await turn.get_result()
     assert result.final_output == "finished"
     assert effects == ["one", "two"]
     assert [frame["type"] for frame in frames] == [
@@ -579,6 +616,8 @@ async def test_hosted_nonstored_fallback_replays_all_injected_outputs(terminal_f
         "response.inject",
         "response.create",
     ]
+    assert json.dumps(frames[1]["input"]).count(steering) == int(steer)
+    assert steering not in json.dumps(frames[2]["input"])
     assert frames[-1]["input"] == [
         *frames[0]["input"],
         first,

@@ -50,6 +50,9 @@ class _Active:
     injection_input: list[dict[str, Any]] | None = None
     fallback_input: list[dict[str, Any]] | None = None
     acknowledged_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    acknowledged_user_items: dict[str, tuple[str | None, dict[str, Any]]] = field(
+        default_factory=dict
+    )
     template: dict[str, Any] | None = None
     response_id: str | None = None
     pending: set[str] = field(default_factory=set)
@@ -273,6 +276,7 @@ class _Socket:
         self, active: _Active, frame: dict[str, Any], outputs: list[dict[str, Any]]
     ) -> None:
         completed = next_frame = replay = acknowledged = terminal_output = item = result = None
+        anchored_users = call_id = messages = None
         try:
             completed = (active.terminal or {}).get("response")
             if not isinstance(completed, dict) or not isinstance(completed.get("id"), str):
@@ -288,14 +292,25 @@ class _Socket:
             else:
                 replay = list(active.create.get("input", []))
                 acknowledged = active.acknowledged_outputs.copy()
+                anchored_users = {}
+                for call_id, item in active.acknowledged_user_items.values():
+                    anchored_users.setdefault(call_id, []).append(item)
+                replay.extend(anchored_users.pop(None, ()))
                 terminal_output = completed.get("output", [])
                 for item in terminal_output:
                     replay.append(item)
                     if item.get("type") == "function_call":
-                        result = acknowledged.pop(item.get("call_id"), None)
+                        call_id = item.get("call_id")
+                        result = acknowledged.pop(call_id, None)
                         if result is not None:
                             replay.append(result)
-                next_frame["input"] = [*replay, *acknowledged.values(), *outputs]
+                            replay.extend(anchored_users.pop(call_id, ()))
+                for call_id, result in acknowledged.items():
+                    replay.append(result)
+                    replay.extend(anchored_users.pop(call_id, ()))
+                for messages in anchored_users.values():
+                    replay.extend(messages)
+                next_frame["input"] = [*replay, *outputs]
                 original_previous = active.create.get("previous_response_id")
                 if isinstance(original_previous, str):
                     next_frame["previous_response_id"] = original_previous
@@ -304,10 +319,10 @@ class _Socket:
             await self._create(next_frame, active.emitted)
         finally:
             del self, active, frame, outputs, completed, next_frame, replay
-            del acknowledged, terminal_output, item, result
+            del acknowledged, terminal_output, item, result, anchored_users, call_id, messages
 
     async def send(self, payload: str) -> None:
-        frame = active = outputs = ids = None
+        frame = active = items = input_items = original_user_ids = ids = None
         try:
             frame = json.loads(payload)
             frame.pop("stream", None)
@@ -316,33 +331,47 @@ class _Socket:
             if active is None:
                 await self._create(frame)
                 return
-            outputs = [
+            original_user_ids = {
+                item.get("id")
+                for item in active.create.get("input", [])
+                if isinstance(item, dict) and item.get("role") == "user"
+            }
+            input_items = frame.get("input", [])
+            items = [
                 item
-                for item in frame.get("input", [])
+                for item in input_items
                 if isinstance(item, dict)
-                and item.get("type") == "function_call_output"
-                and item.get("call_id") in active.pending
+                and (
+                    item.get("type") == "function_call_output"
+                    and item.get("call_id") in active.pending
+                    or item.get("type") == "message"
+                    and item.get("role") == "user"
+                    and isinstance(item.get("id"), str)
+                    and item["id"] not in original_user_ids
+                    and item["id"] not in active.acknowledged_user_items
+                )
             ]
-            ids = {item["call_id"] for item in outputs}
+            ids = {item["call_id"] for item in items if item["type"] == "function_call_output"}
             if not active.response_id or not ids or active.pending - ids:
                 raise ValueError("Hosted response requires the matching local function outputs")
             if active.terminal is not None:
-                await self._fallback(active, frame, outputs)
+                await self._fallback(active, frame, items)
                 return
-            active.size += len(json.dumps(outputs, allow_nan=False).encode("utf-8"))
+            active.size += len(json.dumps(items, allow_nan=False).encode("utf-8"))
             if active.size > _MAX_RESPONSE_BYTES:
                 raise ValueError("Hosted response exceeds the native retained-byte limit")
             active.continuation = frame
-            active.injection_input = outputs
+            active.injection_input = items
             active.injecting = ids
             await self._send(
-                {"type": "response.inject", "response_id": active.response_id, "input": outputs}
+                {"type": "response.inject", "response_id": active.response_id, "input": items}
             )
         finally:
-            del self, payload, frame, active, outputs, ids
+            del self, payload, frame, active, items, input_items, original_user_ids, ids
 
     async def recv(self) -> _ResponsesWebSocketFrame:
         payload = event = response = output = saved = item = active = calls = supported = None
+        acknowledged_call = None
         try:
             while not self._queue:
                 payload = await self._socket.recv()
@@ -390,9 +419,16 @@ class _Socket:
                         active.queued.append(deepcopy(item))
                 elif kind == "response.inject.created":
                     if active.injecting is not None:
-                        active.acknowledged_outputs.update(
-                            (result["call_id"], result) for result in active.injection_input or ()
-                        )
+                        acknowledged_call = None
+                        for item in active.injection_input or ():
+                            if item["type"] == "function_call_output":
+                                acknowledged_call = item["call_id"]
+                                active.acknowledged_outputs[acknowledged_call] = item
+                            else:
+                                active.acknowledged_user_items[item["id"]] = (
+                                    acknowledged_call,
+                                    item,
+                                )
                         active.pending.difference_update(active.injecting)
                         active.injection_input = None
                         active.injecting = None

@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import math
+import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -195,6 +196,41 @@ def _finite_json_float(value: str) -> float:
     return parsed
 
 
+# Bound decoded allocation before building the provider-controlled object graph.
+# Count containers, object keys, and scalar values; string contents are one node.
+_MAX_SOCKET_JSON_NODES = 65_536
+_MAX_SOCKET_JSON_DEPTH = 128
+_JSON_TOKEN = re.compile(r'[\[\]{}"]|[^ \t\r\n\[\]{}":,]+')
+_JSON_STRING_SPECIAL = re.compile(r'["\\]')
+
+
+def _check_socket_json_structure(payload: str) -> None:
+    nodes = depth = position = 0
+    while (token := _JSON_TOKEN.search(payload, position)) is not None:
+        position = token.end()
+        first = payload[token.start()]
+        if first in "}]":
+            depth -= 1
+            continue
+        nodes += 1
+        if nodes > _MAX_SOCKET_JSON_NODES:
+            raise ValueError("Responses WebSocket frame exceeds its JSON node limit")
+        if first in "{[":
+            depth += 1
+            if depth > _MAX_SOCKET_JSON_DEPTH:
+                raise ValueError("Responses WebSocket frame exceeds its JSON depth limit")
+        elif first == '"':
+            # Search without capturing/copying string contents or allocating a
+            # token list. Escapes skip one character; json.loads validates them.
+            while (special := _JSON_STRING_SPECIAL.search(payload, position)) is not None:
+                position = special.end()
+                if payload[special.start()] == '"':
+                    break
+                position += 1
+            else:
+                return  # The normal decoder rejects an unterminated string.
+
+
 def _decode_socket_frame(payload: Any, limit: int | None) -> dict[str, Any]:
     decoded: Any = None
     try:
@@ -203,6 +239,11 @@ def _decode_socket_frame(payload: Any, limit: int | None) -> dict[str, Any]:
                 isinstance(payload, str) and len(payload.encode("utf-8")) > limit
             ):
                 raise ValueError("Responses WebSocket frame exceeds its receive limit")
+        if isinstance(payload, (bytes, bytearray)):
+            # Preserve the standard decoder's supported byte encodings.
+            payload = payload.decode(json.detect_encoding(payload), "surrogatepass")
+        if isinstance(payload, str):
+            _check_socket_json_structure(payload)
         decoded = json.loads(
             payload, parse_constant=_reject_json_constant, parse_float=_finite_json_float
         )
@@ -242,7 +283,10 @@ class ResponsesWebSocketModel(ResponsesModel):
     select the connection; changed values open a replacement. The SDK closes
     sockets before releasing a run and leaves the borrowed client open.
 
-    Default receive ceiling: 8 MiB. Explicit unlimited override:
+    Frames allow at most 65,536 JSON containers, keys, and scalar values, with
+    nesting depth at most 128. String contents count as one value.
+
+    Default receive ceiling: 8 MiB. Explicit unlimited byte override:
     ``websocket_options={"max_size": None}``.
     """
 
