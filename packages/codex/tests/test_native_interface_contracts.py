@@ -73,6 +73,7 @@ async def cleanup_session(events, *, managed_environment=True):
     session = object.__new__(Session)
     session._loop = asyncio.get_running_loop()
     session._close_task = None
+    session._configured_capture = None
     session._scope_close_task = None
     session._native_scope_failure = None
     session._sync_cleanup_owner = _sync_run.get()

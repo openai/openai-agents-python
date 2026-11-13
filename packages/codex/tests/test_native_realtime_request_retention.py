@@ -171,8 +171,11 @@ async def test_terminal_request_byte_pressure_releases_only_terminal_reservation
     request(realtime, "active")
     for index in range(12):
         call_id = f"terminal-{index}" + "x" * 12
-        request(realtime, call_id)
-        realtime._retire_pending_functions(call_id)
+        # Reserve the same identity fields without adding unrelated conversation history.
+        realtime._reserve_request(
+            call_id, call_id, call_id, "echo", call_id, "{}", f"item-{call_id}", ""
+        )
+        realtime._finish_request(call_id)
         assert "active" in realtime._pending_functions
         assert "active" in realtime._seen
         assert realtime._identity_bytes == sum(

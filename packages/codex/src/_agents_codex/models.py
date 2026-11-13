@@ -1673,13 +1673,20 @@ class ResponsesModel:
 
     @staticmethod
     def _check_video_input(request: ModelRequest) -> None:
-        if any(
-            part.get("type") == "input_video"
-            for item in request.body.get("input", [])
-            if item.get("type") == "message"
-            for part in item.get("content", [])
-        ):
-            raise ValueError("Video input requires a compatible Chat Completions model")
+        try:
+            if isinstance(request.body.get("input"), str):
+                return
+            if any(
+                part.get("type") == "input_video"
+                for item in request.body.get("input") or []
+                if isinstance(item, Mapping) and item.get("type", "message") == "message"
+                if not isinstance(item.get("content"), str)
+                for part in item.get("content") or []
+                if isinstance(part, Mapping)
+            ):
+                raise ValueError("Video input requires a compatible Chat Completions model")
+        finally:
+            del request
 
     @asynccontextmanager
     async def _opened_stream(self, response: Any) -> AsyncIterator[AsyncIterator[Any]]:

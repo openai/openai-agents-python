@@ -3778,6 +3778,26 @@ def _opening_tool_policy(
     }
 
 
+def _configured_continuation_tool_slots(
+    catalog: _ToolCatalog,
+    operation_slots: tuple[int, ...] | None,
+    saved: SessionState | None,
+) -> list[int]:
+    return [
+        slot
+        for slot, tool in enumerate(catalog.tools)
+        if isinstance(tool, _CapturedFunction)
+        and tool.configured_agent is not None
+        and (operation_slots is None or slot in operation_slots)
+        and saved is not None
+        and saved.native_continuation is not None
+        and any(
+            pending.tool == tool.name and pending.continuation is not None
+            for pending in saved.native_continuation.pending_manual
+        )
+    ]
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -4546,19 +4566,9 @@ class Session(Generic[ContextT, OutputT]):
                     "_application_instructions": instructions,
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
-                    "_configured_continuation_tool_slots": [
-                        slot
-                        for slot, tool in enumerate(restored_catalog.tools)
-                        if isinstance(tool, _CapturedFunction)
-                        and tool.configured_agent is not None
-                        and (operation_slots is None or slot in operation_slots)
-                        and state is not None
-                        and saved.native_continuation is not None
-                        and any(
-                            pending.tool == tool.name and pending.continuation is not None
-                            for pending in saved.native_continuation.pending_manual
-                        )
-                    ],
+                    "_configured_continuation_tool_slots": _configured_continuation_tool_slots(
+                        restored_catalog, operation_slots, saved if state is not None else None
+                    ),
                     "_terminal_tool_slots": restored_catalog.finish_slots(),
                     "_input_error_tool_slots": restored_catalog.input_error_slots(
                         run_formatter=tool_error_formatter is not None
@@ -11181,8 +11191,8 @@ class Session(Generic[ContextT, OutputT]):
                     project = policy if run_policy is None else run_policy.project
                     try:
                         history = await self._read_canonical_history(None, for_replay=True)
-                    except RuntimeError as error:
-                        if str(error) != (
+                    except RuntimeError as history_error:
+                        if str(history_error) != (
                             "Run completed, but its one-shot conversation history "
                             "exceeds the result size limit"
                         ):
@@ -11190,7 +11200,7 @@ class Session(Generic[ContextT, OutputT]):
                         raise NativeError(
                             "Input storage policy history exceeds the admission size limit "
                             "(4096 records or 8 MiB)"
-                        ) from error
+                        ) from history_error
 
                     def active() -> bool:
                         return (
@@ -17531,7 +17541,7 @@ class Session(Generic[ContextT, OutputT]):
         before_seal: Callable[[], None] | None = None,
     ) -> SessionState:
         if self._configured_capture is not None:
-            return await _join(self._configured_capture)
+            return cast(SessionState, await _join(self._configured_capture))
         if self._sealed_checkpoint is not None:
             return SessionState.from_json(self._sealed_checkpoint)
         self._check_portable_capture()
@@ -17594,7 +17604,7 @@ class Session(Generic[ContextT, OutputT]):
             capture = _create_task(capture_configured())
             self._configured_capture = capture
             try:
-                return await _join(capture)
+                return cast(SessionState, await _join(capture))
             finally:
                 self._configured_capture = None
         return await self._checkpoint(active, before_seal=before_seal)
