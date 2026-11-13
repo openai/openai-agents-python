@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "openai-agents-codex"
+version = "0.1.0"
+description = "Native Codex runtime for the OpenAI Agents SDK"
+requires-python = ">=3.10"
+
+[tool.maturin]
+module-name = "_openai_agents_codex"
+locked = true

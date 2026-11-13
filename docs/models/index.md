@@ -67,6 +67,7 @@ Start with the simplest path that fits your setup:
 | Use OpenAI models only | Use the default OpenAI provider with the Responses model path | [OpenAI models](#openai-models) |
 | Use OpenAI Responses API over websocket transport | Keep the Responses model path and enable websocket transport | [Responses WebSocket transport](#responses-websocket-transport) |
 | Use OpenAI-hosted subagents | Use the experimental hosted multi-agent model | [Hosted multi-agent](#hosted-multi-agent-experimental) |
+| Run an agent with text input and output through Codex | Select `CodexProvider` for the run | [Codex provider](#codex-provider) |
 | Use one non-OpenAI provider | Start with the built-in provider integration points | [Non-OpenAI models](#non-openai-models) |
 | Mix models or providers across agents | Select providers per run or per agent and review feature differences | [Mixing models in one workflow](#mixing-models-in-one-workflow) and [Mixing models across providers](#mixing-models-across-providers) |
 | Tune advanced OpenAI Responses request settings | Use `ModelSettings` on the OpenAI Responses path | [Advanced OpenAI Responses settings](#advanced-openai-responses-settings) |
@@ -356,6 +357,41 @@ The experimental model rejects `reasoning.summary`, `max_tool_calls`, and caller
 One `OpenAIHostedMultiAgentModel` instance owns at most one active hosted response at a time. If a run is abandoned while waiting for local function output, call `await model.close()` to release its WebSocket. Restoring an in-flight hosted response in a different process or event loop is not currently supported.
 
 See the [OpenAI Multi-agent guide](https://developers.openai.com/api/docs/guides/tools-multi-agent) for the underlying Responses API beta behavior. See [`examples/agent_patterns/hosted_multi_agent_beta.py`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/hosted_multi_agent_beta.py) for non-streaming and streaming SDK usage.
+
+## Codex provider
+
+Set `RunConfig(model_provider=CodexProvider())` to run an agent with text input and output through the embedded Codex runtime. The provider uses a native Python extension built from the SDK checkout.
+
+To build the extension, install Python 3.10 or later, Rust 1.95 or later, Git, a C/C++ compiler, CMake, Make, Perl, and `pkg-config`. From the root of the SDK checkout, activate your Python virtual environment and install the SDK and native extension with uv.
+
+```bash
+uv pip install . ./native/codex
+```
+
+Run `codex login` to save a Codex login, or set `CODEX_API_KEY` in the environment where you run Python. See [Codex authentication](https://developers.openai.com/codex/auth/).
+
+```python
+from agents import Agent, RunConfig, Runner
+from agents.models.codex import CodexProvider
+
+agent = Agent(name="Python tutor", instructions="Explain Python in one sentence.")
+result = Runner.run_sync(
+    agent,
+    "What does a list comprehension do?",
+    run_config=RunConfig(model_provider=CodexProvider(), tracing_disabled=True),
+)
+print(result.final_output)
+```
+
+Save the example as `codex_example.py` and run `python codex_example.py` in the same virtual environment. The example prints Codex's answer and disables SDK tracing so it can run with Codex credentials alone. To switch to the default provider, remove the `model_provider` argument from `RunConfig` and set up OpenAI API credentials. See the [SDK quickstart](../quickstart.md#set-an-openai-api-key).
+
+Leave `Agent.model` and `RunConfig.model` unset to use the Codex default model. To choose a model by name, set `Agent.model` or override it with `RunConfig.model`. The Runner uses a concrete `Model` object directly. Pass `CodexProvider(cwd=...)` to set the Codex working directory. The provider otherwise uses the current directory at construction.
+
+Each model call starts a temporary Codex conversation thread. Pass a nonempty string or a list of user and assistant text messages. When you pass a list, end it with a nonempty user message. To continue a conversation, pass the previous text messages with the new user message. After the Codex turn completes, `Runner.run_streamed()` emits the full final text in one `response.output_text.delta` event.
+
+The provider loads user and managed Codex configuration and skips project configuration. Use a trusted `CODEX_HOME` because configuration under that directory can select model providers and MCP servers. The provider starts threads without a local execution environment, so shell commands and workspace file tools are unavailable. It disables Codex hooks, plugins, and approval prompts.
+
+The provider raises `UserError` for SDK tools, handoffs, structured output, `previous_response_id`, `conversation_id`, and `Agent.prompt`. Use Codex configuration for model request settings. Set `ModelSettings.timeout` to limit how long the SDK waits for a model call, and leave other SDK model settings at their defaults.
 
 ## Non-OpenAI models
 

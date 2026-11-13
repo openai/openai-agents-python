@@ -1,0 +1,33 @@
+[package]
+name = "openai-agents-codex"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[lib]
+name = "_openai_agents_codex"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+codex-app-server-client = { git = "https://github.com/openai/codex", rev = "7c2ce90716335c889a5076ded9a630459f9c9899" }
+codex-app-server-protocol = { git = "https://github.com/openai/codex", rev = "7c2ce90716335c889a5076ded9a630459f9c9899" }
+codex-async-utils = { git = "https://github.com/openai/codex", rev = "7c2ce90716335c889a5076ded9a630459f9c9899" }
+codex-config = { git = "https://github.com/openai/codex", rev = "7c2ce90716335c889a5076ded9a630459f9c9899" }
+codex-feedback = { git = "https://github.com/openai/codex", rev = "7c2ce90716335c889a5076ded9a630459f9c9899" }
+codex-protocol = { git = "https://github.com/openai/codex", rev = "7c2ce90716335c889a5076ded9a630459f9c9899" }
+codex-utils-rustls-provider = { git = "https://github.com/openai/codex", rev = "7c2ce90716335c889a5076ded9a630459f9c9899" }
+pyo3 = { version = "0.29", features = ["abi3-py310", "extension-module"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+
+[profile.dev]
+debug = 0
+
+# Cargo reads dependency overrides from the root manifest only. These two
+# overrides match the pinned Codex workspace's WebSocket dependencies.
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
