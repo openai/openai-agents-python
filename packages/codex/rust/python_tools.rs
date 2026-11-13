@@ -9303,7 +9303,7 @@ pub(crate) mod managed_tests {
             let recovery_state = resumed.clone();
             let manual = restored.manual.clone();
             let recovering = tokio::spawn(async move {
-                manual_checkpoint::continue_if_ready(&recovery_state, &manual, None, None, None).await.unwrap()
+                manual_checkpoint::continue_if_ready(&recovery_state, &manual, None, None, None, false).await.unwrap()
             });
             hold.flush.entered.acquire().await.unwrap().forget();
             assert_eq!(provider.requests.lock().unwrap().len(), 2,

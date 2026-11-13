@@ -4080,16 +4080,6 @@ class Session(Generic[ContextT, OutputT]):
                 ) = _prepare_native_checkpoint(
                     saved, has_output_override=restored_output_type is not None
                 )
-                if (saved.native_continuation is not None or saved.pending_actions) and (
-                    _distinct_profile_wire_outputs(
-                        tuple(
-                            _prepare_spec(profile.declaration.output_type) for profile in profiles
-                        )
-                    )
-                ):
-                    raise ValueError(
-                        "Per-profile output schemas do not support pending checkpoints"
-                    )
                 manual_restore = saved.native_continuation is not None
                 continuation = saved.native_continuation
             if isinstance(storage, LocalStorage) and programmatic_tool_calling:
@@ -8466,6 +8456,8 @@ class Session(Generic[ContextT, OutputT]):
                 tracing_args["operation_declaration_source_json"] = json.dumps(
                     submission.operation_declaration_source
                 )
+            if self._profiles and submission.output_override:
+                tracing_args["profile_output_override"] = True
             operation = self._native._continue_manual(
                 submission.handle.submission_id, **tracing_args
             )
@@ -9586,7 +9578,7 @@ class Session(Generic[ContextT, OutputT]):
         assert agent is not None and turn_id is not None
         captured = self._effective_agent()
         checks = (*self._output_guardrails, *captured.output_guardrails)
-        records = list(failure.details.guardrail_results)
+        records = submission._guardrail_results
         if checks:
             model = next(
                 (
@@ -9621,12 +9613,15 @@ class Session(Generic[ContextT, OutputT]):
                 async with _bind_decisions(request, active, captured.decisions):
                     return await _call_callback(guardrail.callback, active, request, agent)
 
+            def revoke() -> None:
+                scope.active = False
+
             try:
                 await _settle_output_guardrails(
-                    checks, agent, guard_request, records, invoke, active
+                    checks, agent, guard_request, records, invoke, active, revoke=revoke
                 )
             finally:
-                scope.active = False
+                revoke()
                 _invocation.reset(token)
             check_owner()
             current = await self.history_snapshot(limit=0)
@@ -18009,10 +18004,6 @@ class Session(Generic[ContextT, OutputT]):
         *,
         before_seal: Callable[[], None] | None = None,
     ) -> SessionState:
-        if _distinct_profile_wire_outputs(
-            tuple(profile.output for profile in self._profiles.values())
-        ):
-            raise ValueError("Per-profile output schemas do not support pending checkpoints")
         if self._configured_capture is not None:
             return cast(SessionState, await _join(self._configured_capture))
         if self._sealed_checkpoint is not None:
@@ -18227,6 +18218,9 @@ class Session(Generic[ContextT, OutputT]):
         if active is not None:
             if not await self._manual_ready(active):
                 raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
+            if self._profiles and not active.output_override:
+                await self._refresh_profile_bindings()
+                active.output = self._default_output
             if before_seal is not None:
                 before_seal()
             if drain_budget_usage and self._reader.done():

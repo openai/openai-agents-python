@@ -1525,6 +1525,7 @@ pub(crate) async fn continue_if_ready(
     trace: Option<codex_protocol::protocol::W3cTraceContext>,
     observation_submission_id: Option<String>,
     operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
+    profile_output_override: bool,
 ) -> Result<Value> {
     let _operation = thread.engine.operation(false)?;
     let _mutation = thread.mutations.lock().await;
@@ -1627,6 +1628,7 @@ pub(crate) async fn continue_if_ready(
     if frame.raise_on_unknown_tool {
         recovery_options["raise_on_unknown_tool"] = Value::Bool(true);
     }
+    recovery_options["profile_output_override"] = Value::Bool(profile_output_override);
     recovery_options["trace"] = serde_json::json!(trace);
     recovery_options["observation_submission_id"] = serde_json::json!(observation_submission_id);
     if let Some(source) = operation_declaration_source {

@@ -3052,7 +3052,7 @@ impl NativeThread {
             .is_some_and(|frame| frame.raise_on_unknown_tool))
     }
 
-    #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None, operation_declaration_source_json=None))]
+    #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None, operation_declaration_source_json=None, profile_output_override=false))]
     fn _continue_manual<'py>(
         &self,
         py: Python<'py>,
@@ -3060,6 +3060,7 @@ impl NativeThread {
         tracing_context: Option<&str>,
         trace_json: Option<String>,
         operation_declaration_source_json: Option<&str>,
+        profile_output_override: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let context = tracing_context
             .map(codex_otel::sdk_trace::context)
@@ -3086,6 +3087,7 @@ impl NativeThread {
                     trace,
                     observation_submission_id,
                     operation_declaration_source,
+                    profile_output_override,
                 )
                 .await
                 .map_err(py_error)?;

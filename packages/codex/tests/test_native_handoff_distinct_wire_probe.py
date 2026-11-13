@@ -3,10 +3,9 @@ import json
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, FunctionTool, NativeOutput, NativeProvider
+from agents import Agent, NativeOutput, NativeProvider
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
-from tests.test_native_manual_tools import next_request
 
 
 @pytest.mark.parametrize("override", ["none", "different", "source-equivalent"])
@@ -110,49 +109,3 @@ async def test_distinct_wire_schema_survives_idle_save_restore(responses):
                 assert result.final_output.target_value == "restored"
     assert len(responses.requests) == 3
     assert set(responses.requests[2]["text"]["format"]["schema"]["properties"]) == {"target_value"}
-
-
-async def test_distinct_wire_pending_refusal_keeps_live_receipt_usable(responses):
-    class SourceValue(BaseModel):
-        source_value: str
-
-    class TargetValue(BaseModel):
-        target_value: str
-
-    class DecisionArgs(BaseModel):
-        key: str
-
-    decision = FunctionTool(
-        name="decision", description="Ask.", input_type=DecisionArgs, output_type=str
-    )
-    responses.respond(function_call("decision", {"key": "one"}, "pending-decision"))
-    responses.respond(assistant_output('{"source_value":"continued"}'))
-    async with NativeProvider(
-        base_url=responses.url, api_key="synthetic-wire", supports_websockets=False
-    ) as provider:
-        target = Agent(name="target", instructions="Target.", output_type=NativeOutput(TargetValue))
-        source = Agent(
-            model="gpt-5.5",
-            provider=provider,
-            instructions="Source.",
-            tools=[decision],
-            output_type=NativeOutput(SourceValue),
-            handoffs=[target],
-        )
-        async with timeout(30), source.session() as session:
-            turn = await session.submit("Ask then finish.")
-            request = await next_request(session.interactions(), decision)
-            assert len(responses.requests) == 1
-            with pytest.raises(ValueError, match="Per-profile output schemas.*pending checkpoints"):
-                await session.suspend()
-            assert len(responses.requests) == 1
-            assert [item.call_id for item in await session.pending_interactions()] == [
-                request.call_id
-            ]
-            await request.respond("settled-manual")
-            result = await turn.get_result()
-            assert isinstance(result.final_output, SourceValue)
-            assert result.final_output.source_value == "continued"
-    assert len(responses.requests) == 2
-    assert json.dumps(responses.requests[1]["input"]).count("settled-manual") == 1
-    assert set(responses.requests[1]["text"]["format"]["schema"]["properties"]) == {"source_value"}
