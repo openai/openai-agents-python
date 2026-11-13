@@ -73,6 +73,7 @@ def callback_session(root):
     session._opening_agent = profiles[0].declaration
     session._decisions_provider = profiles[0].declaration.decisions
     session._profile_current = ("agent_0", 0)
+    session._repair_transport_settings = None
     return session
 
 
@@ -418,8 +419,22 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
         def _check_open(self):
             return None
 
-        async def _start(self, input, output, *, budget, run_usage, model_override=None):
+        async def _start(
+            self,
+            input,
+            output,
+            *,
+            budget,
+            run_usage,
+            model_override=None,
+            model_settings_override=None,
+            retry_policy_override=None,
+            raise_on_unknown_tool=False,
+        ):
             assert model_override is None
+            assert model_settings_override is None
+            assert retry_policy_override is None
+            assert raise_on_unknown_tool is False
             assert run_usage is state.run_usage
             correction_inputs.append(json.loads(input[0]["text"]))
             return Attempt()

@@ -15,11 +15,15 @@ from .retry import ModelRetrySettings
 from .tools import ToolRef
 
 if TYPE_CHECKING:
-    from openai import Omit
+    from openai import Omit as Omit
 
     from .agent import ModelSettings
-else:
-    Omit = getattr(sys.modules.get("openai"), "Omit", type(None))
+
+
+def __getattr__(name: str) -> type[Any]:
+    if name == "Omit":
+        return getattr(sys.modules.get("openai"), name, type(None))
+    raise AttributeError(name)
 
 
 class _StaticProviderCompaction(TypedDict, closed=True):
