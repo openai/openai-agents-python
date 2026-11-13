@@ -54,3 +54,54 @@ async def test_native_handoff_changes_output_wrapper_and_cold_restore(
         {target_field},
         {target_field},
     ]
+
+
+@pytest.mark.parametrize("native_destination", [True, False])
+@pytest.mark.parametrize("explicit_override", [True, False])
+async def test_plain_and_native_handoffs_select_the_active_wire_contract(
+    responses, native_destination, explicit_override
+):
+    source_type = str if native_destination else NativeOutput(Record)
+    target_type = NativeOutput(Record) if native_destination else str
+    responses.respond(function_call("transfer_to_target", {}, "route-mode"))
+    wire = '{"count":7}' if native_destination or explicit_override else "plain destination"
+    responses.respond(assistant_output(wire))
+    responses.respond(
+        assistant_output('{"count":7}' if native_destination else "plain destination")
+    )
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-wire", supports_websockets=False
+    ) as provider:
+        target = Agent(name="target", instructions="Target.", output_type=target_type)
+        source = Agent(
+            model="gpt-5.5",
+            provider=provider,
+            instructions="Source.",
+            output_type=source_type,
+            handoffs=[target],
+        )
+        async with timeout(30):
+            async with source.session() as session:
+                turn = await session.submit(
+                    "Route.", output_type=NativeOutput(Record) if explicit_override else None
+                )
+                result = await turn.get_result()
+                assert result.final_output == (
+                    Record(count=7) if native_destination or explicit_override else wire
+                )
+                saved = await session.save_state()
+            async with source.session(state=saved) as restored:
+                assert await restored.get_active_agent() is target
+                result = await (await restored.submit("Continue.")).get_result()
+                assert result.final_output == (
+                    Record(count=7) if native_destination else "plain destination"
+                )
+
+    def structured(request):
+        return request.get("text", {}).get("format", {}).get("type") == "json_schema"
+
+    assert [structured(request) for request in responses.requests] == [
+        not native_destination or explicit_override,
+        native_destination or explicit_override,
+        native_destination,
+    ]

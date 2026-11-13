@@ -1082,8 +1082,8 @@
     },
     {
       "path": "sdk-native-handoff-profile-output.patch",
-      "sha256": "aae60b21b3ca20db7f1fe373380cf18a6786740e9ec7e267a487c55a89ca5059"
+      "sha256": "aed19dd35b66a772cb7ccc3e193125de85853da4e65a3ec097111eee2517a183"
     }
   ],
-  "result_tree": "d8c6114b79d81ad2aee60e6a16b1ed0cdbd75ee2"
+  "result_tree": "c1e69cc4423fd8cb62830f7072f3685535497e5d"
 }

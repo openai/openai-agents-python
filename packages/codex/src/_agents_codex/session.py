@@ -2608,10 +2608,8 @@ def _needs_before_complete(
 
 
 def _distinct_profile_wire_outputs(outputs: Sequence[_PreparedOutput]) -> bool:
-    return (
-        bool(outputs)
-        and outputs[0].mode == "native"
-        and any(output.schema != outputs[0].schema for output in outputs[1:])
+    return any(output.mode == "native" for output in outputs) and any(
+        output.schema != outputs[0].schema for output in outputs[1:]
     )
 
 
@@ -2737,7 +2735,13 @@ def _capture_profile_runtimes(
                 )
                 or any(server.tool_filter is not None for server in mcp),
                 "output_fingerprint": output.fingerprint,
-                **({"wire_output_schema": output.schema} if distinct_wire_outputs else {}),
+                **(
+                    {"wire_output_schema": output.schema}
+                    if distinct_wire_outputs and output.mode == "native"
+                    else {"wire_output_plain": True}
+                    if distinct_wire_outputs
+                    else {}
+                ),
                 # Fingerprinting uses admitted MCP identities, not credentials.
                 # Connection configs are completed only after environment entry.
                 "mcp_servers": {server.name: {} for server in mcp},

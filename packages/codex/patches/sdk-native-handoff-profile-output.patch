@@ -27,7 +27,7 @@ index b06ec131..d74ef81a 100644
 +    Ok(if control.preserve_turn_output {
 +        turn_schema.cloned()
 +    } else {
-+        Some(schema.0.clone())
++        schema.0.clone()
 +    })
 +}
 +
@@ -105,9 +105,9 @@ index 1af8bc2f..2d539c1c 100644
      }
  }
 
-+/// Optional native wire schema owned by an admitted SDK profile.
++/// Native wire schema selection owned by an admitted SDK profile.
 +#[derive(Clone, Debug)]
-+pub struct AgentProfileOutputSchema(pub serde_json::Value);
++pub struct AgentProfileOutputSchema(pub Option<serde_json::Value>);
 +
 +/// Live output selection scoped to its actual managed SDK thread.
 +#[derive(Clone, Debug)]

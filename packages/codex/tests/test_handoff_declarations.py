@@ -4,7 +4,7 @@ import pytest
 
 from _agents_codex._agent_profiles import _capture_agent_graph
 from _agents_codex.session import _split_tools
-from agents import Agent, Handoff, ToolRef, function_tool
+from agents import Agent, Handoff, PromptedOutput, ToolRef, function_tool
 
 
 def test_callback_handoff_captures_an_unnamed_target_and_one_callback():
@@ -59,12 +59,12 @@ def test_transfer_callback_rejects_incompatible_execution_modes(options, message
         Handoff(Agent(instructions="Resolve"), route)
 
 
-def test_callback_handoff_keeps_the_existing_graph_wire_requirement():
+def test_callback_handoff_rejects_a_mixed_prompted_output_mode():
     @function_tool
     def route() -> str:
         return "routed"
 
-    target = Agent(instructions="Number", output_type=int)
+    target = Agent(instructions="Number", output_type=PromptedOutput(int))
     source = Agent(instructions="Text", handoffs=[Handoff(target, route)])
     with pytest.raises(ValueError, match="share output mode"):
         _capture_agent_graph(source)

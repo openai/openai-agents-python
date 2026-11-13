@@ -310,7 +310,7 @@ async with triage.session() as session:
 
 When the Session opens, the SDK captures the Agents reachable through `handoffs` and exposes tools that let the model select declared targets. `get_active_agent()` returns the original Agent object currently selected in native history. To switch from application code, pass a captured Agent to a separate idle `update(agent=...)` call. A new Agent object with the same name cannot replace that captured object.
 
-Agents in the handoff graph share the Session provider, programmatic-tool-calling mode, and native runtime grants. They use the same output mode. Native structured outputs can use different schemas, including object and scalar outputs, and the active Agent supplies the schema. A per-turn output override keeps its schema across handoffs. Profiles that use prompted output share a schema.
+Agents in the handoff graph share the Session provider, programmatic-tool-calling mode, and native runtime grants. The active Agent supplies its plain text or native structured output contract. Structured output can use object or scalar schemas. A per-turn output override keeps its contract across handoffs. A graph that uses prompted output requires the same prompted schema on every profile.
 
 Each target supplies its captured instructions, model settings, callbacks, and default tools. An explicit tool selection keeps the original operation's tool limit across handoffs. Omitting the selection uses the destination's defaults; `tools=[]` disables model tools.
 

@@ -75,6 +75,8 @@ pub(crate) struct ProfileSpec {
     output_fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wire_output_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    wire_output_plain: bool,
     #[serde(default)]
     mcp_servers: BTreeMap<String, Value>,
     #[serde(default)]
@@ -333,6 +335,10 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
                 .as_ref()
                 .is_none_or(Value::is_object),
             "Captured Agent wire output schema must be an object"
+        );
+        ensure!(
+            !profile.wire_output_plain || profile.wire_output_schema.is_none(),
+            "Captured Agent cannot declare both plain and structured wire output"
         );
         let mut all_declarations = profile.tools.clone();
         for name in profile.handoffs.keys() {
@@ -1055,9 +1061,11 @@ impl AgentProfiles {
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
-        if let Some(schema) = &prepared.declaration.wire_output_schema {
+        if prepared.declaration.wire_output_plain
+            || prepared.declaration.wire_output_schema.is_some()
+        {
             data.insert(codex_extension_api::AgentProfileOutputSchema(
-                schema.clone(),
+                prepared.declaration.wire_output_schema.clone(),
             ));
         }
         data.insert(accepted);
@@ -1310,9 +1318,11 @@ pub(crate) async fn configure(
         data.insert(codex_extension_api::AgentProfileInstructions {
             text: Some(accepted.text.clone()),
         });
-        if let Some(schema) = &prepared.declaration.wire_output_schema {
+        if prepared.declaration.wire_output_plain
+            || prepared.declaration.wire_output_schema.is_some()
+        {
             data.insert(codex_extension_api::AgentProfileOutputSchema(
-                schema.clone(),
+                prepared.declaration.wire_output_schema.clone(),
             ));
         }
         data.insert(accepted);
