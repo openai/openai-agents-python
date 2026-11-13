@@ -166,7 +166,12 @@ from .canonical_storage import (
     CustomStorage as CustomStorage,
     SessionStoreCleanup as SessionStoreCleanup,
 )
-from .compaction import CompactionContext, _compaction_instruction_messages
+from .compaction import (
+    CompactionContext,
+    _compaction_context,
+    _run_responses_compaction,
+    _validate_compaction_summary,
+)
 from .completion import (
     CompletionContext,
     ContinueTurn,
@@ -13363,15 +13368,7 @@ class Session(Generic[ContextT, OutputT]):
             callback = declaration.before_compact
             if factory is None and callback is None:
                 raise NativeError("Compaction callback has no application owner")
-            request = CompactionContext(
-                context=cast(ContextT, self._context),
-                items=tuple(message["items"]),
-                session_id=self.id,
-                turn_id=message["turn_id"],
-                subagent_id=message["thread"] if message["instance"] is not None else None,
-                model=message["model"],
-                trigger=message["trigger"],
-            )
+            request = _compaction_context(cast(ContextT, self._context), self.id, message)
             if not policy and factory is None:
                 assert callback is not None
                 return callback, request
@@ -13393,104 +13390,26 @@ class Session(Generic[ContextT, OutputT]):
                 try:
                     if factory is None:
                         return None
-                    transform = declaration.transform_context
-                    provider_response = (
-                        message.get("provider_response")
-                        if transform is None
-                        and message.get("provider_response") is not None
-                        and factory.mode != "input"
-                        and factory._matches_provider(
+                    matches_provider = factory._matches_provider
+                    return await _run_responses_compaction(
+                        factory,
+                        request,
+                        policy=policy,
+                        transform=declaration.transform_context,
+                        provider_response=message.get("provider_response"),
+                        candidate_indexes=message["candidate_indexes"],
+                        model_omitted=message["model_omitted"],
+                        step_id=message["step_id"],
+                        active=active,
+                        invoke=lambda callback, value: self._call_decision_callback(
+                            state, message, callback, active, value
+                        ),
+                        matches_provider=lambda: matches_provider(
                             self._model_api_key,
                             json.loads(self._native_options or "{}").get("config", {}),
-                        )
-                        else None
-                    )
-                    prepared = factory._context(
-                        request,
-                        candidates=tuple(
-                            request.items[index] for index in message["candidate_indexes"]
                         ),
-                        provider_response=provider_response,
-                        model_omitted=message["model_omitted"],
-                    )
-                    if policy:
-                        predicate = factory.should_compact
-                        if predicate is None:
-                            decision = len(prepared.candidates) >= 10
-                        else:
-                            decision = await self._call_decision_callback(
-                                state,
-                                message,
-                                predicate,
-                                active,
-                                prepared,
-                            )
-                        if not active():
-                            raise asyncio.CancelledError
-                        if type(decision) is not bool:
-                            raise TypeError("should_compact must return a bool")
-                        if (
-                            decision
-                            and prepared.mode == "previous_response_id"
-                            and not factory._matches_provider(
-                                self._model_api_key,
-                                json.loads(self._native_options or "{}").get("config", {}),
-                            )
-                        ):
-                            raise ValueError(
-                                "Compaction client provider scope changed before dispatch"
-                            )
-                        return decision
-                    if not active():
-                        raise asyncio.CancelledError
-                    original_controls: tuple[dict[str, Any], ...] = ()
-                    if prepared.mode == "input" and transform is not None:
-                        original_controls = deepcopy(
-                            _compaction_instruction_messages(prepared.items)
-                        )
-                        replacement = await self._call_decision_callback(
-                            state,
-                            message,
-                            transform,
-                            active,
-                            ModelRequestContext(
-                                context=prepared.context,
-                                items=prepared.items,
-                                session_id=prepared.session_id,
-                                turn_id=prepared.turn_id,
-                                subagent_id=prepared.subagent_id,
-                                request_id=str(message["step_id"]),
-                                model=prepared.model,
-                                purpose="compaction",
-                            ),
-                        )
-                        if not active():
-                            raise asyncio.CancelledError
-                        if replacement is not None:
-                            if (
-                                not isinstance(replacement, Sequence)
-                                or isinstance(replacement, (str, bytes, bytearray))
-                                or any(not isinstance(item, Mapping) for item in replacement)
-                            ):
-                                raise TypeError("transform_context must return input items or None")
-                            prepared = replace(prepared, items=tuple(replacement))
-                    verified_provider_scope = factory._matches_provider(
-                        self._model_api_key,
-                        json.loads(self._native_options or "{}").get("config", {}),
-                    )
-                    if prepared.mode == "previous_response_id" and not verified_provider_scope:
-                        raise ValueError("Compaction client provider scope changed before dispatch")
-                    window = await factory._window(
-                        prepared,
-                        provider_response=provider_response,
                         observe=observe,
-                        original_controls=original_controls,
                     )
-                    verified_provider_scope = verified_provider_scope and factory._matches_provider(
-                        self._model_api_key,
-                        json.loads(self._native_options or "{}").get("config", {}),
-                    )
-                    return window, verified_provider_scope
                 except Exception:
                     if policy or message.get("optional", False):
                         if tracing is not None:
@@ -13524,11 +13443,7 @@ class Session(Generic[ContextT, OutputT]):
                     verified_provider_scope=verified_provider_scope,
                 )
             else:
-                if result is not None:
-                    if not isinstance(result, str):
-                        raise TypeError("before_compact must return a summary string or None")
-                    if not result.strip():
-                        raise ValueError("before_compact summary must not be empty")
+                _validate_compaction_summary(result)
                 self._native._reply_compaction(
                     message["step_id"],
                     result,
