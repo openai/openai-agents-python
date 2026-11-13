@@ -13,9 +13,9 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from agents import Agent, NativeError, NativeProvider
-from agents.observation import ResponseFactReceived
+from agents.observation import RawProviderEvent, ResponseFactReceived
 from tests._asyncio import timeout
-from tests.native_fixtures import assistant_output
+from tests.native_fixtures import assistant_output, text_response
 
 PRIVATE = "SYNTHETIC_FACT_PRIVATE_CONTENT_9f0368"
 TOKEN = {
@@ -283,6 +283,67 @@ async def test_unsolicited_probabilities_are_not_retained_or_published() -> None
             assert PRIVATE not in json.dumps([asdict(event) for event in events])
             assert "top_logprobs" not in peer.requests[0]
             assert "message.output_text.logprobs" not in peer.requests[0]["include"]
+
+
+@pytest.mark.parametrize("top_logprobs", [None, 0])
+async def test_empty_probability_delta_and_replacement_snapshot_preserve_capture_flag(
+    top_logprobs: int | None,
+) -> None:
+    from tests.test_native_provider_websockets import peer as websocket_peer
+
+    frames = text_response("item-empty-probabilities", "a", "")
+    frames[1]["logprobs"] = [TOKEN]
+    frames[2]["logprobs"] = []
+    frames[-1]["item"]["content"][0]["logprobs"] = []
+    settings = {} if top_logprobs is None else {"top_logprobs": top_logprobs}
+    async with timeout(30), websocket_peer() as peer:
+        peer.respond(*frames)
+        async with Agent(
+            instructions="Answer.",
+            model="gpt-5.2",
+            provider=peer.provider(websocket=False),
+            model_settings=settings,
+        ).session(include_raw_provider_events=True, observation_retention="all") as session:
+            turn = await session.submit("answer")
+            assert (await turn.get_result()).final_output == "a"
+            events = [event async for event in turn.events(include_execution_details=True)]
+            recorded = [row async for row in session.turns()][0]
+            probability = [
+                row["fact"]
+                for row in recorded.get("response_facts", [])
+                if row["fact"]["kind"] == "text_probabilities"
+            ]
+            observed = [
+                event.record["fact"]
+                for event in events
+                if isinstance(event, ResponseFactReceived)
+                and event.record["fact"]["kind"] == "text_probabilities"
+            ]
+            assert observed == probability
+            if top_logprobs is None:
+                assert probability == []
+            else:
+                assert [
+                    (part["snapshot"], part["delta"], part["tokens"]) for part in probability
+                ] == [
+                    (False, "a", [TOKEN]),
+                    (False, "", []),
+                    (True, None, []),
+                ]
+                assert all(part["capture_complete"] for part in probability)
+                assert all(part["item_id"] == "item-empty-probabilities" for part in probability)
+            raw = [event for event in events if isinstance(event, RawProviderEvent)]
+            assert all(event.transport == "sse" for event in raw)
+            assert [event.payload for event in raw[1:-1]] == frames
+            assert PRIVATE in json.dumps([event.payload for event in raw])
+        assert len(peer.requests) == 1
+        request = peer.requests[0]
+        if top_logprobs is None:
+            assert "top_logprobs" not in request
+            assert "message.output_text.logprobs" not in request["include"]
+        else:
+            assert request["top_logprobs"] == 0
+            assert "message.output_text.logprobs" in request["include"]
 
 
 async def test_websocket_probabilities_do_not_relabel_a_handshake_request_id(
